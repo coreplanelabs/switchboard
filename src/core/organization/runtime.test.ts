@@ -1,3 +1,10 @@
+import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { Secret } from "../../secrets.js";
+import { handleAdminTraceLog, TRACE_LOG_PATH } from "../../channels/adminTraceLog.js";
+import { NO_GRANTS } from "../authz/types.js";
+import { classifyError } from "../trace/classify.js";
+import { logOwnerFailure, type OrganizationOwnerFailure } from "./ownerFailure.js";
+import { createSpanLog } from "../trace/spanLog.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
@@ -105,6 +112,304 @@ function setup(authorize = async () => true, clock = () => 1) {
   return { ...options, runtime, send, tasks, effects, authentication };
 }
 describe("organization runtime", () => {
+  describe("owner failure diagnostics", () => {
+    it("keeps safe failure output readable through the authorized trace reader before an agent run exists", async () => {
+      const s = setup();
+      const log = createSpanLog();
+      const runtime = createOrganizationRuntime({
+        ...s,
+        reportOwnerFailure: (report) =>
+          logOwnerFailure({ spanLog: log, clock: () => 7, buildCommit: "a".repeat(40) }, report),
+        dispatchOwned: async () => {
+          throw classifyError(new Error("private source body"), {
+            kind: "refused",
+            code: "history_producer_unavailable",
+          });
+        },
+      });
+      const admitted = await s.send("trace-output");
+      if (admitted.status !== "receipt") throw new Error("not admitted");
+      await runtime.reconcile("org:test");
+      await s.tasks.shift()!();
+      const original = await s.ledger.readIngress(admitted.receipt.effectKey!);
+      if (original.status !== "record") throw new Error("missing owner");
+      expect(log.read({ runId: original.record.runId }).lines).toMatchObject([
+        {
+          span: "organization.owner_failure",
+          status: "error",
+          errorKind: "refused",
+          errorCode: "history_producer_unavailable",
+          attrs: {
+            runId: original.record.runId,
+            organizationReceiptId: admitted.receipt.id,
+            requestDigest: original.record.digest,
+            ownerStage: "execute",
+            ownerBranch: "dispatch",
+            buildCommit: "a".repeat(40),
+          },
+        },
+      ]);
+      const tokens = new Secret(
+        JSON.stringify({ "fixture-reader": { subject: "reader" } }),
+        "SWITCHBOARD_INGRESS_TOKENS",
+      );
+      for (const allowed of [false, true]) {
+        let status = 0,
+          body = "";
+        handleAdminTraceLog(
+          {
+            method: "GET",
+            url: `${TRACE_LOG_PATH}?runId=${original.record.runId}&span=organization.owner_failure`,
+            headers: { authorization: "Bearer fixture-reader" },
+          } as HttpRequest,
+          {
+            writeHead: (value: number) => {
+              status = value;
+            },
+            end: (value: string) => {
+              body = value;
+            },
+          } as unknown as ServerResponse,
+          {
+            tokens,
+            spanLog: log,
+            grantsFor: () =>
+              allowed ? { actions: new Set(["trace:read"]), channels: new Set(), repos: new Set() } : NO_GRANTS,
+            log: () => {},
+          },
+        );
+        expect(status).toBe(allowed ? 200 : 403);
+        if (allowed)
+          expect(JSON.parse(body)).toMatchObject({
+            ok: true,
+            matched: 1,
+            lines: [
+              {
+                span: "organization.owner_failure",
+                errorCode: "history_producer_unavailable",
+                attrs: {
+                  runId: original.record.runId,
+                  organizationReceiptId: admitted.receipt.id,
+                  ownerStage: "execute",
+                },
+              },
+            ],
+          });
+        else expect(JSON.parse(body)).toMatchObject({ ok: false });
+        expect(body).not.toContain("private source body");
+      }
+      expect(JSON.stringify(log.read())).not.toContain("private source body");
+      expect(original.record).toMatchObject({
+        status: "uncertain",
+        outcome: "The original owner's outcome could not be confirmed.",
+      });
+    });
+
+    it.each(["actor", "authorization", "execution-fence", "source-snapshot", "sink", "execute", "settlement"] as const)(
+      "reports %s without exposing the exception or replaying the owner",
+      async (stage) => {
+        const s = setup();
+        const reports: OrganizationOwnerFailure[] = [];
+        let failing = false;
+        const secret = classifyError(new Error("private body TOKEN=private-credential"), {
+          kind: "transport",
+          code: "private-arbitrary-code",
+        });
+        const runtime = createOrganizationRuntime({
+          ...s,
+          reportOwnerFailure: (report) => {
+            reports.push(report);
+          },
+          resolveActor: async (envelope) => {
+            if (failing && stage === "actor") throw secret;
+            return s.resolveActor(envelope);
+          },
+          sink: () => {
+            if (failing && stage === "sink") throw secret;
+            return s.sink();
+          },
+          dispatchOwned: async (request) => {
+            if (failing && stage === "execute") throw secret;
+            return s.dispatchOwned(request);
+          },
+        });
+        const admitted = await s.send("diagnostic-owner");
+        if (admitted.status !== "receipt") throw new Error("not admitted");
+        await runtime.reconcile("org:test");
+        const original = await s.ledger.readIngress(admitted.receipt.effectKey!);
+        if (original.status !== "record") throw new Error("missing owner");
+        failing = true;
+        if (stage === "authorization") vi.spyOn(s.service, "authorizeExecution").mockRejectedValueOnce(secret);
+        if (stage === "execution-fence") vi.spyOn(s.store, "execute").mockRejectedValueOnce(secret);
+        if (stage === "source-snapshot") vi.spyOn(s.ledger, "readIngress").mockRejectedValueOnce(secret);
+        if (stage === "settlement") vi.spyOn(s.ledger, "finishIngress").mockRejectedValueOnce(secret);
+        await s.tasks.shift()!();
+        expect(reports).toEqual([
+          {
+            runId: original.record.runId,
+            receiptId: admitted.receipt.id,
+            requestDigest: original.record.digest,
+            branch: "dispatch",
+            failure: { stage, kind: "transport" },
+          },
+        ]);
+        expect(await s.ledger.readIngress(admitted.receipt.effectKey!)).toMatchObject({
+          status: "record",
+          record: {
+            runId: original.record.runId,
+            status: "uncertain",
+            outcome: "The original owner's outcome could not be confirmed.",
+          },
+        });
+        expect(s.effects).toEqual(
+          stage === "settlement"
+            ? [
+                {
+                  actor: "http:credential",
+                  userId: "http:alice",
+                  thread: "http:home:alice",
+                  text: "Start original work",
+                  runId: original.record.runId,
+                  kind: "message",
+                },
+              ]
+            : [],
+        );
+        failing = false;
+        await runtime.reconcile("org:test");
+        expect(s.tasks).toEqual([]);
+        expect(s.effects).toHaveLength(stage === "settlement" ? 1 : 0);
+      },
+    );
+    it("retains the first failure when uncertain settlement also throws", async () => {
+      const s = setup();
+      const reports: OrganizationOwnerFailure[] = [];
+      const log = createSpanLog();
+      const runtime = createOrganizationRuntime({
+        ...s,
+        reportOwnerFailure: (report) => {
+          reports.push(structuredClone(report));
+          logOwnerFailure({ spanLog: log, buildCommit: "unknown" }, report);
+          report.failure.stage = "schedule";
+          report.failure.code = "history_context_unavailable";
+        },
+        dispatchOwned: async () => {
+          throw classifyError(new Error("private original"), {
+            kind: "refused",
+            code: "history_producer_unavailable",
+          });
+        },
+      });
+      const admitted = await s.send("double-failure");
+      if (admitted.status !== "receipt") throw new Error("not admitted");
+      await runtime.reconcile("org:test");
+      vi.spyOn(s.ledger, "finishIngress").mockRejectedValueOnce(new Error("private settlement"));
+      await expect(s.tasks.shift()!()).rejects.toThrow("private settlement");
+      const original = await s.ledger.readIngress(admitted.receipt.effectKey!);
+      if (original.status !== "record") throw new Error("missing owner");
+      const identity = {
+        runId: original.record.runId,
+        receiptId: admitted.receipt.id,
+        requestDigest: original.record.digest,
+        branch: "dispatch",
+      };
+      expect(reports).toEqual([
+        { ...identity, failure: { stage: "execute", kind: "refused", code: "history_producer_unavailable" } },
+        {
+          ...identity,
+          failure: { stage: "uncertain-settlement", kind: "other" },
+          firstFailure: { stage: "execute", kind: "refused", code: "history_producer_unavailable" },
+        },
+      ]);
+      expect(log.read({ runId: original.record.runId }).lines).toMatchObject([
+        { errorCode: "history_producer_unavailable", attrs: { ownerStage: "execute" } },
+        {
+          errorKind: "other",
+          attrs: {
+            ownerStage: "uncertain-settlement",
+            firstOwnerStage: "execute",
+            firstOwnerErrorKind: "refused",
+            firstOwnerErrorCode: "history_producer_unavailable",
+          },
+        },
+      ]);
+      expect(original.record).toMatchObject({ status: "dispatching", outcome: null });
+      await runtime.reconcile("org:test");
+      expect(s.tasks).toEqual([]);
+      expect(s.effects).toEqual([]);
+    });
+    it.each(["sync", "async", "span-log"] as const)(
+      "a %s reporter failure cannot change settlement or replay",
+      async (mode) => {
+        const s = setup();
+        const reports: OrganizationOwnerFailure[] = [];
+        const runtime = createOrganizationRuntime({
+          ...s,
+          reportOwnerFailure: (report) => {
+            reports.push(report);
+            if (mode === "span-log") {
+              const log = createSpanLog();
+              vi.spyOn(log.sink, "onEnd").mockImplementation(() => {
+                throw new Error("private sink failure");
+              });
+              logOwnerFailure({ spanLog: log, buildCommit: "unknown" }, report);
+              return;
+            }
+            if (mode === "sync") throw new Error("logger failed");
+            return Promise.reject(new Error("logger failed"));
+          },
+          dispatchOwned: async () => {
+            throw new Error("private original");
+          },
+        });
+        const admitted = await s.send("reporter-failure");
+        if (admitted.status !== "receipt") throw new Error("not admitted");
+        await runtime.reconcile("org:test");
+        await s.tasks.shift()!();
+        expect(await s.ledger.readIngress(admitted.receipt.effectKey!)).toMatchObject({
+          status: "record",
+          record: { status: "uncertain", outcome: "The original owner's outcome could not be confirmed." },
+        });
+        expect(reports).toMatchObject([{ branch: "dispatch", failure: { stage: "execute", kind: "other" } }]);
+        await runtime.reconcile("org:test");
+        expect(s.tasks).toEqual([]);
+        expect(s.effects).toEqual([]);
+      },
+    );
+    it.each(["dispatch", "answer", "confirm"] as const)(
+      "reports the selected %s branch when scheduling fails",
+      async (branch) => {
+        const s = setup();
+        const reports: OrganizationOwnerFailure[] = [];
+        const target = branch === "answer" ? { key: "question", revision: 7 } : null;
+        if (target)
+          await s.store.execute({ action: "observe", organization: "org:test", target: target.key, revision: 7 });
+        const continuation =
+          branch === "confirm" ? { kind: "confirm" as const, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } : undefined;
+        const runtime = createOrganizationRuntime({
+          ...s,
+          answerOwned: s.dispatchOwned,
+          confirmOwned: s.dispatchOwned,
+          reportOwnerFailure: (report) => {
+            reports.push(report);
+          },
+          launch: () => {
+            throw new Error("private scheduling failure");
+          },
+        });
+        const admitted = await s.send("schedule-failure", continuation, target);
+        if (admitted.status !== "receipt") throw new Error("not admitted");
+        await runtime.reconcile("org:test");
+        expect(await s.ledger.readIngress(admitted.receipt.effectKey!)).toMatchObject({
+          status: "record",
+          record: { status: "uncertain", outcome: "The original owner could not be scheduled." },
+        });
+        expect(reports).toMatchObject([{ branch, failure: { stage: "schedule", kind: "other" } }]);
+        expect(s.effects).toEqual([]);
+      },
+    );
+  });
+
   it("lets another source reconcile the next bounded batch while the first original model remains unfinished", async () => {
     const s = setup();
     const peer = { actorId: "mcp:peer", userId: "mcp:peer", channelId: "mcp:home", threadKey: "mcp:home:peer" };

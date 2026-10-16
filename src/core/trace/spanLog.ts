@@ -20,7 +20,7 @@ export interface SpanLogQuery {
   sinceMs?: number;
   /** Only this trace. */
   traceId?: string;
-  /** All retained spans in the trace whose request root carried this run ID. */
+  /** Request traces and original-owner failure records carrying this run ID. */
   runId?: string;
   /** Only this span name, or the family under it (`github` matches `github.rest`). */
   span?: string;
@@ -87,7 +87,9 @@ export function createSpanLog(opts: { maxLines?: number; maxBytes?: number } = {
         (e, i) =>
           (query.sinceMs === undefined || e.endedAt >= query.sinceMs) &&
           (query.traceId === undefined || e.traceId === query.traceId) &&
-          (query.runId === undefined || (roots[i]?.name === "request" && roots[i]?.runId === query.runId)) &&
+          (query.runId === undefined ||
+            ((roots[i]?.name === "request" || roots[i]?.name === "organization.owner_failure") &&
+              roots[i]?.runId === query.runId)) &&
           (query.span === undefined || e.span === query.span || e.span.startsWith(family!)),
       );
       return {

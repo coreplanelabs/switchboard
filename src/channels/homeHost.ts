@@ -1,3 +1,4 @@
+import { historyFailure } from "../core/organization/ownerFailure.js";
 import { createHash } from "node:crypto";
 import { authorize } from "../core/authz/authorize.js";
 import type { IncomingMessage, ChannelIO } from "../core/types.js";
@@ -133,20 +134,22 @@ export function createHomeHost(options: HomeHostOptions) {
   }
   async function privateHistory(request: Omit<OrganizationExecutionRequest, "io">): Promise<TextTurn[]> {
     const current = await options.authentication.resolveEnvelope(request.envelope);
-    if (current.status !== "resolved") throw new Error("The private conversation is unavailable.");
+    if (current.status !== "resolved")
+      throw historyFailure("history_conversation_unavailable", "The private conversation is unavailable.");
     if (!current.privateSource || request.envelope.actor.stream === null) return [];
     const captured = request.envelope.sourceReference?.capturedPrivateEpoch;
     if (captured && captured !== (await currentEpoch({ actor: current.actor, authentication: current.authentication })))
-      throw new Error("The private conversation is unavailable.");
+      throw historyFailure("history_epoch_unavailable", "The private conversation is unavailable.");
     const history = await options.organization.streamTail(current.authentication, 100);
-    if (history.status !== "stream_tail") throw new Error("The private conversation is unavailable.");
+    if (history.status !== "stream_tail")
+      throw historyFailure("history_tail_unavailable", "The private conversation is unavailable.");
     const final = await options.authentication.resolveEnvelope(request.envelope);
     if (
       final.status !== "resolved" ||
       !final.privateSource ||
       (captured && captured !== (await currentEpoch({ actor: final.actor, authentication: final.authentication })))
     )
-      throw new Error("The private conversation is unavailable.");
+      throw historyFailure("history_after_tail_unavailable", "The private conversation is unavailable.");
     const turns: TextTurn[] = [];
     for (const entry of history.entries) {
       if (entry.receiptId === request.receipt.id || entry.role === "receipt") continue;
@@ -171,7 +174,7 @@ export function createHomeHost(options: HomeHostOptions) {
       (captured &&
         captured !== (await currentEpoch({ actor: complete.actor, authentication: complete.authentication })))
     )
-      throw new Error("The private conversation is unavailable.");
+      throw historyFailure("history_after_context_unavailable", "The private conversation is unavailable.");
     return turns;
   }
   async function originalInput(

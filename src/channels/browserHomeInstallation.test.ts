@@ -1,3 +1,4 @@
+import type { OrganizationOwnerFailure } from "../core/organization/ownerFailure.js";
 import { runAgentSmoke, type SmokeScenario } from "../deploy/agentSmoke.js";
 import { handleModelProxyRequest, ANTHROPIC_MESSAGES_PATH } from "./modelProxy.js";
 import { generateKeyPairSync, sign } from "node:crypto";
@@ -202,6 +203,7 @@ async function fixture(
         }
       : {}),
   });
+  const ownerFailures: OrganizationOwnerFailure[] = [];
   const effects: string[] = [];
   const nativeReplies: string[] = [];
   const nativeReplyThreads: string[] = [];
@@ -408,6 +410,9 @@ async function fixture(
     coordinator,
     privateWorkerLog,
     commands: bound,
+    reportOwnerFailure: (report) => {
+      ownerFailures.push(report);
+    },
     mappings,
     limits: {
       pendingPerActor: 10,
@@ -585,6 +590,7 @@ async function fixture(
   cleanups.push(() => installation.handler.dispose());
   return {
     installation,
+    ownerFailures,
     setMergeRead: (read: NonNullable<BrowserHomeInstallationOptions["mergeFacts"]>) => {
       mergeRead = read;
     },
@@ -3099,6 +3105,11 @@ describe("browser installation", () => {
       const beforePruned = requests.length;
       await s.execute();
       expect(requests).toHaveLength(beforePruned);
+      expect(s.ownerFailures.at(-1)).toMatchObject({
+        runId: missingC.status === "receipt" ? missingC.receipt.ownerRunId : null,
+        branch: "dispatch",
+        failure: { stage: "execute", kind: "refused", code: "history_producer_unavailable" },
+      });
       pruned.mockRestore();
       await s.ledger.clearIngressContent(a.receipt.effectKey!);
       expect(await access.readRunDependencies(b.receipt.ownerRunId)).toBeUndefined();

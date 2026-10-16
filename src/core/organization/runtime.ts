@@ -1,3 +1,4 @@
+import { ownerFailureAt, type OrganizationOwnerFailure, type OrganizationOwnerStage } from "./ownerFailure.js";
 import type { Actor } from "../authz/types.js";
 import { withChatActor } from "../authz/actor.js";
 import { withOriginalOrganizationDispatch } from "../dispatch/originalOrganizationInput.js";
@@ -62,6 +63,8 @@ export interface OrganizationRuntimeOptions {
   dispatchOwned(request: OrganizationExecutionRequest): Promise<OrganizationOwnerOutcome>;
   answerOwned?(request: OrganizationExecutionRequest): Promise<OrganizationOwnerOutcome>;
   confirmOwned?(request: OrganizationExecutionRequest): Promise<OrganizationOwnerOutcome>;
+  /** Best-effort metadata only; a reporter cannot affect owner custody. */
+  reportOwnerFailure?(failure: OrganizationOwnerFailure): void | Promise<void>;
   /** Supervise work using the host's existing run/shutdown lifecycle. */
   launch(task: () => Promise<void>): void;
   /** Read evidence for this exact original run. Missing evidence never permits replay. */
@@ -499,23 +502,60 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
         if (finished.status === "record" && outcome.status === "refused") await repairRefusals(organization);
         invalidate(organization);
       };
+      const branch = envelope.continuation ? "confirm" : envelope.target ? "answer" : "dispatch";
+      const report = (
+        failure: OrganizationOwnerFailure["failure"],
+        firstFailure?: OrganizationOwnerFailure["failure"],
+      ) => {
+        try {
+          void Promise.resolve(
+            options.reportOwnerFailure?.({
+              runId,
+              receiptId: receipt.id,
+              requestDigest: envelope.digest,
+              branch,
+              failure: { ...failure },
+              ...(firstFailure ? { firstFailure: { ...firstFailure } } : {}),
+            }),
+          ).catch(() => {});
+        } catch {
+          // Logging cannot change settlement, authority or replay safety.
+        }
+      };
+      const uncertain = async (error: unknown, stage: OrganizationOwnerStage, reason: string) => {
+        const firstFailure = ownerFailureAt(stage, error);
+        report(firstFailure);
+        try {
+          await finish({ status: "uncertain", reason });
+        } catch (error) {
+          report(ownerFailureAt("uncertain-settlement", error), firstFailure);
+          throw error;
+        }
+      };
       try {
         options.launch(async () => {
+          let stage: OrganizationOwnerStage = "actor";
+          const settleOwner = (outcome: OrganizationOwnerOutcome) => {
+            stage = "settlement";
+            return finish(outcome);
+          };
           try {
             // Authority can change while the host waits to start this task.
             const current = await options.resolveActor(envelope);
             if (current?.status === "unavailable") {
-              await finish({ status: "uncertain", reason: "The original actor's current proof is unavailable." });
+              await settleOwner({ status: "uncertain", reason: "The original actor's current proof is unavailable." });
               return;
             }
             if (!resolvedActor(current) || !sourceMatches(envelope, current)) {
-              await finish({ status: "refused", reason: "Current actor could not be verified." });
+              await settleOwner({ status: "refused", reason: "Current actor could not be verified." });
               return;
             }
+            stage = "authorization";
             if (!(await options.service.authorizeExecution(envelope))) {
-              await finish({ status: "refused", reason: "Current organization authority could not be verified." });
+              await settleOwner({ status: "refused", reason: "Current organization authority could not be verified." });
               return;
             }
+            stage = "execution-fence";
             const fence = await options.store.execute({
               action: "execution",
               organization,
@@ -524,17 +564,19 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
               ownerRunId: runId,
             });
             if (fence.status === "unavailable") {
-              await finish({ status: "uncertain", reason: "The original execution fence is unavailable." });
+              await settleOwner({ status: "uncertain", reason: "The original execution fence is unavailable." });
               return;
             }
             if (fence.status !== "ok") {
-              await finish({ status: "refused", reason: "Access, retention or the original target changed." });
+              await settleOwner({ status: "refused", reason: "Access, retention or the original target changed." });
               return;
             }
+            stage = "source-snapshot";
             if (!(await currentSnapshot(envelope, accepted.receipt, runId))) {
-              await finish({ status: "refused", reason: "The original source snapshot is unavailable." });
+              await settleOwner({ status: "refused", reason: "The original source snapshot is unavailable." });
               return;
             }
+            stage = "request";
             const request = {
               envelope: snapshotEnvelope(envelope, accepted.receipt),
               receipt: accepted.receipt,
@@ -549,13 +591,17 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
               ),
               runId,
             };
-            await finish(await execute({ ...request, io: options.sink(request) }));
-          } catch {
-            await finish({ status: "uncertain", reason: "The original owner's outcome could not be confirmed." });
+            stage = "sink";
+            const io = options.sink(request);
+            stage = "execute";
+            const outcome = await execute({ ...request, io });
+            await settleOwner(outcome);
+          } catch (error) {
+            await uncertain(error, stage, "The original owner's outcome could not be confirmed.");
           }
         });
-      } catch {
-        await finish({ status: "uncertain", reason: "The original owner could not be scheduled." });
+      } catch (error) {
+        await uncertain(error, "schedule", "The original owner could not be scheduled.");
       }
     }
     if (unavailableProof) return options.store.execute({ action: "yield", ...lease });

@@ -1,3 +1,4 @@
+import type { OrganizationOwnerFailure } from "../organization/contract.js";
 import type { GithubAccessDiagnostic } from "../references/githubAccessDiagnostic.js";
 import type { ErrorKind } from "./types.js";
 
@@ -133,6 +134,14 @@ export interface AttrDomain {
   /** State-write failure facts; identifiers and closed vocabulary, no request bytes. */
   stateWriteStage: "promotion-preflight" | "state-read" | "state-rpc" | "acknowledgment" | "request";
   requestDigest: string;
+  /** Original ingress failure metadata; no source actor or content. */
+  organizationReceiptId: string;
+  buildCommit: string;
+  ownerStage: OrganizationOwnerFailure["failure"]["stage"];
+  ownerBranch: OrganizationOwnerFailure["branch"];
+  firstOwnerStage: OrganizationOwnerFailure["failure"]["stage"];
+  firstOwnerErrorKind: ErrorKind;
+  firstOwnerErrorCode: NonNullable<OrganizationOwnerFailure["failure"]["code"]>;
   // mcp.*
   bytes: number;
   // ship.round
@@ -310,6 +319,13 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   httpStatus: "number",
   stateWriteStage: "string",
   requestDigest: "string",
+  organizationReceiptId: "string",
+  buildCommit: "string",
+  ownerStage: "string",
+  ownerBranch: "string",
+  firstOwnerStage: "string",
+  firstOwnerErrorKind: "string",
+  firstOwnerErrorCode: "string",
   bytes: "number",
   agent: "string",
   waitedMs: "number",
