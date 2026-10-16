@@ -59,10 +59,99 @@ export function readToken(env) {
   return null;
 }
 
+/** Error bodies are evidence only. Read at most 8 KiB and never return their bytes. */
+async function readRefusalBody(response) {
+  const reader = response.body?.getReader();
+  if (!reader) return { state: "empty" };
+  const chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 8192) {
+        await reader.cancel().catch(() => {});
+        return { state: "too-large" };
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      return { state: "parsed", value: JSON.parse(new TextDecoder().decode(bytes)) };
+    } catch {
+      return { state: "malformed" };
+    }
+  } catch {
+    return { state: "unreadable" };
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/** Only existing producer literals and closed metadata can name a refusal.
+ * The legacy acquisition error conflates several predicates, including an
+ * already-held fence. It cannot establish which predicate failed. */
+function fenceHttpDiagnostic(status, body) {
+  let phase = "http-response";
+  let reason = "unclassified-http-refusal";
+  let nextStep = "inspect-worker-response";
+  if (
+    status === 409 &&
+    body.value?.error === "deploy-fence requires a live fleet drain with time for upload and readiness"
+  ) {
+    phase = "fence-acquisition";
+    reason = "fence-acquisition-refused";
+    nextStep = "inspect-original-fence";
+  } else if (status === 503 && body.value?.error === "deploy-fence-read-unavailable") {
+    phase = "activity-read";
+    reason = "activity-read-unavailable";
+  } else if (status === 503 && body.value?.error === "Worker version timestamp is unavailable") {
+    phase = "producer";
+    reason = "producer-unavailable";
+  } else if (status === 401 || status === 403) {
+    phase = "http-authorization";
+    reason = "access-refused";
+    nextStep = "check-current-access";
+  }
+  const producer = deployProducerDiagnostic(body.value);
+  return {
+    schema: 1,
+    httpStatus: status,
+    phase,
+    reason,
+    bodyState: body.state,
+    evidenceAvailability:
+      producer.producer.state === "reported"
+        ? "producer-reported"
+        : reason === "unclassified-http-refusal"
+          ? "unavailable"
+          : "reason-only",
+    ...producer,
+    activeAdmissions:
+      producer.producer.state === "reported" &&
+      Number.isSafeInteger(body.value?.activeAdmissions) &&
+      body.value.activeAdmissions >= 0
+        ? body.value.activeAdmissions
+        : null,
+    observation: "response-only",
+    nativeOutcome: "unverified",
+    ...(body.state === "unreadable"
+      ? { requestOutcome: "unknown", nextStep: "reconcile-original-request" }
+      : { nextStep }),
+  };
+}
+
 /** POST /deploy-fence closes registered reattach and reads activity. Never throws. */
 export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000, attempt } = {}) {
   if (!token) return { ok: false, error: "no bearer in the environment" };
   const url = new URL("/deploy-fence", baseUrl).toString();
+  let httpStatus;
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -70,15 +159,40 @@ export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000, attem
       ...(attempt ? { body: JSON.stringify({ attempt }) } : {}),
       signal: AbortSignal.timeout(timeoutMs),
     });
+    httpStatus = res.status;
+    if (!res.ok)
+      return {
+        ok: false,
+        error: `http-status:${res.status}`,
+        httpStatus: res.status,
+        diagnostic: fenceHttpDiagnostic(res.status, await readRefusalBody(res)),
+      };
     const text = await res.text();
-    if (!res.ok) return { ok: false, error: `http-status:${res.status}` };
     try {
       return { ok: true, payload: JSON.parse(text) };
     } catch {
-      return { ok: false, error: "malformed-json" };
+      return { ok: false, error: "malformed-json", httpStatus: res.status };
     }
   } catch (err) {
-    return { ok: false, error: err?.name === "TimeoutError" || err?.name === "AbortError" ? "timeout" : "transport" };
+    const error = err?.name === "TimeoutError" || err?.name === "AbortError" ? "timeout" : "transport";
+    return {
+      ok: false,
+      error,
+      ...(httpStatus === undefined ? {} : { httpStatus }),
+      diagnostic: {
+        schema: 1,
+        httpStatus: httpStatus ?? null,
+        phase: httpStatus === undefined ? "request" : "response-body",
+        reason: httpStatus === undefined ? `request-${error}` : "response-body-unavailable",
+        requestOutcome: "unknown",
+        evidenceAvailability: "unavailable",
+        producer: { state: "unverified" },
+        fenceDisposition: "unavailable",
+        activeAdmissions: null,
+        nativeOutcome: "unverified",
+        nextStep: "reconcile-original-request",
+      },
+    };
   }
 }
 
@@ -637,7 +751,13 @@ export function decide(
   let retained = 0;
 
   if (!fetched || fetched.ok !== true) {
-    problems.push(`resident Worker not consulted: ${fetched?.error ?? "unknown error"}`);
+    problems.push(
+      Number.isSafeInteger(fetched?.httpStatus)
+        ? `resident Worker responded HTTP ${fetched.httpStatus}: ${fetched.error}`
+        : fetched?.diagnostic?.requestOutcome === "unknown"
+          ? `resident deploy-fence request outcome is unknown: ${fetched.error}`
+          : `resident Worker not consulted: ${fetched?.error ?? "unknown error"}`,
+    );
   } else {
     const maintenance = fetched.payload?.stagingMaintenance;
     if (attempt || maintenance) {
@@ -830,7 +950,9 @@ export function decide(
     };
   }
   const hints = [HOW_TO_FORCE];
-  if (fetched?.ok !== true) hints.unshift(HOW_TO_SET_TOKEN);
+  const httpRefusal = fetched?.ok !== true && Number.isSafeInteger(fetched?.httpStatus);
+  const requestUnknown = fetched?.diagnostic?.requestOutcome === "unknown";
+  if (fetched?.ok !== true && !httpRefusal && !requestUnknown) hints.unshift(HOW_TO_SET_TOKEN);
   return {
     allow: false,
     forced: false,
@@ -838,7 +960,7 @@ export function decide(
     provisioning,
     interrupting,
     unknown,
-    message: `preflight REFUSED: a Worker deploy swaps every ResidentDO isolate and kills in-flight runs and provisions —\n${detail}\n  wait for them to finish and retry; ${hints.join("; ")}${warningText}`,
+    message: `preflight REFUSED: a Worker deploy swaps every ResidentDO isolate and kills in-flight runs and provisions —\n${detail}\n  ${requestUnknown ? "the release owner must reconcile the original request and fence before retrying" : httpRefusal ? "the release owner must inspect the original fence and response before retrying" : `wait for them to finish and retry; ${hints.join("; ")}`}${warningText}`,
   };
 }
 
@@ -898,6 +1020,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, { cl
     );
   }
   if (!d.allow) {
+    try {
+      if (fetched.diagnostic) console.error("[resident-deploy-fence-diagnostic] " + JSON.stringify(fetched.diagnostic));
+    } catch {
+      /* Diagnostic failure cannot change deployment admission. */
+    }
     try {
       const diagnostic = deployAdmissionDiagnostic(fetched);
       if (diagnostic) console.error(diagnostic);
