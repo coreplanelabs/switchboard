@@ -18079,6 +18079,38 @@ describe("terminal native retirement authority", () => {
       owner: { runId, ownerGen: "g1", ownerFence: 7 },
     },
   });
+  it("logs only the preparation outcome while preserving held and prepared responses", async () => {
+    const key = storeKey(),
+      id = "terminal-native-diagnostic",
+      thread = "slack:C1:PRIVATE_TERMINAL_THREAD";
+    const logs: unknown[][] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args));
+    try {
+      const body = { storeKey: key, target: target(id, thread) };
+      const held = await post("/runs/native-retirement/prepare", body);
+      expect(held).toEqual({ status: 200, data: { kind: "held", reason: "terminal-source-unavailable" } });
+      const original = { ...record(id, thread), repo: "acme/api", sealedAt: Date.now() };
+      expect((await post("/runs/put", { storeKey: key, record: original })).status).toBe(200);
+      const prepared = await post("/runs/native-retirement/prepare", body);
+      expect(prepared).toMatchObject({
+        status: 200,
+        data: { kind: "prepared", permit: { purpose: "terminal-native-scope", target: body.target } },
+      });
+      const liveId = "terminal-native-diagnostic-live";
+      expect((await post("/runs/claim", claimBody(key, liveId, thread))).status).toBe(200);
+      expect(await post("/runs/native-retirement/prepare", { storeKey: key, target: target(liveId, thread) })).toEqual({
+        status: 200,
+        data: { kind: "held", reason: "owner-live" },
+      });
+      expect(logs.filter((args) => args[0] === "[runs/native-retirement/prepare]")).toEqual([
+        ["[runs/native-retirement/prepare]", { kind: "held", reason: "terminal-source-unavailable" }],
+        ["[runs/native-retirement/prepare]", { kind: "prepared" }],
+        ["[runs/native-retirement/prepare]", { kind: "held", reason: "owner-live" }],
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
   it("prepares exact sealed terminal authority and fences late same-ID claims without changing history", async () => {
     const key = storeKey(),
       id = "terminal-native-original",
