@@ -775,7 +775,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
       if (stopped()) return outcome();
       const move = classified?.move;
       const followUp = turn.followUp;
-      if (move?.kind === "rebase" && completeReviewVerdict(verdict)) {
+      if (move?.kind === "matching-metadata" && completeReviewVerdict(verdict)) {
         console.log(
           `[review] ${logKey} head moved during run: ${expected.slice(0, 7)} → ${current.slice(0, 7)} — rebase of the same ${move.commits} commit(s); review carried to ${current.slice(0, 7)} (${where})`,
         );

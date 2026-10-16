@@ -62,7 +62,7 @@ export interface PrCommitList {
 }
 
 export type HeadMove =
-  | { kind: "rebase"; commits: number }
+  | { kind: "matching-metadata"; commits: number }
   | {
       kind: "substantive";
       before: number;
@@ -79,7 +79,7 @@ export function classifyHeadMove(before: PrCommitList, after: PrCommitList): Hea
   const sameMessages = msgsBefore.length === msgsAfter.length && msgsBefore.every((m, i) => m === msgsAfter[i]);
   const filesComparable = !before.filesTruncated && !after.filesTruncated;
   const sameFiles = !filesComparable || setEqual(new Set(before.files), new Set(after.files));
-  if (sameMessages && sameFiles) return { kind: "rebase", commits: msgsAfter.length };
+  if (sameMessages && sameFiles) return { kind: "matching-metadata", commits: msgsAfter.length };
   const beforeSet = new Set(msgsBefore);
   const afterSet = new Set(msgsAfter);
   return {

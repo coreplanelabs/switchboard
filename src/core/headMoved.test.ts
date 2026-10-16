@@ -48,12 +48,12 @@ describe("classifyHeadMove (item 12)", () => {
   it("same count, same messages in order, same files → rebase (a rebase onto main, conflict fixes included)", () => {
     const before = list(["feat: catalog\n\nbody", "fix: nits"], ["src/a.ts", "docs/b.md"]);
     const after = list(["feat: catalog\n\nbody", "fix: nits"], ["docs/b.md", "src/a.ts"]); // order of files is irrelevant
-    expect(classifyHeadMove(before, after)).toEqual({ kind: "rebase", commits: 2 });
+    expect(classifyHeadMove(before, after)).toEqual({ kind: "matching-metadata", commits: 2 });
   });
 
   it("message comparison ignores surrounding whitespace only — a reworded commit is a change", () => {
     const before = list(["feat: catalog\n"], ["src/a.ts"]);
-    expect(classifyHeadMove(before, list(["feat: catalog"], ["src/a.ts"]))).toEqual({ kind: "rebase", commits: 1 });
+    expect(classifyHeadMove(before, list(["feat: catalog"], ["src/a.ts"]))).toEqual({ kind: "matching-metadata", commits: 1 });
     expect(classifyHeadMove(before, list(["feat: catalogue"], ["src/a.ts"])).kind).toBe("substantive");
   });
 
@@ -92,7 +92,7 @@ describe("classifyHeadMove (item 12)", () => {
   it("the file-set check is skipped when GitHub truncated either list (300-file cap) — messages decide", () => {
     const before = list(["feat: catalog"], ["src/a.ts"], true);
     const after = list(["feat: catalog"], ["src/a.ts", "src/b.ts"]);
-    expect(classifyHeadMove(before, after)).toEqual({ kind: "rebase", commits: 1 });
+    expect(classifyHeadMove(before, after)).toEqual({ kind: "matching-metadata", commits: 1 });
   });
 
   it("same messages in a different order → substantive (a reorder changes what each commit applies to)", () => {
