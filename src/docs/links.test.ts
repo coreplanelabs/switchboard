@@ -2,6 +2,8 @@ import { existsSync, globSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { createMarkdownRenderer } from "vitepress";
+import { repositorySourceLink } from "../../docs/.vitepress/source-links.mjs";
 import { SHOTS, shotSrc } from "../../docs/.vitepress/theme/screenshots.mjs";
 
 // The docs tree's absolute URLs, linted.
@@ -15,6 +17,7 @@ import { SHOTS, shotSrc } from "../../docs/.vitepress/theme/screenshots.mjs";
 // only thing that can hold the line is a literal check on the separator.
 
 const DOCS = fileURLToPath(new URL("../../docs", import.meta.url));
+const REPOSITORY = JSON.parse(readFileSync(new URL("../../project.json", import.meta.url), "utf8")).repository;
 // Scheme + at least one slash. The slash is what separates a URL from this
 // codebase's platform-namespaced ids, which look scheme-ish (`http:cron`,
 // `http:*` — see AGENTS.md invariant 4) and are not URLs at all.
@@ -117,6 +120,58 @@ describe("site links in the theme's components", () => {
   });
 });
 
+describe("historical source citations", () => {
+  it("refuses unregistered missing sources without lending another record’s historical citation", () => {
+    const record = "decisions/0041-the-settings-page-is-a-surface-over-the-registry-and-configures-the-shared-tiers.md";
+    expect(
+      repositorySourceLink(record, "../../src/channels/commandHttp.ts#L1", "https://example.com/repository")?.href,
+    ).toBe("https://example.com/repository/blob/main/src/channels/commandHttp.ts#L1");
+    expect(
+      repositorySourceLink(record, "../../web/src/lib/missing.ts", "https://example.com/repository"),
+    ).toBeUndefined();
+    expect(
+      repositorySourceLink(
+        "reference/specs/docs-site.md",
+        "../../../web/src/lib/navSections.ts",
+        "https://example.com/repository",
+      ),
+    ).toBeUndefined();
+    expect(
+      repositorySourceLink(record, "../../web/src/pages/UnitPage.vue", "https://example.com/repository"),
+    ).toBeUndefined();
+  });
+  it("renders retired citations from unchanged records at their stated source snapshots while living sources stay on main", async () => {
+    const { default: config } = await import(new URL("../../docs/.vitepress/config.ts", import.meta.url).href);
+    const md = await createMarkdownRenderer(DOCS, config.markdown);
+    const settings = md.render(
+      readFileSync(
+        `${DOCS}/decisions/0041-the-settings-page-is-a-surface-over-the-registry-and-configures-the-shared-tiers.md`,
+        "utf8",
+      ),
+      {
+        relativePath:
+          "decisions/0041-the-settings-page-is-a-surface-over-the-registry-and-configures-the-shared-tiers.md",
+      },
+    );
+    const chat = md.render(
+      readFileSync(
+        `${DOCS}/decisions/0043-the-home-page-is-a-chat-the-browser-is-a-channel-and-a-turn-is-a-run.md`,
+        "utf8",
+      ),
+      {
+        relativePath: "decisions/0043-the-home-page-is-a-chat-the-browser-is-a-channel-and-a-turn-is-a-run.md",
+      },
+    );
+    expect(settings).toContain(
+      `href="${REPOSITORY}/blob/95b4face165e6f62b5d32273557ba97004e24c68/web/src/lib/navSections.ts"`,
+    );
+    expect(chat).toContain(
+      `href="${REPOSITORY}/blob/1546268599d07637b5123700d8d054f728c3e7e0/web/src/pages/UnitPage.vue"`,
+    );
+    expect(settings).toContain(`href="${REPOSITORY}/blob/main/src/channels/commandHttp.ts"`);
+  });
+});
+
 describe("absolute URLs in docs/", () => {
   const pages = docsPages();
 
@@ -150,23 +205,23 @@ describe("absolute URLs in docs/", () => {
     expect(broken).toEqual([]);
   });
 
-  it("a relative link that leaves the tree names a file that exists — the site rewrites it to the repository URL, so only the target's existence can be checked here", () => {
+  it("a relative link that leaves the tree names a current file or an exact verified historical citation — other missing sources fail", () => {
     const wrong: string[] = [];
     // `plans/**` are frozen records (decisions:check) and are not published:
     // a target they named may since have moved, and that is not a defect.
     for (const rel of pages.filter((p) => !p.startsWith("plans/"))) {
       const text = readFileSync(`${DOCS}/${rel}`, "utf8");
-      // A relative link that climbs out of docs/ resolves on GitHub to the file
-      // and, on the site, to that file's page in the repository (the config's
-      // link rule). The site's dead-link check never sees it, so this is the
-      // one place a renamed or deleted target is caught.
+      // The compiler and this check share exact source resolution. Historical
+      // citations name verified blobs (decisions:check); other missing sources
+      // remain failures, including the same path cited by a different record.
       for (const [line, i] of text.split("\n").map((l, i) => [l, i] as const)) {
         for (const m of line.matchAll(/\]\((\.\.\/[^)#]+)(?:#[^)]*)?\)/g)) {
           const target = m[1];
           const climbs = rel.split("/").length - 1;
           const ups = (target.match(/\.\.\//g) ?? []).length;
           if (ups <= climbs) continue; // stays inside docs/: the site checks it
-          if (!existsSync(resolve(DOCS, dirname(rel), target))) wrong.push(`${rel}:${i + 1} ${target}`);
+          if (!repositorySourceLink(rel, target, "https://example.com/repository"))
+            wrong.push(`${rel}:${i + 1} ${target}`);
         }
       }
     }

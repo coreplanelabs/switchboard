@@ -13,7 +13,8 @@ export default defineConfig({
     ui({
       ui: {
         // The chrome has no hue: both aliases are the zero-chroma neutral, and
-        // main.css maps `--ui-primary` itself onto the inverted neutral (ink).
+        // The green theme adds the application's green accent; the consent preview
+        // retains the shared neutral theme.
         colors: {
           primary: "neutral",
           neutral: "neutral",
@@ -47,7 +48,6 @@ export default defineConfig({
     outDir: "dist",
     rollupOptions: {
       input: {
-        legacy: fileURLToPath(new URL("./src/main.ts", import.meta.url)),
         green: fileURLToPath(new URL("./green/main.ts", import.meta.url)),
       },
     },

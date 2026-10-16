@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { h } from "vue";
+import Shell from "../../green/components/Shell.vue";
 import ScheduledPage from "../../green/pages/Scheduled.vue";
 import { mountApp } from "../testing/mount";
 import { formatLocalIso } from "../lib/format";
@@ -49,6 +51,17 @@ const seed = (rows: ScheduledRow[] | null, firingsUnavailable?: string): Schedul
 });
 
 describe("ScheduledPage", () => {
+  it("marks Scheduled work in the global navigation with Run details one click away", async () => {
+    const wrapper = mountApp(Shell, {
+      seed: { page: "scheduled", now: NOW, rows: [] },
+      slots: { default: () => h(ScheduledPage) },
+    });
+    await wrapper.findComponent(Shell).vm.$router.push("/runs/scheduled");
+    expect(wrapper.find('a[href="/runs/scheduled"][aria-current="page"]').text()).toBe("Scheduled work");
+    expect(wrapper.find('a[href="/runs"]').text()).toBe("Run details");
+    expect(wrapper.find("h1").text()).toBe("Scheduled work");
+  });
+
   it("renders one block per schedule: name · cron UTC · worker · command as identity · next fire in the viewer's clock", () => {
     const w = mountApp(ScheduledPage, { seed: seed([RUN_ROW]) });
     const t = w.text();

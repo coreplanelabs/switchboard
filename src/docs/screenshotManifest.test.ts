@@ -47,10 +47,10 @@ describe("isScreenshotInput", () => {
       "scripts/screenshots.mts",
       "src/channels/webShell.ts",
       "src/docs/screenshotManifest.ts",
-      "web/src/main.ts",
-      "web/src/App.vue",
+      "web/green/main.ts",
+      "web/green/App.vue",
       "web/src/components/run/Timeline.vue",
-      "web/src/pages/RunPage.vue",
+      "web/green/pages/Run.vue",
       "web/src/lib/format.ts",
       "web/src/assets/main.css",
       "web/vite.config.ts",
@@ -109,8 +109,8 @@ describe("listInputs", () => {
   });
   it("finds the dashboard's sources in this tree, repository-relative, tests left out", () => {
     const inputs = listInputs(root);
-    expect(inputs).toContain("web/src/App.vue");
-    expect(inputs).toContain("web/src/pages/RunPage.vue");
+    expect(inputs).toContain("web/green/App.vue");
+    expect(inputs).toContain("web/green/pages/Run.vue");
     expect(inputs).toContain("scripts/web-preview.ts");
     expect(inputs).toContain("src/docs/screenshotOutput.ts");
     expect(inputs).toContain("src/docs/screenshotOutputPinned.ts");
@@ -179,16 +179,16 @@ describe("isSharedInput", () => {
     for (const p of [
       "scripts/screenshots.mts",
       "src/docs/screenshotManifest.ts",
-      "web/src/main.ts",
-      "web/src/routes.ts",
-      "web/src/App.vue",
+      "web/green/main.ts",
+      "web/green/routes.ts",
+      "web/green/App.vue",
       "web/src/assets/main.css",
     ]) {
       expect(isSharedInput(p), p).toBe(true);
     }
     for (const p of [
       "scripts/web-preview.ts",
-      "web/src/pages/RunPage.vue",
+      "web/green/pages/Run.vue",
       "web/src/components/AppShell.vue",
       "web/src/lib/format.ts",
     ]) {
@@ -312,7 +312,7 @@ describe("manifestProblems", () => {
   const inputs = {
     "scripts/web-preview.ts": "a".repeat(64),
     "src/docs/screenshotManifest.ts": "m".repeat(64),
-    "web/src/App.vue": "b".repeat(64),
+    "web/green/App.vue": "b".repeat(64),
   };
   const recorded: Manifest = renderManifest(inputs, costsSurface);
   const pngs = expectedFiles();
@@ -322,17 +322,17 @@ describe("manifestProblems", () => {
   });
 
   it("names a changed input, a new one, and one that was removed — each prefixed with the surface", () => {
-    const changed = { ...inputs, "web/src/App.vue": "c".repeat(64) };
+    const changed = { ...inputs, "web/green/App.vue": "c".repeat(64) };
     expect(manifestProblems("costs", changed, recorded, pngs)).toEqual([
-      "costs: web/src/App.vue changed since it was rendered",
+      "costs: web/green/App.vue changed since it was rendered",
     ]);
     const added = { ...inputs, "web/src/pages/New.vue": "d".repeat(64) };
     expect(manifestProblems("costs", added, recorded, pngs)).toEqual([
       "costs: web/src/pages/New.vue is new since it was rendered",
     ]);
-    const { "web/src/App.vue": _gone, ...removed } = inputs;
+    const { "web/green/App.vue": _gone, ...removed } = inputs;
     expect(manifestProblems("costs", removed, recorded, pngs)).toEqual([
-      "costs: web/src/App.vue was removed since it was rendered",
+      "costs: web/green/App.vue was removed since it was rendered",
     ]);
   });
 

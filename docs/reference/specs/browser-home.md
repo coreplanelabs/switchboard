@@ -246,9 +246,13 @@ Broad messages materialize their retained work references from current authorize
 | Production browser composition forwards the actual viewer’s GitHub binding and canonical native merge facts; completion preserves the original ending and starts no model | `[unit]` `src/channels/browserHomeWiring.test.ts::browser production wiring::offers an owned reviewed-head merge and observes native completion through installation callbacks without a model` |
 | Home schedules bounded merge observation after its page or snapshot response has been sent | `[unit]` `src/channels/homeView.test.ts::authorized Home pages::schedules merge observation only after sending the current Home response` |
 
-### Retained report facts
+### Entry replacement and retained reading behavior
+
+The cutover bundle has one green entry. Old page and shell modules are removed; shared run, transcript, settings, chart, theme, and native consent components stay. This source proof does not activate the candidate or replace live parity approval.
 
 | Criterion | Evidence |
 |---|---|
+| The default server asset loader selects the sole green manifest entry and includes its shared styles; a missing requested entry refuses startup | `[unit]` `src/channels/webAssets.test.ts::loadWebAssets::*` |
 | Recorded schedule ID and exact firing times remain visible even without a run link | `[unit]` `web/green/pages/reportStates.test.ts::Green report states::retains the recorded schedule run without a live link and exposes exact next and last times` |
 | Costs uses the global selected owner scope without a second me checkbox | `[unit]` `web/green/pages/reportStates.test.ts::Green report states::keeps the global owner selection on a user cost breakdown without a second me filter` |
+| Final candidate captures and authenticated live parity match the published replacement inputs before activation | `[gap]` Parent-owned staging and final capture regeneration remain pending. |

@@ -73,11 +73,7 @@ import { createGreenPreview } from "./web-green-fixtures.js";
 const PORT = Number(process.env.PORT ?? 8788);
 const NOW = process.env.SWITCHBOARD_PREVIEW_NOW ? Number(process.env.SWITCHBOARD_PREVIEW_NOW) : systemClock();
 
-const GREEN = process.argv.includes("--green");
-const assets = loadWebAssets(
-  process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"),
-  GREEN ? "green/main.ts" : "src/main.ts",
-);
+const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"), "green/main.ts");
 // The shell stamps the capabilities the nav paints from: every one on by
 // default (every surface reachable); SWITCHBOARD_PREVIEW_CAPABILITIES=minimal
 // paints the smallest installation instead — Runs alone, no Scheduled tab, no
@@ -2539,9 +2535,7 @@ const VIEWING_AS_ALICE: Actor = {
   grants: { actions: "all", channels: "all", repos: "all" },
   viewingAs: { id: "slack:UALICE", name: "alice" },
 };
-const greenPreview = GREEN
-  ? createGreenPreview({ now: NOW, unit: UNIT_U3, thread: homeSeed("conv-1", HOME_TURNS) })
-  : null;
+const greenPreview = createGreenPreview({ now: NOW, unit: UNIT_U3, thread: homeSeed("conv-1", HOME_TURNS) });
 
 function page(
   pathname: string,
@@ -3066,6 +3060,4 @@ createServer((req, res) => {
   }) as typeof res.writeHead;
   const output = greenPreview ? greenPreview.marked(p) : p;
   sendPage(req, res, p.status ?? 200, p.viewer, output.title, output.seed);
-}).listen(PORT, "127.0.0.1", () =>
-  console.log(`web preview on http://localhost:${PORT}/${GREEN ? "home" : "runs"} (fixtures only, no bot)`),
-);
+}).listen(PORT, "127.0.0.1", () => console.log(`web preview on http://localhost:${PORT}/home (fixtures only, no bot)`));
