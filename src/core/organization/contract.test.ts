@@ -42,6 +42,414 @@ function organizationContract(
   _name: string,
 ) {
   describe("organization store contract", () => {
+    it("admits an unlinked delegated service into only its own source stream and fences its old revision after unlink", async () => {
+      const store = factory(() => 1);
+      const serviceIdentity = { issuer: "token:test", tenant: null, subject: "device-one" };
+      const service = new OrganizationService({
+        store,
+        directory: store.directory,
+        limits,
+        mappings: [
+          { source: "mcp", issuer: "token:test", tenant: null, organization: "org:test" },
+          { source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" },
+        ],
+        authorize: async () => true,
+        currentIdentityRead: async () => "allowed",
+      });
+      const auth = {
+        source: "mcp" as const,
+        identity: serviceIdentity,
+        kind: "service" as const,
+        organizations: ["org:test"],
+        onBehalfOf: identity,
+      };
+      const original = await service.resolve(auth);
+      expect(original).toEqual({
+        organization: "org:test",
+        actor: {
+          identity: serviceIdentity,
+          kind: "service",
+          principal: 'mcp:["token:test",null,"device-one"]',
+          stream: 'mcp:["token:test",null,"device-one"]',
+          bindingRevision: 0,
+          onBehalfOf: identity,
+        },
+      });
+      if (!original) throw new Error("No delegated source actor");
+      const request = {
+        key: "delegated-source",
+        sourceEvent: "delegated-source",
+        destination: { kind: "broad" as const },
+        workload: "message" as const,
+        target: null,
+        content: "Device-only request",
+        context: [],
+      };
+      const admitted = await service.admit(auth, request);
+      expect(admitted).toMatchObject({
+        status: "receipt",
+        duplicate: false,
+        receipt: { status: "pending", actor: original.actor },
+      });
+      if (admitted.status !== "receipt") throw new Error("No receipt");
+      expect(await service.replay(auth, request)).toEqual({ ...admitted, duplicate: true });
+      const human = { source: "http" as const, identity, kind: "human" as const, organizations: ["org:test"] };
+      expect(
+        await service.admit(human, { ...request, key: "human-peer", content: "Human-only request" }),
+      ).toMatchObject({ status: "receipt" });
+      const peer = { ...auth, identity: { ...serviceIdentity, subject: "device-two" } };
+      expect(
+        await service.admit(peer, { ...request, key: "device-peer", content: "Other-device request" }),
+      ).toMatchObject({ status: "receipt" });
+      for (const read of [
+        await service.stream(auth),
+        await service.streamTail(auth),
+        await service.streamForIdentities(auth, [identity, peer.identity, serviceIdentity]),
+      ])
+        expect(read).toMatchObject({
+          entries: [{ content: "Device-only request", identity: serviceIdentity, onBehalfOf: identity }],
+        });
+      const own = await service.stream(auth);
+      if (own.status !== "stream") throw new Error("No private stream");
+      expect(own.entries).toHaveLength(1);
+      expect(await service.stream(human)).toMatchObject({
+        status: "stream",
+        entries: [{ content: "Human-only request" }],
+      });
+      expect(await service.stream(peer)).toMatchObject({
+        status: "stream",
+        entries: [{ content: "Other-device request" }],
+      });
+      const machine = { ...auth, onBehalfOf: undefined };
+      expect(await service.resolve(machine)).toMatchObject({
+        actor: { identity: serviceIdentity, kind: "service", stream: null },
+      });
+      expect(await service.stream(machine)).toEqual({ status: "not_found" });
+      const person = await store.directory.createPerson();
+      if (person.status !== "created") throw new Error("No person");
+      expect(
+        await store.directory.change({
+          action: "link",
+          identity,
+          personId: person.person.id,
+          expectedRevision: 0,
+          actor: identity,
+          proof: { method: "dual-authentication", version: 1 },
+        }),
+      ).toMatchObject({ status: "changed" });
+      expect(
+        await store.directory.change({
+          action: "revoke",
+          identity,
+          personId: person.person.id,
+          expectedRevision: 1,
+          actor: identity,
+          proof: { method: "dual-authentication", version: 1 },
+        }),
+      ).toMatchObject({ status: "changed" });
+      expect(await service.resolve(auth)).toMatchObject({ actor: { ...original.actor, bindingRevision: 2 } });
+      expect(
+        await store.execute({
+          action: "stream",
+          organization: "org:test",
+          actor: original.actor,
+          stream: original.actor.stream!,
+          identities: [identity],
+          after: 0,
+          limit: 10,
+        }),
+      ).toEqual({ status: "fenced" });
+      expect(await service.streamTail(auth)).toMatchObject({
+        status: "stream_tail",
+        entries: [{ content: "Device-only request" }],
+      });
+      expect(await service.delete(human, admitted.receipt.id)).toEqual({ status: "not_found" });
+      expect(await service.delete(auth, admitted.receipt.id)).toEqual({ status: "ok", removed: 1 });
+    });
+    it("retains only a delegated service's joined history after unlink without rehosting its original owner", async () => {
+      const store = factory(() => 1);
+      const person = await store.directory.createPerson();
+      if (person.status !== "created") throw new Error("No person");
+      expect(
+        await store.directory.change({
+          action: "link",
+          identity,
+          personId: person.person.id,
+          expectedRevision: 0,
+          actor: identity,
+          proof: { method: "dual-authentication", version: 1 },
+        }),
+      ).toMatchObject({ status: "changed" });
+      const service = new OrganizationService({
+        store,
+        directory: store.directory,
+        limits,
+        mappings: [
+          { source: "mcp", issuer: "token:test", tenant: null, organization: "org:test" },
+          { source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" },
+        ],
+        authorize: async () => true,
+        currentIdentityRead: async () => "allowed",
+      });
+      const auth = {
+        source: "mcp" as const,
+        identity: { issuer: "token:test", tenant: null, subject: "device" },
+        kind: "service" as const,
+        organizations: ["org:test"],
+        onBehalfOf: identity,
+      };
+      const original = await service.resolve(auth);
+      if (!original) throw new Error("No original actor");
+      const request = {
+        key: "joined-device",
+        sourceEvent: "joined-device",
+        destination: { kind: "broad" as const },
+        workload: "message" as const,
+        target: null,
+        content: "Owned joined device request",
+        context: [],
+      };
+      const own = await service.admit(auth, request);
+      expect(own).toMatchObject({
+        status: "receipt",
+        receipt: { actor: { identity: auth.identity, stream: person.person.id, bindingRevision: 1 } },
+      });
+      if (own.status !== "receipt") throw new Error("No owned receipt");
+      const peer = { source: "http" as const, identity, kind: "human" as const, organizations: ["org:test"] };
+      expect(
+        await service.admit(peer, { ...request, key: "joined-peer", content: "Former person's peer request" }),
+      ).toMatchObject({ status: "receipt" });
+      expect(await service.streamTail(auth)).toMatchObject({
+        status: "stream_tail",
+        entries: [{ content: "Owned joined device request" }, { content: "Former person's peer request" }],
+      });
+      expect(
+        await store.execute({ action: "claim", organization: "org:test", owner: "worker", leaseMs: 100 }),
+      ).toMatchObject({ status: "state" });
+      expect(
+        await store.execute({
+          action: "settle",
+          organization: "org:test",
+          owner: "worker",
+          generation: 1,
+          receiptId: own.receipt.id,
+          status: "accepted",
+          ownerRunId: "original-service-run",
+          reason: null,
+          reply: null,
+          contentTtlMs: 90,
+        }),
+      ).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      expect(
+        await store.directory.change({
+          action: "revoke",
+          identity,
+          personId: person.person.id,
+          expectedRevision: 1,
+          actor: identity,
+          proof: { method: "authenticated-human", version: 1 },
+        }),
+      ).toMatchObject({ status: "changed" });
+      const current = await service.resolve(auth);
+      expect(current).toMatchObject({ actor: { stream: 'mcp:["token:test",null,"device"]', bindingRevision: 2 } });
+      if (!current) throw new Error("No current source actor");
+      for (const actor of [original.actor, current.actor])
+        expect(
+          await store.execute({
+            action: "execution",
+            organization: "org:test",
+            actor,
+            receiptId: own.receipt.id,
+            ownerRunId: "original-service-run",
+          }),
+        ).toEqual({ status: "fenced" });
+      expect(await service.streamTail(auth)).toMatchObject({
+        status: "stream_tail",
+        entries: [{ content: "Owned joined device request", identity: auth.identity }],
+      });
+      expect(await service.delete(peer, own.receipt.id)).toEqual({ status: "not_found" });
+      expect(await service.delete(auth, own.receipt.id)).toEqual({ status: "ok", removed: 1 });
+    });
+    it("retains only its exact source history and policy census after unlink without changing the original actor", async () => {
+      const store = factory(() => 1);
+      const peer = { ...identity, subject: "aardvark" };
+      const person = await store.directory.createPerson();
+      if (person.status !== "created") throw new Error("No person");
+      for (const external of [identity, peer])
+        expect(
+          await store.directory.change({
+            action: "link",
+            identity: external,
+            personId: person.person.id,
+            expectedRevision: 0,
+            actor: identity,
+            proof: { method: "dual-authentication", version: 1 },
+          }),
+        ).toMatchObject({ status: "changed" });
+      const service = new OrganizationService({
+        store,
+        directory: store.directory,
+        limits,
+        mappings: [{ source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" }],
+        authorize: async () => true,
+        currentIdentityRead: async () => "allowed",
+      });
+      const auth = (external: typeof identity) => ({
+        source: "http" as const,
+        identity: external,
+        kind: "human" as const,
+        organizations: ["org:test"],
+      });
+      const request = (key: string, content: string) => ({
+        key,
+        sourceEvent: key,
+        content,
+        destination: { kind: "broad" as const },
+        workload: "message" as const,
+        target: null,
+        context: [],
+      });
+      const own = await service.admit(auth(identity), request("own-before-unlink", "Own earlier source content"));
+      expect(own).toMatchObject({
+        status: "receipt",
+        receipt: { status: "pending", actor: { stream: person.person.id, bindingRevision: 1 } },
+      });
+      if (own.status !== "receipt") throw new Error("No own receipt");
+      expect(await service.admit(auth(peer), request("peer-before-unlink", "Peer private content"))).toMatchObject({
+        status: "receipt",
+      });
+      expect(
+        await store.directory.change({
+          action: "revoke",
+          identity,
+          personId: person.person.id,
+          expectedRevision: 1,
+          actor: identity,
+          proof: { method: "dual-authentication", version: 1 },
+        }),
+      ).toMatchObject({ status: "changed" });
+      const current = await service.resolve(auth(identity));
+      if (!current) throw new Error("No independent source");
+      expect(await service.streamTail(auth(identity), 1)).toMatchObject({
+        status: "stream_tail",
+        entries: [{ content: "Own earlier source content", stream: person.person.id }],
+        hasMore: false,
+      });
+      expect(await service.stream(auth(identity), 0, 10)).toMatchObject({
+        status: "stream",
+        entries: [{ content: "Own earlier source content" }],
+      });
+      const catalogue = await store.execute({ action: "source-catalogue", ...current, limit: 1, paged: true });
+      expect(catalogue).toMatchObject({ status: "source-catalogue", entries: [{ actor: { identity } }] });
+      if (catalogue.status !== "source-catalogue" || catalogue.revision === undefined)
+        throw new Error("No complete census");
+      expect(catalogue.entries).toHaveLength(1);
+      expect(catalogue.next).toBeUndefined();
+      expect(
+        await store.execute({
+          action: "source-policy-observe",
+          ...current,
+          expectedRevision: catalogue.revision,
+          observations: catalogue.entries.map((row) => ({ authority: row.authority, fingerprint: "a".repeat(64) })),
+        }),
+      ).toMatchObject({ status: "source-policies-observed" });
+      expect(await store.execute({ action: "provenance", ...current, receiptId: own.receipt.id })).toMatchObject({
+        status: "provenance",
+        provenance: { actor: own.receipt.actor },
+      });
+      expect(await service.delete(auth(peer), own.receipt.id)).toEqual({ status: "not_found" });
+      expect(await service.delete(auth(identity), own.receipt.id)).toEqual({ status: "ok", removed: 1 });
+    });
+    it("keeps an accepted unlinked owner's receipt and source history unchanged when linking later", async () => {
+      const store = factory(() => 1);
+      const peer = { ...identity, subject: "peer" };
+      const service = new OrganizationService({
+        store,
+        directory: store.directory,
+        limits,
+        mappings: [{ source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" }],
+        authorize: async () => true,
+        currentIdentityRead: async () => "allowed",
+      });
+      const auth = (external: typeof identity) => ({
+        source: "http" as const,
+        identity: external,
+        kind: "human" as const,
+        organizations: ["org:test"],
+      });
+      const input = {
+        key: "before-link",
+        sourceEvent: "before-link",
+        content: "Only original source input",
+        destination: { kind: "broad" as const },
+        workload: "message" as const,
+        target: null,
+        context: [],
+      };
+      const admitted = await service.admit(auth(identity), input);
+      if (admitted.status !== "receipt") throw new Error("No receipt");
+      const original = await service.resolve(auth(identity));
+      if (!original) throw new Error("No actor");
+      const pending = envelope("before-link");
+      pending.actor = original.actor;
+      pending.sourceEvent = input.sourceEvent;
+      pending.content = input.content;
+      pending.digest = admitted.receipt.digest;
+      const lease = { organization: "org:test", owner: "worker", generation: 1 };
+      expect(
+        await store.execute({ action: "claim", organization: "org:test", owner: "worker", leaseMs: 100 }),
+      ).toMatchObject({ status: "state" });
+      expect(await service.authorizeEffect(pending, { owner: "worker", generation: 1 })).toBe(true);
+      const accepted = await store.execute({
+        action: "settle",
+        ...lease,
+        receiptId: admitted.receipt.id,
+        status: "accepted",
+        ownerRunId: "original-run",
+        reason: null,
+        reply: null,
+        contentTtlMs: 90,
+      });
+      expect(accepted).toMatchObject({
+        status: "receipt",
+        receipt: { status: "accepted", ownerRunId: "original-run" },
+      });
+      expect(await service.authorizeReply(pending)).toBe(true);
+      expect(
+        await service.admit(auth(peer), {
+          ...input,
+          key: "peer-old",
+          sourceEvent: "peer-old",
+          content: "Do not inherit this history",
+        }),
+      ).toMatchObject({ status: "receipt" });
+      const person = await store.directory.createPerson();
+      if (person.status !== "created") throw new Error("No person");
+      for (const external of [identity, peer])
+        expect(
+          await store.directory.change({
+            action: "link",
+            identity: external,
+            personId: person.person.id,
+            expectedRevision: 0,
+            actor: identity,
+            proof: { method: "dual-authentication", version: 1 },
+          }),
+        ).toMatchObject({ status: "changed" });
+      expect(await service.stream(auth(identity), 0, 10)).toMatchObject({
+        status: "stream",
+        entries: [{ content: "Only original source input", stream: original.actor.stream }],
+      });
+      const replay = await service.replay(auth(identity), input);
+      expect(replay).toMatchObject({
+        status: "receipt",
+        duplicate: true,
+        receipt: { actor: original.actor, ownerRunId: "original-run" },
+      });
+      // The current host must preserve native owned-unit read rights separately;
+      // old logical stream authority does not gain the new joined audience.
+      expect(await service.authorizeReply(pending)).toBe(false);
+    });
     it.each(["settlement", "owner"] as const)(
       "retains original source proof when a shorter-lived %s reply expires",
       async (delivery) => {
@@ -295,11 +703,51 @@ function organizationContract(
         "b".repeat(64),
         "c".repeat(64),
       ]);
+      const pageOne = await store.execute({ ...query, paged: true, limit: 2 });
+      expect(pageOne).toMatchObject({
+        status: "source-catalogue",
+        accessRevision: 0,
+        entries: [{ allowed: true }, { allowed: true }],
+      });
+      if (pageOne.status !== "source-catalogue" || !pageOne.next || pageOne.revision === undefined)
+        throw new Error("page unavailable");
+      const pageTwo = await store.execute({ ...query, paged: true, after: pageOne.next, limit: 2 });
+      expect(pageTwo).toMatchObject({
+        status: "source-catalogue",
+        accessRevision: 0,
+        revision: pageOne.revision,
+        entries: [{ allowed: true }],
+      });
+      if (pageTwo.status !== "source-catalogue") throw new Error("page unavailable");
+      expect(
+        [...pageOne.entries, ...pageTwo.entries].map((entry) => entry.sourceReference?.credentialDigest).sort(),
+      ).toEqual(["a".repeat(64), "b".repeat(64), "c".repeat(64)]);
+      const observe = {
+        action: "source-policy-observe" as const,
+        organization: query.organization,
+        actor: query.actor,
+        expectedRevision: pageOne.revision,
+        observations: [...pageOne.entries, ...pageTwo.entries].map((entry) => ({
+          authority: entry.authority,
+          fingerprint: "d".repeat(64),
+        })),
+      };
+      const initialized = await store.execute(observe);
+      expect(initialized).toMatchObject({ status: "source-policies-observed", accessRevision: 0 });
+      if (initialized.status !== "source-policies-observed") throw new Error("observation unavailable");
+      expect(await store.execute({ ...observe, expectedRevision: initialized.revision })).toEqual(initialized);
+      expect(await store.execute(observe)).toEqual({ status: "conflict" });
+      const denied = await store.execute({
+        ...observe,
+        expectedRevision: initialized.revision,
+        observations: [{ authority: pageOne.entries[0]!.authority, fingerprint: null }],
+      });
+      expect(denied).toMatchObject({ status: "source-policies-observed", accessRevision: 1 });
       expect(
         await store.execute({ ...query, actor: { ...query.actor, identity: { ...identity, subject: "bob" } } }),
       ).toEqual({ status: "fenced" });
       now = 500;
-      expect(await store.execute(query)).toEqual({ status: "source-catalogue", accessRevision: 0, entries: [] });
+      expect(await store.execute(query)).toEqual({ status: "source-catalogue", accessRevision: 1, entries: [] });
     });
     it("preserves bounded own-source history and deletion after linking without inheriting another source's old history", async () => {
       const store = factory(() => 1);

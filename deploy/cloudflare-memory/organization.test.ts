@@ -266,6 +266,28 @@ describe("OrganizationDO routes", () => {
       entries: [{ content: "Private request", identity }],
     });
     expect(await client().service.stream(auth)).toMatchObject({ status: "stream", entries: [] });
+    const peer = { ...identity, subject: "peer" };
+    expect(
+      await replacement.store.directory.change({
+        action: "link",
+        identity: peer,
+        personId: person.person.id,
+        expectedRevision: 0,
+        actor: identity,
+        proof: { method: "dual-authentication", version: 1 },
+      }),
+    ).toMatchObject({ status: "changed" });
+    const peerAuth = { ...auth, identity: peer };
+    const peerKey = await replacement.service.issue(peerAuth, 30_000);
+    if (peerKey.status !== "key") throw new Error("peer key unavailable");
+    expect(
+      await replacement.service.admit(peerAuth, {
+        ...input,
+        key: peerKey.key,
+        sourceEvent: "peer-private-send",
+        content: "Former peer private request",
+      }),
+    ).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
     const resolved = await first.service.resolve(auth);
     if (!resolved) throw new Error("actor unavailable");
     expect(
@@ -288,7 +310,12 @@ describe("OrganizationDO routes", () => {
         limit: 10,
       }),
     ).toEqual({ status: "fenced" });
-    expect(await replacement.service.stream(auth)).toEqual({ status: "not_found" });
+    const retainedOwn = await replacement.service.stream(auth);
+    expect(retainedOwn.status).toBe("stream");
+    if (retainedOwn.status !== "stream") throw new Error("own source stream unavailable");
+    expect(retainedOwn.entries.map((entry) => ({ content: entry.content, identity: entry.identity }))).toEqual([
+      { content: "Private request", identity },
+    ]);
   });
   it("refuses unknown stored schema versions without overwriting rows", async () => {
     const { store, installation } = client();

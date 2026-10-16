@@ -1,6 +1,6 @@
 import { identityKey, readBinding, resolution } from "../identity/engine.js";
 import { SqlitePersonDirectory, type DirectorySqlStorage } from "../identity/sqlite.js";
-import { bindingSchema, type PersonDirectory } from "../identity/contract.js";
+import { bindingSchema, type PersonDirectory, type ExternalIdentity } from "../identity/contract.js";
 import { executeOrganization, type OrganizationRows } from "./engine.js";
 import type { OrganizationCommand, OrganizationResult, OrganizationStore } from "./contract.js";
 import { bindingCutoffSchema, stateSchema } from "./contract.js";
@@ -60,6 +60,19 @@ export class SqliteOrganizationStore implements OrganizationStore {
       );
     });
   }
+  private currentBinding(identity: ExternalIdentity) {
+    const row = [
+      ...this.storage.sql.exec<{ body: string }>(
+        "SELECT body FROM person_bindings WHERE identity_key = ?",
+        identityKey(identity),
+      ),
+    ][0];
+    return readBinding(
+      row ? decode(row.body) : undefined,
+      identity,
+      (id) => [...this.storage.sql.exec("SELECT id FROM directory_people WHERE id = ?", id)].length === 1,
+    );
+  }
   async execute(command: OrganizationCommand): Promise<OrganizationResult> {
     try {
       return this.storage.transactionSync(() => {
@@ -98,9 +111,17 @@ export class SqliteOrganizationStore implements OrganizationStore {
           list: (kind, org, options = {}) => {
             let query = "SELECT body FROM organization_rows WHERE organization = ? AND kind = ?";
             const params: (string | number | null)[] = [org, kind];
+            if (options.sourceIdentity !== undefined) {
+              query += ` AND json_extract(body, '${kind === "stream" ? "$.identity" : "$.actor.identity"}') = ?`;
+              params.push(JSON.stringify(options.sourceIdentity));
+            }
             if (options.partition !== undefined) {
               query += " AND partition_key = ?";
               params.push(options.partition);
+            }
+            if (options.partitions !== undefined) {
+              query += ` AND partition_key IN (${options.partitions.map(() => "?").join(",")})`;
+              params.push(...options.partitions);
             }
             if (options.after !== undefined) {
               query += " AND ordinal > ?";
@@ -118,7 +139,15 @@ export class SqliteOrganizationStore implements OrganizationStore {
               query += " AND expires_at <= ?";
               params.push(options.expiresBefore);
             }
-            query += options.descending ? " ORDER BY ordinal DESC" : " ORDER BY ordinal";
+            if (options.afterKey !== undefined) {
+              query += " AND row_key > ?";
+              params.push(options.afterKey);
+            }
+            query += options.keyOrder
+              ? " ORDER BY row_key COLLATE BINARY"
+              : options.descending
+                ? " ORDER BY ordinal DESC"
+                : " ORDER BY ordinal";
             if (options.limit !== undefined) {
               query += " LIMIT ?";
               params.push(options.limit);
@@ -135,20 +164,14 @@ export class SqliteOrganizationStore implements OrganizationStore {
               .map((row) => bindingSchema.parse(decode(row.body)))
               .filter((binding) => binding.state === "active" && binding.personId === personId)
               .map((binding) => binding.identity),
-          binding: (identity) => {
-            const row = [
-              ...this.storage.sql.exec<{ body: string }>(
-                "SELECT body FROM person_bindings WHERE identity_key = ?",
-                identityKey(identity),
-              ),
-            ][0];
-            return resolution(
-              readBinding(
-                row ? decode(row.body) : undefined,
-                identity,
-                (id) => [...this.storage.sql.exec("SELECT id FROM directory_people WHERE id = ?", id)].length === 1,
-              ),
-            );
+          binding: (identity) => resolution(this.currentBinding(identity)),
+          ownPartition: (identity, revision) => {
+            const current = this.currentBinding(identity);
+            return current.status === "present" &&
+              current.binding.state === "revoked" &&
+              current.binding.revision === revision
+              ? current.binding.personId
+              : undefined;
           },
         };
         return executeOrganization(rows, command, this.now());

@@ -9,6 +9,11 @@ export const sourcePolicySchema = z
     source: sourceSchema,
     actor: actorSchema,
     sourceReference: sourceReferenceSchema.optional(),
+    observedFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable()
+      .optional(),
     expiresAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   })
   .strict();
