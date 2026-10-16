@@ -51,6 +51,42 @@ afterEach(() => {
 });
 
 describe("resolveRepoContext: read-scoped PR lookup", () => {
+  it("keeps native source identity for explicit, accepted and inherited PR targets", async () => {
+    const source = { host: "github.com" as const, appId: 1, installationId: 2 };
+    vi.spyOn(githubApp, "resolveGithubCredential").mockResolvedValue({ token: "read", expiresAtMs: null, source });
+    const row = {
+      id: 101,
+      number: 7,
+      state: "open",
+      head: { ref: "fix/retry", sha: "a".repeat(40), repo: { id: 22, full_name: "fork/api" } },
+      base: { ref: "main", repo: { id: 11, full_name: "acme/api" } },
+    };
+    const expected = {
+      version: 1,
+      source,
+      repositoryId: 11,
+      pullRequestId: 101,
+      number: 7,
+      head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+      baseRef: "main",
+    };
+    stubFetch({ body: row }, { body: row }, { body: row });
+    const explicit = await resolveRepoContext(msg("https://github.com/acme/api/pull/7"));
+    const accepted = await resolveRepoContext(msg("continue"), [], undefined, undefined, undefined, undefined, true, {
+      repo: "acme/api",
+      prTarget: { number: 7, source: "parent" },
+    });
+    const inherited = await resolveRepoContext(msg("continue"), [
+      { role: "user", text: "https://github.com/acme/api/pull/7" },
+    ]);
+    expect([explicit.githubSource, accepted.githubSource, inherited.githubSource]).toEqual([
+      expected,
+      expected,
+      expected,
+    ]);
+    expect(explicit.ref).toBeUndefined();
+  });
+
   it("resolves the current PR with a read credential when a write credential is unavailable", async () => {
     vi.spyOn(githubApp, "resolveGithubCredential").mockImplementation(async (scope) => {
       if (scope !== "read") throw new Error("write mint unavailable");

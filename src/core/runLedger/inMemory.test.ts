@@ -75,6 +75,34 @@ describe("resident attachment claims", () => {
   });
 });
 
+describe("native GitHub source recovery", () => {
+  it("retains the saved source snapshot when a new generation reclaims the run", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const req = claimReq("source-run", "slack:C1:source");
+    req.meta.githubSource = {
+      version: 1,
+      source: { host: "github.com", appId: 1, installationId: 2 },
+      repositoryId: 11,
+      pullRequestId: 101,
+      number: 7,
+      head: { repositoryId: null, ref: "fix/retry", sha: "a".repeat(40) },
+      baseRef: "main",
+    };
+    expect(await ledger.claim(req)).toMatchObject({ ok: true });
+    await ledger.handoff("g1", ["source-run"]);
+    const [reclaimed] = await ledger.reclaim("g2", 0, LEASE_MS);
+    expect(reclaimed.row.meta.githubSource).toEqual({
+      version: 1,
+      source: { host: "github.com", appId: 1, installationId: 2 },
+      repositoryId: 11,
+      pullRequestId: 101,
+      number: 7,
+      head: { repositoryId: null, ref: "fix/retry", sha: "a".repeat(40) },
+      baseRef: "main",
+    });
+  });
+});
+
 const stepRecord = (step: number, turnIndex: number, inFlight: StepRecord["inFlight"] = []): StepRecord => ({
   step,
   seq: step * 10,

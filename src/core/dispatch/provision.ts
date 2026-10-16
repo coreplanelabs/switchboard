@@ -6,6 +6,7 @@ import { resourceLifetimeSchema } from "../../agents/resourceLifetime.js";
 import { allocationAckOf } from "../runLedger/allocationAck.js";
 import { UnknownAllocationClaimError } from "../runLedger/allocationAck.js";
 import type { LiveRunMeta, WorkspaceAllocationAck } from "../runLedger/types.js";
+import { githubSourceContextForTask } from "../../execution/githubReadSource.js";
 // The provision stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // everything a run needs before its first model turn, in the order the request
 // meets it. The memory read started; the ack card the thread sees while setup
@@ -862,6 +863,10 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
     const directAudience = directAudienceStampOf(msg);
     const privateMain = agent.name === "orchestrator" && privateDestinationOf(msg) !== undefined;
+    const githubSource =
+      privateMain || repoCtx.repo === undefined
+        ? undefined
+        : githubSourceContextForTask(repoCtx.githubSource, repoCtx.pr);
     const meta: LiveRunMeta = {
       residentExecution: "native-v1",
       ...(privateMain ? { privateConversation: true as const } : {}),
@@ -875,6 +880,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
       ...(directAudience !== undefined ? { directAudience } : {}),
       channelVisibility,
       ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
+      ...(githubSource ? { githubSource } : {}),
       ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),

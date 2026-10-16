@@ -11,6 +11,7 @@ import { validRef } from "./residentAdmin.js";
 import type { PrCommitList } from "./headMoved.js";
 import { normalizeHead } from "./reviewedHead.js";
 import type { PrSize } from "./digestCoverage.js";
+import { githubPullSourceContextOf, type GithubPullSourceContext } from "../execution/githubReadSource.js";
 
 // Repo/ref resolution for resident environments (docs/reference/specs/resident-repos.md
 // item 29): the
@@ -166,6 +167,8 @@ export function operationTargetOf(raw: unknown): OperationTarget | undefined {
 
 export interface RepoContext {
   repo?: string;
+  /** Native read snapshot for later source matching; never cached authority. */
+  githubSource?: GithubPullSourceContext;
   ref?: string;
   /** PR number the review post-step targets. Set when the CURRENT
    *  message references a PR of the resolved repo (URL or `owner/name#N`) —
@@ -1020,6 +1023,7 @@ export async function resolveRepoContext(
     if (head?.base !== undefined) out.baseRef = head.base;
     if (head?.size !== undefined) out.prSize = head.size;
     if (head?.facts !== undefined) out.prDescription = head.facts;
+    if (head?.githubSource !== undefined) out.githubSource = head.githubSource;
     if (head?.state === "closed")
       out.closedPr = {
         number: prTarget.number,
@@ -1234,6 +1238,7 @@ export async function resolveRepoContext(
   let baseRef: string | undefined;
   let prSize: PrSize | undefined;
   let facts: PrFacts | undefined;
+  let githubSource: GithubPullSourceContext | undefined;
   let closedPr: RepoContext["closedPr"];
   let namedPrMatchesOperation = operationTarget?.ref === undefined;
   if (namedPr && repo === namedPr.repo) {
@@ -1257,6 +1262,7 @@ export async function resolveRepoContext(
     baseRef = operationTarget?.ref === undefined || operationTarget.ref === head?.ref ? head?.base : undefined;
     prSize = head?.size;
     facts = head?.facts;
+    githubSource = head?.githubSource;
     if (head?.state === "closed")
       closedPr = {
         number: namedPr.number,
@@ -1294,6 +1300,7 @@ export async function resolveRepoContext(
     if (baseRef) out.baseRef = baseRef;
     if (prSize) out.prSize = prSize;
     if (facts) out.prDescription = facts;
+    if (githubSource) out.githubSource = githubSource;
     if (closedPr) out.closedPr = closedPr;
   } else if (repo) {
     const inherited = inheritedPr(thread, records, repo);
@@ -1311,6 +1318,7 @@ export async function resolveRepoContext(
           out.baseRef = head.base;
         if (head.size) out.prSize = head.size;
         if (head.facts) out.prDescription = head.facts;
+        if (head.githubSource) out.githubSource = head.githubSource;
         // A PR the thread's own run opened is the branch the thread's work
         // lives on (item 29): a follow-up that names no ref of its own runs
         // there, so its pushes land on the PR and its description edits it
@@ -1441,7 +1449,7 @@ async function openPrHeadSha(pr: {
   repo: string;
   number: number;
 }): Promise<
-  | { sha: string; ref?: string; base?: string; size?: PrSize; facts?: PrFacts }
+  | { sha: string; ref?: string; base?: string; size?: PrSize; facts?: PrFacts; githubSource?: GithubPullSourceContext }
   | { reason: "closed"; sha?: string; ref?: string; merged: boolean; mergedAt?: string }
   | { reason: "unreachable" }
 > {
@@ -1462,6 +1470,7 @@ async function openPrHeadSha(pr: {
       ...(head.base ? { base: head.base } : {}),
       ...(head.size ? { size: head.size } : {}),
       ...(head.facts ? { facts: head.facts } : {}),
+      ...(head.githubSource ? { githubSource: head.githubSource } : {}),
     };
   }
   return { reason: "unreachable" };
@@ -1553,6 +1562,7 @@ async function prHead(
       /** GitHub's merge instant, normalized to ISO when valid. */
       mergedAt?: string;
       facts?: PrFacts;
+      githubSource?: GithubPullSourceContext;
     }
   | undefined
 > {
@@ -1610,6 +1620,18 @@ async function prHead(
     typeof data.mergedAt === "string" && !Number.isNaN(Date.parse(data.mergedAt))
       ? new Date(data.mergedAt).toISOString()
       : undefined;
+  const githubSource =
+    data.number === pr.number
+      ? githubPullSourceContextOf({
+          version: 1,
+          source: data.source,
+          repositoryId: data.base.repositoryId,
+          pullRequestId: data.id,
+          number: data.number,
+          head: { repositoryId: data.head.repositoryId, ref: data.head.ref, sha: data.head.sha },
+          baseRef: data.base.ref,
+        })
+      : undefined;
   if (sha === undefined) {
     if (span) {
       span.fail(classifyError(new Error("PR head unavailable"), { kind: "other", code: "head_unknown" }));
@@ -1633,6 +1655,7 @@ async function prHead(
     ...(data.headFacts?.size ? { size: data.headFacts.size } : {}),
     ...(mergedAt !== undefined ? { mergedAt } : {}),
     ...(facts ? { facts } : {}),
+    ...(githubSource ? { githubSource } : {}),
   };
 }
 

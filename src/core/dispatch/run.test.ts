@@ -568,14 +568,40 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     const raw = { version: 1, original: true };
     await claimRun(deps, {
       ...base,
-      repoCtx: { repo: "acme/api", ref: "feature/original", baseRef: "release" },
+      repoCtx: {
+        repo: "acme/api",
+        ref: "feature/original",
+        baseRef: "release",
+        pr: 41,
+        githubSource: {
+          version: 1,
+          source: { host: "github.com", appId: 1, installationId: 2 },
+          repositoryId: 11,
+          pullRequestId: 101,
+          number: 41,
+          head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+          baseRef: "release",
+        },
+      },
       restartBranchIdentityBaseline: raw,
       restartPushedBranch: "feature/original",
       reserved: new NullLedgerRun(base.run.id, { put: async () => {}, abandoned: () => {} }),
       resume: undefined,
       ledgerRun: undefined,
     });
-    expect(ledger.opened[0]!.meta).toMatchObject({ ref: "feature/original", baseRef: "release" });
+    expect(ledger.opened[0]!.meta).toMatchObject({
+      ref: "feature/original",
+      baseRef: "release",
+      githubSource: {
+        version: 1,
+        source: { host: "github.com", appId: 1, installationId: 2 },
+        repositoryId: 11,
+        pullRequestId: 101,
+        number: 41,
+        head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+        baseRef: "release",
+      },
+    });
     expect(ledger.opened[0]!.state).toMatchObject({ branchIdentityBaseline: raw, pushedBranch: "feature/original" });
   });
 

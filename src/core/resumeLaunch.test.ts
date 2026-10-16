@@ -291,6 +291,31 @@ describe("the pure pieces", () => {
     expect(repoContextOf(row())).toEqual({ repo: "acme/api", ref: "feat/x", pr: 12, headSha: "a".repeat(40) });
     expect(repoContextOf(row({ meta: { channelId: "c", userId: "u", threadKey: "t" } }))).toEqual({});
   });
+
+  it("restores a native source snapshot without borrowing a changed PR number", () => {
+    const original = row();
+    original.meta.githubSource = {
+      version: 1,
+      source: { host: "github.com", appId: 1, installationId: 2 },
+      repositoryId: 11,
+      pullRequestId: 101,
+      number: 12,
+      head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+      baseRef: "main",
+    };
+    expect(repoContextOf(original).githubSource).toEqual({
+      version: 1,
+      source: { host: "github.com", appId: 1, installationId: 2 },
+      repositoryId: 11,
+      pullRequestId: 101,
+      number: 12,
+      head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+      baseRef: "main",
+    });
+    original.meta.pr = 13;
+    expect(repoContextOf(original)).toMatchObject({ repo: "acme/api", pr: 13 });
+    expect(repoContextOf(original).githubSource).toBeUndefined();
+  });
 });
 
 describe("launchResumes", () => {
