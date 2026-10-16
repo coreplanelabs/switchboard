@@ -1,3 +1,4 @@
+import { operatorSettingsEvidence } from "../testing/operatorSettings.js";
 import { describe, expect, it, vi } from "vitest";
 import { ConfigStore, InMemoryOverridesBacking } from "../../config.js";
 import {
@@ -25,7 +26,7 @@ const input = (text: string): OperatorInput => ({
   providerModels: { read: async () => `Model refs this deployment can run:\n- \`${modelRef}\`` },
   tail: [],
 });
-const bind = (settings = {}) => ({
+const bind = (settings: Record<string, unknown> & { settingsEvidence?: Record<string, unknown> } = {}) => ({
   tool: OPERATOR_BIND_TOOL,
   input: {
     preset: "review",
@@ -33,6 +34,7 @@ const bind = (settings = {}) => ({
     prTarget: { number: 7, source: "request", quote: url },
     reason: "review the authored target",
     ...settings,
+    settingsEvidence: operatorSettingsEvidence(settings.settingsEvidence),
   },
 });
 const message = (text: string) => ({
@@ -79,7 +81,11 @@ describe("typed re-review and consumed source custody", () => {
       .fn<RouteModel>()
       .mockResolvedValueOnce({
         tool: OPERATOR_ASK_TOOL,
-        input: { text: "Review?", proposal: `agent:review ${url}`, proposalSettings: { model: "openai/unrequested" } },
+        input: {
+          text: "Review?",
+          proposal: `agent:review ${url}`,
+          proposalSettings: { settingsEvidence: operatorSettingsEvidence(), model: "openai/unrequested" },
+        },
       })
       .mockResolvedValueOnce(bind({ model: modelRef }));
     const answer = await runOperator(input(`re-review ${url} model:${modelRef}`), model);
@@ -155,7 +161,14 @@ describe("typed re-review and consumed source custody", () => {
         ? { tool: OPERATOR_READ_TOOLS.threadState, input: {} }
         : path === "thread-target"
           ? { ...bind(), input: { ...bind().input, prTarget: { number: 7, source: "thread", quote: url } } }
-          : { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "answer from earlier context" } };
+          : {
+              tool: OPERATOR_BIND_TOOL,
+              input: {
+                settingsEvidence: operatorSettingsEvidence(),
+                preset: "general",
+                reason: "answer from earlier context",
+              },
+            };
     const result = await operatorStage(
       { config: config(), operatorModel: model },
       {

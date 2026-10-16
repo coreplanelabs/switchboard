@@ -1,3 +1,4 @@
+import { operatorSettingsEvidence } from "../testing/operatorSettings.js";
 import { describe, expect, it } from "vitest";
 import { parseAppConfigText } from "../../config.js";
 import type { CompletionRequest, Provider } from "../provider.js";
@@ -28,7 +29,14 @@ async function request(yaml: string) {
     async complete(value) {
       requests.push(value);
       return {
-        content: [{ type: "tool_use", id: "t1", name: "bind_preset", input: { preset: "general", reason: "read" } }],
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "bind_preset",
+            input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "read" },
+          },
+        ],
         stopReason: "tool_use",
       };
     },
@@ -59,7 +67,14 @@ costs:
       get: () => ({
         name: "acme",
         complete: async () => ({
-          content: [{ type: "tool_use", id: "t1", name: "bind_preset", input: { preset: "general", reason: "read" } }],
+          content: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "bind_preset",
+              input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "read" },
+            },
+          ],
           stopReason: "tool_use",
           usage: { inputTokens: 100, outputTokens: 20 },
         }),

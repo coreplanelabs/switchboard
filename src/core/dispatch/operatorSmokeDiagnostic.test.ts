@@ -1,3 +1,4 @@
+import { operatorSettingsEvidence } from "../testing/operatorSettings.js";
 // Feature: docs/reference/specs/routing-and-config.md — closed candidate diagnostics.
 import { describe, expect, it, vi } from "vitest";
 import { CommandRegistry } from "../commandRegistry.js";
@@ -67,7 +68,10 @@ describe("closed candidate smoke loop diagnostic", () => {
     expect(JSON.stringify(answer.smokeDiagnostic)).not.toMatch(/private|never-print|42/);
     const next: RouteToolCall[] = [
       { tool: "repository_brief", input: { repo: "private/two" } },
-      { tool: "bind_preset", input: { preset: "general", reason: "Reply." } },
+      {
+        tool: "bind_preset",
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Reply." },
+      },
     ];
     const repeated = await runOperator(input, async () => next.shift()!, {
       smokeDiagnosticScope: "candidate-smoke-v1",
@@ -78,7 +82,10 @@ describe("closed candidate smoke loop diagnostic", () => {
   it("omits the candidate carrier from the durable public operator event", async () => {
     const replies: RouteToolCall[] = [
       { tool: "repository_brief", input: { repo: "private/fixture" } },
-      { tool: "bind_preset", input: { preset: "general", reason: "Reply." } },
+      {
+        tool: "bind_preset",
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Reply." },
+      },
     ];
     const answer = await runOperator(input, async () => replies.shift()!, {
       smokeDiagnosticScope: "candidate-smoke-v1",
@@ -95,7 +102,10 @@ describe("closed candidate smoke loop diagnostic", () => {
       expect(candidateSmokeDiagnostic(scope)).toBeUndefined();
       const replies: RouteToolCall[] = [
         { tool: "repository_brief", input: { repo: "private/fixture" } },
-        { tool: "bind_preset", input: { preset: "general", reason: "Reply." } },
+        {
+          tool: "bind_preset",
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Reply." },
+        },
       ];
       const answer = await runOperator(input, async () => replies.shift()!, {
         includeAllowance: true,
@@ -137,7 +147,10 @@ describe("closed candidate smoke loop diagnostic", () => {
         { tool: "repository_brief", input: { repo: "private/fixture" } },
         { tool: "repo_list", input: { intent: "read", reason: "inspect" } },
         { tool: "verify", input: { agrees: false, reason: "Not the requested effect." } },
-        { tool: "bind_preset", input: { preset: "general", reason: "Reply." } },
+        {
+          tool: "bind_preset",
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Reply." },
+        },
       ];
       const model = vi.fn<RouteModel>(async () => replies.shift()!);
       const result = await runOperator(input, model, {
@@ -190,7 +203,10 @@ describe("closed candidate smoke loop diagnostic", () => {
     async ({ name, repo, source, reply }) => {
       const replies: RouteToolCall[] = [
         { tool: "repository_brief", input: { repo } },
-        { tool: "bind_preset", input: { preset: "general", reason: "Reply." } },
+        {
+          tool: "bind_preset",
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Reply." },
+        },
       ];
       const model = vi.fn<RouteModel>(async () => replies.shift()!);
       const answer = await runOperator(
@@ -215,7 +231,10 @@ describe("closed candidate smoke loop diagnostic", () => {
     const brief = Object.defineProperty({ repo: "private/fixture" }, "sources", { get: getter });
     const replies: RouteToolCall[] = [
       { tool: "repository_brief", input: { repo: "private/fixture" } },
-      { tool: "bind_preset", input: { preset: "general", reason: "Reply." } },
+      {
+        tool: "bind_preset",
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Reply." },
+      },
     ];
     const model = vi.fn<RouteModel>(async () => replies.shift()!);
     const answer = await runOperator(
@@ -246,7 +265,10 @@ describe("closed candidate smoke loop diagnostic", () => {
             return count === 2
               ? { tool: "repo_list", input: { intent: "read", reason: "inspect" } }
               : { tool: "verify", input: {} };
-          return { tool: "bind_preset", input: { preset: "general", reason: "Reply." } };
+          return {
+            tool: "bind_preset",
+            input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Reply." },
+          };
         });
         const answer = await runOperator(
           {

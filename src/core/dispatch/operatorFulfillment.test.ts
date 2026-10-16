@@ -1,3 +1,4 @@
+import { operatorSettingsEvidence } from "../testing/operatorSettings.js";
 import { describe, expect, it, vi } from "vitest";
 import { CommandRegistry } from "../commandRegistry.js";
 import { ALL_CAPABILITIES } from "../capabilities.js";
@@ -50,6 +51,7 @@ const fix: OperatorInput = {
 const work: RouteToolCall = {
   tool: OPERATOR_BIND_TOOL,
   input: {
+    settingsEvidence: operatorSettingsEvidence(),
     preset: "ship",
     shipEntry: "work_from_thread",
     repo: "acme/api",
@@ -226,6 +228,7 @@ describe("action repair after read exhaustion", () => {
   const review: RouteToolCall = {
     tool: OPERATOR_BIND_TOOL,
     input: {
+      settingsEvidence: operatorSettingsEvidence(),
       preset: "review",
       repo: "acme/api",
       prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },

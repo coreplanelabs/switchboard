@@ -1,3 +1,4 @@
+import { operatorSettingsEvidence } from "../testing/operatorSettings.js";
 import { NativeMediaHeldError } from "../harness/nativeMedia.js";
 import { RequiredTranscriptError } from "../runLedger/transcript.js";
 import { sourceBinding } from "../references/receipts.js";
@@ -120,6 +121,203 @@ const ctxOf = (over: Partial<OperatorTurnContext> = {}): OperatorTurnContext => 
   ...over,
 });
 
+describe("complete operator control assessments", () => {
+  const text = "Review https://github.com/acme/api/pull/7 with two renewals.";
+  const prTarget = { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" };
+  const rawReview = {
+    tool: OPERATOR_BIND_TOOL,
+    input: { preset: "review", repo: "acme/api", prTarget, reason: "review the PR" },
+  };
+
+  it("refuses an actual raw executable bind with no control assessment", () => {
+    expect(parseOperatorTurn(rawReview, ctxOf({ requestText: text, presets: ["review", "ship"] }))).toMatchObject({
+      kind: "violation",
+      violation: expect.stringContaining("settingsEvidence"),
+    });
+  });
+
+  it.each([null, {}, { renewals: { intent: "requested", quote: "two renewals" } }])(
+    "refuses a raw missing or partial assessment: %j",
+    (settingsEvidence) => {
+      expect(
+        parseOperatorTurn(
+          { ...rawReview, input: { ...rawReview.input, renewals: 2, settingsEvidence } },
+          ctxOf({ requestText: text, presets: ["review", "ship"] }),
+        ),
+      ).toMatchObject({ kind: "violation" });
+    },
+  );
+
+  it("refuses requested renewal evidence whose typed value was omitted", () => {
+    expect(
+      parseOperatorTurn(
+        {
+          ...rawReview,
+          input: {
+            ...rawReview.input,
+            preset: "ship",
+            shipEntry: "review",
+            settingsEvidence: operatorSettingsEvidence({ renewals: { intent: "requested", quote: "two renewals" } }),
+          },
+        },
+        ctxOf({ requestText: text, presets: ["review", "ship"] }),
+      ),
+    ).toMatchObject({ kind: "violation", violation: expect.stringContaining("typed value") });
+  });
+
+  it("refuses an assessment containing an unsupported control name", () => {
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "general",
+            reason: "answer the question",
+            settingsEvidence: operatorSettingsEvidence({ model: { intent: "unrequested" } }),
+          },
+        },
+        ctxOf({ requestText: "What is 2 + 2?" }),
+      ),
+    ).toMatchObject({ kind: "violation" });
+  });
+
+  it("preserves requested renewals and the exact PR on a compatible Ship review", () => {
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "ship",
+            shipEntry: "review",
+            repo: "acme/api",
+            prTarget,
+            renewals: 2,
+            settingsEvidence: operatorSettingsEvidence({ renewals: { intent: "requested", quote: "two renewals" } }),
+            reason: "review with the requested renewals",
+          },
+        },
+        ctxOf({ requestText: text, presets: ["review", "ship"] }),
+      ),
+    ).toMatchObject({
+      kind: "decision",
+      decision: {
+        kind: "binds",
+        binds: [{ preset: "ship", shipEntry: "review", renewals: 2, prTarget, line: `agent:ship ${text}` }],
+      },
+    });
+  });
+
+  it.each([
+    operatorSettingsEvidence(),
+    operatorSettingsEvidence({ renewals: { intent: "incidental", quote: "renewals" } }),
+  ])("does not apply supplied defaults or incidental values: %j", (settingsEvidence) => {
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: { preset: "general", renewals: 2, effort: "low", settingsEvidence, reason: "explain the term" },
+        },
+        ctxOf({ requestText: "Explain what renewals mean.", presets: ["general", "ship"] }),
+      ),
+    ).toEqual({
+      kind: "decision",
+      decision: {
+        kind: "binds",
+        binds: [{ preset: "general", line: "agent:general Explain what renewals mean.", reason: "explain the term" }],
+        reason: "explain the term",
+      },
+    });
+  });
+
+  it("refuses a quote on an unrequested assessment", () => {
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "general",
+            settingsEvidence: operatorSettingsEvidence({ renewals: { intent: "unrequested", quote: "renewals" } }),
+            reason: "explain the term",
+          },
+        },
+        ctxOf({ requestText: "Explain what renewals mean." }),
+      ),
+    ).toMatchObject({ kind: "violation" });
+  });
+
+  it("refuses a raw PR batch and a preset proposal without assessments", () => {
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BATCH_TOOL,
+          input: {
+            kind: "review",
+            targets: [prTarget.quote, "https://github.com/acme/web/pull/8"],
+            targetQuotes: [prTarget.quote, "https://github.com/acme/web/pull/8"],
+            actionQuote: "Review",
+            reason: "review both",
+          },
+        },
+        ctxOf({
+          requestText: "Review https://github.com/acme/api/pull/7 and https://github.com/acme/web/pull/8",
+          presets: ["conductor"],
+        }),
+      ),
+    ).toMatchObject({ kind: "violation", violation: expect.stringContaining("settingsEvidence") });
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_ASK_TOOL,
+          input: {
+            proposal: "agent:ship Review https://github.com/acme/api/pull/7 with two renewals.",
+            proposalSettings: {},
+            text: "Use Ship?",
+            reason: "clarify",
+          },
+        },
+        ctxOf({ requestText: text, presets: ["review", "ship"] }),
+      ),
+    ).toMatchObject({ kind: "violation", violation: expect.stringContaining("settingsEvidence") });
+  });
+
+  it("repairs a raw omission within the existing bounded loop without dropping the requested action", async () => {
+    let calls = 0;
+    const answer = await runOperator(input({ text, projection: projectionOf(["review", "ship"]) }), async () =>
+      ++calls === 1
+        ? rawReview
+        : {
+            tool: OPERATOR_BIND_TOOL,
+            input: {
+              preset: "ship",
+              shipEntry: "review",
+              repo: "acme/api",
+              prTarget,
+              renewals: 2,
+              settingsEvidence: operatorSettingsEvidence({ renewals: { quote: "two renewals", intent: "requested" } }),
+              reason: "review with the requested control",
+            },
+          },
+    );
+    expect(answer.attempts?.map((attempt) => attempt.outcome)).toEqual(["violation", "accepted"]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ preset: "ship", shipEntry: "review", renewals: 2 }],
+    });
+    expect(calls).toBe(2);
+  });
+
+  it("exhausts persistent raw omissions without accepting a bind or changing the repair budget", async () => {
+    let calls = 0;
+    const answer = await runOperator(input({ text, projection: projectionOf(["review", "ship"]) }), async () => {
+      calls++;
+      return rawReview;
+    });
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.attempts?.map((attempt) => attempt.outcome)).toEqual(["violation", "violation", "violation"]);
+    expect(calls).toBe(3);
+  });
+});
+
 describe("publication of an operator decision", () => {
   const denied: AudienceCheck = { ok: false, code: "github-access-lost" };
   const eventOf = (fields: Partial<OperatorEventFields> = {}): OperatorEventFields => ({
@@ -187,7 +385,7 @@ describe("publication of an operator decision", () => {
     const { deps, ctx } = fixture();
     const answer = await runOperator(input({ text: "What changed?" }), async () => ({
       tool: OPERATOR_BIND_TOOL,
-      input: { preset: "general", reason: "answer the question" },
+      input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "answer the question" },
     }));
     const event = operatorEventOf("on", answer);
     event.binds![0]!.line = "agent:ship This is display text only.";
@@ -468,6 +666,7 @@ describe("explicit PR directives at the operator stage", () => {
     const model = vi.fn<RouteModel>(async () => ({
       tool: OPERATOR_BIND_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "review",
         repo: "acme/api",
         prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
@@ -552,7 +751,14 @@ describe("explicit PR directives at the operator stage", () => {
     let available = true;
     const model = vi.fn<RouteModel>(async () => {
       available = false;
-      return { tool: OPERATOR_BIND_TOOL, input: { preset: "unavailable", reason: "invalid first proposal" } };
+      return {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "unavailable",
+          reason: "invalid first proposal",
+        },
+      };
     });
     await expect(
       operatorStage(
@@ -603,6 +809,7 @@ describe("the operator is one loop with typed tools", () => {
     const model = vi.fn<RouteModel>(async () => ({
       tool: OPERATOR_BIND_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "review",
         repo: "acme/api",
         prTarget: { number: 124, source: "request", quote },
@@ -719,6 +926,7 @@ describe("the operator is one loop with typed tools", () => {
     const model = vi.fn<RouteModel>(async () => ({
       tool: OPERATOR_BIND_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         shipEntry: "work",
         repo: "acme/api",
@@ -793,7 +1001,13 @@ channels:
           expect(prompt.system).toContain("attachments and connected repository briefs");
           return {
             tool: OPERATOR_BIND_TOOL,
-            input: { preset: "ship", shipEntry: "work", repo: "acme/atlas", reason: "the attached plan targets atlas" },
+            input: {
+              settingsEvidence: operatorSettingsEvidence(),
+              preset: "ship",
+              shipEntry: "work",
+              repo: "acme/atlas",
+              reason: "the attached plan targets atlas",
+            },
           };
         },
       },
@@ -890,7 +1104,13 @@ channels:
       parseOperatorTurn(
         {
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", shipEntry: "work", repo: "acme/first", reason: "explicit choice" },
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "ship",
+            shipEntry: "work",
+            repo: "acme/first",
+            reason: "explicit choice",
+          },
         },
         ctxOf({
           requestText: "In acme/first, fix the drift",
@@ -959,7 +1179,15 @@ channels:
 
   it("bind_preset renders the preset on the PERSON's own words — the model's request copy never rides, so a paraphrase or a doubled head is unrepresentable", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "some paraphrase", reason: "read ask" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          request: "some paraphrase",
+          reason: "read ask",
+        },
+      },
       ctxOf({ requestText: "what changed this week?" }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -978,11 +1206,11 @@ channels:
           effort: "high",
           budget: 25,
           verbosity: "debug",
-          settingsEvidence: {
+          settingsEvidence: operatorSettingsEvidence({
             effort: { quote: "high effort", intent: "requested" },
             budget: { quote: "25 minute budget", intent: "requested" },
             verbosity: { quote: "debug detail", intent: "requested" },
-          },
+          }),
           reason: "requested controls",
         },
       },
@@ -1011,10 +1239,10 @@ channels:
           severity: "major",
           renewals: 2,
           repo: "acme/api",
-          settingsEvidence: {
+          settingsEvidence: operatorSettingsEvidence({
             severity: { quote: "major findings", intent: "requested" },
             renewals: { quote: "two renewals", intent: "requested" },
-          },
+          }),
           reason: "requested review bar",
         },
       },
@@ -1033,7 +1261,7 @@ channels:
           severity: "major",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
-          settingsEvidence: { severity: { quote: "major findings", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ severity: { quote: "major findings", intent: "requested" } }),
           reason: "requested review bar",
         },
       },
@@ -1048,7 +1276,15 @@ channels:
 
   it("a general bind ignores a stray Ship entry instead of exhausting the door", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", shipEntry: "work", reason: "answer the question" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          shipEntry: "work",
+          reason: "answer the question",
+        },
+      },
       ctxOf({ requestText: "What happened in this thread?", presets: ["general", "ship"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -1064,6 +1300,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           severity: "nit",
           repo: "acme/api",
@@ -1076,7 +1313,14 @@ channels:
     const ship = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work", repo: "acme/api", renewals: 4, reason: "work" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "work",
+          repo: "acme/api",
+          renewals: 4,
+          reason: "work",
+        },
       },
       ctxOf({ requestText: "Fix the flaky test.", presets: ["ship"] }),
     );
@@ -1097,7 +1341,7 @@ channels:
           effort: "medium",
           budget: 25,
           verbosity: "verbose",
-          settingsEvidence: { effort: { quote: "not in the request", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence(),
           reason: "answer the question",
         },
       },
@@ -1119,7 +1363,7 @@ channels:
         input: {
           preset: "general",
           severity: "major",
-          settingsEvidence: { severity: { quote: "major findings", intent: "incidental" } },
+          settingsEvidence: operatorSettingsEvidence({ severity: { quote: "major findings", intent: "incidental" } }),
           reason: "explain the term",
         },
       },
@@ -1139,7 +1383,15 @@ channels:
     const requestText = "What is 2 + 2? Answer in one sentence.";
     for (const settingsEvidence of [undefined, { effort: { quote: "Answer in one sentence", intent: "incidental" } }]) {
       const turn = parseOperatorTurn(
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "general", effort: "low", settingsEvidence, reason: "answer" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "general",
+            effort: "low",
+            settingsEvidence: operatorSettingsEvidence(settingsEvidence ?? {}),
+            reason: "answer",
+          },
+        },
         ctxOf({ requestText }),
       );
       if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("read did not bind");
@@ -1155,7 +1407,12 @@ channels:
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", effort: "low", settingsEvidence: { effort: "Answer" }, reason: "answer" },
+        input: {
+          preset: "general",
+          effort: "low",
+          settingsEvidence: operatorSettingsEvidence({ effort: "Answer" }),
+          reason: "answer",
+        },
       },
       ctxOf({ requestText: "What is 2 + 2? Answer in one sentence." }),
     );
@@ -1178,17 +1435,21 @@ channels:
         if (!prompt.retries?.length)
           return {
             tool: OPERATOR_BIND_TOOL,
-            input: { preset: "general", [setting]: value, settingsEvidence: { [setting]: quote }, reason: "answer" },
+            input: {
+              preset: "general",
+              [setting]: value,
+              settingsEvidence: operatorSettingsEvidence({ [setting]: quote }),
+              reason: "answer",
+            },
           };
         expect(prompt.retries.at(-1)?.violation).toContain(`settingsEvidence.${setting}`);
         expect(prompt.retries.at(-1)?.violation).toContain("incidental");
-        expect(prompt.retries.at(-1)?.violation).toContain("Keep the requested action");
         return {
           tool: OPERATOR_BIND_TOOL,
           input: {
             preset: "general",
             [setting]: value,
-            settingsEvidence: { [setting]: { quote, intent } },
+            settingsEvidence: operatorSettingsEvidence({ [setting]: { quote, intent } }),
             reason: "answer",
           },
         };
@@ -1222,7 +1483,7 @@ channels:
           repo: "acme/api",
           prTarget: { number: 42, source: "request", quote: url },
           effort: "high",
-          settingsEvidence: { effort: { quote: "effort:high", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ effort: { quote: "effort:high", intent: "requested" } }),
           reason: "review",
         },
       },
@@ -1237,6 +1498,7 @@ channels:
         {
           tool: OPERATOR_BIND_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             preset: "review",
             repo: "acme/api",
             prTarget: { number: 42, source: "request", quote: url },
@@ -1257,7 +1519,13 @@ channels:
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work", ...settings, settingsEvidence, reason: "work" },
+        input: {
+          preset: "ship",
+          shipEntry: "work",
+          ...settings,
+          settingsEvidence: operatorSettingsEvidence(settingsEvidence ?? {}),
+          reason: "work",
+        },
       },
       ctxOf({ requestText, presets: ["ship"] }),
     );
@@ -1282,7 +1550,11 @@ channels:
         parseOperatorTurn(
           {
             tool: OPERATOR_BIND_TOOL,
-            input: { preset: "general", effort: "high", settingsEvidence: { effort: evidence } },
+            input: {
+              preset: "general",
+              effort: "high",
+              settingsEvidence: operatorSettingsEvidence({ effort: evidence }),
+            },
           },
           ctxOf({ requestText }),
         ),
@@ -1294,14 +1566,13 @@ channels:
         input: {
           preset: "general",
           effort: "high",
-          settingsEvidence: { effort: { quote: "low effort", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ effort: { quote: "low effort", intent: "requested" } }),
           reason: "answer",
         },
       },
       ctxOf({ requestText }),
     );
-    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("read did not bind");
-    expect(turn.decision.binds[0]).not.toHaveProperty("effort");
+    expect(turn).toMatchObject({ kind: "violation", violation: expect.stringContaining("exact authored") });
   });
 
   it("the bind and proposal schemas require semantic settings evidence", () => {
@@ -1309,13 +1580,14 @@ channels:
     const bind = tools.find((tool) => tool.name === OPERATOR_BIND_TOOL)!;
     const ask = tools.find((tool) => tool.name === OPERATOR_ASK_TOOL)!;
     const evidence = {
+      required: ["effort", "budget", "severity", "renewals", "verbosity"],
       properties: Object.fromEntries(
         ["effort", "budget", "severity", "renewals", "verbosity"].map((name) => [
           name,
           {
             type: "object",
-            required: ["quote", "intent"],
-            properties: { intent: { enum: ["requested", "incidental"] } },
+            required: ["intent"],
+            properties: { intent: { enum: ["requested", "incidental", "unrequested"] } },
           },
         ]),
       ),
@@ -1335,6 +1607,7 @@ channels:
         {
           tool: OPERATOR_BIND_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             preset: "general",
             repo: "x/y",
             prTarget: { number: 7, source: "request", quote: "https://github.com/x/y/pull/7" },
@@ -1361,7 +1634,15 @@ channels:
   it("drops unsupported preset settings without requester evidence before routing", () => {
     for (const severity of ["major", null]) {
       const read = parseOperatorTurn(
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "general", severity, reason: "answer from facts" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "general",
+            severity,
+            reason: "answer from facts",
+          },
+        },
         ctxOf({
           requestText: "What happened with the export issue and its pull request?",
           presets: ["general", "review"],
@@ -1376,6 +1657,7 @@ channels:
         {
           tool: OPERATOR_BIND_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             preset: "review",
             repo: "acme/api",
             prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
@@ -1397,7 +1679,7 @@ channels:
         input: {
           preset: "general",
           severity: "major",
-          settingsEvidence: { severity: { quote: "major findings", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ severity: { quote: "major findings", intent: "requested" } }),
           reason: "answer",
         },
       },
@@ -1411,7 +1693,7 @@ channels:
           renewals: 2,
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
-          settingsEvidence: { renewals: { quote: "two renewals", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ renewals: { quote: "two renewals", intent: "requested" } }),
           reason: "review",
         },
       },
@@ -1429,7 +1711,7 @@ channels:
         input: {
           preset: "general",
           severity: "major",
-          settingsEvidence: { severity: "Answer" },
+          settingsEvidence: operatorSettingsEvidence({ severity: "Answer" }),
           reason: "answer the question",
         },
       },
@@ -1448,11 +1730,14 @@ channels:
         input: {
           preset: "general",
           severity: "major",
-          settingsEvidence: { severity: { quote: "Answer", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ severity: { quote: "Answer", intent: "requested" } }),
           reason: "answer the question",
         },
       },
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "answer the question" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "answer the question" },
+      },
     ];
     const answer = await runOperator(
       input({ text: "What is 2 + 2? Answer in one sentence.", projection: projectionOf(["general", "review"]) }),
@@ -1482,7 +1767,7 @@ channels:
           repo: "acme/api",
           prTarget,
           renewals: 2,
-          settingsEvidence: { renewals: { quote: "two renewals", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ renewals: { quote: "two renewals", intent: "requested" } }),
           reason: "review the PR",
         },
       },
@@ -1494,7 +1779,7 @@ channels:
           repo: "acme/api",
           prTarget,
           renewals: 2,
-          settingsEvidence: { renewals: { quote: "two renewals", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ renewals: { quote: "two renewals", intent: "requested" } }),
           reason: "review the PR with renewals",
         },
       },
@@ -1526,6 +1811,7 @@ channels:
       .mockResolvedValueOnce({
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
@@ -1585,6 +1871,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
@@ -1625,7 +1912,10 @@ channels:
             },
           };
         if (prompt.retries?.length)
-          return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "Explain the marker." } };
+          return {
+            tool: OPERATOR_BIND_TOOL,
+            input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Explain the marker." },
+          };
         return { tool: "repo_list", input: { intent: "read", reason: "list repos" } };
       },
     );
@@ -1664,6 +1954,7 @@ channels:
         ? {
             tool: OPERATOR_BIND_TOOL,
             input: {
+              settingsEvidence: operatorSettingsEvidence(),
               preset: "ship",
               shipEntry: "work_from_thread",
               repo: "acme/api",
@@ -1673,7 +1964,13 @@ channels:
           }
         : {
             tool: OPERATOR_BIND_TOOL,
-            input: { preset: "review", repo: "acme/old", prTarget, reason: "Review the historical PR." },
+            input: {
+              settingsEvidence: operatorSettingsEvidence(),
+              preset: "review",
+              repo: "acme/old",
+              prTarget,
+              reason: "Review the historical PR.",
+            },
           };
     });
     const answer = await runOperator(
@@ -1718,6 +2015,7 @@ channels:
         ? {
             tool: OPERATOR_BIND_TOOL,
             input: {
+              settingsEvidence: operatorSettingsEvidence(),
               preset: "ship",
               shipEntry: "work_from_thread",
               repo: "acme/api",
@@ -1728,6 +2026,7 @@ channels:
         : {
             tool: OPERATOR_BIND_TOOL,
             input: {
+              settingsEvidence: operatorSettingsEvidence(),
               preset: "review",
               repo: "acme/api",
               prTarget: {
@@ -1775,6 +2074,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: {
@@ -1788,6 +2088,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
@@ -1823,7 +2124,7 @@ channels:
           shipEntry: "work",
           reason: "r",
           ...setting,
-          settingsEvidence: { [name]: { quote: requestText, intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ [name]: { quote: requestText, intent: "requested" } }),
         },
       },
       ctxOf({ requestText, presets: ["ship"] }),
@@ -1835,7 +2136,12 @@ channels:
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "research", repo: "acme/api", reason: "the thread target" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "research",
+          repo: "acme/api",
+          reason: "the thread target",
+        },
       },
       ctxOf({ requestText: "review again", threadRepo: "acme/api" }),
     );
@@ -1851,7 +2157,15 @@ channels:
     ]);
     expect(
       parseOperatorTurn(
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "research", repo: "not-a-slug", reason: "guess" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "research",
+            repo: "not-a-slug",
+            reason: "guess",
+          },
+        },
         ctxOf({ requestText: "Investigate https://github.com/acme/api" }),
       ),
     ).toMatchObject({ kind: "violation", violation: expect.stringContaining("owner/name") as unknown as string });
@@ -1861,7 +2175,13 @@ channels:
     const requestText = "agents:ship review https://github.com/acme/api/pull/3931";
     const ctx = ctxOf({ requestText, presets: ["ship"] });
     expect(
-      parseOperatorTurn({ tool: OPERATOR_BIND_TOOL, input: { preset: "ship", reason: "review" } }, ctx),
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "ship", reason: "review" },
+        },
+        ctx,
+      ),
     ).toMatchObject({
       kind: "violation",
       violation: expect.stringContaining("shipEntry"),
@@ -1870,6 +2190,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "ship",
           shipEntry: "review",
           repo: "acme/api",
@@ -1898,7 +2219,17 @@ channels:
     const url = "https://github.com/acme/api/pull/3931";
     const bind = (prTarget: { number: number; source: "request" | "thread"; quote: string }, repo = "acme/api") =>
       parseOperatorTurn(
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "review", repo, prTarget, reason: "review" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "ship",
+            shipEntry: "review",
+            repo,
+            prTarget,
+            reason: "review",
+          },
+        },
         ctxOf({
           requestText: `Review ${url}`,
           presets: ["ship"],
@@ -1936,6 +2267,7 @@ channels:
         {
           tool: OPERATOR_BIND_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             preset: "ship",
             shipEntry: "review",
             repo: "acme/api",
@@ -1954,7 +2286,7 @@ channels:
       { preset: "review", repo: "acme/api", reason: "review" },
     ]) {
       const turn = parseOperatorTurn(
-        { tool: OPERATOR_BIND_TOOL, input },
+        { tool: OPERATOR_BIND_TOOL, input: { ...input, settingsEvidence: operatorSettingsEvidence() } },
         ctxOf({
           requestText: "review it",
           presets: ["ship", "review"],
@@ -1975,6 +2307,7 @@ channels:
         {
           tool: OPERATOR_BIND_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             preset: "ship",
             shipEntry: "review",
             repo: "acme/api",
@@ -2045,6 +2378,7 @@ channels:
         {
           tool: OPERATOR_BIND_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             preset: "review",
             repo: "acme/api",
             prTarget: { number: 7, source: "request", quote: "acme/api#7" },
@@ -2062,6 +2396,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "ship",
           shipEntry: "work",
           workObjective: "fix the failing check",
@@ -2087,6 +2422,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "ship",
           shipEntry: "work",
           workObjective: "fix the API",
@@ -2111,6 +2447,7 @@ channels:
         {
           tool: OPERATOR_BIND_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             preset: "ship",
             shipEntry: "work_from_thread",
             workObjective: "fix the prior issue",
@@ -2140,6 +2477,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "ship",
           shipEntry: "work_from_thread",
           repo: "acme/api",
@@ -2169,6 +2507,7 @@ channels:
     const model = vi.fn(async () => ({
       tool: OPERATOR_BIND_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         shipEntry: "work_from_thread",
         repo: "acme/api",
@@ -2208,6 +2547,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "ship",
           shipEntry: "work_from_thread",
           workObjective: "fix the prior issue",
@@ -2227,7 +2567,13 @@ channels:
       parseOperatorTurn(
         {
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", shipEntry: "work_from_thread", repo: "acme/api", reason: "guess" },
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "ship",
+            shipEntry: "work_from_thread",
+            repo: "acme/api",
+            reason: "guess",
+          },
         },
         ctxOf({ requestText: "Fix it.", presets: ["ship"] }),
       ),
@@ -2241,7 +2587,13 @@ channels:
     const answer = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "plan", repo: "acme/api", reason: "explicit plan" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "plan",
+          repo: "acme/api",
+          reason: "explicit plan",
+        },
       },
       ctxOf({ requestText: "agent:ship in acme/api: plan docs/plans/fixture.md", presets: ["ship"] }),
     );
@@ -2260,6 +2612,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "other/tooling",
           prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -2281,10 +2634,19 @@ channels:
   it("re-asks a review bind missing its canonical repository without asking the user for syntax", async () => {
     const prTarget = { number: 7, source: "request", quote: "PR #7" };
     const answers: RouteToolCall[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", prTarget, reason: "review PR" } },
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "review", repo: "acme/api", prTarget, reason: "the billing service" },
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "review", prTarget, reason: "review PR" },
+      },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "review",
+          repo: "acme/api",
+          prTarget,
+          reason: "the billing service",
+        },
       },
     ];
     const answer = await runOperator(
@@ -2313,6 +2675,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -2339,6 +2702,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote },
@@ -2359,6 +2723,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/web",
           prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -2379,6 +2744,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/web",
           prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -2399,6 +2765,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/web",
           prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -2422,7 +2789,13 @@ channels:
     const answer = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "review", repo: "acme/api", prTarget, reason: "the billing service" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "review",
+          repo: "acme/api",
+          prTarget,
+          reason: "the billing service",
+        },
       },
       ctxOf({ requestText: "review PR #7; see https://github.com/acme/web/pull/7 for context", presets: ["review"] }),
     );
@@ -2435,6 +2808,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/web",
           prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -2457,6 +2831,7 @@ channels:
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -2477,6 +2852,7 @@ channels:
         {
           tool: OPERATOR_BIND_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             preset: "review",
             repo,
             prTarget: { number: 7, source: "request", quote },
@@ -2499,7 +2875,10 @@ channels:
 
   it("a typo'd directive head naming the bound preset is stripped from the request the bind carries", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "x", reason: "r" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", request: "x", reason: "r" },
+      },
       ctxOf({ requestText: "adgent:general what changed this week?" }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -2508,7 +2887,16 @@ channels:
 
   it("a bind_preset naming a preset outside the projection is a violation the loop re-asks — never a hand-back", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", request: "x", reason: "r" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "work",
+          request: "x",
+          reason: "r",
+        },
+      },
       ctxOf(),
     );
     expect(turn).toMatchObject({ kind: "violation" });
@@ -2524,7 +2912,12 @@ channels:
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_ASK_TOOL,
-        input: { text: "Which listing?", proposal: "runs list", reason: "fork" },
+        input: {
+          proposalSettings: {},
+          text: "Which listing?",
+          proposal: "runs list",
+          reason: "fork",
+        },
       },
       ctxOf(),
     );
@@ -2540,7 +2933,15 @@ channels:
     ).toMatchObject({ kind: "decision", decision: { kind: "question", text: "Which repository contains the plan?" } });
     expect(
       parseOperatorTurn(
-        { tool: OPERATOR_ASK_TOOL, input: { text: "Review it?", proposal: "agent:research", reason: "fork" } },
+        {
+          tool: OPERATOR_ASK_TOOL,
+          input: {
+            proposalSettings: { settingsEvidence: operatorSettingsEvidence() },
+            text: "Review it?",
+            proposal: "agent:research",
+            reason: "fork",
+          },
+        },
         ctxOf(),
       ),
     ).toMatchObject({ kind: "violation", violation: expect.stringContaining("runnable bind") as unknown as string });
@@ -2553,7 +2954,12 @@ channels:
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_ASK_TOOL,
-        input: { text: "Which listing?", proposal: "runs list", reason: "fork" },
+        input: {
+          proposalSettings: {},
+          text: "Which listing?",
+          proposal: "runs list",
+          reason: "fork",
+        },
       },
       ctxOf(),
     );
@@ -2667,7 +3073,14 @@ defaults:
         config,
         operatorModel: groundedModel(async (prompt) => {
           prompts.push(prompt);
-          return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "configured data source" } };
+          return {
+            tool: OPERATOR_BIND_TOOL,
+            input: {
+              settingsEvidence: operatorSettingsEvidence(),
+              preset: "general",
+              reason: "configured data source",
+            },
+          };
         }),
         mcp: {
           catalogFor: async (caller) => {
@@ -2728,7 +3141,10 @@ defaults:
         config,
         operatorModel: groundedModel(async (prompt) => {
           prompts.push(prompt);
-          return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "service investigation" } };
+          return {
+            tool: OPERATOR_BIND_TOOL,
+            input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "service investigation" },
+          };
         }),
         mcp: {
           catalogFor: async () => {
@@ -2823,7 +3239,10 @@ restrict:
         config,
         operatorModel: groundedModel(async (prompt) => {
           prompts.push(prompt);
-          return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "fallback read" } };
+          return {
+            tool: OPERATOR_BIND_TOOL,
+            input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "fallback read" },
+          };
         }),
         mcp: {
           catalogFor: async (caller) => {
@@ -3019,6 +3438,7 @@ describe("runOperator — the loop over a scripted model", () => {
         return {
           tool: OPERATOR_BATCH_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             kind: "review",
             targets: ["https://github.com/acme/cli/pull/120", "https://github.com/acme/api/pull/3927"],
             actionQuote: "review",
@@ -3058,6 +3478,7 @@ describe("runOperator — the loop over a scripted model", () => {
       {
         tool: OPERATOR_BATCH_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           kind: "ship",
           targets: ["https://github.com/acme/api/pull/1", "https://github.com/acme/web/pull/9"],
           actionQuote: "ship",
@@ -3085,6 +3506,7 @@ describe("runOperator — the loop over a scripted model", () => {
     const model = vi.fn(async () => ({
       tool: OPERATOR_BATCH_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         kind: "review",
         targets: [
           "https://github.com/acme/api/pull/7",
@@ -3132,6 +3554,7 @@ describe("runOperator — the loop over a scripted model", () => {
       async () => ({
         tool: OPERATOR_BATCH_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           kind: "ship",
           targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
           actionQuote: "ship",
@@ -3154,6 +3577,7 @@ describe("runOperator — the loop over a scripted model", () => {
         {
           tool: OPERATOR_BATCH_TOOL,
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             kind: "ship",
             targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
             actionQuote: "ship",
@@ -3186,6 +3610,7 @@ describe("runOperator — the loop over a scripted model", () => {
       async () => ({
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "conductor",
           shipEntry: "review",
           workObjective: "review the listed PRs",
@@ -3206,6 +3631,7 @@ describe("runOperator — the loop over a scripted model", () => {
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           shipEntry: "work",
           workObjective: "change the linked PR",
@@ -3228,6 +3654,7 @@ describe("runOperator — the loop over a scripted model", () => {
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "ship",
           shipEntry: "review",
           workObjective: "please review",
@@ -3247,7 +3674,10 @@ describe("runOperator — the loop over a scripted model", () => {
   it("an untyped conductor bind carries no PR child authority", () => {
     const text = "review these: • https://github.com/acme/cli/pull/120 • https://github.com/acme/api/pull/3927";
     const answer = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "conductor", reason: "handle the reviews" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "conductor", reason: "handle the reviews" },
+      },
       ctxOf({ requestText: text, presets: ["conductor", "review", "ship", "general"] }),
     );
     expect(answer).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
@@ -3260,7 +3690,10 @@ describe("runOperator — the loop over a scripted model", () => {
       "ship these: https://github.com/acme/api/pull/7 https://github.com/acme/web/pull/9; https://github.com/acme/cli/pull/10";
     expect(
       parseOperatorTurn(
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "conductor", reason: "ship the listed PRs" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "conductor", reason: "ship the listed PRs" },
+        },
         ctxOf({ requestText, presets: ["conductor", "ship"] }),
       ),
     ).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
@@ -3272,6 +3705,7 @@ describe("runOperator — the loop over a scripted model", () => {
       {
         tool: OPERATOR_BATCH_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           kind: "ship",
           targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
           reason: "coordinate Ship",
@@ -3280,6 +3714,7 @@ describe("runOperator — the loop over a scripted model", () => {
       {
         tool: OPERATOR_BATCH_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           kind: "ship",
           targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
           actionQuote: "ship",
@@ -3314,6 +3749,7 @@ describe("runOperator — the loop over a scripted model", () => {
       {
         tool: OPERATOR_BATCH_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           kind: "ship",
           targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/web/pull/9"],
           actionQuote: "ship",
@@ -3337,10 +3773,19 @@ describe("runOperator — the loop over a scripted model", () => {
 
   it("a review missing its PR identity is repaired without rejecting the inferred repository", async () => {
     const answers: RouteToolCall[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "review", repo: "acme/api", reason: "billing repository" } },
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "review",
+          repo: "acme/api",
+          reason: "billing repository",
+        },
+      },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -3383,6 +3828,7 @@ describe("runOperator — the loop over a scripted model", () => {
       return {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "ship",
           shipEntry: "work",
           repo: "acme/payments",
@@ -3426,7 +3872,13 @@ describe("runOperator — the loop over a scripted model", () => {
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work", repo: "acme/web", reason: "plan target" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "work",
+          repo: "acme/web",
+          reason: "plan target",
+        },
       }),
     );
     expect(answer.decision).toMatchObject({
@@ -3439,6 +3891,7 @@ describe("runOperator — the loop over a scripted model", () => {
     const model = vi.fn(async () => ({
       tool: OPERATOR_BIND_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         shipEntry: "work",
         repo: "acme/web",
@@ -3473,7 +3926,10 @@ describe("runOperator — the loop over a scripted model", () => {
         repoCandidates: ["acme/api", "acme/web"],
         attachments: [{ name: "comparison.md", mediaType: "text/markdown", text: "Compare acme/api and acme/web." }],
       }),
-      async () => ({ tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "summarize" } }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "summarize" },
+      }),
     );
     expect(answer.decision).toMatchObject({
       kind: "binds",
@@ -3484,10 +3940,19 @@ describe("runOperator — the loop over a scripted model", () => {
   it("keeps the whole plan request when repository resolution is left to dispatch", async () => {
     const text = "ship the attached plan";
     const answers: RouteToolCall[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", reason: "ship it" } },
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work", repo: "acme/web", reason: "web is the plan's target" },
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "ship", shipEntry: "work", reason: "ship it" },
+      },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "work",
+          repo: "acme/web",
+          reason: "web is the plan's target",
+        },
       },
     ];
     const answer = await runOperator(
@@ -3518,7 +3983,13 @@ describe("runOperator — the loop over a scripted model", () => {
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work", repo: "acme/web", reason: "requested target" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "work",
+          repo: "acme/web",
+          reason: "requested target",
+        },
       }),
     );
     expect(answer.decision).toMatchObject({
@@ -3597,6 +4068,7 @@ describe("runOperator — the loop over a scripted model", () => {
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 7, source: "thread", quote: "https://github.com/acme/api/pull/7" },
@@ -3632,7 +4104,15 @@ describe("runOperator — the loop over a scripted model", () => {
   it("a read tool call is answered and the model asked again; the decision lands with the read as a turn", async () => {
     const answers: (RouteToolCall | string)[] = [
       { tool: OPERATOR_READ_TOOLS.repoFacts, input: {} },
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "list the runs", reason: "read ask" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          request: "list the runs",
+          reason: "read ask",
+        },
+      },
     ];
     const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
     const model: RouteModel = async (prompt) => {
@@ -3647,8 +4127,25 @@ describe("runOperator — the loop over a scripted model", () => {
 
   it("an invalid call is re-asked with the violation named, then the corrected call is accepted — two attempts on the event", async () => {
     const answers: (RouteToolCall | string)[] = [
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", shipEntry: "work", request: "x", reason: "r" } },
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "list the runs", reason: "r" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "work",
+          request: "x",
+          reason: "r",
+        },
+      },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          request: "list the runs",
+          reason: "r",
+        },
+      },
     ];
     const answer = await runOperator(input(), async () => answers.shift()!);
     expect(answer.decision.kind).toBe("binds");
@@ -3737,7 +4234,10 @@ describe("runOperator — the loop over a scripted model", () => {
               schemaRejection: { tool: "repo_test", keyword: "dependentSchemas" },
             }),
           });
-        return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "read ask" } };
+        return {
+          tool: OPERATOR_BIND_TOOL,
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "read ask" },
+        };
       },
     );
 
@@ -3779,7 +4279,10 @@ describe("runOperator — the loop over a scripted model", () => {
               keyword: "futureKeyword",
             },
           });
-        return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "read ask" } };
+        return {
+          tool: OPERATOR_BIND_TOOL,
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "read ask" },
+        };
       },
     );
 
@@ -3856,7 +4359,7 @@ describe("runOperator — the loop over a scripted model", () => {
               type: "tool_use",
               id: "bind-1",
               name: OPERATOR_BIND_TOOL,
-              input: { preset: "general", reason: "read ask" },
+              input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "read ask" },
             },
           ],
           stopReason: "tool_use",
@@ -3928,7 +4431,10 @@ describe("long asks and multi-call answers (issue 2099)", () => {
               input: {
                 text: "Confirm?",
                 proposal: "agent:general explain",
-                proposalSettings: phase === "catalogue" ? { model: "anthropic/example" } : {},
+                proposalSettings:
+                  phase === "catalogue"
+                    ? { settingsEvidence: operatorSettingsEvidence(), model: "anthropic/example" }
+                    : { settingsEvidence: operatorSettingsEvidence() },
                 reason: "fork",
               },
             },
@@ -3960,7 +4466,7 @@ describe("long asks and multi-call answers (issue 2099)", () => {
   it("bind_preset carries no request argument — the admitted message rides by reference, so the call's size never grows with the ask", () => {
     const bind = operatorTools(input()).find((t) => t.name === OPERATOR_BIND_TOOL)!;
     const schema = bind.inputSchema as { required: string[]; properties: Record<string, unknown> };
-    expect(schema.required).toEqual(["preset", "reason"]);
+    expect(schema.required).toEqual(["preset", "reason", "settingsEvidence"]);
     expect(schema.properties).not.toHaveProperty("request");
   });
 
@@ -3969,7 +4475,10 @@ describe("long asks and multi-call answers (issue 2099)", () => {
       `fix the export job: ${"the checkpoint file is rewritten in place and a crash loses it. ".repeat(30)}`.trim();
     expect(ask.length).toBeGreaterThanOrEqual(1900);
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "write ask" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "write ask" },
+      },
       ctxOf({ requestText: ask }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -3983,10 +4492,16 @@ describe("long asks and multi-call answers (issue 2099)", () => {
       prompts.push(prompt);
       if (calls++ === 0)
         throw new MultiToolCallError([
-          { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "r" } },
+          {
+            tool: OPERATOR_BIND_TOOL,
+            input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "r" },
+          },
           { tool: OPERATOR_READ_TOOLS.repoFacts, input: {} },
         ]);
-      return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "r" } };
+      return {
+        tool: OPERATOR_BIND_TOOL,
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "r" },
+      };
     };
     const answer = await runOperator(input(), model);
     expect(answer.decision.kind).toBe("binds");
@@ -4002,7 +4517,10 @@ describe("long asks and multi-call answers (issue 2099)", () => {
     const answer = await runOperator(input(), async () => {
       calls++;
       throw new MultiToolCallError([
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "r" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "r" },
+        },
         { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
       ]);
     });
@@ -4025,7 +4543,13 @@ describe("long asks and multi-call answers (issue 2099)", () => {
         throw new MultiToolCallError([
           {
             tool: OPERATOR_BIND_TOOL,
-            input: { preset: "general", model: "openrouter/openai/not-real", modelWord: "not-real", reason: "r" },
+            input: {
+              settingsEvidence: operatorSettingsEvidence(),
+              preset: "general",
+              model: "openrouter/openai/not-real",
+              modelWord: "not-real",
+              reason: "r",
+            },
           },
           { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
         ]);
@@ -4041,7 +4565,10 @@ describe("long asks and multi-call answers (issue 2099)", () => {
   it("a multi-call answer with two action calls floors past the retries — there is no one act to take", async () => {
     const answer = await runOperator(input(), async () => {
       throw new MultiToolCallError([
-        { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "r" } },
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "r" },
+        },
         { tool: OPERATOR_ASK_TOOL, input: { text: "which?", reason: "r" } },
       ]);
     });
@@ -4115,7 +4642,12 @@ describe("the question and its answer-as-a-bind", () => {
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_ASK_TOOL,
-        input: { reason: "ambiguous", text: "Which listing?", proposal: "runs list" },
+        input: {
+          proposalSettings: {},
+          reason: "ambiguous",
+          text: "Which listing?",
+          proposal: "runs list",
+        },
       },
       ctxOf(),
     );
@@ -4162,7 +4694,7 @@ describe("the question and its answer-as-a-bind", () => {
           reason: "confirm",
           proposalSettings: {
             effort: "low",
-            settingsEvidence: { effort: { quote: "one sentence", intent: "incidental" } },
+            settingsEvidence: operatorSettingsEvidence({ effort: { quote: "one sentence", intent: "incidental" } }),
           },
         },
       },
@@ -4183,7 +4715,9 @@ describe("the question and its answer-as-a-bind", () => {
             reason: "confirm",
             proposalSettings: {
               severity: "major",
-              settingsEvidence: { severity: { quote: "severity:major", intent: "requested" } },
+              settingsEvidence: operatorSettingsEvidence({
+                severity: { quote: "severity:major", intent: "requested" },
+              }),
             },
           },
         },
@@ -4201,7 +4735,7 @@ describe("the question and its answer-as-a-bind", () => {
           proposal: "agent:general Summarize the run with effort:high",
           proposalSettings: {
             effort: "high",
-            settingsEvidence: { effort: { quote: "effort:high", intent: "requested" } },
+            settingsEvidence: operatorSettingsEvidence({ effort: { quote: "effort:high", intent: "requested" } }),
           },
           reason: "confirm summary",
         },
@@ -4225,7 +4759,7 @@ describe("the question and its answer-as-a-bind", () => {
         input: {
           text: "Summarize this run?",
           proposal: "agent:general Summarize the run",
-          proposalSettings: { model: "openai/gpt-6-sol" },
+          proposalSettings: { settingsEvidence: operatorSettingsEvidence(), model: "openai/gpt-6-sol" },
           reason: "confirm summary",
         },
       },
@@ -4376,7 +4910,13 @@ describe("the pending question's free-text answer joins the original ask (issue 
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work", repo: "acme/infrastructure", reason: "the requested drift change" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "work",
+          repo: "acme/infrastructure",
+          reason: "the requested drift change",
+        },
       }),
     );
     expect(answer.decision).toMatchObject({
@@ -4410,7 +4950,13 @@ describe("the pending question's free-text answer joins the original ask (issue 
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", shipEntry: "work", repo: "acme/project", reason: "the requested Renovate change" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "work",
+          repo: "acme/project",
+          reason: "the requested Renovate change",
+        },
       }),
     );
     expect(answer.decision).toMatchObject({
@@ -4463,7 +5009,13 @@ describe("the pending question's free-text answer joins the original ask (issue 
         input({ text: joined, projection: projectionOf(["general", "ship"]) }),
         async () => ({
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", shipEntry: "work", repo: "acme/examples", reason: "use the referenced example" },
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "ship",
+            shipEntry: "work",
+            repo: "acme/examples",
+            reason: "use the referenced example",
+          },
         }),
       );
       expect(answer.decision).toMatchObject({
@@ -4513,6 +5065,7 @@ describe("the pending question's free-text answer joins the original ask (issue 
     const model = async () => ({
       tool: OPERATOR_BIND_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         shipEntry: turn++ === 0 ? "work" : "work_from_thread",
         repo: "acme/infrastructure",
@@ -4562,7 +5115,13 @@ describe("the pending question's free-text answer joins the original ask (issue 
         },
         operatorModel: async () => ({
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", shipEntry: "work", repo: "acme/infrastructure", reason: "the requested change" },
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "ship",
+            shipEntry: "work",
+            repo: "acme/infrastructure",
+            reason: "the requested change",
+          },
         }),
       },
       {
@@ -4607,7 +5166,13 @@ describe("the pending question's free-text answer joins the original ask (issue 
         },
         operatorModel: async () => ({
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "ship", shipEntry: "work", repo: "acme/infrastructure", reason: "the requested change" },
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "ship",
+            shipEntry: "work",
+            repo: "acme/infrastructure",
+            reason: "the requested change",
+          },
         }),
       },
       {
@@ -4722,6 +5287,7 @@ describe("the operator's repository briefs", () => {
           return {
             tool: OPERATOR_BIND_TOOL,
             input: {
+              settingsEvidence: operatorSettingsEvidence(),
               preset: "ship",
               shipEntry: "work",
               repo: "acme/payments",
@@ -4765,7 +5331,12 @@ describe("the operator's repository briefs", () => {
       parseOperatorTurn(
         {
           tool: OPERATOR_BIND_TOOL,
-          input: { preset: "coding", repo: "acme/payments", reason: "Billing is the payments service" },
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "coding",
+            repo: "acme/payments",
+            reason: "Billing is the payments service",
+          },
         },
         ctxOf({ requestText: "fix billing retries", presets: ["coding"] }),
       ),
@@ -4790,7 +5361,10 @@ describe("the operator's repository briefs", () => {
       async (prompt) => {
         prompts.push(prompt);
         if (prompts.length === 1) return { tool: "repository_brief", input: { repo: "acme/api" } };
-        return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "source context loaded" } };
+        return {
+          tool: OPERATOR_BIND_TOOL,
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "source context loaded" },
+        };
       },
     );
     expect(read).toHaveBeenCalledWith("acme/api");
@@ -4960,7 +5534,13 @@ describe("requester-authored repository inheritance for a plain fix", () => {
     input({ text: "Fix it.", projection: projectionOf(["ship"]), newestFinishedRun: { agent: "general" } });
   const bind = {
     tool: OPERATOR_BIND_TOOL,
-    input: { preset: "ship", shipEntry: "work", repo: "acme/sensors", reason: "fix the issue" },
+    input: {
+      settingsEvidence: operatorSettingsEvidence(),
+      preset: "ship",
+      shipEntry: "work",
+      repo: "acme/sensors",
+      reason: "fix the issue",
+    },
   };
 
   it("carries the requester's issue target through general research and reconciliation, after restart", async () => {
@@ -4978,7 +5558,7 @@ describe("requester-authored repository inheritance for a plain fix", () => {
     const tail = [turn(`Investigate ${issue}`, requester)];
     const answer = await runOperator({ ...base(), tail, requesterId: requester }, async () => ({
       tool: OPERATOR_BIND_TOOL,
-      input: { preset: "ship", shipEntry: "work", reason: "fix it" },
+      input: { settingsEvidence: operatorSettingsEvidence(), preset: "ship", shipEntry: "work", reason: "fix it" },
     }));
     expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: "agent:ship Fix it." }] });
     expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
@@ -5093,7 +5673,10 @@ defaults:
       operatorModel: async (prompt: { user: string }) => {
         prompts.push(prompt.user);
         if (prompts.length % 2 === 1) return { tool: OPERATOR_READ_TOOLS.threadState, input: {} };
-        return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "Read current context" } };
+        return {
+          tool: OPERATOR_BIND_TOOL,
+          input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Read current context" },
+        };
       },
     };
     const ctx = {
@@ -5198,7 +5781,7 @@ defaults:
           runLedger: ledger as never,
           operatorModel: groundedModel(async () => ({
             tool: OPERATOR_BIND_TOOL,
-            input: { preset: "general", reason: "investigate" },
+            input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "investigate" },
           })),
         },
         {
@@ -5218,6 +5801,7 @@ defaults:
             return {
               tool: OPERATOR_BIND_TOOL,
               input: {
+                settingsEvidence: operatorSettingsEvidence(),
                 preset,
                 ...(preset === "ship" ? { shipEntry: "work" } : {}),
                 repo: targetRepo,
@@ -5245,7 +5829,15 @@ defaults:
     const issueNumber = 2430;
     const answers: RouteToolCall[] = [
       { tool: OPERATOR_ASK_TOOL, input: { text: `Which repository owns #${issueNumber}?`, reason: "target unclear" } },
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", repo: "acme/api", reason: "continue the answer" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          repo: "acme/api",
+          reason: "continue the answer",
+        },
+      },
     ];
     const answer = await runOperator(
       {
@@ -5727,6 +6319,7 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "general",
           request: "with astra, list the runs",
           reason: "r",
@@ -5743,7 +6336,15 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
   it("an exact authored model ref binds without a separate model word", () => {
     const requestText = `Use model:${ASTRA} for this review.`;
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: ASTRA, reason: "requested model" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          model: ASTRA,
+          reason: "requested model",
+        },
+      },
       ctxOf({ requestText, providers: ["anthropic", "openrouter"], presets: ["general"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -5758,7 +6359,12 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", model: "openai/gpt-6.1-sol", reason: "requested model" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          model: "openai/gpt-6.1-sol",
+          reason: "requested model",
+        },
       },
       ctxOf({ requestText, providers: ["openai"], presets: ["general"] }),
     );
@@ -5773,7 +6379,15 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     "Use ``model:openai/o3` to answer this.",
   ])("backticks do not authorize a partial or malformed model token: %s", (requestText) => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openai/o3", reason: "requested model" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          model: "openai/o3",
+          reason: "requested model",
+        },
+      },
       ctxOf({ requestText, providers: ["openai"], presets: ["general"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -5783,7 +6397,15 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("a prefix of a longer authored model ref cannot select another model", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openai/o3", reason: "requested model" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          model: "openai/o3",
+          reason: "requested model",
+        },
+      },
       ctxOf({ requestText: "Use model:openai/o3-pro for this review.", providers: ["openai"], presets: ["general"] }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -5792,7 +6414,15 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("a colon-suffixed model ref cannot authorize its shorter prefix", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openrouter/llama", reason: "requested model" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          model: "openrouter/llama",
+          reason: "requested model",
+        },
+      },
       ctxOf({
         requestText: "Use model:openrouter/llama:free for this review.",
         providers: ["openrouter"],
@@ -5805,7 +6435,15 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("an unrelated colon-prefixed token cannot authorize a model ref", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openrouter/llama", reason: "requested model" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          model: "openrouter/llama",
+          reason: "requested model",
+        },
+      },
       ctxOf({
         requestText: "Inspect cache:openrouter/llama for this review.",
         providers: ["openrouter"],
@@ -5818,7 +6456,15 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("a sentence period after a requested full ref keeps the model override", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openrouter/llama", reason: "requested model" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          model: "openrouter/llama",
+          reason: "requested model",
+        },
+      },
       ctxOf({
         requestText: "Use model:openrouter/llama. Review this PR.",
         providers: ["openrouter"],
@@ -5833,7 +6479,14 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", request: "with gpt-6", reason: "r", model: "openai/gpt-6", modelWord: "gpt-6" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          request: "with gpt-6",
+          reason: "r",
+          model: "openai/gpt-6",
+          modelWord: "gpt-6",
+        },
       },
       ctxOf({ requestText: "with gpt-6", providers: ["anthropic", "openrouter"] }),
     );
@@ -5846,7 +6499,14 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", request: "with astra", reason: "r", model: "astra", modelWord: "astra" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          request: "with astra",
+          reason: "r",
+          model: "astra",
+          modelWord: "astra",
+        },
       },
       ctxOf({ requestText: "with astra", providers: ["anthropic", "openrouter"] }),
     );
@@ -5856,7 +6516,15 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
 
   it("a bind without a model carries none: a request naming no model binds with no model", () => {
     const turn = parseOperatorTurn(
-      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "list the runs", reason: "r" } },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          request: "list the runs",
+          reason: "r",
+        },
+      },
       modelCtx(),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
@@ -5866,7 +6534,12 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
   it("an empty optional model is omitted without a repair turn", async () => {
     const model = vi.fn(async () => ({
       tool: OPERATOR_BIND_TOOL,
-      input: { preset: "general", reason: "Review the pull request", model: "" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "general",
+        reason: "Review the pull request",
+        model: "",
+      },
     }));
     const answer = await runOperator(
       input({ text: "review: https://github.com/example/repo/pull/1", projection: projectionOf(["general"]) }),
@@ -5886,7 +6559,12 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", reason: "Review the pull request", model: ASTRA },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          reason: "Review the pull request",
+          model: ASTRA,
+        },
       },
       ctxOf({
         requestText: "review: https://github.com/example/repo/pull/1",
@@ -5902,7 +6580,13 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", reason: "Review the pull request", model: ASTRA, modelWord: "astra" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          reason: "Review the pull request",
+          model: ASTRA,
+          modelWord: "astra",
+        },
       },
       ctxOf({
         requestText: "review: https://github.com/example/repo/pull/1",
@@ -5918,7 +6602,13 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", reason: "Review the pull request", model: ASTRA, modelWord: "open" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          reason: "Review the pull request",
+          model: ASTRA,
+          modelWord: "open",
+        },
       },
       ctxOf({ requestText: "open the PR for review", presets: ["general"], providers: ["openrouter"] }),
     );
@@ -5930,7 +6620,13 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", reason: "Review the pull request", model: "openai/o3", modelWord: "o3" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          reason: "Review the pull request",
+          model: "openai/o3",
+          modelWord: "o3",
+        },
       },
       ctxOf({ requestText: "use o3 to review the PR", presets: ["general"], providers: ["openai"] }),
     );
@@ -5942,7 +6638,13 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", reason: "Review the pull request", model: "openai/o3-pro", modelWord: "o3" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          reason: "Review the pull request",
+          model: "openai/o3-pro",
+          modelWord: "o3",
+        },
       },
       ctxOf({ requestText: "use o3 to review the PR", presets: ["general"], providers: ["openai"] }),
     );
@@ -5954,7 +6656,13 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "general", reason: "Review the pull request", model: ASTRA, modelWord: "openai" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          reason: "Review the pull request",
+          model: ASTRA,
+          modelWord: "openai",
+        },
       },
       ctxOf({ requestText: "use openai to review the PR", presets: ["general"], providers: ["openrouter"] }),
     );
@@ -5967,6 +6675,7 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "general",
           request: "with astra, list the runs",
           reason: "r",
@@ -5977,6 +6686,7 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
       {
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "general",
           request: "with astra, list the runs",
           reason: "r",
@@ -6018,6 +6728,7 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
       async () => ({
         tool: OPERATOR_BIND_TOOL,
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "general",
           request: "with astra, list the runs",
           reason: "r",
@@ -6190,6 +6901,7 @@ describe("the write-intent cell (issue 2088)", () => {
       {
         tool: OPERATOR_ASK_TOOL,
         input: {
+          proposalSettings: {},
           text: "Did you mean these?",
           proposal: "config set me --models.coding openrouter/openai/gpt-5",
           reason: "unresolvable provider",
@@ -6348,7 +7060,7 @@ ${effort === undefined ? "" : `  efforts:\n    general: ${effort}`}
                   type: "tool_use" as const,
                   id: "bind-1",
                   name: OPERATOR_BIND_TOOL,
-                  input: { preset: "general", reason: "read ask" },
+                  input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "read ask" },
                 },
               ],
               stopReason: "tool_use" as const,
@@ -6392,7 +7104,7 @@ describe("typed action acceptance", () => {
         repo: "acme/api",
         prTarget: target,
         budget: value,
-        settingsEvidence: { budget: { quote: "budget:15", intent: "requested" } },
+        settingsEvidence: operatorSettingsEvidence({ budget: { quote: "budget:15", intent: "requested" } }),
         reason: "review this PR",
       },
     });
@@ -6410,6 +7122,7 @@ describe("typed action acceptance", () => {
     const call = (kind: string) => ({
       tool: OPERATOR_BATCH_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         kind,
         targets: urls,
         targetQuotes: urls,
@@ -6459,6 +7172,7 @@ describe("model-selected PR requests keep their authored constraints", () => {
     const answer = await runOperator(input({ text, projection: projectionOf(["review", "ship"]) }), async () => ({
       tool: OPERATOR_BIND_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset,
         repo: "acme/api",
         prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
@@ -6487,7 +7201,13 @@ describe("model-selected PR requests keep their authored constraints", () => {
       }),
       async () => ({
         tool: OPERATOR_BIND_TOOL,
-        input: { preset: "ship", repo: "acme/api", shipEntry: "continue", reason: "resume the owned unit" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          repo: "acme/api",
+          shipEntry: "continue",
+          reason: "resume the owned unit",
+        },
       }),
     );
     expect(answer.decision).toMatchObject({
@@ -6508,6 +7228,7 @@ describe("typed action limits and saved choices", () => {
     const wrong = {
       tool: OPERATOR_BIND_TOOL,
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         shipEntry: "review",
         repo: "acme/api",
@@ -6536,7 +7257,7 @@ describe("typed action limits and saved choices", () => {
           targetQuotes: urls,
           actionQuote: "Review",
           budget: 15,
-          settingsEvidence: { budget: { quote: "budget:15", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ budget: { quote: "budget:15", intent: "requested" } }),
           reason: "review both",
         },
       }),
@@ -6564,7 +7285,10 @@ describe("typed action limits and saved choices", () => {
       input: {
         text: "Use this scope?",
         proposal: "agent:general Explain the retry policy.",
-        proposalSettings: { budget: 15, settingsEvidence: { budget: { quote: "budget:15", intent: "requested" } } },
+        proposalSettings: {
+          budget: 15,
+          settingsEvidence: operatorSettingsEvidence({ budget: { quote: "budget:15", intent: "requested" } }),
+        },
         reason: "confirm the scope",
       },
     }));
@@ -6583,7 +7307,10 @@ describe("typed action limits and saved choices", () => {
   it("quoted controls and mid-prose agent words supply no formal constraints", async () => {
     const answer = await runOperator(
       input({ text: "Explain `agent:review budget:15` and the agent:ship word.", projection }),
-      async () => ({ tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "explain the syntax" } }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "explain the syntax" },
+      }),
     );
     expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ preset: "general" }] });
   });
@@ -6591,7 +7318,14 @@ describe("typed action limits and saved choices", () => {
     const custom = { ...projectionOf(["general"]).presets[0]!, name: "custom" };
     const answer = await runOperator(
       input({ text: "agent:custom Explain this.", projection: { presets: [custom], commands: [] } }),
-      async () => ({ tool: OPERATOR_BIND_TOOL, input: { preset: "custom", reason: "use the offered custom preset" } }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "custom",
+          reason: "use the offered custom preset",
+        },
+      }),
     );
     expect(answer.decision).toMatchObject({
       kind: "binds",

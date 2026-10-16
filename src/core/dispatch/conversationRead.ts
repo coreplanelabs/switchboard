@@ -1,13 +1,7 @@
 import { parseDirectives } from "../../directives.js";
 import type { IncomingMessage } from "../types.js";
 import type { SpawnBinding, SpawnRequest } from "./spawn.js";
-import {
-  operatorTurnContext,
-  parseOperatorTurn,
-  prepareActionContext,
-  OPERATOR_BIND_TOOL,
-  type ActionContextDeps,
-} from "./operator.js";
+import { operatorTurnContext, bindPresetTarget, prepareActionContext, type ActionContextDeps } from "./operator.js";
 
 /** Use the existing action binder before handing a selected read task to spawn. */
 export async function bindConversationRead(
@@ -20,15 +14,12 @@ export async function bindConversationRead(
   // parent's remaining lease and uses the spawn tool's narrower settings.
   const msg = { ...message, text: parseDirectives(message.text).text };
   const prepared = await prepareActionContext(deps, { msg });
-  const parsed = parseOperatorTurn(
+  const parsed = bindPresetTarget(
     {
-      tool: OPERATOR_BIND_TOOL,
-      input: {
-        preset: request.preset,
-        ...(request.repo ? { repo: request.repo } : {}),
-        prTarget,
-        reason: "Selected by the orchestrator",
-      },
+      preset: request.preset,
+      ...(request.repo ? { repo: request.repo } : {}),
+      prTarget,
+      reason: "Selected by the orchestrator",
     },
     operatorTurnContext(prepared.input),
   );
