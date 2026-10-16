@@ -12,6 +12,7 @@ import {
   type HarnessLaunchIntent,
 } from "../harness/sessionPolicy.js";
 import { runCheckTool } from "../../tools/check.js";
+import { diffDigestTool } from "../../tools/diffDigest.js";
 import { reviewHeadOf } from "../../directives.js";
 import { gitInCheckout } from "../../execution/workspaceAdvance.js";
 import type { RunnableTool, ToolContext } from "../../tools/runnableTool.js";
@@ -1361,7 +1362,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   };
   // Keep canonical coverage when a reviewer also inspects an incremental range.
   // The immutable range survives restart and is checked again at publication.
-  let digest: DigestReport | undefined = parseDigestReport(restored.digest);
+  const savedDigest = parseDigestReport(restored.digest);
+  let digest: DigestReport | undefined = savedDigest;
   if (isPrReview && restored.digest !== undefined && !digest?.range) {
     console.log(
       JSON.stringify({
@@ -4206,6 +4208,48 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         };
       reviewHead = settled.reviewHead;
       observedHead = settled.observedHead;
+    }
+    // Older checkpoints have totals but no immutable range. Recompute the
+    // saved base only in the original PR checkout, before release. Equal
+    // totals alone cannot bind another target, head, or incremental range.
+    const originalReview = resume?.repoCtx;
+    if (
+      isPrReview &&
+      savedDigest?.complete &&
+      !savedDigest.range &&
+      digest?.complete === false &&
+      digest.reason === "saved digest does not identify the current review range" &&
+      !tailSkipped() &&
+      postedBefore === undefined &&
+      !unconfirmedReplayedPost &&
+      currentCheckout !== undefined &&
+      originalReview?.repo === repoCtx.repo &&
+      originalReview?.pr === repoCtx.pr &&
+      originalReview?.baseRef === repoCtx.baseRef &&
+      originalReview?.headSha !== undefined &&
+      originalReview.headSha === reviewHead &&
+      verdict?.head === reviewHead &&
+      observedHead === reviewHead
+    ) {
+      let rebuilt: DigestReport | undefined;
+      try {
+        await diffDigestTool.run(
+          { base: savedDigest.base },
+          { ...toolContext, onDigest: (report) => (rebuilt = report) },
+        );
+      } catch {
+        // An unavailable read retains the original publication refusal.
+      }
+      if (
+        rebuilt?.complete &&
+        rebuilt.range?.head === reviewHead &&
+        rebuilt.range.baseRef === originalReview.baseRef &&
+        rebuilt.range.base === rebuilt.range.canonicalBase &&
+        rebuilt.totals.files === savedDigest.totals.files &&
+        rebuilt.totals.additions === savedDigest.totals.additions &&
+        rebuilt.totals.deletions === savedDigest.totals.deletions
+      )
+        onDigest(rebuilt);
     }
     if (agent.name === "review" && reviewSubmission !== undefined) await persistReviewSubmission(reviewSubmission);
     // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt

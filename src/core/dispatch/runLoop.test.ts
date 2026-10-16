@@ -12152,6 +12152,103 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     },
   );
 
+  it.each([
+    "matching",
+    "different repository",
+    "different PR",
+    "different base ref",
+    "missing original head",
+    "different original head",
+    "different checkout head",
+    "different listing head",
+    "incremental base",
+    "changed totals",
+    "truncated listing",
+    "unavailable listing",
+    "incomplete digest",
+    "malformed range",
+  ])("rebuilds legacy digest coverage before publication only when bound: %s", async (mode) => {
+    const base = "e".repeat(40);
+    const other = "c".repeat(40);
+    const posts: ReviewCommentTarget[] = [];
+    const repoCtx = { ...prThread.repoCtx, headSha: HEAD, prSize: { changedFiles: 1, additions: 7, deletions: 2 } };
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      repoCtx,
+      cold: { ref: repoCtx.ref!, sha: HEAD, workspace: "/workspace/original-review" },
+      executor: {
+        execResult: async () => ({
+          stdout: mode === "different checkout head" ? other : HEAD,
+          stderr: "",
+          exitCode: 0,
+          truncated: false,
+        }),
+        exec: async (command) => {
+          if (command.includes("@@diff_digest:range@@")) {
+            expect(command).toContain("git -C '/workspace/original-review'");
+            expect(command).toContain("'origin/main^{commit}'");
+            if (mode === "unavailable listing") throw new Error("unavailable");
+            return (
+              `@@diff_digest:range@@\n${mode === "incremental base" ? other : base}\n` +
+              `${mode === "different listing head" ? other : HEAD}\n${base}\n` +
+              `${mode === "changed totals" ? 8 : 7}\t2\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n` +
+              (mode === "truncated listing" ? "...[truncated 10 chars]\n" : "")
+            );
+          }
+          return command.includes("rev-parse") ? HEAD : "";
+        },
+      },
+      review: {
+        head: HEAD,
+        post: async (target) => {
+          const row = (await s.deps.runLedger.readLiveRuns())[0]!;
+          expect(row.state.digest).toEqual({
+            complete: true,
+            base: "origin/main",
+            totals: { files: 1, additions: 7, deletions: 2 },
+            range: { base, head: HEAD, canonicalBase: base, baseRef: "main" },
+          });
+          posts.push(target);
+          return { state: "accepted" };
+        },
+      },
+    });
+    const resume = finishing("Original review.", {
+      agent: "review",
+      repoCtx: {
+        ...repoCtx,
+        ...(mode === "different repository" ? { repo: "other/repo" } : {}),
+        ...(mode === "different PR" ? { pr: 43 } : {}),
+        ...(mode === "different base ref" ? { baseRef: "release" } : {}),
+        ...(mode === "missing original head" ? { headSha: undefined } : {}),
+        ...(mode === "different original head" ? { headSha: other } : {}),
+      },
+      state: {
+        verdict: VERDICT,
+        digest:
+          mode === "incomplete digest"
+            ? { complete: false, base: "origin/main", reason: "listing was cut" }
+            : {
+                complete: true,
+                base: "origin/main",
+                totals: { files: 1, additions: 7, deletions: 2 },
+                ...(mode === "malformed range" ? { range: { base } } : {}),
+              },
+      },
+    });
+    const out = answered(
+      await runLoop(s.deps, await trackedReviewContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
+    expect({ published: out.reviewPost?.posted, targets: posts }).toEqual(
+      mode === "matching"
+        ? { published: true, targets: [{ repo: "o/r", number: 42, commitId: HEAD }] }
+        : { published: false, targets: [] },
+    );
+    if (out.reviewPost?.posted === false) expect(out.reviewPost.reason).toMatch(/digest|head/);
+    expect(out.toolCalls).toBe(0);
+  });
+
   it("admits exact original run review publication durably before native POST and records native acceptance", async () => {
     let posted = 0;
     const s = setup("", {
