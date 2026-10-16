@@ -4,6 +4,7 @@ import { NOTEPAD_MAX_BYTES } from "../core/runLedger/sessionLog.js";
 import { utf8ByteLength } from "../core/runRecord.js";
 import { redactAndCap, redactSecrets } from "../core/runEvents.js";
 import type { CheckExecutionReceipt } from "../core/checkExecutionTypes.js";
+import { STREAM_CAP, RECEIPT_CAP } from "../core/checkExecutionSchema.js";
 import type { RunnableTool } from "./runnableTool.js";
 import { typedExecutionDiagnosticFrom, type TypedExecutionDiagnostic } from "../execution/typedExecutionDiagnostic.js";
 
@@ -56,8 +57,7 @@ const inputSchema = z
 
 export const runCheckTool: RunnableTool = {
   name: "run_check",
-  description:
-    "Run a task-relevant baseline or verification command in this run's checkout and save its actual process result. Choose a focused command after reading repository instructions. Purpose describes your intent, not proof of test coverage or pre-edit ordering. This grants no extra authority and installs nothing automatically. An unknown result must not be blindly retried. Optional checkpoint replaces your working notes only after a new recorded verification exits zero. Supply the current goal, decisions, rejected approaches, reported completed work, unproven work and next step; these reports are not certified by the command. Replayed checks never replace notes.",
+  description: `Run a task-relevant baseline or verification command in this run's checkout and save its actual process result. This run retains at most ${RECEIPT_CAP} checks and ${STREAM_CAP} characters per output stream. Use read or review_read for source text, not repeated small shell slices. If a request requires shell-based source collection, save the large read-only output once under $TMPDIR and read the saved file. Choose a focused command after reading repository instructions. Purpose describes your intent, not proof of test coverage or pre-edit ordering. This grants no extra authority and installs nothing automatically. An unknown result must not be blindly retried. Optional checkpoint replaces your working notes only after a new recorded verification exits zero. Supply the current goal, decisions, rejected approaches, reported completed work, unproven work and next step; these reports are not certified by the command. Replayed checks never replace notes.`,
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -167,7 +167,9 @@ export const runCheckTool: RunnableTool = {
       const missing = ["recording_unavailable", "unsupported_executor", "workspace_unavailable", "capacity"].includes(
         response.reason,
       );
-      const lifecycle = ["budget_exhausted", "stopped"].includes(response.reason);
+      // A batch can cross the receipt budget without starting any of its
+      // excess commands. These refusals must not consume recovery attempts.
+      const lifecycle = ["budget_exhausted", "stopped", "receipt_limit"].includes(response.reason);
       ctx.reportToolFailure?.({
         code: lifecycle
           ? "lifecycle"
@@ -179,6 +181,10 @@ export const runCheckTool: RunnableTool = {
         recovery: lifecycle || invalid || missing ? "correct" : "stop",
       });
       if (response.reason === "capacity") return "error: recorded check capacity exhausted; command did not start";
+      if (response.reason === "receipt_limit")
+        return retainFailure(
+          "error: recorded check receipt limit reached; command did not start. Use read or review_read for source and saved output; do not retry this check under another call id.",
+        );
       if (response.reason === "recording_unavailable")
         return "error: recording capability unavailable; command did not start";
       const text = `error: recorded check unavailable (${response.reason}); no completion receipt was returned${diagnosticText}${
@@ -240,7 +246,11 @@ export const runCheckTool: RunnableTool = {
         : receipt.outcome.kind === "not_started"
           ? `Command did not start (${receipt.outcome.reason}). No execution result exists.`
           : "Command outcome is unknown; do not blindly rerun it. Existing workspace recovery must reconcile the operation.";
-    const text = `${receipt.outcome.kind === "completed" ? "" : "error: "}${summary}${diagnosticText}${checkpointResult ? `\n${checkpointResult}` : ""}\n<untrusted-check-evidence>\n${encoded}\n</untrusted-check-evidence>`;
+    const outputNotice =
+      receipt.outcome.kind === "completed" && receipt.outcome.truncated
+        ? "\nOutput is truncated; this receipt is partial evidence. Use read or review_read for source text. For large read-only shell output, save it once under $TMPDIR and read the saved file. Do not run small shell slices or repeat a check only to recover output."
+        : "";
+    const text = `${receipt.outcome.kind === "completed" ? "" : "error: "}${summary}${outputNotice}${diagnosticText}${checkpointResult ? `\n${checkpointResult}` : ""}\n<untrusted-check-evidence>\n${encoded}\n</untrusted-check-evidence>`;
     return ["pending", "unknown"].includes(receipt.outcome.kind) ? retainFailure(text) : text;
   },
 };

@@ -66,7 +66,7 @@
     "scripts/web-preview.ts": "b16e15c92b6b1a56b1df70bcb924ec5974c080305610745bb047cd1f47bb3be9",
     "scripts/web-review-fixture.ts": "ca73c51b9c8d8345fc0304e1d550026bc7e7f5df52df669e7cb9f689e643bf37",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
-    "src/agents/registry.ts": "dbf74ae200eaf6903728f9536c144b04eb4c779abb1131d147cada8f85cb34fa",
+    "src/agents/registry.ts": "8488d5544506a85d7c517f19ef4183765bc798547de39516eb86da19f5f8f5d6",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
@@ -496,7 +496,7 @@
       "response:*/*:/assets/536024deca28e1ce.js": "2c8faa55777b3bd108e1917eada2b5201f7798b2b8b1bdc7c1b7a642f2660c44",
       "response:*/*:/assets/6cc5f6bbe4a3ebcc.js": "9c85a9b329073ed96fc3f06f0bf4352ee8013d4b37dcd6b4c225c080fb3b0643",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
-      "response:*/*:/assets/7704038c40f6cb06.js": "e61e7b9ddf30576fb2c6c1cd77d8ce8f62abcb5ce499a5a6b8e49a64775563b9",
+      "response:*/*:/assets/7704038c40f6cb06.js": "6b067f608d9cd62bdc9455d1fa434eaca7848dbe9df3465e8aa739650ac430db",
       "response:*/*:/assets/801c8f91d5264208.js": "838778f8bffbced50ec9141ef5243c50b42e81bf7b75b6a7ba90de6ce2fc203a",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
       "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
@@ -514,8 +514,8 @@
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
       "response:*/*:/assets/green.css": "910b7d4303c281ffc4a9abd83e0d5af751a49010657bf5fb94f94c3be4333bc7",
       "response:*/*:/runs/hist-4": "56a9474b352eaf4865cfb21bf9445d7e38ebad25581cf90532b8daf12b2ce0d1",
-      "response:application/json:/home/session": "28b4467df4813713ad87316fbd9e8d08b13198c0118affb6c024172c57423b9c",
-      "response:text/event-stream:/home/events": "43a3ee9f1a41b8cb989d6814a2f00d8600238cc166e9ff84fd03aa5eb48e7571"
+      "response:application/json:/home/session": "3485ac0ed1ca6b02d0b08e7531add4549d3f6907b6ee70e6ef6fbb282343c53e",
+      "response:text/event-stream:/home/events": "c3a7cf087d9991c3dc5cd3632f238ee61e967639c130b83a84f97456cb6542b6"
     }
   }
 }

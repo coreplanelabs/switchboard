@@ -123,6 +123,27 @@ function phaseContext(exitCode = 0) {
 const phaseInput = { command: "node tests/focused.js", purpose: "verification", checkpoint };
 
 describe("run_check phase checkpoints", () => {
+  it("reports partial output with source-reading guidance instead of silently clipping a check", async () => {
+    const s = phaseContext();
+    s.execResult
+      .mockReset()
+      .mockResolvedValueOnce({
+        stdout: `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n`,
+        stderr: "",
+        exitCode: 0,
+        truncated: false,
+      })
+      .mockResolvedValue({ stdout: "source line\n".repeat(1000), stderr: "", exitCode: 0, truncated: false });
+    const result = String(await runCheckTool.run({ command: "git diff", purpose: "verification" }, s.ctx));
+    expect(result).toContain("Output is truncated; this receipt is partial evidence.");
+    expect(result).toContain("read the saved file");
+    const receipt = JSON.parse(
+      result.split("<untrusted-check-evidence>\n")[1]!.split("\n</untrusted-check-evidence>")[0]!,
+    );
+    expect(receipt.outcome).toMatchObject({ kind: "completed", exitCode: 0, truncated: true });
+    expect(receipt.outcome.stdout).toHaveLength(4000);
+    expect(s.state()?.receipts[0]?.outcome).toEqual(receipt.outcome);
+  });
   it("rejects baseline checkpoints in the model-visible schema while accepting valid check intents", () => {
     const [definition] = convertResponsesTools([
       {
