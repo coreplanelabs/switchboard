@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { normalizeContext, validateToolArguments, type JsonObject, type Model, type Tool } from "@earendil-works/pi-ai";
+import { stream as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +10,8 @@ import { toolTextFailed } from "../core/runEvents.js";
 import { LocalExecutor } from "../execution/executor.js";
 import { TOOLSETS } from "./toolsets.js";
 import type { ToolContext } from "./runnableTool.js";
+import { shapeToolSchemasForWire } from "../core/providerToolSchemas.js";
+import { reviewReadTool } from "./reviewRead.js";
 
 let root: string;
 let head: string;
@@ -52,6 +56,57 @@ describe("review_read", () => {
     head = git("rev-parse", "HEAD");
   });
   afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  it("keeps first-page inputs optional on the Responses wire and enforces pinned continuations", async () => {
+    const model: Model<"openai-responses"> = {
+      id: "fixture",
+      name: "fixture",
+      api: "openai-responses",
+      provider: "openai",
+      baseUrl: "https://provider.invalid/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200_000,
+      maxTokens: 100,
+    };
+    const tool: Tool = {
+      name: reviewReadTool.name,
+      description: reviewReadTool.description,
+      parameters: reviewReadTool.inputSchema as Tool["parameters"],
+    };
+    let sent: { tools: Array<{ name: string; strict?: boolean; parameters: Tool["parameters"] }> } | undefined;
+    await responsesStream(model, normalizeContext({ messages: [], tools: [tool] }), {
+      apiKey: "fixture",
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        sent = shapeToolSchemasForWire("openai-responses", body).body as typeof sent;
+        return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+      },
+    }).result();
+    expect(sent?.tools.map((entry) => entry.name)).toEqual(["review_read"]);
+    expect(sent?.tools[0].strict).toBe(false);
+    const wireTool: Tool = { ...tool, parameters: sent!.tools[0].parameters };
+    const checkedRead = (input: JsonObject) =>
+      read(validateToolArguments(wireTool, { type: "toolCall", id: "read", name: tool.name, arguments: input }));
+    const first = await checkedRead({ kind: "diff", limit: 4 });
+    expect(first).toMatchObject({ text: "diff", offset: 0, nextOffset: 4, eof: false });
+    expect(
+      await checkedRead({ kind: "diff", path: null, offset: 4, limit: 4, sourceHash: first.sourceHash }),
+    ).toMatchObject({ text: " --g", offset: 4, nextOffset: 8, eof: false });
+    expect(
+      await checkedRead({ kind: "file", path: "unicode.txt", offset: null, limit: null, sourceHash: null }),
+    ).toMatchObject({ text: "\uFEFFé😀\r\nend\n", offset: 0, nextOffset: 15, eof: true });
+    expect(await checkedRead({ kind: "diff", path: null, offset: 4, limit: 4, sourceHash: null })).toEqual({
+      error: "sourceHash is required after the first page",
+    });
+    expect(await checkedRead({ kind: "diff", path: null, offset: 0, limit: 4, sourceHash: "0".repeat(64) })).toEqual({
+      error: "source changed; start a new read at offset 0",
+    });
+    expect(await checkedRead({ kind: "diff", path: "other.txt", offset: 0, limit: 4, sourceHash: null })).toEqual({
+      error: "path is only supported for kind=file",
+    });
+  });
 
   it("reconstructs a private full diff and oversized source line through bounded UTF8 byte pages", async () => {
     for (const input of [{ kind: "file", path: "catalog.txt" }, { kind: "diff" }]) {

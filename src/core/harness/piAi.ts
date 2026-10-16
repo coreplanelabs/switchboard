@@ -12,6 +12,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import type {
+  Api,
   AnthropicEffort,
   AnthropicOptions,
   AssistantMessage as PiAssistantMessage,
@@ -191,8 +192,17 @@ export class PiAiProvider implements Provider {
       model: req.model,
       secretValues: key ? [key] : [],
     };
+    const streamOptions = piStreamOptions(this.api, req, key);
     const options = {
-      ...piStreamOptions(this.api, req, key),
+      ...streamOptions,
+      ...(this.api === "openai-responses"
+        ? {
+            onPayload: async (payload: unknown, model: Model<Api>) => {
+              const controlled = (await streamOptions.onPayload?.(payload, model)) ?? payload;
+              return shapeToolSchemasForWire("openai-responses", controlled as Record<string, unknown>).body;
+            },
+          }
+        : {}),
       fetch: (async (input, init) => {
         delete failureContext.headers;
         try {
