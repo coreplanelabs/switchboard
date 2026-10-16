@@ -2,6 +2,9 @@
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import type { RunLedger } from "../core/runLedger/ledger.js";
+import { withWorkViewScope, resolveWorkViewScope } from "./workViewScope.js";
 import { actor } from "../core/authz/testing.js";
 import { InMemoryOrganizationStore } from "../core/organization/memory.js";
 import { OrganizationService } from "../core/organization/service.js";
@@ -79,7 +82,13 @@ function response() {
     } as unknown as ServerResponse,
   };
 }
-function fixture(options: { maxBodyBytes?: number; currentOffer?: () => Promise<undefined> } = {}) {
+function fixture(
+  options: {
+    maxBodyBytes?: number;
+    currentOffer?: () => Promise<HomeSession["offer"]>;
+    readIngress?: RunLedger["readIngress"];
+  } = {},
+) {
   const store = new InMemoryOrganizationStore(() => 1000);
   const service = new OrganizationService({
     store,
@@ -119,6 +128,7 @@ function fixture(options: { maxBodyBytes?: number; currentOffer?: () => Promise<
   const submissions: HomeRuntimeContext[] = [];
   const handler = createHomeRuntimeHandler({
     organization: service,
+    ...(options.readIngress ? { readIngress: options.readIngress } : {}),
     directory: store.directory,
     now: () => 1000,
     refresh: async (current) => (readable ? current : undefined),
@@ -175,6 +185,148 @@ function fixture(options: { maxBodyBytes?: number; currentOffer?: () => Promise<
 }
 
 describe("authenticated browser organization runtime", () => {
+  it("reports original handler bookkeeping without native success and withholds it on a mid-read proof loss", async () => {
+    const ledger = new InMemoryRunLedger(() => 1000);
+    let loseProof = false;
+    const choice = {
+      id: "00000000-0000-4000-8000-000000000001",
+      line: "private proposal never restored",
+      question: "Private question",
+    };
+    const app = fixture({
+      currentOffer: async () => choice,
+      readIngress: async (key) => {
+        const result = await ledger.readIngress(key);
+        if (loseProof) app.revoke();
+        return result;
+      },
+    });
+    const first = (await app.read("/home/session")).json as unknown as HomeSession;
+    const key = first.submissionKey;
+    expect(
+      (
+        await app.read("/home/send", {
+          key,
+          revision: first.bindingRevision,
+          confirmation: { kind: "confirm", id: choice.id },
+          destination: { kind: "broad" },
+          context: [],
+        })
+      ).json.status,
+    ).toBe("pending");
+    const resolved = await app.service.resolve(context.authentication);
+    if (!resolved) throw new Error("current proof missing");
+    const original = await app.store.execute({ action: "submission", ...resolved, source: "browser", key });
+    if (original.status !== "submission" || !original.receipt.effectKey) throw new Error("original submission missing");
+    const consumed = await ledger.consumeIngress({
+      effectKey: original.receipt.effectKey,
+      digest: original.receipt.digest,
+      requester: credential.id,
+      threadKey: "web:alice:organization",
+      request: { envelope: original.envelope },
+      origin: { ...original.envelope, content: "", context: [] },
+      receiptId: original.receipt.id,
+      contentExpiresAt: 5000,
+    });
+    if (consumed.status !== "claimed") throw new Error("original owner missing");
+    const lease = await app.store.execute({
+      action: "claim",
+      organization: resolved.organization,
+      owner: "fixture-owner",
+      leaseMs: 100,
+    });
+    if (lease.status !== "state" || !lease.state.lease) throw new Error("lease missing");
+    await app.store.execute({
+      action: "settle",
+      organization: resolved.organization,
+      owner: "fixture-owner",
+      generation: lease.state.lease.generation,
+      receiptId: original.receipt.id,
+      status: "accepted",
+      reason: "private reason never returned",
+      reply: null,
+      contentTtlMs: DAY_MS,
+      ownerRunId: consumed.record.runId,
+    });
+    await ledger.finishIngress({
+      effectKey: original.receipt.effectKey,
+      digest: original.receipt.digest,
+      runId: consumed.record.runId,
+      status: "completed",
+      outcome: "private owner outcome never returned",
+    });
+    const url = `/home/submissions/${encodeURIComponent(key)}`;
+    const everyone = {
+      ...context,
+      actor: withWorkViewScope(
+        credential,
+        resolveWorkViewScope(credential, { organization: "installation", mode: "everyone" }),
+      ),
+    };
+    expect((await app.read(url, undefined, everyone)).json).toEqual({
+      status: "known",
+      admission: "accepted",
+      dispatch: "handler_returned",
+      nativeEffect: "unknown",
+    });
+    const person = {
+      ...context,
+      actor: withWorkViewScope(
+        { ...credential },
+        {
+          mode: "person",
+          person: { id: "access:other", name: "Other" },
+          ownerIds: ["access:other"],
+          canEveryone: false,
+        },
+      ),
+    };
+    expect((await app.read(url, undefined, person)).json).toEqual({ status: "unknown" });
+    const known = await app.read(url);
+    expect(known.body).not.toContain("private");
+    expect(known.body).not.toContain(choice.id);
+    loseProof = true;
+    expect((await app.read(url)).json).toEqual({ status: "unknown" });
+    expect((await ledger.readIngress(original.receipt.effectKey)).status).toBe("record");
+    expect(app.submissions).toHaveLength(1);
+  });
+
+  it("reads the exact opaque owner's admission without exposing a saved choice or replaying it", async () => {
+    const { read, submissions } = fixture({ currentOffer: async () => undefined });
+    const session = (await read("/home/session")).json as unknown as HomeSession;
+    const key = session.submissionKey;
+    const sent = await read("/home/send", {
+      key,
+      text: "private request should never return",
+      revision: session.bindingRevision,
+      destination: { kind: "broad" },
+      context: [],
+    });
+    expect(sent.json.status).toBe("pending");
+    const status = await read(`/home/submissions/${encodeURIComponent(key)}`);
+    expect(status.json).toEqual({
+      status: "known",
+      admission: "pending",
+      dispatch: "unknown",
+      nativeEffect: "unknown",
+    });
+    expect(submissions).toHaveLength(1);
+    expect(status.body).not.toContain("private request");
+    const bob = {
+      ...context,
+      actor: { ...credential, id: "access:bob" },
+      authentication: { ...context.authentication, identity: { ...identity, subject: "bob" } },
+    };
+    expect((await read(`/home/submissions/${encodeURIComponent(key)}`, undefined, bob)).json).toEqual({
+      status: "unknown",
+    });
+    const foreign = {
+      ...context,
+      authentication: { ...context.authentication, identity: { ...identity, issuer: "foreign:realm" } },
+    };
+    expect((await read(`/home/submissions/${encodeURIComponent(key)}`, undefined, foreign)).status).toBe(404);
+  });
+
   it("follows server event URLs for authorized read-only threads and view-as", async () => {
     vi.useFakeTimers();
     for (const viewer of [context, { ...context, actor: { ...credential, viewingAs: { id: "slack:UBOB" } } }]) {

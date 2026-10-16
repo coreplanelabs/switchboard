@@ -130,6 +130,40 @@ watch([destinationKey, transcript], () => {
         <UIcon :name="expanded ? 'i-lucide-chevron-down' : 'i-lucide-chevron-up'" />
       </button>
     </div>
+    <section
+      v-if="home.status.value === 'ready' && home.earlierRequests.value.length"
+      class="green-notice green-earlier-requests m-3"
+      aria-label="Earlier requests"
+    >
+      <p class="text-xs text-muted">
+        Only request identifiers are saved here. Checking never sends the earlier action again.
+      </p>
+      <p v-if="!home.earlierPersistent.value" class="text-xs text-muted">
+        The request identifier can be checked in this tab, but could not be saved for a reload.
+      </p>
+      <ul class="list-none m-0 p-0">
+        <li v-for="(item, index) in home.earlierRequests.value" :key="item.key" class="mt-2">
+          <p class="text-xs text-muted">Earlier request {{ index + 1 }}</p>
+          <p v-if="item.message" class="text-xs" role="status">{{ item.message }}</p>
+          <button
+            type="button"
+            class="green-button"
+            :disabled="item.checking"
+            @click="home.checkEarlierRequest(item.key)"
+          >
+            Check earlier request
+          </button>
+          <button
+            type="button"
+            class="text-xs text-muted ml-2"
+            :disabled="item.checking"
+            @click="home.forgetEarlierRequest(item.key)"
+          >
+            Forget saved identifier
+          </button>
+        </li>
+      </ul>
+    </section>
     <div v-if="home.status.value === 'loading'" class="green-dock-transcript p-5 text-xs text-muted" role="status">
       Loading your conversation…
     </div>
@@ -297,6 +331,11 @@ watch([destinationKey, transcript], () => {
   min-height: 460px;
   max-height: 900px;
   min-width: 0;
+}
+.green-earlier-requests {
+  max-height: 180px;
+  overflow-y: auto;
+  flex-shrink: 0;
 }
 .green-dock-heading {
   padding: 16px;

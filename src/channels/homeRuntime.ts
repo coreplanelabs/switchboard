@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
+import type { RunLedger } from "../core/runLedger/ledger.js";
+import { workViewScopeOf } from "./workViewScope.js";
 import type { Actor } from "../core/authz/types.js";
 import { CONFIRMATION_TTL_MS, RUN_VIEW_POLL_MS } from "../core/budgets.js";
 import type { PersonDirectory } from "../core/identity/contract.js";
@@ -45,6 +47,7 @@ export type HomeReplayInput = Pick<
 export interface HomeRuntimeOptions {
   organization: OrganizationService;
   directory: PersonDirectory;
+  readIngress?: RunLedger["readIngress"];
   now: () => number;
   refresh: (context: HomeRuntimeContext) => Promise<HomeRuntimeContext | undefined>;
   currentEpoch: (context: HomeRuntimeContext) => Promise<string | undefined>;
@@ -277,6 +280,7 @@ export function createHomeRuntimeHandler(options: HomeRuntimeOptions) {
     }
     const value: HomeSession = {
       version: 1,
+      receiptRetentionMs: options.organization.receiptRetentionMs,
       organization: fresh.resolved.organization,
       actor: fresh.context.actor.id,
       stream: fresh.resolved.actor.stream!,
@@ -361,6 +365,56 @@ export function createHomeRuntimeHandler(options: HomeRuntimeOptions) {
       const outcome = await options.deleteContent?.(fresh.context, receiptId);
       const status = outcome?.status ?? "unavailable";
       reply(res, status === "ok" ? 200 : status === "not_found" ? 404 : 503, { status });
+      return;
+    }
+    if (selected.startsWith("submissions/")) {
+      if (
+        viewer.context.actor.viewingAs ||
+        workViewScopeOf(viewer.context.actor).mode === "person" ||
+        viewer.context.authentication.source !== "browser" ||
+        viewer.context.authentication.kind !== "human"
+      ) {
+        reply(res, 404, { status: "unknown" });
+        return;
+      }
+      let key: string;
+      try {
+        key = decodeURIComponent(selected.slice("submissions/".length));
+      } catch {
+        reply(res, 400, { status: "unknown" });
+        return;
+      }
+      const read = await options.organization.receiptStatus(viewer.context.authentication, key);
+      if (read.status !== "receipt") {
+        reply(res, read.status === "unavailable" ? 503 : 404, { status: "unknown" });
+        return;
+      }
+      const receipt = read.receipt;
+      let dispatch: "unknown" | "dispatching" | "uncertain" | "handler_returned" = "unknown";
+      if (receipt.effectKey && receipt.ownerRunId && options.readIngress) {
+        const original = await options.readIngress(receipt.effectKey);
+        if (
+          original.status === "record" &&
+          original.record.runId === receipt.ownerRunId &&
+          original.record.receiptId === receipt.id &&
+          original.record.digest === receipt.digest &&
+          original.record.origin?.organization === receipt.organization &&
+          original.record.origin.source === receipt.source &&
+          identityKey(original.record.origin.actor.identity) === identityKey(viewer.context.authentication.identity)
+        )
+          dispatch = original.record.status === "completed" ? "handler_returned" : original.record.status;
+      }
+      const checked = await current(viewer.context);
+      if (!checked || privacy(checked) !== privacy(viewer)) {
+        reply(res, 503, { status: "unknown" });
+        return;
+      }
+      const final = await options.organization.receiptStatus(checked.context.authentication, key);
+      if (final.status !== "receipt" || final.receipt.id !== receipt.id) {
+        reply(res, final.status === "unavailable" ? 503 : 404, { status: "unknown" });
+        return;
+      }
+      reply(res, 200, { status: "known", admission: final.receipt.status, dispatch, nativeEffect: "unknown" });
       return;
     }
     if (selected === "key") {
@@ -585,7 +639,8 @@ export function createHomeRuntimeHandler(options: HomeRuntimeOptions) {
   }
   const handler = (req: IncomingMessage, res: ServerResponse, context?: HomeRuntimeContext): boolean => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (!/^\/home\/(session|key|focus|send|events|messages\/[^/]+)$/.test(url.pathname)) return false;
+    if (!/^\/home\/(session|key|focus|send|events|messages\/[^/]+|submissions\/[^/]+)$/.test(url.pathname))
+      return false;
     void serve(req, res, context, url).catch(() => {
       if (!res.headersSent) reply(res, 503, { status: "unavailable" });
       else res.end();
