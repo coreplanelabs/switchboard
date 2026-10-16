@@ -1,6 +1,225 @@
 import { describe, expect, it, vi } from "vitest";
 import { BASE_URL_ENV, decide, main, readToken } from "./preflight.mjs";
 
+describe("resident deploy fence HTTP refusal", () => {
+  const prefix = "[resident-deploy-fence-diagnostic] ";
+  async function capture(response, failDiagnostic = false) {
+    const lines = [];
+    const wire = vi.spyOn(globalThis, "fetch");
+    if (typeof response === "function") wire.mockImplementation(response);
+    else wire.mockResolvedValue(response);
+    const log = vi.spyOn(console, "error").mockImplementation((line) => {
+      if (failDiagnostic && String(line).startsWith(prefix)) throw new Error("private-log-error");
+      lines.push(String(line));
+    });
+    try {
+      const exit = await main([], {
+        RESIDENT_BASE_URL: "https://resident.example.test",
+        RESIDENT_DRAIN_TOKEN: "private-test-token",
+      });
+      const diagnostic = lines.find((line) => line.startsWith(prefix));
+      return {
+        exit,
+        lines,
+        calls: wire.mock.calls.map(([url, init]) => ({ path: new URL(url).pathname, method: init.method })),
+        diagnostic: diagnostic ? JSON.parse(diagnostic.slice(prefix.length)) : null,
+      };
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+    }
+  }
+
+  it("retains the legacy 409 acquisition refusal without guessing which fence predicate failed", async () => {
+    const result = await capture(
+      Response.json(
+        {
+          error: "deploy-fence requires a live fleet drain with time for upload and readiness",
+          detail: "private-test-token /workspace/private untrusted exception",
+        },
+        { status: 409 },
+      ),
+    );
+    expect(result).toMatchObject({
+      exit: 1,
+      calls: [{ path: "/deploy-fence", method: "POST" }],
+      diagnostic: {
+        schema: 1,
+        httpStatus: 409,
+        phase: "fence-acquisition",
+        reason: "fence-acquisition-refused",
+        bodyState: "parsed",
+        producer: { state: "unverified" },
+        fenceDisposition: "unavailable",
+        activeAdmissions: null,
+        nativeOutcome: "unverified",
+        nextStep: "inspect-original-fence",
+      },
+    });
+    const text = result.lines.join("\n");
+    expect(text).toContain("resident Worker responded HTTP 409");
+    expect(text).not.toContain("not consulted");
+    expect(text).not.toContain("set RESIDENT_DRAIN_TOKEN");
+    expect(text).not.toMatch(/private-test-token|\/workspace\/private|untrusted exception/);
+  });
+
+  it.each(["{invalid-json", JSON.stringify({ error: "private-token /workspace/private", activeAdmissions: -1 })])(
+    "keeps unknown response evidence unavailable without copying its bytes: %s",
+    async (body) => {
+      const result = await capture(new Response(body, { status: 409 }));
+      expect(result.exit).toBe(1);
+      expect(result.diagnostic).toMatchObject({
+        httpStatus: 409,
+        reason: "unclassified-http-refusal",
+        producer: { state: "unverified" },
+        activeAdmissions: null,
+      });
+      expect(result.lines.join("\n")).not.toMatch(/private-token|\/workspace\/private/);
+      expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    },
+  );
+
+  it("cancels an oversized error body and still reports the received HTTP refusal", async () => {
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(8193));
+          controller.enqueue(new Uint8Array(1));
+          controller.close();
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 409 },
+    );
+    const result = await capture(response);
+    expect(result).toMatchObject({ exit: 1, diagnostic: { httpStatus: 409, bodyState: "too-large" } });
+    expect(cancelled).toBe(true);
+    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+  });
+
+  it("reports only valid producer and admission facts without turning them into upload authority", async () => {
+    const body = {
+      error: "deploy-fence requires a live fleet drain with time for upload and readiness",
+      activeAdmissions: 3,
+      fenceReady: true,
+      deployDiagnostic: {
+        schema: 1,
+        producer: { build: "a".repeat(40), workerVersion: "00000000-0000-4000-8000-000000000002" },
+        fenceDisposition: "retained",
+        admissionReadback: "reported",
+      },
+      private: "private-test-token /workspace/private",
+    };
+    const result = await capture(Response.json(body, { status: 409 }));
+    expect(result).toMatchObject({
+      exit: 1,
+      diagnostic: {
+        producer: { state: "reported", build: "a".repeat(40), workerVersion: "00000000-0000-4000-8000-000000000002" },
+        activeAdmissions: 3,
+        evidenceAvailability: "producer-reported",
+        fenceDisposition: "retained",
+        nativeOutcome: "unverified",
+      },
+    });
+    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(JSON.stringify(result.diagnostic)).not.toMatch(/private-test-token|\/workspace\/private/);
+    expect(Buffer.byteLength(JSON.stringify(result.diagnostic))).toBeLessThanOrEqual(1024);
+    body.deployDiagnostic.producer.build = "/workspace/private";
+    const malformed = await capture(Response.json(body, { status: 409 }));
+    expect(malformed).toMatchObject({
+      exit: 1,
+      diagnostic: { producer: { state: "unverified" }, activeAdmissions: null, evidenceAvailability: "reason-only" },
+    });
+  });
+
+  it("retains HTTP status when reading the refusal body fails", async () => {
+    const result = await capture(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error("private-stream-error"));
+          },
+        }),
+        { status: 409 },
+      ),
+    );
+    expect(result).toMatchObject({
+      exit: 1,
+      diagnostic: {
+        httpStatus: 409,
+        bodyState: "unreadable",
+        reason: "unclassified-http-refusal",
+        requestOutcome: "unknown",
+        nextStep: "reconcile-original-request",
+      },
+    });
+    expect(result.lines.join("\n")).not.toMatch(/not consulted|private-stream-error/);
+    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+  });
+
+  it("keeps refusal and performs no recovery when diagnostic output fails", async () => {
+    const result = await capture(Response.json({ error: "deploy-fence-read-unavailable" }, { status: 503 }), true);
+    expect(result.exit).toBe(1);
+    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(result.lines.join("\n")).toContain("http-status:503");
+    expect(result.lines.join("\n")).not.toContain("private-log-error");
+  });
+
+  it("keeps a sent request unknown after a lost reply without claiming that the Worker was not consulted", async () => {
+    let received = false;
+    const result = await capture(async () => {
+      received = true;
+      throw new DOMException("private-request-error", "TimeoutError");
+    });
+    expect(received).toBe(true);
+    expect(result).toMatchObject({
+      exit: 1,
+      diagnostic: {
+        httpStatus: null,
+        phase: "request",
+        reason: "request-timeout",
+        requestOutcome: "unknown",
+        producer: { state: "unverified" },
+        activeAdmissions: null,
+        nextStep: "reconcile-original-request",
+      },
+    });
+    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(result.lines.join("\n")).toContain("request outcome is unknown");
+    expect(result.lines.join("\n")).not.toMatch(/not consulted|set RESIDENT_DRAIN_TOKEN|private-request-error/);
+  });
+
+  it("records a received HTTP response when its body is lost and keeps effects unknown", async () => {
+    const result = await capture(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error("private-body-error"));
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    expect(result).toMatchObject({
+      exit: 1,
+      diagnostic: {
+        httpStatus: 200,
+        phase: "response-body",
+        reason: "response-body-unavailable",
+        requestOutcome: "unknown",
+        nativeOutcome: "unverified",
+        nextStep: "reconcile-original-request",
+      },
+    });
+    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(result.lines.join("\n")).toContain("resident Worker responded HTTP 200");
+    expect(result.lines.join("\n")).not.toMatch(/not consulted|private-body-error/);
+  });
+});
+
 describe("selected staging maintenance preflight", () => {
   const attempt = {
     holdId: "11111111-1111-4111-8111-111111111111",
