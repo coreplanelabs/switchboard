@@ -239,6 +239,10 @@ Add the GitHub failed-delivery reader to the shared recovery scheduler. Keep its
 
 **Done when `[gap]`:** every enabled action reaches the common front door. No adapter code chooses or writes a specialist inbox. Lost or oversized deliveries and unrecoverable history produce explicit coverage gaps.
 
+### Installation access facts, 2026-10-15
+
+The common normalization entry now accepts installation lifecycle and repository-selection updates without a guessed repository. It retains App/installation identity, permission metadata and separate unknown/empty repository lists. These remain source facts. No access cache, producer, receiver or delivery path is enabled. Repository rename/transfer/visibility facts, canonical access checks, source matching, API repair and activation remain pending. Step 4 is still in progress.
+
 ### Inline review history reader, 2026-10-15
 
 The next read-only cut extends `getPullRequestFeedback` and `github_pull_get(includeReviewHistory: true)` with inline/file review comments and replies. The existing App read token, bounded page reader, source-result receipts, redaction and history fingerprint cover this added surface. Comment, review, author and reply IDs, edit times, commit IDs and nullable diff locations remain source metadata. Inline bodies remain evidence; they cannot supply the native review markers used for finding closure.

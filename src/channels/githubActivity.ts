@@ -1,3 +1,4 @@
+import { normalizeGithubInstallationActivity } from "./githubInstallationActivity.js";
 import { prepareSourceEvent, sourceSnapshot, type SourceEvent } from "../core/runLedger/sourceEvents.js";
 import { sourceHash } from "../core/references/receipts.js";
 
@@ -6,7 +7,8 @@ export interface GithubActivitySource {
   host: string;
   appId: number;
   installationId: number;
-  repositoryId: number;
+  /** Required for repository activity; installation facts have no repository. */
+  repositoryId?: number;
 }
 
 export type GithubActivityResult =
@@ -61,6 +63,8 @@ export async function normalizeGithubActivity(
 ): Promise<GithubActivityResult> {
   const { host, appId, installationId, repositoryId } = source;
   const { event, delivery } = headers;
+  if (event === "installation" || event === "installation_repositories")
+    return normalizeGithubInstallationActivity({ host, appId, installationId }, { event, delivery }, payload);
   const refused = (reason: Extract<GithubActivityResult, { kind: "refused" }>["reason"]): GithubActivityResult => ({
     kind: "refused",
     reason,
