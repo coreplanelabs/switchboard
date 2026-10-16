@@ -14,6 +14,7 @@ interface ManifestChunk {
   file: string;
   isEntry?: boolean;
   css?: string[];
+  imports?: string[];
 }
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -57,7 +58,7 @@ export interface WebAssets {
  * manifest is missing — the server must not start half-blind: run
  * `npm run build` in web/ first (the Docker build does).
  */
-export function loadWebAssets(distDir: string): WebAssets {
+export function loadWebAssets(distDir: string, entryKey = "src/main.ts"): WebAssets {
   let manifest: Record<string, ManifestChunk>;
   try {
     manifest = JSON.parse(readFileSync(join(distDir, ".vite", "manifest.json"), "utf8")) as Record<
@@ -70,11 +71,22 @@ export function loadWebAssets(distDir: string): WebAssets {
       { cause: err },
     );
   }
-  const entryChunk = Object.values(manifest).find((c) => c.isEntry);
-  if (!entryChunk) throw new Error(`web app manifest under ${distDir} has no entry chunk`);
+  const entryChunk = manifest[entryKey];
+  if (!entryChunk?.isEntry) throw new Error(`web app manifest under ${distDir} has no entry ${entryKey}`);
+  const css = new Set<string>();
+  const visited = new Set<string>();
+  function collectStyles(key: string): void {
+    if (visited.has(key)) return;
+    visited.add(key);
+    const chunk = manifest[key];
+    if (!chunk) throw new Error(`web app manifest under ${distDir} has no imported chunk ${key}`);
+    for (const dependency of chunk.imports ?? []) collectStyles(dependency);
+    for (const path of chunk.css ?? []) css.add(`/${path}`);
+  }
+  collectStyles(entryKey);
   const entry: ShellAssets = {
     js: `/${entryChunk.file}`,
-    css: (entryChunk.css ?? []).map((f) => `/${f}`),
+    css: [...css],
   };
 
   // Every built file, keyed by its URL path. readdirSync at startup only.

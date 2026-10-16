@@ -76,6 +76,37 @@ describe("isScreenshotInput", () => {
 });
 
 describe("listInputs", () => {
+  it("detects run and pull-request capture drift when their active route wrapper changes", () => {
+    const wrapper = "web/green/pages/RunRoute.vue";
+    const sources = listInputs(root).map((path) => ({ path, text: readFileSync(join(root, path), "utf8") }));
+    const changed = sources.map((source) =>
+      source.path === wrapper
+        ? {
+            ...source,
+            text: source.text.replace("route.query.view === 'pull-request'", "route.query.view === 'recorded-diff'"),
+          }
+        : source,
+    );
+    for (const name of ["green-run", "green-pr"]) {
+      const surface = SURFACES.find((candidate) => candidate.name === name)!;
+      const recorded = renderManifest(currentSurfaceInputs(surface, sources), surface);
+      expect(
+        manifestProblems(surface, currentSurfaceInputs(surface, changed), recorded, expectedFiles([surface])),
+      ).toEqual([`${name}: web/green/pages/RunRoute.vue changed since it was rendered`]);
+    }
+  });
+
+  it("discovers replacement frontend imports without treating unrelated pages as shared inputs", () => {
+    const paths = listInputs(root);
+    expect(paths).toContain("web/green/components/PageHeading.vue");
+    expect(paths).toContain("web/green/theme.css");
+    const sources = paths.map((path) => ({ path, text: readFileSync(join(root, path), "utf8") }));
+    const home = SURFACES.find((surface) => surface.name === "green-home")!;
+    const inputs = surfaceInputs(home.page, sources, [home.fixture.server, ...home.fixture.inputs]);
+    expect(inputs).toContain("web/green/components/ConversationDock.vue");
+    expect(inputs).not.toContain("web/green/pages/Run.vue");
+    expect(isSharedInput("web/green/pages/Run.vue")).toBe(false);
+  });
   it("finds the dashboard's sources in this tree, repository-relative, tests left out", () => {
     const inputs = listInputs(root);
     expect(inputs).toContain("web/src/App.vue");
@@ -134,7 +165,9 @@ describe("hashInputs", () => {
 describe("expectedFiles", () => {
   it("is one PNG per surface per theme, named <surface>-<theme>.png", () => {
     const files = expectedFiles();
-    expect(files).toHaveLength(SURFACES.length * THEMES.length);
+    expect(files).toHaveLength(64);
+    expect(files).toContain("green-home-phone-light.png");
+    expect(files).toContain("green-runtime-phone-dark.png");
     expect(files).toContain("run-page-light.png");
     expect(files).toContain("residents-dark.png");
     expect(new Set(files).size).toBe(files.length);
@@ -424,7 +457,7 @@ describe("capture profiles", () => {
         "unit-search",
       ]),
     );
-    for (const surface of SURFACES) {
+    for (const surface of SURFACES.filter((surface) => surface.fixture.server === "scripts/web-preview.ts")) {
       expect(resolveCaptures([surface])).toEqual(
         THEMES.map((theme) =>
           expect.objectContaining({
@@ -440,7 +473,13 @@ describe("capture profiles", () => {
         ),
       );
     }
-    expect(expectedFiles()).toEqual(SURFACES.flatMap((s) => THEMES.map((t) => `${s.name}-${t}.png`)));
+    expect(expectedFiles()).toEqual(
+      expect.arrayContaining(
+        SURFACES.filter((surface) => surface.fixture.server === "scripts/web-preview.ts").flatMap((s) =>
+          THEMES.map((t) => `${s.name}-${t}.png`),
+        ),
+      ),
+    );
   });
 
   it("resolves desktop and phone into the browser and output options used by generation", () => {

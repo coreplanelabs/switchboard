@@ -31,6 +31,146 @@ export function manifestPath(surface: string): string {
  * Profiles are literal per-surface data; omitted profiles preserve desktop. */
 export const SURFACES = [
   {
+    name: "green-home",
+    path: "/home",
+    page: "web/green/pages/Home.vue",
+    what: "the replacement Home over marked local fixture data",
+    fixture: {
+      server: "scripts/web-green-preview.ts",
+      inputs: ["web/green/main.ts", "web/green/App.vue", "web/green/routes.ts", "web/green/theme.css"],
+    },
+    captures: [
+      {
+        name: "desktop",
+        suffix: "",
+        viewport: {
+          width: 1440,
+          height: 900,
+          deviceScaleFactor: 2,
+        },
+      },
+      {
+        name: "phone",
+        suffix: "-phone",
+        viewport: {
+          width: 320,
+          height: 900,
+          deviceScaleFactor: 2,
+        },
+      },
+    ],
+  },
+  {
+    name: "green-run",
+    path: "/runs/hist-1",
+    page: "web/green/pages/RunRoute.vue",
+    what: "the replacement run evidence view",
+    fixture: {
+      server: "scripts/web-green-preview.ts",
+      inputs: ["web/green/main.ts", "web/green/App.vue", "web/green/routes.ts", "web/green/theme.css"],
+    },
+    captures: [
+      {
+        name: "desktop",
+        suffix: "",
+        viewport: {
+          width: 1440,
+          height: 900,
+          deviceScaleFactor: 2,
+        },
+      },
+      {
+        name: "phone",
+        suffix: "-phone",
+        viewport: {
+          width: 320,
+          height: 900,
+          deviceScaleFactor: 2,
+        },
+      },
+    ],
+  },
+  {
+    name: "green-unit",
+    path: "/runs/unit/plan-acme-3:U13",
+    page: "web/green/pages/Unit.vue",
+    what: "the replacement unit thread and evidence view",
+    fixture: {
+      server: "scripts/web-green-preview.ts",
+      inputs: ["web/green/main.ts", "web/green/App.vue", "web/green/routes.ts", "web/green/theme.css"],
+    },
+    captures: [
+      {
+        name: "desktop",
+        suffix: "",
+        viewport: {
+          width: 1440,
+          height: 900,
+          deviceScaleFactor: 2,
+        },
+      },
+      {
+        name: "phone",
+        suffix: "-phone",
+        viewport: {
+          width: 320,
+          height: 900,
+          deviceScaleFactor: 2,
+        },
+      },
+    ],
+  },
+  {
+    name: "green-runtime",
+    path: "/settings/runtime",
+    page: "web/green/pages/Runtime.vue",
+    what: "the replacement runtime view in Settings",
+    fixture: {
+      server: "scripts/web-green-preview.ts",
+      inputs: ["web/green/main.ts", "web/green/App.vue", "web/green/routes.ts", "web/green/theme.css"],
+    },
+    captures: [
+      {
+        name: "desktop",
+        suffix: "",
+        viewport: {
+          width: 1440,
+          height: 900,
+          deviceScaleFactor: 2,
+        },
+      },
+      {
+        name: "phone",
+        suffix: "-phone",
+        viewport: {
+          width: 320,
+          height: 900,
+          deviceScaleFactor: 2,
+        },
+      },
+    ],
+  },
+  {
+    name: "green-pr",
+    path: "/runs/hist-4?view=pull-request",
+    page: "web/green/pages/PullRequest.vue",
+    what: "the recorded pull request diff in the replacement main pane",
+    fixture: {
+      server: "scripts/web-green-preview.ts",
+      inputs: [
+        "web/green/main.ts",
+        "web/green/App.vue",
+        "web/green/routes.ts",
+        "web/green/theme.css",
+        "web/green/pages/RunRoute.vue",
+      ],
+    },
+    captures: [
+      { name: "desktop", suffix: "", viewport: { width: 1440, height: 900, deviceScaleFactor: 2 } },
+      { name: "phone", suffix: "-phone", viewport: { width: 320, height: 900, deviceScaleFactor: 2 } },
+    ],
+  },
+  {
     name: "home-empty",
     path: "/threads",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
@@ -552,7 +692,12 @@ export function surfaceInputs(
     // while the surface selects the page closure, not every possible route.
     for (const spec of path.endsWith(".json")
       ? []
-      : importSpecifiers(text, path !== "web/src/routes.ts", false, path.endsWith(".vue"))) {
+      : importSpecifiers(
+          text,
+          !["web/src/routes.ts", "web/green/routes.ts"].includes(path),
+          false,
+          path.endsWith(".vue"),
+        )) {
       const resolved = resolveSpecifier(path, spec, known);
       if (!resolved) throw new Error(`Missing screenshot dependency: ${path} → ${spec}`);
       queue.push(resolved);
@@ -583,6 +728,7 @@ export function listInputs(root: string, surfaces: readonly Surface[] = SURFACES
   const candidates = new Set([
     ...known,
     ...globSync(["src/**/*.{ts,mts,js,mjs,cjs,json}", "scripts/**/*.{ts,mts,js,mjs,cjs,json}"], { cwd: root }),
+    ...globSync("web/green/**/*.{ts,mts,vue,css,json}", { cwd: root }),
   ]);
   for (const path of known) {
     if (!existsSync(join(root, path))) throw new Error(`Missing screenshot input: ${path}`);
@@ -674,7 +820,7 @@ function captureDependencyInputs(files: readonly { path: string; text: string }[
   for (const file of files.filter((f) => !f.path.endsWith(".json"))) {
     for (const spec of importSpecifiers(
       file.text,
-      file.path !== "web/src/routes.ts",
+      !["web/src/routes.ts", "web/green/routes.ts"].includes(file.path),
       true,
       file.path.endsWith(".vue"),
     )) {

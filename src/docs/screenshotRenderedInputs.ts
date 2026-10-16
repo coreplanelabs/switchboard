@@ -45,10 +45,23 @@ export function loadRenderedAssets(root: string) {
     string,
     { file: string; src?: string }
   >;
+  const chunks = Object.entries(manifest)
+    .sort()
+    .map(([key, chunk]) => ({
+      key,
+      file: chunk.file,
+      identity: chunk.src ?? key.replace(/-[\w-]{8}(?=\.[^./]+$)/, ""),
+    }));
+  const filesByIdentity = new Map<string, Set<string>>();
+  for (const chunk of chunks) {
+    const files = filesByIdentity.get(chunk.identity) ?? new Set<string>();
+    files.add(chunk.file);
+    filesByIdentity.set(chunk.identity, files);
+  }
+  // Dual entry builds can emit different modules under one basename. Keep the
+  // full manifest key for those collisions instead of aliasing their bytes.
   const identities = new Map(
-    Object.entries(manifest)
-      .sort()
-      .map(([key, chunk]) => [chunk.file, chunk.src ?? key.replace(/-[\w-]{8}(?=\.[^./]+$)/, "")]),
+    chunks.map((chunk) => [chunk.file, filesByIdentity.get(chunk.identity)!.size > 1 ? chunk.key : chunk.identity]),
   );
   return renderedAssets(
     readdirSync(dir).map((name) => {
