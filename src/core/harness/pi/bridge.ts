@@ -121,6 +121,7 @@ export type PiTerminalFailure =
   | { kind: "local_turn_budget"; detail: string; turns: number; maxTurns: number }
   | { kind: "local_abort"; detail: string }
   | { kind: "local_stream"; detail: string }
+  | { kind: "context_overflow"; detail: string; failure: ProviderFailure }
   | {
       kind: "unknown";
       detail: string;
@@ -499,6 +500,10 @@ export class PiBridge {
       }
       if (raw !== undefined && proxyProviderFailureIsAuthenticated(raw)) {
         const failure = classifyProviderFailure({ error: raw, trustedEnvelope: true });
+        if (failure.cause === "request-rejected" && failure.diagnostic?.code === "context_length_exceeded") {
+          out.terminalFailure = { kind: "context_overflow", detail, failure };
+          return;
+        }
         out.terminalFailure = { kind: "provider_failure", detail, failure };
         out.providerFailure = failure;
         return;

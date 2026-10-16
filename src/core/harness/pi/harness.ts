@@ -470,6 +470,8 @@ const terminalFailureText = (terminal: PiTerminalFailure): string => {
       return LOCAL_MODEL_ABORT_MESSAGE;
     case "local_stream":
       return LOCAL_MODEL_STREAM_MESSAGE;
+    case "context_overflow":
+      return "The model input exceeded its context window.";
     case "unknown":
       return terminal.diagnostic.source === "proxy" &&
         terminal.diagnostic.reason === "consumer_rejected" &&
@@ -2027,6 +2029,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       return outcome;
     };
     let terminalFailure: PiTerminalFailure | undefined;
+    let pendingOverflow: ProviderFailure | undefined;
     /** Sent retry prompts, including provider-up releases. Model success resets them. */
     let providerRetries = facts?.retryRecovery?.retries ?? 0;
     let providerRetryUntil: number | undefined = facts?.retryRecovery?.until;
@@ -2141,6 +2144,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       bridge.judgeGate = !catchingUp;
       const obs = bridge.observe(event);
       if (!catchingUp && obs.message?.role === "assistant" && obs.terminalFailure === undefined) {
+        // Pi owns one compact-and-retry attempt for a verified overflow. A
+        // later accepted model turn, not the compaction alone, settles it.
+        pendingOverflow = undefined;
         providerRetries = 0;
         providerRetryUntil = undefined;
         await saveRecovery(undefined);
@@ -2303,6 +2309,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // intentional abort is booked before local-cancellation recovery, so
           // it never re-issues the turn the budget deliberately cut.
           cutAborted = false;
+        } else if (!writeUp && !finaleAborted && terminal.kind === "context_overflow") {
+          pendingOverflow = terminal.failure;
+          note("harness_error", terminalFailureText(terminal));
         } else if (!writeUp && !finaleAborted && terminalFailureIsRecoverable(terminal)) {
           providerRetryUntil ??= Math.min(loopEnd, now() + PROVIDER_RETRY_WAIT_MS);
           const backoff = providerRetryDelay(
@@ -2475,6 +2484,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     } else {
       if (bypass) throw bypass;
       if (terminalFailure !== undefined) {
+        if (terminalFailure.kind === "context_overflow") throw terminalFailure.failure;
         if (terminalFailure.kind === "provider_refusal") throw policyRefused(terminalFailure.failure);
         if (terminalFailure.kind === "provider_failure") {
           // Defensive fallback: provider-down causes normally enter the hold
@@ -2491,6 +2501,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (terminalFailure.kind === "local_stream") throw new ModelStreamIncompleteError();
         throw new Error(terminalFailureText(terminalFailure));
       }
+      if (pendingOverflow !== undefined) throw pendingOverflow;
       const text = bridge.answer() ?? "";
       // The ending the run loop composes the thread's answer from once its
       // post-steps have run (item 6); the answer here is the same words with
@@ -2556,6 +2567,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const id = `${ids.prompt}:follow-up:${++followUps}`;
       let turnSettled = false;
       let turnFailure: PiTerminalFailure | undefined;
+      let turnOverflow: ProviderFailure | undefined;
       /** A recoverable provider or local-pi ending in this post-loop turn stays
        * inside the turn's lease, just as one in the initial loop does. */
       let turnHeld: PiTerminalFailure | undefined;
@@ -2765,6 +2777,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (obs.message && (await mirror.onMessage(obs.message, bridge.turns))) held();
           if (obs.compaction && (await mirror.onCompaction(obs.compaction, bridge.turns))) held();
           if (obs.message?.role === "assistant" && obs.terminalFailure === undefined) {
+            turnOverflow = undefined;
             turnRetries = 0;
             turnRetryUntil = undefined;
             await saveRecovery(undefined);
@@ -2832,6 +2845,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               // ending — the write-up's label is (the loop's rule).
               writeUpFailed = terminalFailureText(terminal);
               note("harness_error", windDownFailureNote(writeUpFailed, "turn"));
+            } else if (terminal.kind === "context_overflow") {
+              turnOverflow = terminal.failure;
+              note("harness_error", terminalFailureText(terminal));
             } else if (terminalFailureIsRecoverable(terminal)) {
               turnRetryUntil ??= Math.min(turnDeadline, now() + PROVIDER_RETRY_WAIT_MS);
               const backoff = providerRetryDelay(
@@ -2950,6 +2966,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           );
         }
         if (turnFailure !== undefined) {
+          if (turnFailure.kind === "context_overflow") throw turnFailure.failure;
           if (turnFailure.kind === "provider_refusal") throw policyRefused(turnFailure.failure);
           if (turnFailure.kind === "provider_failure") {
             if (turnFailure.failure.cause === "permanent") throw new Error(PERMANENT_MODEL_FAILURE_MESSAGE);
@@ -2961,6 +2978,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (turnFailure.kind === "local_stream") throw new ModelStreamIncompleteError();
           throw new Error(terminalFailureText(turnFailure));
         }
+        if (turnOverflow !== undefined) throw turnOverflow;
         const text = bridge.answer() ?? "";
         const turnEnding = windDownEndingOf(writeUp, text, writeUpFailed);
         return turnEnding ? windDownAnswer(turnEnding, input.maxMinutes) : unlabelledAnswer(text, undefined);

@@ -39,6 +39,7 @@ const CAUSES: Readonly<Record<string, ProviderFailureCause>> = {
   server_error: "transient",
   rate_limit_exceeded: "rate-limited",
   invalid_prompt: "request-rejected",
+  context_length_exceeded: "request-rejected",
 };
 const LOCAL_OUTPUT = new Set(["message", "reasoning", "function_call"]);
 const localOutputItem = (item: unknown): boolean => {
@@ -602,14 +603,18 @@ export class ResponsesFailureBoundary {
         return frame;
       }
       const firstTerminal = this.terminal === undefined;
-      const error = failed ? record(response?.error) : event;
+      const nestedOverflow =
+        event.type === "error" &&
+        record(event.error)?.type === "invalid_request_error" &&
+        record(event.error)?.code === "context_length_exceeded";
+      const error = failed ? record(response?.error) : nestedOverflow ? record(event.error) : event;
       const code = error?.code;
       const cause = typeof code === "string" && Object.hasOwn(CAUSES, code) ? CAUSES[code] : undefined;
       const output = response?.output;
       const localOutputOnly = output === undefined || (Array.isArray(output) && output.every(localOutputItem));
       const verified =
         firstTerminal &&
-        !wireError &&
+        (!wireError || nestedOverflow) &&
         !malformedCompletion &&
         !this.hostedOutputSeen &&
         !incomplete &&
@@ -620,7 +625,14 @@ export class ResponsesFailureBoundary {
       let replacementCode = "unclassified_stream_failure";
       let message = JSON.stringify(authenticateProxyUnknownTerminal("unverified_terminal"));
       const observation = classifyProviderFailure({ ...this.failureContext, body: error });
-      const failure = verified ? new ProviderFailure(cause, { ...observation }) : undefined;
+      const failure = verified
+        ? new ProviderFailure(cause, {
+            ...observation,
+            ...(code === "context_length_exceeded"
+              ? { diagnostic: { code, message: "The model input exceeds the context window." } }
+              : {}),
+          })
+        : undefined;
       if (firstTerminal) this.observedFailure = failure ?? observation;
       if (verified) {
         replacementCode = "provider_failure";
