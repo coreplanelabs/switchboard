@@ -4,6 +4,7 @@ import { processSecrets, type Secrets } from "../secrets.js";
 import type { LiveRunRow } from "../core/runLedger/types.js";
 import {
   cancellationRuntimeSupported,
+  unboundNativeReview,
   cancellationRefusalOf,
   cancellationObservationOf,
   type CancellationRefusal,
@@ -35,6 +36,17 @@ export function createRunStop(
     if (!cancellationRuntimeSupported(row) || (binding?.backend === "resident" && !row.meta.repo))
       return { phase: "prepare", cause: "custody-unverified" };
     if (row.state.binding === undefined && row.meta.profile?.machine === "none") return;
+    if (unboundNativeReview(row)) {
+      for (const resident of [true, false]) {
+        const { url, token } = target(resident);
+        if (!url || !token)
+          return {
+            phase: resident ? ("resident" as const) : ("sandbox" as const),
+            cause: "runtime-unavailable" as const,
+          };
+      }
+      return;
+    }
     if (
       (!binding && row.meta.selection !== "resident") ||
       (binding && binding.backend !== "resident" && binding.backend !== "sandbox")
@@ -90,6 +102,8 @@ export function createRunStop(
       if (!result || result.cancellationId !== cancellation.id || result.stopped !== true) return unconfirmed();
       if (resident && (result.disposition === "processes-stopped" || result.disposition === "runtime-retired"))
         return { stopped: true, disposition: result.disposition };
+      if (resident && cancellation.targets && result.disposition === "no-workspace")
+        return { stopped: true, disposition: "no-workspace" };
       if (!resident && result.disposition === "workspace-discarded")
         return { stopped: true, disposition: "workspace-discarded" };
       return unconfirmed();
@@ -102,6 +116,15 @@ export function createRunStop(
     if (refusal) return { stopped: false, refusal };
     const binding = workspaceBindingOf(row.state.binding);
     if (!binding && row.meta.profile?.machine === "none") return { stopped: true, disposition: "no-workspace" };
+    if (!binding && cancellation.targets) {
+      const [resident, sandbox] = await Promise.all([
+        stopTarget(row, cancellation, true, undefined),
+        stopTarget(row, cancellation, false, { backend: "sandbox", sandboxKey: cancellation.targets.sandboxKey }),
+      ]);
+      if (!resident.stopped) return resident;
+      if (!sandbox.stopped) return sandbox;
+      return { stopped: true, disposition: "isolated-targets-stopped" };
+    }
     return stopTarget(
       row,
       cancellation,

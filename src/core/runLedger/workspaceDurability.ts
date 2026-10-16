@@ -10,6 +10,12 @@ import {
 import type { LiveRunMeta, LiveRunRow, StepRecord, TranscriptRow } from "./types.js";
 import { isContextDependencies } from "../references/contextDependencies.js";
 import {
+  cancellationOf,
+  nativeReviewStopTargetsOf,
+  type RunCancellation,
+  type NativeReviewStopTargets,
+} from "./cancellation.js";
+import {
   resourceLifetimeSchema,
   sameResourceLifetime,
   type ResourceLifetimeDeclaration,
@@ -283,6 +289,10 @@ export function workspaceReportRowsMatch(rows: readonly TranscriptRow[] | undefi
 export interface WorkspaceDurabilityArchive {
   /** Original execution contract, never inferred from a later empty workspace. */
   residentExecution?: "native-v1";
+  /** Original isolated review namespaces, before selection or attachment. */
+  stopTargets?: NativeReviewStopTargets;
+  /** Completed negative ending, retained after history expiry to prevent replay. */
+  cancellation?: RunCancellation;
   version: 1;
   runId: string;
   /** Identity reference to the first claim, not a new budget or expiry. */
@@ -446,6 +456,7 @@ export function prepareWorkspaceAllocation(
   if (prior) {
     if (prior.runId !== runId || prior.startedAt !== startedAt)
       throw new Error("workspace allocation identity changed");
+    if (prior.cancellation) throw new Error("the original run was cancelled");
     if (prior.allocation === null) {
       if (incoming) throw new Error("workspace allocation cannot be retrofitted");
       return prior;
@@ -459,15 +470,27 @@ export function prepareWorkspaceAllocation(
     if (prior.disposition?.kind === "scratch-custody-closed") throw new Error("workspace allocation is terminal");
     return prior;
   }
+  const nativeBirth = !previouslyAdmitted && meta.residentExecution === "native-v1";
+  const stopTargets =
+    nativeBirth &&
+    meta.nativeReviewIsolation === true &&
+    meta.agent === "review" &&
+    meta.readonly === true &&
+    meta.profile?.identity === "read" &&
+    meta.profile.machine === "repo-resident"
+      ? nativeReviewStopTargetsOf(
+          { version: 1, repo: meta.repo, threadKey: meta.threadKey, sandboxKey: `review:${runId}` },
+          runId,
+        )
+      : undefined;
   if (!incoming)
     return {
       version: 1,
       runId,
       startedAt,
       allocation: null,
-      ...(!previouslyAdmitted && meta.residentExecution === "native-v1"
-        ? { residentExecution: "native-v1" as const }
-        : {}),
+      ...(stopTargets ? { stopTargets } : {}),
+      ...(nativeBirth ? { residentExecution: "native-v1" as const } : {}),
     };
   if (
     previouslyAdmitted ||
@@ -481,6 +504,7 @@ export function prepareWorkspaceAllocation(
     startedAt,
     allocation: incoming,
     ...(meta.residentExecution === "native-v1" ? { residentExecution: "native-v1" as const } : {}),
+    ...(stopTargets ? { stopTargets } : {}),
   };
 }
 
@@ -577,6 +601,8 @@ export function workspaceDurabilityArchiveOf(v: unknown): WorkspaceDurabilityArc
         ![
           "version",
           "residentExecution",
+          "stopTargets",
+          "cancellation",
           "runId",
           "startedAt",
           "allocation",
@@ -588,6 +614,17 @@ export function workspaceDurabilityArchiveOf(v: unknown): WorkspaceDurabilityArc
           "promotionStepBase",
         ].includes(k),
     )
+  )
+    return;
+  if (
+    v.stopTargets !== undefined &&
+    (v.residentExecution !== "native-v1" || !nativeReviewStopTargetsOf(v.stopTargets, v.runId))
+  )
+    return;
+  const cancellation = v.cancellation === undefined ? undefined : cancellationOf(v.cancellation);
+  if (
+    v.cancellation !== undefined &&
+    (!cancellation || cancellation.runId !== v.runId || cancellation.startedAt !== v.startedAt)
   )
     return;
   const allocation = v.allocation === null ? null : workspaceAllocationOf(v.allocation);
@@ -622,6 +659,8 @@ export function workspaceDurabilityArchiveOf(v: unknown): WorkspaceDurabilityArc
   return {
     version: 1,
     ...(v.residentExecution === "native-v1" ? { residentExecution: "native-v1" as const } : {}),
+    ...(v.stopTargets !== undefined ? { stopTargets: nativeReviewStopTargetsOf(v.stopTargets, v.runId)! } : {}),
+    ...(cancellation ? { cancellation } : {}),
     runId: v.runId,
     startedAt: v.startedAt,
     allocation,

@@ -12843,8 +12843,13 @@ export class ResidentDO extends Sandbox<Env> {
     const scopes = new NativeRunScopes(this.ctx.storage, {
       request: (value, timeoutMs) => this.nativeScopeTransport().request(value, timeoutMs),
     });
+    let beforeBirth = false;
     try {
-      if ((await scopes.protocol(cancellation.threadKey, cancellation.runId)) !== "native-v1") return null;
+      const protocol = await scopes.protocol(cancellation.threadKey, cancellation.runId);
+      if (protocol === "legacy" && cancellation.targets !== undefined)
+        return cancellationFailure(cancellation, "resident", "custody-unverified");
+      beforeBirth = protocol === undefined && cancellation.targets !== undefined;
+      if (protocol !== "native-v1" && !beforeBirth) return null;
     } catch {
       return cancellationFailure(cancellation, "resident", "kill-unconfirmed");
     }
@@ -12860,7 +12865,7 @@ export class ResidentDO extends Sandbox<Env> {
       if (admission) return admission;
       try {
         const owners = await scopes.matching(cancellation.threadKey, cancellation.runId);
-        if (owners.length === 0) throw new Error("native scope inventory is missing");
+        if (owners.length === 0 && !beforeBirth) throw new Error("native scope inventory is missing");
         const closed: NativeScopeRef[] = [];
         for (const owner of owners) {
           const result = await scopes.close(cancellation.threadKey, owner);
@@ -12870,7 +12875,22 @@ export class ResidentDO extends Sandbox<Env> {
         const journal = new NativeOperationJournal(this.ctx.storage);
         const prefix = `native-operation:${cancellation.threadKey}:${cancellation.runId}:`;
         const records = await journal.fingerprints(prefix);
+        if (beforeBirth && owners.length !== 0)
+          return cancellationFailure(cancellation, "resident", "custody-unverified");
         const active = await journal.unresolved(prefix);
+        if (beforeBirth) {
+          for (const operationKey of Object.keys(records)) {
+            const value = active.get(operationKey);
+            if (
+              !isWorkspaceOwner(value) ||
+              value.runId !== cancellation.runId ||
+              !unstartedNativeThread(value, value, cancellation.threadKey) ||
+              (value as NativeOperationRecord).native.scope !== undefined
+            )
+              return cancellationFailure(cancellation, "resident", "custody-unverified");
+            owners.push(value);
+          }
+        }
         if (
           [...active.values()].some((value) => {
             const scope = (value as NativeOperationRecord)?.native?.scope;
@@ -12887,6 +12907,20 @@ export class ResidentDO extends Sandbox<Env> {
             return cancellationFailure(cancellation, "resident", "ticket-conflict");
           if (JSON.stringify(await journal.fingerprints(prefix, txn)) !== JSON.stringify(records))
             return cancellationFailure(cancellation, "resident", "native-outcome-unknown");
+          if (beforeBirth) {
+            const registration = await txn.get<RunRegistration>(runRegKey(cancellation.threadKey));
+            const binding = await txn.get<ThreadBinding>(threadBindingKey(cancellation.threadKey));
+            if (
+              (registration?.runId === cancellation.runId &&
+                (registration.threadKey !== cancellation.threadKey ||
+                  !owners.some(
+                    (owner) =>
+                      isWorkspaceOwner(registration) && workspaceOwnerKey(owner) === workspaceOwnerKey(registration),
+                  ))) ||
+              binding?.lastRunOwner?.runId === cancellation.runId
+            )
+              return cancellationFailure(cancellation, "resident", "custody-unverified");
+          }
           for (const [operationKey, value] of active) {
             if (owners.some((owner) => unstartedNativeThread(value, owner, cancellation.threadKey))) {
               await txn.put(`native-operation-no-start:${operationKey}`, value);
@@ -12901,8 +12935,9 @@ export class ResidentDO extends Sandbox<Env> {
               records,
               originalOperationOutcome: "unknown",
             });
-          await txn.put(key, { ...prior, stopped: true, disposition: "processes-stopped", nativeScopes: closed });
-          return { stopped: true as const, cancellationId: cancellation.id, disposition: "processes-stopped" as const };
+          const disposition = beforeBirth ? ("no-workspace" as const) : ("processes-stopped" as const);
+          await txn.put(key, { ...prior, stopped: true, disposition, nativeScopes: closed });
+          return { stopped: true as const, cancellationId: cancellation.id, disposition };
         });
       } catch {
         return cancellationFailure(cancellation, "resident", "kill-unconfirmed");

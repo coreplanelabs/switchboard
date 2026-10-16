@@ -8,6 +8,56 @@ export interface CancellationActor {
   kind: "chat" | "access" | "cli" | "mcp";
   id: string;
 }
+/** Physical namespaces frozen by the original native review admission. */
+export interface NativeReviewStopTargets {
+  version: 1;
+  repo: string;
+  threadKey: string;
+  sandboxKey: string;
+}
+export function nativeReviewStopTargetsOf(value: unknown, runId: string): NativeReviewStopTargets | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const v = value as Record<string, unknown>;
+  if (
+    Object.keys(v).some((key) => !["version", "repo", "threadKey", "sandboxKey"].includes(key)) ||
+    v.version !== 1 ||
+    typeof v.repo !== "string" ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(v.repo) ||
+    typeof v.threadKey !== "string" ||
+    !v.threadKey ||
+    v.threadKey.length > 512 ||
+    !/^[A-Za-z0-9_-]{1,56}$/.test(runId) ||
+    v.sandboxKey !== `review:${runId}`
+  )
+    return;
+  return structuredClone(v) as unknown as NativeReviewStopTargets;
+}
+export function sameNativeReviewStopTargets(
+  a: NativeReviewStopTargets | undefined,
+  b: NativeReviewStopTargets | undefined,
+): boolean {
+  return a === undefined
+    ? b === undefined
+    : b !== undefined &&
+        a.version === b.version &&
+        a.repo === b.repo &&
+        a.threadKey === b.threadKey &&
+        a.sandboxKey === b.sandboxKey;
+}
+export function unboundNativeReview(row: LiveRunRow): boolean {
+  return (
+    row.state.binding === undefined &&
+    !row.meta.hosted &&
+    row.meta.residentExecution === "native-v1" &&
+    row.meta.nativeReviewIsolation === true &&
+    row.meta.agent === "review" &&
+    row.meta.readonly === true &&
+    row.meta.profile?.identity === "read" &&
+    row.meta.profile.machine === "repo-resident" &&
+    typeof row.meta.repo === "string" &&
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(row.meta.repo)
+  );
+}
 export interface RunCancellation {
   version: 1;
   id: string;
@@ -17,8 +67,10 @@ export interface RunCancellation {
   startedAt: number;
   repo?: string;
   actor: CancellationActor;
+  targets?: NativeReviewStopTargets;
 }
-export type CancellationDisposition = "workspace-discarded" | "processes-stopped" | "runtime-retired" | "no-workspace";
+export type CancellationDisposition =
+  "workspace-discarded" | "processes-stopped" | "runtime-retired" | "no-workspace" | "isolated-targets-stopped";
 export type CancellationPhase = "prepare" | "sandbox" | "resident";
 const CANCELLATION_REFUSAL_CAUSES = [
   "state-unconfigured",
@@ -165,7 +217,7 @@ export function cancellationOf(value: unknown): RunCancellation | undefined {
   const actor = v.actor as CancellationActor | undefined;
   if (
     Object.keys(v).some(
-      (k) => !["version", "id", "runId", "ownerGen", "threadKey", "startedAt", "actor", "repo"].includes(k),
+      (k) => !["version", "id", "runId", "ownerGen", "threadKey", "startedAt", "actor", "repo", "targets"].includes(k),
     ) ||
     v.version !== 1 ||
     typeof v.id !== "string" ||
@@ -190,6 +242,10 @@ export function cancellationOf(value: unknown): RunCancellation | undefined {
     actor.id.length > 128
   )
     return;
+  if (v.targets !== undefined) {
+    const targets = nativeReviewStopTargetsOf(v.targets, v.runId);
+    if (!targets || targets.repo !== v.repo || targets.threadKey !== v.threadKey) return;
+  }
   return structuredClone(v) as unknown as RunCancellation;
 }
 
@@ -203,7 +259,8 @@ export function sameCancellation(a: RunCancellation | undefined, b: RunCancellat
     a.startedAt === b.startedAt &&
     a.repo === b.repo &&
     a.actor.kind === b.actor.kind &&
-    a.actor.id === b.actor.id
+    a.actor.id === b.actor.id &&
+    sameNativeReviewStopTargets(a.targets, b.targets)
   );
 }
 
@@ -232,7 +289,16 @@ export function cancellationRecordMatches(record: RunRecord, cancellation: RunCa
     receipt.version === 1 &&
     receipt.actor.kind === cancellation.actor.kind &&
     receipt.actor.id === cancellation.actor.id &&
-    ["workspace-discarded", "processes-stopped", "runtime-retired", "no-workspace"].includes(receipt.disposition) &&
+    [
+      "workspace-discarded",
+      "processes-stopped",
+      "runtime-retired",
+      "no-workspace",
+      "isolated-targets-stopped",
+    ].includes(receipt.disposition) &&
+    (cancellation.targets !== undefined
+      ? receipt.disposition === "isolated-targets-stopped"
+      : receipt.disposition !== "isolated-targets-stopped") &&
     sameCancellation(cancellationOf(receipt.cancellation), cancellation)
   );
 }
@@ -318,6 +384,7 @@ export function cancellationRuntimeSupported(row: LiveRunRow): boolean {
   if (b === undefined)
     return (
       row.meta.profile?.machine === "none" ||
+      unboundNativeReview(row) ||
       (!row.meta.hosted &&
         row.meta.selection === "resident" &&
         typeof row.meta.repo === "string" &&
@@ -345,6 +412,19 @@ export function cancellationRuntimeSupported(row: LiveRunRow): boolean {
 
 /** Null explicitly requests discovery; absence never bypasses a stored target. */
 export function cancellationTargetMatches(row: LiveRunRow, requested: unknown): boolean {
+  const ticket = cancellationOf(row.state.cancellation);
+  if (row.state.binding === undefined && ticket?.targets) {
+    if (requested === null) return true;
+    if (requested && typeof requested === "object" && !Array.isArray(requested)) {
+      const target = requested as Record<string, unknown>;
+      return (
+        Object.keys(target).every((key) => ["backend", "sandboxKey"].includes(key)) &&
+        target.backend === "sandbox" &&
+        target.sandboxKey === ticket.targets.sandboxKey
+      );
+    }
+    return false;
+  }
   if (requested === null)
     return (
       row.state.binding === undefined &&
@@ -356,16 +436,28 @@ export function cancellationTargetMatches(row: LiveRunRow, requested: unknown): 
   return cancellationBindingMatches(row.state.binding, requested);
 }
 
-export function prepareCancellation(row: LiveRunRow, actor: CancellationActor, id: string): CancellationPreparation {
+export function prepareCancellation(
+  row: LiveRunRow,
+  actor: CancellationActor,
+  id: string,
+  originalTargets?: NativeReviewStopTargets,
+): CancellationPreparation {
   if (row.meta.hosted) return { ok: false, reason: "unsupported" };
   const existing = row.state.cancellation;
   if (existing !== undefined) {
     const cancellation = cancellationOf(existing);
-    return cancellation && cancellationMatches(row, cancellation)
+    return cancellation &&
+      cancellationMatches(row, cancellation) &&
+      (cancellation.targets === undefined || sameNativeReviewStopTargets(cancellation.targets, originalTargets))
       ? { ok: true, row: structuredClone(row), cancellation }
       : { ok: false, reason: "fenced" };
   }
   if (!cancellationRuntimeSupported(row)) return { ok: false, reason: "unsupported" };
+  const targets = unboundNativeReview(row) ? nativeReviewStopTargetsOf(originalTargets, row.runId) : undefined;
+  if (targets && (targets.repo !== row.meta.repo || targets.threadKey !== row.threadKey))
+    return { ok: false, reason: "fenced" };
+  if (unboundNativeReview(row) && !targets && row.meta.selection !== "resident")
+    return { ok: false, reason: "unsupported" };
   const cancellation = cancellationOf({
     version: 1,
     id,
@@ -375,6 +467,7 @@ export function prepareCancellation(row: LiveRunRow, actor: CancellationActor, i
     startedAt: row.startedAt,
     ...(row.meta.repo ? { repo: row.meta.repo } : {}),
     actor,
+    ...(targets ? { targets } : {}),
   });
   if (!cancellation || row.stop !== "hard") return { ok: false, reason: "fenced" };
   row.state = { ...row.state, cancellation };

@@ -869,6 +869,14 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
         : githubSourceContextForTask(repoCtx.githubSource, repoCtx.pr);
     const meta: LiveRunMeta = {
       residentExecution: "native-v1",
+      ...(agent.name === "review" &&
+      profile.machine === "repo-resident" &&
+      profile.identity === "read" &&
+      deps.config.config.execution?.type === "cloudflare" &&
+      deps.config.config.execution.url &&
+      deps.config.config.execution.resident?.baseUrl
+        ? { nativeReviewIsolation: true as const }
+        : {}),
       ...(privateMain ? { privateConversation: true as const } : {}),
       ...(ctx.ingressRunId ? { organizationIngressRunId: ctx.ingressRunId } : {}),
       ...(ctx.authoritativeHistory ? { authoritativeHistory: true as const } : {}),

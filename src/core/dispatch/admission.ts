@@ -56,11 +56,15 @@ import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { waitingWords, type PlaneAskAnswer } from "../plane/decide.js";
 import { replyAck, replyOutcome, REFUSAL_SENTENCES } from "./reply.js";
 import { RESTART_CLAIM_GRACE_MS } from "../budgets.js";
+import type { RunStore } from "../runStore.js";
+import { cancellationOf, cancellationRecordMatches } from "../runLedger/cancellation.js";
 
 /** What thread admission reads off the dispatcher's dependencies. `CoreDeps`
  *  extends this; a caller's shape is unchanged. */
 export interface AdmissionDeps {
   config: ConfigStore;
+  /** Canonical negative endings can release an unknown local claim, without replay. */
+  runStore: RunStore;
   /** The wall clock (docs/reference/specs/tracing.md): `systemClock` in production, a ticking clock in tests. */
   clock?: Clock;
   /**
@@ -494,6 +498,18 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
     refuseSilently,
     admission,
   } = ctx;
+  if (
+    carriedRow?.meta.nativeReviewIsolation &&
+    (deps.config.config.execution?.type !== "cloudflare" ||
+      !deps.config.config.execution.url ||
+      !deps.config.config.execution.resident?.baseUrl)
+  ) {
+    console.log(
+      `[dispatch] ${msg.threadKey} run ${carriedRow.runId} held: the original review requires its Cloudflare runtime`,
+    );
+    await replyOutcome(io, "The original review requires its Cloudflare runtime. No work started.");
+    return { kind: "held", runId: carriedRow.runId };
+  }
   // Thread admission (docs/reference/specs/thread-admission.md item 1): ONE live run per
   // thread. Claimed HERE — after the agent gate (a follow-up's sender must be
   // allowed to run the live agent, exactly like a first message) and before
@@ -510,6 +526,29 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
     agent: agentName,
     ...(carriedRow ? { now: carriedRow.startedAt } : {}),
   });
+  if (
+    claim.kind === "live" &&
+    claim.live.unknownClaim &&
+    !resume &&
+    !restart &&
+    !ctx.coordinator &&
+    ctx.restartOf === undefined
+  ) {
+    const id = claim.live.unknownClaim.runId;
+    const record = await deps.runStore.get(id).catch(() => null);
+    const cancelled = cancellationOf(record?.cancellation?.cancellation);
+    if (
+      record &&
+      cancelled &&
+      record.id === id &&
+      record.threadKey === msg.threadKey &&
+      record.channelId === msg.channelId &&
+      cancellationRecordMatches(record, cancelled)
+    ) {
+      admission.release(msg.threadKey, claim.live);
+      claim = admission.claim(msg.threadKey, { agent: agentName });
+    }
+  }
   if (claim.kind === "live" && restart) {
     // A restart is not a follow-up either (item 42): a live run here means
     // the user re-mentioned after the kill; the reserved run is closed

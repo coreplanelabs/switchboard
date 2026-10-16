@@ -128,6 +128,45 @@ const NOW = 10_000;
 const THREAD = "slack:CX:1.0";
 
 describe("original allocation before first reservation", () => {
+  it.each(["cloudflare", "local"] as const)(
+    "records early stop targets only for the original Cloudflare backend: %s",
+    async (backend) => {
+      const d = deps(
+        backend === "cloudflare"
+          ? "\nexecution:\n  type: cloudflare\n  url: https://sandbox.example\n  resident:\n    baseUrl: https://resident.example\n"
+          : "\nexecution:\n  type: local\n",
+      );
+      const store = new InMemoryRunLedger(() => NOW);
+      const writer = createLedgerWriteThrough({
+        ledger: store,
+        gen: "gen-T",
+        now: () => NOW,
+        warn: () => {},
+        fallback: new NullRunStore(),
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+      });
+      const ctx = originalContext(d);
+      const reserved = await reserveRun({ ...d, runLedger: writer }, ctx);
+      expect(reserved?.reserved?.runId).toBe("run-original-v2");
+      expect(await store.requestStop(ctx.runId, "hard")).toMatchObject({ ok: true });
+      const stopped = await store.prepareCancellation(ctx.runId, { kind: "chat", id: "slack:UADMIN" });
+      if (backend === "cloudflare")
+        expect(stopped).toMatchObject({
+          ok: true,
+          cancellation: {
+            targets: {
+              version: 1,
+              repo: "acme/api",
+              threadKey: ctx.msg.threadKey,
+              sandboxKey: "review:run-original-v2",
+            },
+          },
+        });
+      else expect(stopped).toEqual({ ok: false, reason: "unsupported" });
+    },
+  );
+
   function originalContext(d: ProvisionDeps) {
     const r = request(d, "Review this exact PR", "review");
     return {

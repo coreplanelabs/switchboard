@@ -129,3 +129,5 @@ The dated implementation plans under [`docs/plans/`](../plans/) are records of t
 The [resident replica placement proposal](../plans/2026-10-14-002-resident-replica-placement-design.md) separates thread placement from per-run containment and records the migration boundary for several warm residents of one repository.
 
 The proposed [shared message handling design](../plans/2026-10-14-002-feat-github-activity-inbox-plan.md) routes external agent messages through the orchestrator. Its [implementation plan](../plans/2026-10-14-003-feat-shared-message-handling-execution-plan.md) lists changes, effort and proof for the shared core, thin GitHub adapter and review-head continuation.
+
+The [native launch and hard-stop design](../plans/2026-10-14-001-native-launch-fence-design.md) records per-run isolation, descendant termination and cancellation before VM startup. Its early setup amendment describes stop failures before a runtime is selected.

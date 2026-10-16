@@ -55,8 +55,11 @@ export interface CardHandle {
  *  registry is a Node module and this file is shared with the state Worker)
  *  plus what a resume needs that the dispatcher otherwise keeps in closures. */
 export const EXECUTION_PROTOCOL_HEADER = "x-switchboard-execution-protocol";
+export const NATIVE_REVIEW_STOP_HEADER = "x-switchboard-native-review-stops";
 
 export interface LiveRunMeta {
+  /** This original client uses Cloudflare's two isolated review namespaces. */
+  nativeReviewIsolation?: true;
   /** Frozen at first admission; absent means legacy execution. */
   residentExecution?: "native-v1";
   /** Plane placeholder only; first execution owner freezes its own protocol. */

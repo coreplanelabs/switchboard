@@ -121,6 +121,7 @@ describe("original allocation claim acknowledgment", () => {
     await expect(
       reserveRun(
         {
+          config: { config: {} },
           runLedger: {
             reserve: async () => {
               throw new UnknownAllocationClaimError(new Error("fixture unknown"));
