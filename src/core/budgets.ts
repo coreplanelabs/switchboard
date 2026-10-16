@@ -36,6 +36,11 @@ export const SOURCE_REVALIDATE_MAX_MS = 30 * SECOND_MS;
 export const secondsToMs = (seconds: number): number => seconds * SECOND_MS;
 
 export const MINUTE_MS = 60_000;
+/** Optional dashboard identity enrichment must not hold independent browser reads. */
+export const WORK_VIEW_ENRICHMENT_TIMEOUT_MS = 1.5 * SECOND_MS;
+/** Only discovery reuses these checks; private-source authorization always verifies afresh. */
+export const WORK_VIEW_SLACK_PROOF_TTL_MS = 30 * SECOND_MS;
+export const WORK_VIEW_SLACK_PROOF_CACHE_MAX = 1000;
 /** PR validation finishes before the staging job receives deployment credentials. */
 export const STAGING_VALIDATION_WAIT_MS = 35 * MINUTE_MS;
 /** Observe the already-admitted smoke run; never submit it again. */

@@ -256,6 +256,24 @@ describe("the view-as routes", () => {
     await settle();
     expect(allowed.status()).toBe(204);
   });
+  it("lets a repository-limited operator select Everyone without permission to view as another person", async () => {
+    const actor: Actor = {
+      ...ADMIN,
+      grants: { ...ALL_GRANTS, repos: new Set(["sample/fixture"]), repoAccess: new Set(["sample/fixture"]) },
+    };
+    withWorkViewScope(actor, resolveWorkViewScope(actor, { organization: "installation" }));
+    const all = post("/runs/data-view", JSON.stringify({ mode: "everyone" }), actor);
+    await settle();
+    expect(all.status()).toBe(204);
+    expect(all.headers()["set-cookie"]).toEqual([
+      `${DATA_VIEW_COOKIE}=everyone; Path=/; HttpOnly; SameSite=Strict; Secure`,
+      `${VIEW_AS_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0`,
+    ]);
+    const person = post("/runs/view-as", JSON.stringify({ person: "slack:UIVY" }), actor);
+    await settle();
+    expect(person.status()).toBe(403);
+    expect(person.headers()).not.toHaveProperty("set-cookie");
+  });
   it("accepts a known Access person and rejects unknown or service subjects", async () => {
     const h = createViewAsHandler({
       publicBaseUrl: "https://bot.example.test",

@@ -233,7 +233,12 @@ export function createViewAsHandler(
             json(res, 400, { error: "invalid_input" });
             return;
           }
-          if (mode === "everyone" && (!holdsAll(ctx.actor) || !workViewScopeOf(ctx.actor).canEveryone)) {
+          if (
+            mode === "everyone" &&
+            (ctx.actor.grants.actions !== "all" ||
+              ctx.actor.grants.channels !== "all" ||
+              !workViewScopeOf(ctx.actor).canEveryone)
+          ) {
             json(res, 403, { error: "unauthorized" });
             return;
           }
