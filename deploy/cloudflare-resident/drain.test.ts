@@ -555,6 +555,44 @@ describe("global deploy admission evidence", () => {
       const receipt = await h.http("GET", `/deploy-fence-recovery?released=${selected.recordSha256}`);
       expect(receipt.status).toBe(200);
       expect((await receipt.json()).receipt).toMatchObject({ originalRecordSha256: selected.recordSha256 });
+      expect(
+        h.events.filter((event) => event.phase === "fence-recovery-read" || event.phase === "fence-release"),
+      ).toEqual([
+        {
+          schema: 1,
+          phase: "fence-recovery-read",
+          observedAt: 1000,
+          workerVersion: version,
+          operation: "quote",
+          recordSha256: selected.recordSha256,
+          outcome: "read",
+          httpStatus: 200,
+          refusalClass: null,
+        },
+        {
+          schema: 1,
+          phase: "fence-release",
+          observedAt: 1000,
+          workerVersion: version,
+          recordSha256: selected.recordSha256,
+          controllerStoppedAttested: true,
+          nativeTargetUnchangedAttested: true,
+          outcome: "released",
+          httpStatus: 200,
+          refusalClass: null,
+        },
+        {
+          schema: 1,
+          phase: "fence-recovery-read",
+          observedAt: 1000,
+          workerVersion: version,
+          operation: "receipt",
+          recordSha256: selected.recordSha256,
+          outcome: "read",
+          httpStatus: 200,
+          refusalClass: null,
+        },
+      ]);
     });
 
     it.each(["read-fixture", "drain-fixture", "operator-fixture"])(
@@ -714,6 +752,86 @@ describe("global deploy admission evidence", () => {
         error: "fence release outcome is unverified; inspect the original receipt without another mutation",
       });
       expect(h.rows.get("drain")).toEqual(original);
+    });
+
+    it("records closed refusal and uncertain-commit classes without private request or exception text", async () => {
+      const refused = seed();
+      const selected = await quote(refused);
+      refused.setRecoveryView({ state: "warm", executingRuns: 0, unknownRuns: 1 });
+      const refusal = await refused.http("POST", "/release-deploy-fence", request(selected.recordSha256));
+      expect(refusal.status).toBe(409);
+      expect(refused.events.at(-1)).toEqual({
+        schema: 1,
+        phase: "fence-release",
+        observedAt: 1000,
+        workerVersion: version,
+        recordSha256: selected.recordSha256,
+        controllerStoppedAttested: true,
+        nativeTargetUnchangedAttested: true,
+        outcome: "refused",
+        httpStatus: 409,
+        refusalClass: "resident-not-idle",
+      });
+
+      const invalid = seed();
+      expect(
+        (
+          await invalid.http("POST", "/release-deploy-fence", {
+            expectedRecordSha256: "private-request-token",
+            controllerStopped: "private-flag",
+          })
+        ).status,
+      ).toBe(400);
+      expect(invalid.events.at(-1)).toEqual({
+        schema: 1,
+        phase: "fence-release",
+        observedAt: 1000,
+        workerVersion: version,
+        controllerStoppedAttested: false,
+        nativeTargetUnchangedAttested: false,
+        outcome: "refused",
+        httpStatus: 400,
+        refusalClass: "invalid-request",
+      });
+
+      const uncertain = seed();
+      const originalQuote = await quote(uncertain);
+      uncertain.api.releaseDeployFence = async () => {
+        throw new Error("private-exception-token /workspace/private");
+      };
+      const response = await uncertain.http("POST", "/release-deploy-fence", {
+        ...request(originalQuote.recordSha256),
+        evidence: "https://example.com/receipt?token=private-query-token",
+      });
+      expect(response.status).toBe(503);
+      expect(
+        uncertain.events.filter((event) => event.phase === "fence-release-commit" || event.phase === "fence-release"),
+      ).toEqual([
+        {
+          schema: 1,
+          phase: "fence-release-commit",
+          observedAt: 1000,
+          workerVersion: version,
+          recordSha256: originalQuote.recordSha256,
+          controllerStoppedAttested: true,
+          nativeTargetUnchangedAttested: true,
+          commit: "unverified",
+          failure: "storage-or-rpc",
+        },
+        {
+          schema: 1,
+          phase: "fence-release",
+          observedAt: 1000,
+          workerVersion: version,
+          recordSha256: originalQuote.recordSha256,
+          controllerStoppedAttested: true,
+          nativeTargetUnchangedAttested: true,
+          outcome: "unverified",
+          httpStatus: 503,
+          refusalClass: "commit-unverified",
+        },
+      ]);
+      expect(uncertain.rows.get("drain")).toEqual(original);
     });
   });
 
