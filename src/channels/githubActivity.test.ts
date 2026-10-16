@@ -440,3 +440,170 @@ describe("GitHub pull and commit activity normalization", () => {
     expect(result.event).not.toHaveProperty("authorId");
   });
 });
+
+const check = {
+  id: 90,
+  head_sha: "c".repeat(40),
+  head_branch: null,
+  name: "build",
+  status: "completed",
+  conclusion: "failure",
+  app: { id: 91 },
+  pull_requests: [{ id: 70, number: 7, head: pull.head, base: pull.base }],
+};
+const checkPayload = (surface: "check_run" | "check_suite", action = "completed") => ({
+  installation: { id: 2 },
+  repository: { id: 3, full_name: "acme/api" },
+  sender: user,
+  action,
+  [surface]: check,
+});
+const statusPayload = () => ({
+  installation: { id: 2 },
+  repository: { id: 3, full_name: "acme/api" },
+  sender: null,
+  id: 92,
+  sha: "c".repeat(40),
+  context: "external/build",
+  state: "failure",
+  description: "Build failed",
+  target_url: "https://ci.example/build/92",
+});
+
+describe("GitHub check and status normalization", () => {
+  it.each(["check_run", "check_suite"] as const)(
+    "keeps %s commit facts separate from stale PR associations",
+    async (surface) => {
+      const native = checkPayload(surface);
+      const result = await normalizeGithubActivity(source, { event: surface, delivery: "check" }, native);
+      expect(result).toMatchObject({
+        kind: "normalized",
+        event: {
+          kind: "source-fact",
+          objectId: `github:github.com:repository:3:${surface}:90`,
+          payload: {
+            activity: {
+              surface,
+              action: "completed",
+              id: 90,
+              commitSha: "c".repeat(40),
+              status: "completed",
+              conclusion: "failure",
+              appId: 91,
+              pullRequests: [{ id: 70, number: 7, head: { sha: "a".repeat(40), repositoryId: 30 } }],
+            },
+            native,
+          },
+        },
+      });
+      if (result.kind !== "normalized") throw new Error("expected check fact");
+      expect(result.event.payload).not.toHaveProperty("pullNumber");
+    },
+  );
+
+  it("keeps a fork check with no PR association and no actor", async () => {
+    const native = checkPayload("check_suite", "requested");
+    const result = await normalizeGithubActivity(
+      source,
+      { event: "check_suite", delivery: "fork" },
+      {
+        ...native,
+        sender: null,
+        check_suite: { ...check, status: null, conclusion: null, pull_requests: [] },
+      },
+    );
+    expect(result).toMatchObject({
+      kind: "normalized",
+      event: { payload: { activity: { actor: null, status: null, conclusion: null, pullRequests: [] } } },
+    });
+    if (result.kind !== "normalized") throw new Error("expected fork check fact");
+    expect(result.event).not.toHaveProperty("authorId");
+    expect(result.event.payload).not.toHaveProperty("pullNumber");
+  });
+
+  it("retains status without an action or invented PR and permits the external CI link", async () => {
+    const native = statusPayload();
+    expect(await normalizeGithubActivity(source, { event: "status", delivery: "status" }, native)).toMatchObject({
+      kind: "normalized",
+      event: {
+        kind: "source-fact",
+        objectId: "github:github.com:repository:3:status:92",
+        payload: {
+          activity: {
+            surface: "status",
+            id: 92,
+            commitSha: "c".repeat(40),
+            context: "external/build",
+            state: "failure",
+            description: "Build failed",
+            targetUrl: "https://ci.example/build/92",
+            actor: null,
+          },
+          native,
+        },
+      },
+    });
+  });
+
+  it("retains the checked commit and status when the optional CI link is empty", async () => {
+    const native = { ...statusPayload(), target_url: "" };
+    expect(await normalizeGithubActivity(source, { event: "status", delivery: "empty-link" }, native)).toMatchObject({
+      kind: "normalized",
+      event: {
+        kind: "source-fact",
+        payload: {
+          activity: { commitSha: "c".repeat(40), context: "external/build", state: "failure", targetUrl: "" },
+          native,
+        },
+      },
+    });
+  });
+
+  it("separates check transitions and action requests from delivery identity", async () => {
+    const native = checkPayload("check_run");
+    const first = await normalizeGithubActivity(source, { event: "check_run", delivery: "one" }, native);
+    const again = await normalizeGithubActivity(source, { event: "check_run", delivery: "two" }, native);
+    const changed = await normalizeGithubActivity(
+      source,
+      { event: "check_run", delivery: "three" },
+      {
+        ...native,
+        action: "requested_action",
+        requested_action: { identifier: "retry" },
+      },
+    );
+    if (first.kind !== "normalized" || again.kind !== "normalized" || changed.kind !== "normalized")
+      throw new Error("expected check facts");
+    expect(first.event.changeId).toMatch(/^[a-f0-9]{64}$/);
+    expect(again.event.changeId).toBe(first.event.changeId);
+    expect(changed.event.changeId).not.toBe(first.event.changeId);
+    expect(changed.event.objectId).toBe(first.event.objectId);
+    expect(changed.event.payload).toMatchObject({ activity: { action: "requested_action" } });
+  });
+
+  it.each([
+    { ...statusPayload(), sha: "bad" },
+    { ...statusPayload(), installation: { id: 99 } },
+    { ...statusPayload(), state: { toString: null } },
+  ])("holds malformed or foreign commit status (%#)", async (native) => {
+    expect(await normalizeGithubActivity(source, { event: "status", delivery: "bad" }, native)).toMatchObject({
+      kind: "refused",
+    });
+  });
+
+  it("holds malformed PR associations and ignores unknown check actions", async () => {
+    const native = checkPayload("check_run");
+    const bad = { ...native, check_run: { ...check, pull_requests: [{ number: 7 }] } };
+    expect(await normalizeGithubActivity(source, { event: "check_run", delivery: "bad" }, bad)).toEqual({
+      kind: "refused",
+      reason: "invalid-payload",
+    });
+    expect(
+      await normalizeGithubActivity(
+        source,
+        { event: "check_run", delivery: "future" },
+        { ...native, action: "unknown" },
+      ),
+    ).toEqual({ kind: "ignored", reason: "action" });
+  });
+});

@@ -233,6 +233,12 @@ The same inactive converter now covers selected PR head/base and lifecycle updat
 
 The converter still has no receiver importer. Check/status and ref events, access changes, API baseline/recovery merging, matching, relevance, ordering and delivery remain pending. A converted fact is not proof of the latest head or a successful delivery. Step 4 remains in progress.
 
+### Check and status facts, 2026-10-15
+
+The same inactive converter now covers check runs, check suites and commit statuses. Each fact keeps the checked commit independently of any PR association. Forks can have no association, and an association can name a later PR head. The converter makes neither a routing decision nor a current-head claim. Native snapshots retain check output and action-request data; a rerun request remains source data.
+
+This extends the existing source-event boundary. The receiver and existing checks handler are unchanged. Ref/access events, API baseline and repair, source matching, relevance and producer activation remain pending. Step 4 is still in progress.
+
 ## Step 5: continue a review when its head changes
 
 **Current source:** [head classification](../../src/core/headMoved.ts), [review settlement](../../src/core/reviewRound.ts), [run loop](../../src/core/dispatch/runLoop.ts), [history](../../src/core/reviewHistory.ts), and existing workspace/runtime contracts.

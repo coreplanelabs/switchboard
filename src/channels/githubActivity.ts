@@ -74,6 +74,9 @@ export async function normalizeGithubActivity(
       "commit_comment",
       "pull_request",
       "pull_request_review_thread",
+      "check_run",
+      "check_suite",
+      "status",
     ].includes(event ?? "")
   )
     return { kind: "ignored", reason: "event" };
@@ -85,17 +88,24 @@ export async function normalizeGithubActivity(
   }
   if (!object(payload)) return refused("invalid-payload");
   const actions =
-    event === "pull_request"
-      ? ["opened", "edited", "reopened", "closed", "synchronize", "converted_to_draft", "ready_for_review"]
-      : event === "pull_request_review_thread"
-        ? ["resolved", "unresolved"]
-        : event === "commit_comment"
-          ? ["created"]
-          : event === "pull_request_review"
-            ? ["submitted", "edited", "dismissed"]
-            : ["created", "edited", "deleted"];
-  if (typeof payload.action !== "string") return refused("invalid-payload");
-  if (!actions.includes(payload.action)) return { kind: "ignored", reason: "action" };
+    event === "check_run"
+      ? ["created", "completed", "rerequested", "requested_action"]
+      : event === "check_suite"
+        ? ["requested", "completed", "rerequested"]
+        : event === "pull_request"
+          ? ["opened", "edited", "reopened", "closed", "synchronize", "converted_to_draft", "ready_for_review"]
+          : event === "pull_request_review_thread"
+            ? ["resolved", "unresolved"]
+            : event === "commit_comment"
+              ? ["created"]
+              : event === "pull_request_review"
+                ? ["submitted", "edited", "dismissed"]
+                : ["created", "edited", "deleted"];
+  // Commit status has no action field in GitHub's webhook contract.
+  if (event !== "status") {
+    if (typeof payload.action !== "string") return refused("invalid-payload");
+    if (!actions.includes(payload.action)) return { kind: "ignored", reason: "action" };
+  }
   if (!object(payload.installation) || !object(payload.repository)) return refused("invalid-payload");
   if (payload.installation.id !== installationId || payload.repository.id !== repositoryId)
     return refused("source-mismatch");
@@ -133,6 +143,81 @@ export async function normalizeGithubActivity(
       return refused("invalid-event");
     }
   };
+  if (event === "check_run" || event === "check_suite" || event === "status") {
+    const actor = authorOf(payload.sender ?? null);
+    if (actor === undefined) return refused("invalid-payload");
+    if (event === "status") {
+      if (
+        !id(payload.id) ||
+        !sha(payload.sha) ||
+        !text(payload.context) ||
+        !["pending", "success", "failure", "error"].some((state) => state === payload.state) ||
+        (payload.description !== null && typeof payload.description !== "string") ||
+        (payload.target_url !== undefined && payload.target_url !== null && typeof payload.target_url !== "string")
+      )
+        return refused("invalid-payload");
+      return finish(
+        "status",
+        payload.id,
+        "source-fact",
+        actor,
+        {
+          surface: "status",
+          id: payload.id,
+          commitSha: payload.sha,
+          context: payload.context,
+          state: payload.state,
+          description: payload.description,
+          targetUrl: payload.target_url ?? null,
+          actor,
+        },
+        payload,
+      );
+    }
+    const check = payload[event];
+    if (
+      !object(check) ||
+      !id(check.id) ||
+      !sha(check.head_sha) ||
+      (check.status !== null && !text(check.status)) ||
+      (check.conclusion !== null && !text(check.conclusion)) ||
+      !object(check.app) ||
+      !id(check.app.id) ||
+      !Array.isArray(check.pull_requests) ||
+      (event === "check_run" && (!text(check.name) || !text(check.status))) ||
+      (event === "check_suite" && optionalText(check.head_branch) === undefined)
+    )
+      return refused("invalid-payload");
+    const pullRequests: Record<string, unknown>[] = [];
+    for (const pull of check.pull_requests) {
+      if (!object(pull) || !id(pull.id) || !id(pull.number)) return refused("invalid-payload");
+      const head = branchOf(pull.head),
+        base = branchOf(pull.base);
+      if (!head || !base) return refused("invalid-payload");
+      pullRequests.push({ id: pull.id, number: pull.number, head, base });
+    }
+    // Associations can be empty for forks or name a PR's later head. They
+    // are source facts, never a selected PR or current-head assertion.
+    return finish(
+      event,
+      check.id,
+      "source-fact",
+      actor,
+      {
+        surface: event,
+        id: check.id,
+        action: payload.action,
+        commitSha: check.head_sha,
+        status: check.status,
+        conclusion: check.conclusion,
+        appId: check.app.id,
+        ...(event === "check_run" ? { name: check.name } : { headBranch: check.head_branch ?? null }),
+        pullRequests,
+        actor,
+      },
+      { action: payload.action, check, requestedAction: payload.requested_action ?? null },
+    );
+  }
   const pull = event === "issue_comment" ? payload.issue : payload.pull_request;
   if (event !== "commit_comment" && (!object(pull) || !id(pull.number))) return refused("invalid-payload");
   const pullNumber = object(pull) && id(pull.number) ? pull.number : undefined;
