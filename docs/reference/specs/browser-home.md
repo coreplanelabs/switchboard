@@ -2,8 +2,8 @@
 
 Home presents durable work independently of the process that most recently worked on it. The organization is fixed by the installation; browser input cannot select another organization's inventory or grant authority.
 
-- **Code**: `src/config.ts`, `src/config/validate.ts`, `src/channels/homeRuntime.ts`, `src/channels/homeRepositories.ts`, `src/core/home/service.ts`, `src/core/coordinator/inventory.ts`, `src/channels/homeView.ts`, `src/channels/homeSeed.ts`, `src/channels/webAssets.ts`, `web/green/`.
-- **Tests**: `src/config.test.ts`, `src/channels/homeRuntime.test.ts`, `src/channels/homeRepositories.test.ts`, `web/green/app.test.ts` (actual app hash navigation), `src/core/home/service.test.ts`, `src/core/coordinator/inventory.test.ts`, `deploy/cloudflare-memory/inventory.test.ts`, `src/channels/homeView.test.ts`, `src/channels/webAssets.test.ts`, `web/green/frontend.test.ts`, `web/green/pages/workViews.test.ts`, `web/green/pages/reportStates.test.ts`, `web/green/lib/homeSession.test.ts`, `web/green/lib/virtualRows.test.ts`, `web/green/components/threadSearch.test.ts`, `web/green/components/confirmationPrompt.test.ts`, `web/green/components/conversationDock.test.ts`, `web/green/components/unitList.test.ts`, `web/green/pages/pullRequest.test.ts`, `web/green/pages/discovery.test.ts`, `web/green/lib/pullRequest.test.ts`.
+- **Code**: `src/channels/homeHost.ts`, `src/channels/homeAccessEpoch.ts`, `src/channels/homeThreadProjection.ts`, `src/channels/workViewScope.ts`, `src/config.ts`, `src/config/validate.ts`, `src/channels/homeRuntime.ts`, `src/channels/homeRepositories.ts`, `src/core/home/service.ts`, `src/core/coordinator/inventory.ts`, `src/channels/homeView.ts`, `src/channels/homeSeed.ts`, `src/channels/webAssets.ts`, `web/green/`.
+- **Tests**: `src/channels/homeHost.test.ts`, `src/channels/homeAccessEpoch.test.ts`, `src/channels/homeThreadProjection.test.ts`, `src/channels/workViewScope.test.ts`, `src/config.test.ts`, `src/channels/homeRuntime.test.ts`, `src/channels/homeRepositories.test.ts`, `web/green/app.test.ts` (actual app hash navigation), `src/core/home/service.test.ts`, `src/core/coordinator/inventory.test.ts`, `deploy/cloudflare-memory/inventory.test.ts`, `src/channels/homeView.test.ts`, `src/channels/webAssets.test.ts`, `web/green/frontend.test.ts`, `web/green/pages/workViews.test.ts`, `web/green/pages/reportStates.test.ts`, `web/green/lib/homeSession.test.ts`, `web/green/lib/virtualRows.test.ts`, `web/green/components/threadSearch.test.ts`, `web/green/components/confirmationPrompt.test.ts`, `web/green/components/conversationDock.test.ts`, `web/green/components/unitList.test.ts`, `web/green/pages/pullRequest.test.ts`, `web/green/pages/discovery.test.ts`, `web/green/lib/pullRequest.test.ts`.
 
 ## Behavior
 
@@ -97,10 +97,30 @@ This support layer supplies the protected HTTP and live conversation contract. T
 | Repository choices and selected source use only current public capability and code policy; attachment context does not retarget the selected repository | `[unit]` `src/channels/homeRepositories.test.ts::Home repository selection::*` |
 
 
-## Conversation retention
+## Current-source host and focused thread readers
 
-The additive runtime remains unregistered until the production host supplies
-current-source policy and original-owner effect callbacks.
+These additive factories remain unregistered. The later production host supplies current native authentication, original-owner callbacks and IO.
+
+| Criterion | Proof |
+|---|---|
+| A browser worker audience retains its original source and refuses saved model input and output after the captured private-source policy changes | `[unit]` `src/channels/homeHost.test.ts::Home authenticated host::binds its private worker audience to the captured source policy before model input or delivery` |
+| A resumed private input must match its retained original owner, body and source; replies attach to that input's receipt and current proof must still pass | `[unit]` `src/channels/homeHost.test.ts::Home authenticated host::rehosts only the retained original input and sends its reply to that input's receipt`, `src/channels/homeHost.test.ts::Home authenticated host::refuses private history and delivery when the source loses its private audience proof` |
+| Mine includes work credited to the viewer while relayed service input retains its actual author | `[unit]` `src/channels/homeThreadProjection.test.ts::focused browser thread projection::keeps credited work in Mine without calling a relayed service request You` |
+| The authenticated host admits an HTTP message once, retains its original run, and preserves prototype-backed channel methods | `[unit]` `src/channels/homeHost.test.ts::Home authenticated host::admits through HTTP once, keeps its original run, and preserves prototype-backed IO` |
+| Deleted private content is excluded from the next owned input; a late private reply is refused after current source revocation | `[unit]` `src/channels/homeHost.test.ts::Home authenticated host::removes private content from the next owned input and refuses a late reply after revocation` |
+| Every delayed source delivery rechecks current organization permission, including status edits, upload completion and child-thread output | `[unit]` `src/channels/homeHost.test.ts::Home authenticated host::refuses delayed source delivery after organization read permission is removed` |
+| Older exact credential revocation changes the epoch even outside the latest 100 entries, while same-source new messages keep it stable | `[unit]` `src/channels/homeAccessEpoch.test.ts::complete Home access epoch::*` |
+| New valid credentials and threads preserve the epoch across host replacement; more than 200 authorized scopes remain readable through complete pages | `[unit]` `src/channels/homeAccessEpoch.test.ts::complete Home access epoch::keeps an existing draft and accepted owner epoch when new valid credential and thread scopes are added`; `src/channels/homeAccessEpoch.test.ts::complete Home access epoch::checks more than 200 distinct retained authorized scopes without refusing Home or discarding its epoch` |
+| An accepted owner can reply after a scope is added, but revocation and partial native permission loss still fence it | `[unit]` `src/channels/homeAccessEpoch.test.ts::complete Home access epoch::delivers an already accepted owner reply after another valid scope is added and fences it after revocation`; `src/channels/homeAccessEpoch.test.ts::complete Home access epoch::fences a partial retained native policy loss even while the source can still read the organization` |
+| An incomplete later catalogue page holds the frame instead of certifying its first 200 scopes | `[unit]` `src/channels/homeAccessEpoch.test.ts::complete Home access epoch::refuses an incomplete second catalogue page instead of certifying the first 200 scopes` |
+| A focused answer target includes the canonical full saved-question digest; unrelated transcript changes do not replace its target | `[unit]` `src/channels/homeThreadProjection.test.ts::focused browser thread projection::keeps the question revision stable across transcript changes and changes it with the complete owner question` |
+| A canonical accepted answer stays answered after consumption and clearing; a changed original-owner question becomes actionable | `[unit]` `src/channels/homeThreadProjection.test.ts::focused browser thread projection::keeps a consumed canonical answer from reopening the same saved question and offers a changed question` |
+| A protected delegated MCP source retains its actual service credential and exact credited person in its private audience; changed source policy fences delivery | `[unit]` `src/channels/homeHost.test.ts::Home authenticated host::supplies only the exact delegated MCP private audience and fences it after current source policy changes` |
+
+### Conversation retention
+
+The additive host and thread-reader factories remain unregistered until the
+production integration supplies their current-source policy and original-owner callbacks.
 
 `conversationRetention` configures private message content, bounded original source snapshots, and noncontent receipts independently. Defaults are 90, 30 and 365 days. The loader refuses unknown fields and day counts that are not positive safe durations. Source snapshot expiry is anchored to the original admission time, not the time an owner consumes or resumes it. Private history keeps its 90-day content period and receipts keep their 365-day replay and attribution period. The dispatcher rereads the exact original retained ledger body before starting a delayed task; deletion or snapshot expiry refuses that task without a new model run. Bodyless original attribution does not restore deleted input bytes.
 
@@ -109,3 +129,15 @@ current-source policy and original-owner effect callbacks.
 | Default and configured conversation retention remain separate; invalid or unknown fields refuse loading | `[unit]` `src/config.test.ts::conversation retention config::*` |
 | Snapshot expiry refuses original-owner consumption while private history and the original replay receipt remain retained | `[unit]` `src/core/organization/runtime.test.ts::organization runtime::expires the original source snapshot before consuming an owner while private history and replay receipts remain retained` |
 | A delayed launch after the original snapshot deadline, or after explicit body deletion, refuses before model execution | `[unit]` `src/core/organization/runtime.test.ts::organization runtime::refuses a delayed launch after its original snapshot deadline and refuses an explicitly cleared snapshot before executing` |
+
+
+### Proved history authors
+
+User history carries only its protected original source author. Assistant turns have no user author; current permission loss during the read holds the entire private context.
+
+| Criterion | Proof |
+|---|---|
+| Private model history preserves the protected original user and never stamps the current viewer on assistant text | `[unit]` `src/channels/homeHost.test.ts::Home authenticated host::preserves original user authors in private history and fences a policy change during the read` |
+| Read projections overwrite false author stamps after current source proof, without persisting them | `[unit]` `src/core/organization/service.test.ts::organization authenticated service::projects only protected source authors and discards supplied read author stamps` |
+
+| Opened child threads retain local replies and native history; current source loss still refuses publication, and the broad stream receives no child reply | `[unit]` `src/channels/homeHost.test.ts::Home authenticated host::keeps opened thread replies and history local while preserving current source checks` |
