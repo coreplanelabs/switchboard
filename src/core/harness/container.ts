@@ -1254,6 +1254,7 @@ export class ExecHarnessContainer implements HarnessContainer {
       // once after an answered infrastructure failure; no input is resent.
       const reread =
         logObservation && error instanceof ExecInfraError && error.origin === "resident" && error.reason === "answered";
+      if (reread) console.warn("[harness] a log observation is re-read once after an answered resident failure");
       if (!(error instanceof ExecControlResetError) && !reread) throw error;
       if (!idempotent) throw new HarnessContainerControlResetError(input.kind, error.message);
       try {
