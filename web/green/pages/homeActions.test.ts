@@ -48,6 +48,7 @@ const need: HomeUnit = {
 };
 const seed = {
   page: "fleetHome" as const,
+  asUser: { id: "access:alice" },
   attentionRecipient: "access:alice",
   answers: { "i:q": { thread: "slack:C1:1", revision: 9, question: "Approve staging?" } },
   snapshot: {
@@ -87,6 +88,297 @@ const json = (value: unknown) =>
   new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
 const host = defineComponent({ render: () => h("div", [h(Home), h(ConversationDock)]) });
 describe("Home actions", () => {
+  it("keeps owned work visible when the first chat frame matches the page account and organization", async () => {
+    const home = createHomeSession((async () => json(session())) as typeof fetch, fakeEventSourceFactory().factory);
+    const page = mountApp(Home, { seed, provides: [[HomeSessionKey, home]] });
+    expect(page.text()).toContain("Verify staging");
+    await home.load();
+    await flushPromises();
+    expect(page.text()).toContain("Verify staging");
+    expect(page.text()).not.toContain("Work access changed");
+  });
+  it.each([
+    ["first account frame", { actor: "access:bob" }, false],
+    ["first organization frame", { organization: "other-org" }, false],
+    ["already-loaded foreign account", { actor: "access:bob" }, true],
+  ] as const)("hides work and saved choices for a mismatched %s", async (_case, changed, loaded) => {
+    const home = createHomeSession(
+      (async () => json({ ...session(), ...changed })) as typeof fetch,
+      fakeEventSourceFactory().factory,
+    );
+    if (loaded) await home.load();
+    let writes = 0;
+    vi.stubGlobal("fetch", async () => {
+      if (++writes === 1)
+        return new Response(
+          JSON.stringify({
+            error: "confirmation_required",
+            confirmation: {
+              id: "saved-old-account",
+              line: "pulls merge sample/api#42",
+            },
+          }),
+          { status: 409 },
+        );
+      throw new Error("Unknown original saved choice");
+    });
+    const page = mountApp(Home, {
+      seed: { ...seed, answers: {}, actions: { "i:q": { kind: "merge", pr: "sample/api#42", head: "a".repeat(40) } } },
+      provides: [[HomeSessionKey, home]],
+    });
+    if (!loaded) {
+      for (let click = 0; click < 2; click++) {
+        await page
+          .findAll("button")
+          .find((button) => button.text() === "Merge")!
+          .trigger("click");
+        await flushPromises();
+      }
+      expect(page.text()).toContain("Check saved action");
+      await home.load();
+    }
+    await flushPromises();
+    expect(page.text()).not.toContain("Verify staging");
+    expect(page.text()).not.toContain("pulls merge sample/api#42");
+    expect(page.findAll("button").some((button) => button.text() === "Check saved action")).toBe(false);
+    expect(page.text()).toContain("Work access changed");
+  });
+  it("refreshes only work after a known merge and preserves the original private draft and unknown submission", async () => {
+    const privateSends: unknown[] = [];
+    const home = createHomeSession(
+      (async (url: string, init?: RequestInit) => {
+        if (url === "/home/session") return json(session());
+        if (url === "/home/send") {
+          privateSends.push(JSON.parse(String(init?.body)));
+          throw new Error("Unknown private outcome");
+        }
+        throw new Error(`Unexpected private request ${url}`);
+      }) as typeof fetch,
+      fakeEventSourceFactory().factory,
+    );
+    await home.load();
+    home.text.value = "Keep this private draft";
+    await home.submit();
+    expect(home.pendingSubmission.value).toBe(true);
+    const original = privateSends[0];
+    const reads: string[] = [];
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url === "/api/pulls.merge") {
+        writes++;
+        return writes === 1
+          ? new Response(
+              JSON.stringify({
+                error: "confirmation_required",
+                confirmation: { id: "saved-merge", line: "pulls merge sample/api#42" },
+              }),
+              { status: 409 },
+            )
+          : json({ kind: "merged" });
+      }
+      reads.push(url);
+      return json({ ...seed.snapshot, needsYou: [], pipelines: [], observation: "observed" });
+    });
+    const page = mountApp(Home, {
+      seed: { ...seed, answers: {}, actions: { "i:q": { kind: "merge", pr: "sample/api#42", head: "a".repeat(40) } } },
+      provides: [[HomeSessionKey, home]],
+    });
+    await page
+      .findAll("button")
+      .find((button) => button.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    await page
+      .findAll("button")
+      .find((button) => button.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    expect(reads).toEqual(["/home/snapshot?observe=i%3Aq"]);
+    expect(page.text()).not.toContain("Verify staging");
+    expect(page.text()).toContain("Completed work updated.");
+    expect(home.text.value).toBe("Keep this private draft");
+    expect(home.pendingSubmission.value).toBe(true);
+    await home.submit();
+    expect(privateSends).toEqual([original, original]);
+    expect(writes).toBe(2);
+    home.dispose();
+  });
+  it("keeps an unknown sibling saved choice outside Needs you after a known merge refresh", async () => {
+    const second = { ...need, unit: { ...need.unit, unit: "i:second", id: "second", title: "Second work" } };
+    const bodies: unknown[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (url.startsWith("/home/snapshot"))
+        return json({ ...seed.snapshot, needsYou: [], pipelines: [], observation: "observed" });
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      if (!body._confirmation)
+        return new Response(
+          JSON.stringify({
+            error: "confirmation_required",
+            confirmation: {
+              id: body.pr.endsWith("42") ? "saved-first" : "saved-second",
+              line: `pulls merge ${body.pr}`,
+            },
+          }),
+          { status: 409 },
+        );
+      if (body._confirmation.id === "saved-first") throw new Error("Unknown first merge outcome");
+      return json({ kind: "merged" });
+    });
+    const page = mountApp(Home, {
+      seed: {
+        ...seed,
+        answers: {},
+        snapshot: { ...seed.snapshot, needsYou: [need, second] },
+        actions: {
+          "i:q": { kind: "merge", pr: "sample/api#42", head: "a".repeat(40) },
+          "i:second": { kind: "merge", pr: "sample/api#43", head: "a".repeat(40) },
+        },
+      },
+    });
+    const first = () => page.get('[data-unit="i:q"]');
+    await first()
+      .findAll("button")
+      .find((b) => b.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    await first()
+      .findAll("button")
+      .find((b) => b.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    const other = () => page.get('[data-unit="i:second"]');
+    await other()
+      .findAll("button")
+      .find((b) => b.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    await other()
+      .findAll("button")
+      .find((b) => b.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    expect(page.find('[data-unit="i:q"]').exists()).toBe(false);
+    expect(page.find('[data-unit="i:second"]').exists()).toBe(false);
+    const saved = page.get('[aria-label="Saved actions with unknown results"]');
+    expect(saved.text()).toContain("Verify staging");
+    expect(saved.text()).toContain("pulls merge sample/api#42");
+    await saved
+      .findAll("button")
+      .find((b) => b.text() === "Check saved action")!
+      .trigger("click");
+    await flushPromises();
+    expect(bodies.at(-1)).toEqual({ _confirmation: { kind: "confirm", id: "saved-first" } });
+    expect(bodies.filter((body) => (body as { pr?: string }).pr === "sample/api#42")).toHaveLength(1);
+  });
+  it.each(["view change", "unmount"])(
+    "ignores a late work response after %s and drops old saved-choice context",
+    async (change) => {
+      const home = createHomeSession((async () => json(session())) as typeof fetch, fakeEventSourceFactory().factory);
+      await home.load();
+      const second = { ...need, unit: { ...need.unit, unit: "i:second", id: "second", title: "Second work" } };
+      let release!: (response: Response) => void;
+      const writes: unknown[] = [];
+      vi.spyOn(browser, "reload").mockImplementation(() => {});
+      vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+        if (url.startsWith("/home/snapshot"))
+          return new Promise<Response>((resolve) => {
+            release = resolve;
+          });
+        if (url === "/runs/view-as") return new Response(null, { status: 204 });
+        const body = JSON.parse(String(init?.body));
+        writes.push(body);
+        if (!body._confirmation)
+          return new Response(
+            JSON.stringify({
+              error: "confirmation_required",
+              confirmation: {
+                id: body.pr.endsWith("42") ? "saved-first" : "saved-second",
+                line: `pulls merge ${body.pr}`,
+              },
+            }),
+            { status: 409 },
+          );
+        if (body._confirmation.id === "saved-first") throw new Error("Unknown first merge outcome");
+        return json({ kind: "merged" });
+      });
+      const page = mountApp(Shell, {
+        slots: { default: () => h(Home) },
+        provides: [[HomeSessionKey, home]],
+        seed: {
+          ...seed,
+          answers: {},
+          dataView: { mode: "mine", canViewEveryone: true },
+          viewAs: { people: [{ id: "slack:bob", name: "Bob" }] },
+          snapshot: { ...seed.snapshot, needsYou: [need, second] },
+          actions: {
+            "i:q": { kind: "merge", pr: "sample/api#42", head: "a".repeat(40) },
+            "i:second": { kind: "merge", pr: "sample/api#43", head: "a".repeat(40) },
+          },
+        },
+      });
+      for (const unit of ["i:q", "i:second"]) {
+        for (let i = 0; i < 2; i++) {
+          await page
+            .get(`[data-unit="${unit}"]`)
+            .findAll("button")
+            .find((b) => b.text() === "Merge")!
+            .trigger("click");
+          await flushPromises();
+        }
+      }
+      if (change === "view change") {
+        await page.get('[aria-label="User menu"]').trigger("click");
+        await page.get('[aria-label="View as person"]').setValue("person:slack:bob");
+        await flushPromises();
+        expect(home.scopeChanging.value).toBe(true);
+      } else page.unmount();
+      release(
+        json({
+          ...seed.snapshot,
+          needsYou: [{ ...need, unit: { ...need.unit, title: "Late private work" } }],
+          observation: "observed",
+        }),
+      );
+      await flushPromises();
+      expect(document.body.textContent).not.toContain("Late private work");
+      expect(document.body.textContent).not.toContain("Verify staging");
+      expect(document.body.textContent).not.toContain("pulls merge sample/api#42");
+      expect(writes).toHaveLength(4);
+      home.dispose();
+    },
+  );
+  it("hides old work when the targeted read loses permission instead of retaining private rows", async () => {
+    let writes = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.startsWith("/home/snapshot")) return new Response("not found", { status: 404 });
+      return ++writes === 1
+        ? new Response(
+            JSON.stringify({
+              error: "confirmation_required",
+              confirmation: { id: "saved", line: "pulls merge sample/api#42" },
+            }),
+            { status: 409 },
+          )
+        : json({ kind: "merged" });
+    });
+    const page = mountApp(Home, {
+      seed: { ...seed, answers: {}, actions: { "i:q": { kind: "merge", pr: "sample/api#42", head: "a".repeat(40) } } },
+    });
+    await page
+      .findAll("button")
+      .find((b) => b.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    await page
+      .findAll("button")
+      .find((b) => b.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    expect(page.text()).not.toContain("Verify staging");
+    expect(page.find('[aria-label="Saved actions with unknown results"]').exists()).toBe(false);
+    expect(page.text()).toContain("Work access changed. This page's data is hidden.");
+  });
   it("merges an owned completed review through its exact saved command choice without opening a reply composer", async () => {
     const calls: unknown[] = [];
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {

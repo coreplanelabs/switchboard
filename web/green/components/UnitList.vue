@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useMediaQuery } from "@vueuse/core";
-import type { HomeAnswerTarget, HomeMergeAction } from "@core/channels/homeSeed.js";
+import type {
+  HomeAnswerTarget,
+  HomeMergeAction,
+  HomeConfirmationOffer,
+  HomeConfirmationChoice,
+} from "@core/channels/homeSeed.js";
 import MergeAction from "./MergeAction.vue";
 import { SeedKey, useViewingAs } from "../../src/lib/seed";
 import { useHomeSession } from "../lib/homeSession";
@@ -19,6 +24,17 @@ const props = defineProps<{
   attentionRecipients?: string[];
   answers?: Record<string, HomeAnswerTarget>;
   actions?: Record<string, HomeMergeAction>;
+  actionScope?: string | null;
+  savedActions?: Record<string, { offer: HomeConfirmationOffer; pending: HomeConfirmationChoice }>;
+}>();
+const emit = defineEmits<{
+  merged: [unit: string];
+  settled: [unit: string];
+  unknown: [
+    unit: string,
+    saved: { offer: HomeConfirmationOffer; pending: HomeConfirmationChoice },
+    scope: string | null | undefined,
+  ];
 }>();
 const query = ref("");
 const home = useHomeSession();
@@ -219,6 +235,11 @@ const state = (row: (typeof props.rows)[number]) => {
               <MergeAction
                 v-if="urgent && actions?.[item.data.unit.unit] && canReply"
                 :action="actions[item.data.unit.unit]"
+                :scope="actionScope"
+                :saved="savedActions?.[item.data.unit.unit]"
+                @merged="emit('merged', item.data.unit.unit)"
+                @settled="emit('settled', item.data.unit.unit)"
+                @unknown="(saved, scope) => emit('unknown', item.data.unit.unit, saved, scope)"
               />
               <button
                 v-if="urgent && answers?.[item.data.unit.unit] && home && canReply && !home.inlineAnswer.value"
