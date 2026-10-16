@@ -2834,21 +2834,28 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
   /** The last pre-upload read is one registry transaction: an admitted call,
    * replaced drain, or expiring fence makes the answer fail closed. */
+  private async deployFenceVerified(
+    txn: Pick<DurableObjectStorage, "get" | "list">,
+    since: string,
+    until: string,
+    versionId: string | null,
+  ): Promise<boolean> {
+    const now = systemClock();
+    const current = liveDrain(await txn.get(DRAIN_KEY), now);
+    const active = await this.getDeployObligations(txn);
+    const maintenance = await this.getStagingMaintenance(txn);
+    return (
+      deployFenceReady(current, now) &&
+      current?.since === since &&
+      current.until === until &&
+      current.swapVersion === versionId &&
+      active.blocking === 0 &&
+      (maintenance?.state !== "held" || active.qualified)
+    );
+  }
+
   async verifyDeployFence(since: string, until: string, versionId: string | null): Promise<boolean> {
-    return this.ctx.storage.transaction(async (txn) => {
-      const now = systemClock();
-      const current = liveDrain(await txn.get(DRAIN_KEY), now);
-      const active = await this.getDeployObligations(txn);
-      const maintenance = await this.getStagingMaintenance(txn);
-      return (
-        deployFenceReady(current, now) &&
-        current?.since === since &&
-        current.until === until &&
-        current.swapVersion === versionId &&
-        active.blocking === 0 &&
-        (maintenance?.state !== "held" || active.qualified)
-      );
-    });
+    return this.ctx.storage.transaction((txn) => this.deployFenceVerified(txn, since, until, versionId));
   }
 
   /** Admin-only by construction (reached solely via POST /drain): replaces
@@ -2897,38 +2904,44 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
   /** Close the reattach exception before reading deploy activity. The same
    * durable drain survives the Worker isolate swap and expires by itself. */
-  async setDeployFence(versionId: string | null, attempt?: unknown): Promise<DrainRecord | null> {
-    return this.ctx.storage.transaction(async (txn) => {
-      if (!versionId) return null;
-      const now = systemClock();
-      const held = await this.getStagingMaintenance(txn);
-      if (held?.state === "held" && !selectedStagingAttempt(held, attempt, now)) return null;
-      const record = liveDrain(await txn.get(DRAIN_KEY), now);
-      if (record === null || record.swapFence) return null;
-      const fenced = {
-        ...record,
-        swapFence: true,
-        swapBuild: BUILD_ID,
-        swapVersion: versionId,
-        swapAt: new Date(now).toISOString(),
-      } as const;
-      if (!deployFenceReady(fenced, now)) return null;
-      if (held?.state === "held") {
-        const raw = await txn.get(stagingEpisodeKeys(held?.policy).window);
-        if (raw !== undefined) {
-          const window = releaseWindowSchema.safeParse(raw);
-          const counts = await this.getDeployObligations(txn);
-          if (!window.success || window.data.state !== "claimed" || !counts.qualified) return null;
-          await txn.put(stagingEpisodeKeys(held?.policy).window, {
-            ...window.data,
-            state: "fenced",
-            drain: { since: fenced.since, until: fenced.until, versionId },
-          });
-        }
+  private async installDeployFence(
+    txn: DurableObjectTransaction,
+    versionId: string | null,
+    attempt?: unknown,
+  ): Promise<DrainRecord | null> {
+    if (!versionId) return null;
+    const now = systemClock();
+    const held = await this.getStagingMaintenance(txn);
+    if (held?.state === "held" && !selectedStagingAttempt(held, attempt, now)) return null;
+    const record = liveDrain(await txn.get(DRAIN_KEY), now);
+    if (record === null || record.swapFence) return null;
+    const fenced = {
+      ...record,
+      swapFence: true,
+      swapBuild: BUILD_ID,
+      swapVersion: versionId,
+      swapAt: new Date(now).toISOString(),
+    } as const;
+    if (!deployFenceReady(fenced, now)) return null;
+    if (held?.state === "held") {
+      const raw = await txn.get(stagingEpisodeKeys(held?.policy).window);
+      if (raw !== undefined) {
+        const window = releaseWindowSchema.safeParse(raw);
+        const counts = await this.getDeployObligations(txn);
+        if (!window.success || window.data.state !== "claimed" || !counts.qualified) return null;
+        await txn.put(stagingEpisodeKeys(held?.policy).window, {
+          ...window.data,
+          state: "fenced",
+          drain: { since: fenced.since, until: fenced.until, versionId },
+        });
       }
-      await txn.put(DRAIN_KEY, fenced);
-      return fenced;
-    });
+    }
+    await txn.put(DRAIN_KEY, fenced);
+    return fenced;
+  }
+
+  async setDeployFence(versionId: string | null, attempt?: unknown): Promise<DrainRecord | null> {
+    return this.ctx.storage.transaction((txn) => this.installDeployFence(txn, versionId, attempt));
   }
 
   /** A refused preflight reopens owned reattach, but cannot clear a newer

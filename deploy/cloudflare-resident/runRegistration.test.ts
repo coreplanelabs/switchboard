@@ -307,7 +307,7 @@ describe("deploy registration activity", () => {
       source.indexOf("export class ResidentRegistryDO"),
       source.indexOf("export class ResidentDO"),
     );
-    const start = methodOf(registry, "setDeployFence")!;
+    const start = methodOf(registry, "installDeployFence")!;
     const activity = method("getResidentDeployInfo");
     const attach = method("attachThreadTraced");
     const route = source.slice(source.indexOf("async function handleDeployFence"));
@@ -317,7 +317,7 @@ describe("deploy registration activity", () => {
       route.indexOf("getResidentDeployInfo()"),
     );
     expect(route.indexOf("getResidentDeployInfo()")).toBeLessThan(route.indexOf("registry.verifyDeployFence("));
-    expect(methodOf(registry, "verifyDeployFence")).toContain("deployFenceReady(current, now)");
+    expect(methodOf(registry, "deployFenceVerified")).toContain("deployFenceReady(current, now)");
     expect(attach).toContain("drain.swapFence || !registered");
     expect(activity).toContain("this.runsInFlightCount()");
     expect(activity).toContain("this.threadOpsInFlight.get(binding.threadKey)");
@@ -332,7 +332,7 @@ describe("deploy registration activity", () => {
     );
     const begin = methodOf(registry, "beginDeployAdmission")!;
     const end = methodOf(registry, "endDeployAdmission")!;
-    const verify = methodOf(registry, "verifyDeployFence")!;
+    const verify = methodOf(registry, "deployFenceVerified")!;
     const route = source.slice(source.indexOf("async function handleDeployFence"));
     expect(begin).toContain("swapFence");
     expect(begin).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
@@ -379,7 +379,7 @@ describe("deploy registration activity", () => {
     expect(methodOf(registry, "beginDeployReconcileAdmission")).toContain(
       "postUploadVersion(record, versionId, versionTimestamp)",
     );
-    expect(methodOf(registry, "setDeployFence")).toContain("swapVersion");
+    expect(methodOf(registry, "installDeployFence")).toContain("swapVersion");
     expect(methodOf(registry, "clearDrain")).toContain("postUploadVersion(record, versionId, versionTimestamp)");
     expect(source).toContain("CF_VERSION_METADATA");
   });
