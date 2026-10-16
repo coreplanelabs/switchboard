@@ -101,6 +101,11 @@ export interface OrganizationAuthenticationOptions {
     attestation?: unknown,
     reference?: OrganizationSourceReference,
   ): Promise<NativeOrganizationProof>;
+  currentMcp?(
+    identity: ExternalIdentity | IngressIdentity,
+    attestation?: unknown,
+    reference?: OrganizationSourceReference,
+  ): Promise<NativeOrganizationProof>;
   questionOwner?(unitKey: string): Promise<OrganizationQuestionOwner>;
   verifyDelegation?(
     source: OrganizationSource,
@@ -123,7 +128,10 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
     identity: ExternalIdentity | IngressIdentity,
   ): ExternalIdentity | undefined {
     if ("issuer" in identity) return mapped(source, identity) ? identity : undefined;
-    const mappings = options.mappings.filter((m) => m.source === source && m.organization === options.organization);
+    const all = options.mappings.filter((m) => m.source === source && m.organization === options.organization);
+    // The added SSO realm must not make existing raw device/static keys ambiguous.
+    const installed = all.filter((m) => m.issuer === `installation:${options.organization}:${source}`);
+    const mappings = source === "mcp" && installed.length ? installed : all;
     const realms = new Map(mappings.map((m) => [JSON.stringify([m.issuer, m.tenant]), m]));
     if (realms.size !== 1) return;
     const realm = [...realms.values()][0]!;
@@ -187,13 +195,15 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
     original?: OrganizationSourceReference,
   ): Promise<OrganizationAuthenticationResult> {
     try {
-      const identity = external(evidence.source, evidence.identity);
+      let identity = external(evidence.source, evidence.identity);
       if (!identity) return denied();
       const reference: OrganizationSourceReference = {
         actorId:
           original?.actorId ??
           (evidence.source === "http" || evidence.source === "mcp"
-            ? `${evidence.source}:${identity.subject}`
+            ? evidence.source === "mcp" && "session" in evidence.identity
+              ? (msg.authenticatedAs ?? `${evidence.source}:${identity.subject}`)
+              : `${evidence.source}:${identity.subject}`
             : evidence.source === "cli"
               ? CLI_ACTOR.id
               : (msg.postedBy ?? msg.userId)),
@@ -218,7 +228,19 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         nativeEpoch = "";
       let token: McpIdentity | IngressIdentity | undefined;
       let approvedPrincipal: Actor | undefined;
-      if (evidence.source === "http" || evidence.source === "mcp") {
+      if (evidence.source === "mcp" && ("session" in evidence.identity || original?.actorId.startsWith("access:"))) {
+        const proof = await options.currentMcp?.(evidence.identity, evidence.attestation, reference);
+        if (!proof) return denied("unavailable");
+        if (proof.status !== "verified") return denied(proof.status);
+        if (!mapped("mcp", proof.identity) || proof.actorId !== reference.actorId) return denied();
+        identity = proof.identity;
+        const resolved = await actorFor(proof, reference);
+        if (!resolved) return denied("unavailable");
+        actor = resolved;
+        kind = proof.kind;
+        privateSource = proof.privateSource;
+        nativeEpoch = proof.epoch;
+      } else if (evidence.source === "http" || evidence.source === "mcp") {
         const digest = evidence.credentialDigest;
         if (!digest || !/^[0-9a-f]{64}$/.test(digest)) return denied();
         if (evidence.source === "mcp") {
@@ -524,6 +546,7 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
   return {
     resolveNative,
     resolveEnvelope,
+
     resolveQuestion: async (
       current: ResolvedOrganizationAuthentication,
       unitKey: string,

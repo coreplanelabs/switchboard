@@ -52,7 +52,7 @@ import { type PersonLookup, type Requester } from "./requester.js";
 import { digestBearer, type PersonalTokenStore } from "../mcp/personalTokens.js";
 import { redactAndCap } from "../core/redact.js";
 import type { DashboardVerifier } from "./dashboardAuth.js";
-import { callerFor, originAllowed, type CommandHttpOptions } from "./commandHttp.js";
+import { callerFor, callerIdFor, originAllowed, type CommandHttpOptions } from "./commandHttp.js";
 import { requesterOf } from "./web.js";
 import { dispatchSingleShot, SingleShotIO } from "./singleShotDispatch.js";
 import {
@@ -388,7 +388,9 @@ async function route(
           })
         : undefined;
       const requester = sessionCaller
-        ? { ...requesterOf(sessionCaller.actor, identity.session!), authenticatedAs: sessionCaller.id }
+        ? options.admit && name === "dispatch"
+          ? { userId: sessionCaller.id, authenticatedAs: sessionCaller.id }
+          : { ...requesterOf(sessionCaller.actor, identity.session!), authenticatedAs: sessionCaller.id }
         : options.admit && name === "dispatch" && !identity.verifiedUserId
           ? { userId: `mcp:${identity.subject}` }
           : await mcpRequester(identity, options);
@@ -521,7 +523,7 @@ async function route(
       if (options.admit) {
         try {
           const admitted = admissionResponse(
-            await options.admit(msg, io, { source: "mcp", identity, credentialDigest: connectionId }),
+            await options.admit(msg, io, nativeEvidence(identity, connectionId, options)),
           );
           const admission = (admitted.body as { admission: { status: string } }).admission;
           return ok(id, {
@@ -639,6 +641,7 @@ async function authorizeMcpRequest(
     const raw = sso.credentialHeader ? headers[sso.credentialHeader] : undefined;
     try {
       const verdict = await sso.verify({ headers });
+      if (!verdict.ok && verdict.status >= 500) return { status: 503 };
       if (verdict.ok && verdict.identity.sub) {
         if (!originAllowed({ headers }, options)) return { status: 403 };
         const credential = bearerFrom(headers) || (Array.isArray(raw) ? raw[0] : raw);
@@ -651,6 +654,7 @@ async function authorizeMcpRequest(
           revalidateConnection: async (id) => {
             if (id !== connectionId) return undefined;
             const current = await sso.verify({ headers });
+            if (!current.ok && current.status >= 500) throw new Error("MCP source authentication unavailable");
             return current.ok && current.identity.sub === identity.subject
               ? { subject: current.identity.sub, session: current.identity }
               : undefined;
@@ -676,6 +680,24 @@ function mcpErrorForStatus(status: number): McpResponse {
   if (status === 503) return { status, body: err(null, AUTH_ERROR, "MCP access unavailable") };
   if (status === 403) return { status, body: err(null, AUTH_ERROR, "forbidden") };
   return { status: 401, body: err(null, AUTH_ERROR, "unauthorized") };
+}
+
+/** Native source proof is host-only. The verifier closure is never persisted. */
+function nativeEvidence(identity: McpIdentity, connectionId: string, options: McpOptions): OrganizationNativeEvidence {
+  return {
+    source: "mcp",
+    identity,
+    credentialDigest: connectionId,
+    ...(identity.session && options.revalidateConnection
+      ? {
+          attestation: {
+            kind: "mcp-sso",
+            mode: options.sso?.mode,
+            revalidateConnection: options.revalidateConnection,
+          },
+        }
+      : {}),
+  };
 }
 
 /** Normalize the credential once for personal lookup and connection binding. */
@@ -867,7 +889,12 @@ async function approvalResult(
     (response.action === "decline" || response.action === "cancel");
   const kind = cancel || declined || decision?.decision === "cancel" ? ("cancel" as const) : ("confirm" as const);
   const identity = await connectionIdentity(connectionId, options);
-  const requester = identity ? await mcpRequester(identity, options) : undefined;
+  const requester =
+    identity?.session && (row?.originalOrganization || (!row && options.replayChoice))
+      ? { userId: callerIdFor(identity.session), authenticatedAs: callerIdFor(identity.session) }
+      : identity
+        ? await mcpRequester(identity, options)
+        : undefined;
   if (!row && identity && requester && options.replayChoice) {
     const channelId = `mcp:${identity.channel ?? DEFAULT_CHANNEL}`;
     const prior = await options.replayChoice(
@@ -877,8 +904,17 @@ async function approvalResult(
         threadKey: `${channelId}:${DEFAULT_THREAD}`,
         text: "",
         messageId: nativeChoiceMessageId(offerId, kind),
+        ...(identity.session
+          ? {
+              approvalConnection: {
+                id: connectionId,
+                credentialId: actor.id,
+                requestHash: requestHash(cancel ? "approval_cancel" : "approval_resume", { id: offerId }),
+              },
+            }
+          : {}),
       },
-      { source: "mcp", identity, credentialDigest: connectionId },
+      nativeEvidence(identity, connectionId, options),
       { kind, id: offerId },
     );
     if (prior) return nativeChoiceResponse(id, prior);
@@ -911,20 +947,24 @@ async function approvalResult(
   const nativeAdmission = async (saved: typeof row): Promise<JsonRpcResultBody | JsonRpcErrorBody> => {
     if (!options.admit) return err(id, AUTH_ERROR, "The original choice owner is unavailable; nothing ran");
     const current = await connectionIdentity(connectionId, options);
-    const currentRequester = current ? await mcpRequester(current, options) : undefined;
+    const currentRequester = current?.session
+      ? { userId: callerIdFor(current.session), authenticatedAs: callerIdFor(current.session) }
+      : current
+        ? await mcpRequester(current, options)
+        : undefined;
     if (
       !current ||
       !currentRequester ||
       currentRequester.userId !== saved.message.userId ||
-      `mcp:${current.subject}` !== actor.id ||
+      (current.session ? callerIdFor(current.session) : `mcp:${current.subject}`) !== actor.id ||
       (saved.message.authenticatedAs ?? saved.message.userId) !== actor.id
     )
       return err(id, AUTH_ERROR, "This connection or its verified identity was revoked; nothing ran");
-    const caller = toCaller(
-      current,
-      options.grantsFor ?? ((id: string) => deps.config.grantsFor(id)),
-      currentRequester,
-    );
+    const caller = current.session
+      ? await callerFor(current.session, {
+          grantsFor: options.grantsFor ?? ((id: string) => deps.config.grantsFor(id)),
+        })
+      : toCaller(current, options.grantsFor ?? ((id: string) => deps.config.grantsFor(id)), currentRequester);
     if (!allowedChoice(saved, caller))
       return err(id, AUTH_ERROR, "Current permissions do not allow this saved action; nothing ran");
     return nativeChoiceResponse(
@@ -941,7 +981,7 @@ async function approvalResult(
           messageId: nativeChoiceMessageId(offerId, kind),
         },
         new McpIO([], saved.message.threadKey),
-        { source: "mcp", identity: current, credentialDigest: connectionId },
+        nativeEvidence(current, connectionId, options),
         { kind, id: offerId },
       ),
     );
@@ -950,7 +990,11 @@ async function approvalResult(
     if (!identity || requester?.userId !== row.message.userId)
       return err(id, AUTH_ERROR, "This connection or its verified identity was revoked; nothing ran");
     // Refuse current command loss before recording a new consent or consuming the saved id.
-    const caller = toCaller(identity, options.grantsFor ?? ((id: string) => deps.config.grantsFor(id)), requester);
+    const caller = identity.session
+      ? await callerFor(identity.session, {
+          grantsFor: options.grantsFor ?? ((id: string) => deps.config.grantsFor(id)),
+        })
+      : toCaller(identity, options.grantsFor ?? ((id: string) => deps.config.grantsFor(id)), requester);
     if (!allowedChoice(row, caller))
       return err(id, AUTH_ERROR, "Current permissions do not allow this saved action; nothing ran");
   }
