@@ -1,3 +1,4 @@
+import { operatorSettingsEvidence } from "./core/testing/operatorSettings.js";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -63,7 +64,13 @@ beforeAll(async () => {
                     tool_calls: [
                       {
                         index: 0,
-                        function: { arguments: JSON.stringify({ preset: "general", reason: "answer the ask" }) },
+                        function: {
+                          arguments: JSON.stringify({
+                            preset: "general",
+                            reason: "answer the ask",
+                            settingsEvidence: operatorSettingsEvidence(),
+                          }),
+                        },
                       },
                     ],
                   },

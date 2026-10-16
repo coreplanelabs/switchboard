@@ -20,6 +20,7 @@ import {
   operatorTools,
 } from "./operator.js";
 import { routableCommands } from "./route.js";
+import { operatorSettingsEvidence } from "../testing/operatorSettings.js";
 
 interface CapturedRequest {
   url: string;
@@ -65,13 +66,16 @@ function validateResponsesPayload(body: Record<string, unknown>): Response {
   });
 }
 
-function bindReviewStream(): string {
-  const input = JSON.stringify({
+function bindReviewStream(
+  arguments_: Record<string, unknown> = {
     preset: "review",
     repo: "acme/api",
     prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
     reason: "the request names a pull request",
-  });
+    settingsEvidence: operatorSettingsEvidence(),
+  },
+): string {
+  const input = JSON.stringify(arguments_);
   const call = {
     id: "fc_bind_review",
     type: "function_call",
@@ -148,6 +152,76 @@ function fullCatalogue() {
 }
 
 describe("the direct operator on the Responses wire", () => {
+  it("repairs an omitted control assessment through the actual Responses wire before starting Ship review", async () => {
+    const target = { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" };
+    const replies = [
+      {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: target,
+        reason: "Review the specified pull request and provide high-quality findings.",
+      },
+      {
+        preset: "ship",
+        shipEntry: "review",
+        repo: "acme/api",
+        prTarget: target,
+        renewals: 2,
+        settingsEvidence: operatorSettingsEvidence({ renewals: { intent: "requested", quote: "two renewals" } }),
+        reason: "Review the exact PR with the requested renewals.",
+      },
+    ];
+    const calls: Record<string, unknown>[] = [];
+    const config = configStore();
+    const completions = new PiAiProviders(config.config.providers, {
+      secrets: secretsFrom({}),
+      fetch: async (_url, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        const reply = replies.shift();
+        if (!reply) throw new Error("Unexpected additional operator model call");
+        return new Response(bindReviewStream(reply), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const { commands } = fullCatalogue();
+    const result = await operatorStage(
+      { config, completions, commands },
+      {
+        msg: {
+          channelId: "slack:CX",
+          userId: "slack:UX",
+          text: "Review https://github.com/acme/api/pull/7 with two renewals.",
+          threadKey: "slack:CX:1.0",
+        },
+        mode: "on",
+      },
+    );
+    expect(result).toMatchObject({
+      outcome: "binds",
+      binds: [{ preset: "ship", shipEntry: "review", repo: "acme/api", prTarget: target, renewals: 2 }],
+      attempts: [
+        { outcome: "violation", violation: expect.stringContaining("settingsEvidence") },
+        { outcome: "accepted" },
+      ],
+    });
+    expect(calls).toHaveLength(2);
+    const bind = (
+      calls[0]!.tools as Array<{
+        name: string;
+        parameters: { required: string[]; properties: { settingsEvidence: { required: string[] } } };
+      }>
+    ).find((tool) => tool.name === "bind_preset")!;
+    expect(bind.parameters.required).toContain("settingsEvidence");
+    expect(bind.parameters.properties.settingsEvidence.required).toEqual([
+      "effort",
+      "budget",
+      "severity",
+      "renewals",
+      "verbosity",
+    ]);
+    expect(JSON.stringify(bind.parameters.properties.settingsEvidence)).toContain('"unrequested"');
+    expect(JSON.stringify(calls[1]!.input)).toContain("settingsEvidence");
+    expect(calls.every((call) => call.model === "gpt-5.6-sol")).toBe(true);
+  });
   it("uses the independent operator profile on the actual Responses request", async () => {
     const calls: Record<string, unknown>[] = [];
     const config = configStore(true);

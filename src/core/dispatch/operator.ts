@@ -343,21 +343,27 @@ const OPERATOR_SETTINGS_EVIDENCE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   description:
-    "Classify each setting's exact authored quote as requested run control or incidental task content; omit defaults",
+    "Classify every supported control before choosing a preset: requested run control, incidental task content, or unrequested. Requested and incidental controls need exact authored quotes; unrequested controls omit quotes.",
+  required: [...OPERATOR_SETTING_NAMES],
   properties: Object.fromEntries(
     OPERATOR_SETTING_NAMES.map((name) => [
       name,
       {
         type: "object",
         additionalProperties: false,
-        required: ["quote", "intent"],
+        required: ["intent"],
         properties: {
-          quote: { type: "string", minLength: 1, description: "an exact phrase from the current request" },
+          quote: {
+            type: "string",
+            minLength: 1,
+            description:
+              "an exact phrase from the current request for requested or incidental content; omit for unrequested",
+          },
           intent: {
             type: "string",
-            enum: ["requested", "incidental"],
+            enum: ["requested", "incidental", "unrequested"],
             description:
-              "requested only when the phrase asks to set this run control; incidental when it is task content",
+              "requested asks to set this run control; incidental mentions it as task content; unrequested means the person did not mention it",
           },
         },
       },
@@ -637,7 +643,7 @@ export function buildOperatorPrompt(input: OperatorInput, projection = actionPro
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a suggested command built from them for display — a yes cannot confirm a registry proposal because its typed input is not saved; their next words refine the request.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
     "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'). When the person wrote the full `<provider>/<model>` ref, pass it as `model` and omit `modelWord`; the exact authored ref is its evidence. Inline backticks around a full ref or model:<ref> are formatting, not a reason to ignore a requested model. Distinguish a model choice from an example the person asks you to explain. The run uses either at request precedence. The request still rides verbatim — never strip the model choice from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both fields.",
-    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so never re-type the request, write a flag form or paraphrase it. Bind effort, budget in whole minutes, and verbosity only when the person requests them. For review or Ship, bind severity only when requested; renewals apply only to Ship. These are typed settings, whether the person used a directive spelling or ordinary words. For each setting you bind, supply `settingsEvidence.<setting> = {quote, intent}`: quote an exact authored phrase and classify its meaning as `requested` run control or `incidental` task content. A matching substring alone is not a setting request. Omit defaults and unrequested settings; incidental evidence never applies a control. If the person requested a setting the selected preset cannot apply, choose a compatible preset that still does the requested action or ask; never silently drop the setting. The call also carries the preset, optional model and modelWord, and the reason. When `ask` proposes a preset line, include `proposalSettings` (an empty object when none were requested); put each requested setting and its classified evidence from the original request there, including model and modelWord when requested, so a later yes carries the same settings.",
+    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so never re-type the request, write a flag form or paraphrase it. Bind effort, budget in whole minutes, and verbosity only when the person requests them. For review or Ship, bind severity only when requested; renewals apply only to Ship. These are typed settings, whether the person used a directive spelling or ordinary words. Before choosing a preset, classify every control in `settingsEvidence`: effort, budget, severity, renewals and verbosity. Use `{intent: unrequested}` when it was not mentioned, with no invented quote. For a mentioned control, quote an exact authored phrase and classify its meaning as `requested` run control or `incidental` task content. Every requested control needs its typed value; never omit its classification or value. A matching substring alone is not a setting request. Omit defaults and unrequested settings; incidental evidence never applies a control. If the person requested a setting the selected preset cannot apply, choose a compatible preset that still does the requested action or ask; never silently drop the setting. The call also carries the preset, optional model and modelWord, and the reason. When `ask` proposes a preset line, include `proposalSettings` with the same complete five-control assessment even when no values were requested; put each requested setting and its classified evidence from the original request there, including model and modelWord when requested, so a later yes carries the same settings.",
     "Setting intent examples: 'What does 'major findings' mean in a review report? Answer in one sentence.' asks general to explain a term: severity is incidental, not a request to review or address findings. 'Review this PR and address major findings' requests severity major. 'What is 2 + 2? Answer in one sentence.' requests no effort: one sentence does not request low effort, a budget or a verbosity level. 'Use high effort and a 25 minute budget; show debug detail' requests those three controls. On repair, reconsider the setting's meaning, not merely whether its quote occurs: omit a default or classify task content as incidental, but preserve actual requested settings. Keep the requested action; do not turn an explanation into a review just to make a topic word fit a preset.",
     "",
     // 2. Projection: the presets and commands THIS author may run.
@@ -802,7 +808,8 @@ export function operatorTools(input: OperatorInput, projection = actionProjectio
       type: "integer",
       minimum: 0,
       maximum: GRANT_RENEWALS_MAX,
-      description: "Ship renewals the person requested; omit when unrequested",
+      description:
+        "Ship renewals the person requested. A review task with requested renewals needs preset ship and shipEntry review; never drop the control or change the requested review into new coding work. Omit the value when unrequested",
     },
     verbosity: {
       type: "string",
@@ -821,9 +828,14 @@ export function operatorTools(input: OperatorInput, projection = actionProjectio
             inputSchema: {
               type: "object",
               additionalProperties: false,
-              required: ["preset", "reason"],
+              required: ["preset", "reason", "settingsEvidence"],
               properties: {
-                preset: { type: "string", enum: presets, description: "the least capable preset that covers the ask" },
+                preset: {
+                  type: "string",
+                  enum: presets,
+                  description:
+                    "the least capable preset that covers the task and every requested control; use a compatible preset or ask",
+                },
                 ...settingProperties,
                 repo: {
                   type: "string",
@@ -869,7 +881,7 @@ export function operatorTools(input: OperatorInput, projection = actionProjectio
           inputSchema: {
             type: "object",
             additionalProperties: false,
-            required: ["kind", "targets", "actionQuote", "targetQuotes", "reason"],
+            required: ["kind", "targets", "actionQuote", "targetQuotes", "reason", "settingsEvidence"],
             properties: {
               ...settingProperties,
               kind: { type: "string", enum: choice === "review" || choice === "ship" ? [choice] : ["review", "ship"] },
@@ -903,7 +915,8 @@ export function operatorTools(input: OperatorInput, projection = actionProjectio
           type: "object",
           additionalProperties: false,
           description:
-            "Required for a preset proposal, even when empty: the run settings that a yes must preserve from the original request",
+            "Required for a preset proposal: complete classifications for all five controls and the requested values a yes must preserve from the original request",
+          required: ["settingsEvidence"],
           properties: {
             model: { type: "string", description: "the requested provider/model ref from provider_models" },
             modelWord: {
@@ -1308,25 +1321,48 @@ function requestSettingsOf(
     verbosity: suppliedVerbosity,
     settingsEvidence,
   } = input;
-  const evidence =
-    settingsEvidence !== null && typeof settingsEvidence === "object" && !Array.isArray(settingsEvidence)
-      ? (settingsEvidence as Record<string, unknown>)
-      : {};
+  if (settingsEvidence === null || typeof settingsEvidence !== "object" || Array.isArray(settingsEvidence))
+    return {
+      violation:
+        "settingsEvidence must explicitly classify effort, budget, severity, renewals and verbosity before a preset can run. Preserve every requested control; choose a compatible preset or ask",
+    };
+  const evidence = settingsEvidence as Record<string, unknown>;
+  if (Object.keys(evidence).some((name) => !(OPERATOR_SETTING_NAMES as readonly string[]).includes(name)))
+    return {
+      violation:
+        "settingsEvidence supports only effort, budget, severity, renewals and verbosity; model and modelWord use their existing separate evidence",
+    };
   const requested = new Set<(typeof OPERATOR_SETTING_NAMES)[number]>();
   for (const setting of OPERATOR_SETTING_NAMES) {
     const raw = evidence[setting];
-    if (input[setting] === undefined || raw === undefined) continue;
-    const entry =
-      raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+      return {
+        violation: `settingsEvidence.${setting} needs an explicit requested, incidental or unrequested classification; never silently omit a control`,
+      };
+    const entry = raw as Record<string, unknown>;
+    if (entry.intent === "unrequested") {
+      if (entry.quote !== undefined)
+        return {
+          violation: `settingsEvidence.${setting} must omit a quote when unrequested; classify mentioned content as requested or incidental`,
+        };
+      continue;
+    }
     if (
+      (entry.intent !== "requested" && entry.intent !== "incidental") ||
       typeof entry.quote !== "string" ||
       entry.quote.trim() === "" ||
-      (entry.intent !== "requested" && entry.intent !== "incidental")
+      !requestText.includes(entry.quote)
     )
       return {
-        violation: `settingsEvidence.${setting} needs {quote, intent: requested|incidental}; a matching phrase alone is not a run-setting request. Keep the requested action; omit defaults, classify task content as incidental, and preserve genuine requested controls`,
+        violation: `settingsEvidence.${setting} needs an exact authored {quote, intent: requested|incidental}, or {intent: unrequested}; a matching phrase alone is not a run-setting request. Keep the requested action and every requested control`,
       };
-    if (entry.intent === "requested" && requestText.includes(entry.quote)) requested.add(setting);
+    if (entry.intent === "requested") {
+      if (input[setting] === undefined)
+        return {
+          violation: `requested ${setting} needs its typed value; preserve the control with a compatible preset or ask instead of dropping it`,
+        };
+      requested.add(setting);
+    }
   }
   // The model classifies intent; this boundary holds it to typed evidence
   // and an authored quote. Neither defaults nor incidental content applies.
@@ -1399,6 +1435,125 @@ function requestSettingsOf(
 
 /** Validate one model turn. Presets run on the author's own text; commands
  * render through the registry grammar. A no-call turn is one repair. */
+/** Validate a selected preset and its authored target without interpreting run settings.
+ * The model door adds its complete control assessment separately. Typed child
+ * delegation keeps its narrower settings and lease through the spawn boundary. */
+export function bindPresetTarget(
+  input: {
+    preset: unknown;
+    reason: unknown;
+    repo?: unknown;
+    prTarget?: unknown;
+    shipEntry?: unknown;
+    workObjective?: unknown;
+  },
+  ctx: OperatorTurnContext,
+): OperatorTurn {
+  const { preset, reason, repo, prTarget, shipEntry, workObjective } = input;
+  if (typeof preset !== "string" || !ctx.presets.includes(preset))
+    return {
+      kind: "violation",
+      violation: `bind_preset named "${String(preset)}", not a preset the projection offers`,
+    };
+  if (ctx.requestedPreset !== undefined && preset !== ctx.requestedPreset)
+    return { kind: "violation", violation: "the preset must preserve the requested action" };
+  const selectedPreset = preset;
+  if (
+    selectedPreset === "ship" &&
+    shipEntry !== "work" &&
+    shipEntry !== "work_from_thread" &&
+    shipEntry !== "review" &&
+    shipEntry !== "plan" &&
+    shipEntry !== "continue"
+  )
+    return {
+      kind: "violation",
+      violation: "bind_preset for ship needs shipEntry: work, work_from_thread, review, plan or continue",
+    };
+  const shipWork = selectedPreset === "ship" && (shipEntry === "work" || shipEntry === "work_from_thread");
+  if (shipWork && workObjective !== undefined && typeof workObjective !== "string")
+    return { kind: "violation", violation: "workObjective is only for a Ship work bind" };
+  let repository: string | undefined;
+  let repoSource: OperatorBind["repoSource"];
+  const requestRepo = explicitRepoOf(ctx.requestText);
+  const threadRepo = ctx.requesterRepo ?? ctx.threadRepo;
+  // The model resolves language against the supplied context. This boundary
+  // checks the canonical argument's shape; execution authorizes its target.
+  const suppliedRepo = repo;
+  if (suppliedRepo !== undefined) {
+    const trimmed = typeof suppliedRepo === "string" ? suppliedRepo.trim().toLowerCase() : "";
+    if (!/^[\w.-]+\/[\w.-]+$/.test(trimmed))
+      return {
+        kind: "violation",
+        violation:
+          "bind_preset's repo must be a canonical owner/name slug; resolve it from context or read repository_brief",
+      };
+    repository = trimmed;
+    repoSource =
+      requestRepo === trimmed
+        ? "request"
+        : ctx.attachmentRepos?.includes(trimmed)
+          ? "attachment"
+          : threadRepo?.toLowerCase() === trimmed
+            ? "thread"
+            : ctx.channelRepo?.toLowerCase() === trimmed
+              ? "channel"
+              : "context";
+  }
+  const reviewsPr = selectedPreset === "review" || (selectedPreset === "ship" && shipEntry === "review");
+  // The model's union-shaped tool can populate fields for another intent.
+  // Only a review may turn PR evidence into target authority.
+  const suppliedPrTarget = reviewsPr && prTarget !== null ? prTarget : undefined;
+  if (reviewsPr && suppliedPrTarget === undefined)
+    return { kind: "violation", violation: "a PR target is required for review; ask for the PR" };
+  const targetCheck =
+    suppliedPrTarget === undefined
+      ? undefined
+      : inspectPrTargetEvidence(suppliedPrTarget, {
+          requestText: ctx.requestText,
+          ...(ctx.requesterId !== undefined ? { requesterId: ctx.requesterId } : {}),
+          ...(ctx.tail !== undefined ? { tail: ctx.tail } : {}),
+          ...(repository !== undefined ? { repo: repository } : {}),
+        });
+  if (targetCheck?.ok === false) {
+    const violation =
+      targetCheck.reason === "not_requester_authored"
+        ? "the proposed PR target identifier was not authored by this requester; assistant or foreign-actor context cannot establish a PR target. Same-requester authored thread identifiers remain valid. Reconsider the current request and its requester-authored context. Keep the actual asked work; use prTarget null for non-review work, or ask for the PR when a review has no authored target. Do not copy or invent a context quote"
+        : targetCheck.reason === "identity_mismatch"
+          ? "the authored PR target identifier does not match the proposed repository or PR number; preserve the original identifier and resolve its matching typed identity, never relabel it"
+          : targetCheck.reason === "invalid_shape"
+            ? "prTarget needs a positive PR number, request|thread source and one exact nonempty identifier quote; null is for non-review work. An issue checkpoint is not a PR target"
+            : "the PR target quote is not one complete PR identifier; it may include an issue, adjacent constraints or task text. Use the exact authored PR identifier alone, never trim, normalize or invent it. Reconsider the actual request: non-review work uses prTarget null; a requested review needs an exact requester-authored PR target or an ask";
+    return { kind: "violation", violation: `pr_target:${targetCheck.reason}: ${violation}` };
+  }
+  const verifiedPrTarget = targetCheck?.ok ? targetCheck.evidence : undefined;
+  if (verifiedPrTarget !== undefined && repository === undefined)
+    return { kind: "violation", violation: "bind the PR target's repository as a typed repo" };
+  const words = stripDirectiveHead(ctx.requestText, selectedPreset);
+  const line = operatorLine(redactSecrets(`agent:${selectedPreset} ${words}`));
+  return {
+    kind: "decision",
+    decision: {
+      kind: "binds",
+      binds: [
+        {
+          line,
+          preset: selectedPreset,
+          reason: tidy(reason),
+          ...(repository !== undefined ? { repo: repository } : {}),
+          ...(repoSource !== undefined ? { repoSource } : {}),
+          ...(verifiedPrTarget !== undefined ? { prTarget: verifiedPrTarget } : {}),
+          ...(selectedPreset === "ship" ? { shipEntry: shipEntry as ShipEntryIntent } : {}),
+          ...(shipWork && typeof workObjective === "string" && workObjective.trim()
+            ? { workObjective: tidy(workObjective.trim()) }
+            : {}),
+        },
+      ],
+      reason: tidy(reason),
+    },
+  };
+}
+
 export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorTurnContext): OperatorTurn {
   if (typeof answer === "string") {
     const text = tidy(answer.trim());
@@ -1439,110 +1594,15 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     };
   }
   if (answer.tool === OPERATOR_BIND_TOOL) {
-    const { preset, reason, repo, prTarget, shipEntry, workObjective } = input;
-    if (typeof preset !== "string" || !ctx.presets.includes(preset))
-      return {
-        kind: "violation",
-        violation: `bind_preset named "${String(preset)}", not a preset the projection offers`,
-      };
-    if (ctx.requestedPreset !== undefined && preset !== ctx.requestedPreset)
-      return { kind: "violation", violation: "the preset must preserve the requested action" };
-    const selectedPreset = preset;
-    if (
-      selectedPreset === "ship" &&
-      shipEntry !== "work" &&
-      shipEntry !== "work_from_thread" &&
-      shipEntry !== "review" &&
-      shipEntry !== "plan" &&
-      shipEntry !== "continue"
-    )
-      return {
-        kind: "violation",
-        violation: "bind_preset for ship needs shipEntry: work, work_from_thread, review, plan or continue",
-      };
-    const shipWork = selectedPreset === "ship" && (shipEntry === "work" || shipEntry === "work_from_thread");
-    if (shipWork && workObjective !== undefined && typeof workObjective !== "string")
-      return { kind: "violation", violation: "workObjective is only for a Ship work bind" };
-    const requestSettings = requestSettingsOf(input, selectedPreset, ctx.requestText, ctx.providers);
+    const target = bindPresetTarget({ ...input, preset: input.preset, reason: input.reason }, ctx);
+    if (target.kind !== "decision" || target.decision.kind !== "binds") return target;
+    const requestSettings = requestSettingsOf(input, String(input.preset), ctx.requestText, ctx.providers);
     if ("violation" in requestSettings) return { kind: "violation", violation: requestSettings.violation };
-    let repository: string | undefined;
-    let repoSource: OperatorBind["repoSource"];
-    const requestRepo = explicitRepoOf(ctx.requestText);
-    const threadRepo = ctx.requesterRepo ?? ctx.threadRepo;
-    // The model resolves language against the supplied context. This boundary
-    // checks the canonical argument's shape; execution authorizes its target.
-    const suppliedRepo = repo;
-    if (suppliedRepo !== undefined) {
-      const trimmed = typeof suppliedRepo === "string" ? suppliedRepo.trim().toLowerCase() : "";
-      if (!/^[\w.-]+\/[\w.-]+$/.test(trimmed))
-        return {
-          kind: "violation",
-          violation:
-            "bind_preset's repo must be a canonical owner/name slug; resolve it from context or read repository_brief",
-        };
-      repository = trimmed;
-      repoSource =
-        requestRepo === trimmed
-          ? "request"
-          : ctx.attachmentRepos?.includes(trimmed)
-            ? "attachment"
-            : threadRepo?.toLowerCase() === trimmed
-              ? "thread"
-              : ctx.channelRepo?.toLowerCase() === trimmed
-                ? "channel"
-                : "context";
-    }
-    const reviewsPr = selectedPreset === "review" || (selectedPreset === "ship" && shipEntry === "review");
-    // The model's union-shaped tool can populate fields for another intent.
-    // Only a review may turn PR evidence into target authority.
-    const suppliedPrTarget = reviewsPr && prTarget !== null ? prTarget : undefined;
-    if (reviewsPr && suppliedPrTarget === undefined)
-      return { kind: "violation", violation: "a PR target is required for review; ask for the PR" };
-    const targetCheck =
-      suppliedPrTarget === undefined
-        ? undefined
-        : inspectPrTargetEvidence(suppliedPrTarget, {
-            requestText: ctx.requestText,
-            ...(ctx.requesterId !== undefined ? { requesterId: ctx.requesterId } : {}),
-            ...(ctx.tail !== undefined ? { tail: ctx.tail } : {}),
-            ...(repository !== undefined ? { repo: repository } : {}),
-          });
-    if (targetCheck?.ok === false) {
-      const violation =
-        targetCheck.reason === "not_requester_authored"
-          ? "the proposed PR target identifier was not authored by this requester; assistant or foreign-actor context cannot establish a PR target. Same-requester authored thread identifiers remain valid. Reconsider the current request and its requester-authored context. Keep the actual asked work; use prTarget null for non-review work, or ask for the PR when a review has no authored target. Do not copy or invent a context quote"
-          : targetCheck.reason === "identity_mismatch"
-            ? "the authored PR target identifier does not match the proposed repository or PR number; preserve the original identifier and resolve its matching typed identity, never relabel it"
-            : targetCheck.reason === "invalid_shape"
-              ? "prTarget needs a positive PR number, request|thread source and one exact nonempty identifier quote; null is for non-review work. An issue checkpoint is not a PR target"
-              : "the PR target quote is not one complete PR identifier; it may include an issue, adjacent constraints or task text. Use the exact authored PR identifier alone, never trim, normalize or invent it. Reconsider the actual request: non-review work uses prTarget null; a requested review needs an exact requester-authored PR target or an ask";
-      return { kind: "violation", violation: `pr_target:${targetCheck.reason}: ${violation}` };
-    }
-    const verifiedPrTarget = targetCheck?.ok ? targetCheck.evidence : undefined;
-    if (verifiedPrTarget !== undefined && repository === undefined)
-      return { kind: "violation", violation: "bind the PR target's repository as a typed repo" };
-    const words = stripDirectiveHead(ctx.requestText, selectedPreset);
-    const line = operatorLine(redactSecrets(`agent:${selectedPreset} ${words}`));
     return {
-      kind: "decision",
+      ...target,
       decision: {
-        kind: "binds",
-        binds: [
-          {
-            line,
-            preset: selectedPreset,
-            reason: tidy(reason),
-            ...requestSettings.settings,
-            ...(repository !== undefined ? { repo: repository } : {}),
-            ...(repoSource !== undefined ? { repoSource } : {}),
-            ...(verifiedPrTarget !== undefined ? { prTarget: verifiedPrTarget } : {}),
-            ...(selectedPreset === "ship" ? { shipEntry: shipEntry as ShipEntryIntent } : {}),
-            ...(shipWork && typeof workObjective === "string" && workObjective.trim()
-              ? { workObjective: tidy(workObjective.trim()) }
-              : {}),
-          },
-        ],
-        reason: tidy(reason),
+        ...target.decision,
+        binds: target.decision.binds.map((bind) => ({ ...bind, ...requestSettings.settings })),
       },
     };
   }
@@ -1611,7 +1671,8 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     if (proposedPreset !== undefined && proposalSettings === undefined)
       return {
         kind: "violation",
-        violation: "a preset proposal needs typed proposalSettings, empty when none were requested",
+        violation:
+          "a preset proposal needs typed proposalSettings with complete control classifications, even when no values were requested",
       };
     if (
       proposalSettings !== undefined &&

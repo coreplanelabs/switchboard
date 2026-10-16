@@ -1,3 +1,4 @@
+import { operatorSettingsEvidence } from "../core/testing/operatorSettings.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { scanText } from "../../scripts/public-hygiene.mjs";
@@ -31,10 +32,19 @@ const input = (text: string): OperatorInput => ({
 });
 
 const bindModel =
-  (preset: string, settings: Record<string, unknown> = {}): RouteModel =>
+  (
+    preset: string,
+    settings: Record<string, unknown> & { settingsEvidence?: Record<string, unknown> } = {},
+  ): RouteModel =>
   async () => ({
     tool: OPERATOR_BIND_TOOL,
-    input: { preset, reason: "fixture route", ...settings, ...(preset === "ship" ? { shipEntry: "work" } : {}) },
+    input: {
+      preset,
+      reason: "fixture route",
+      ...settings,
+      settingsEvidence: operatorSettingsEvidence(settings.settingsEvidence),
+      ...(preset === "ship" ? { shipEntry: "work" } : {}),
+    },
   });
 
 const boundPreset = (decision: OperatorDecision): string | undefined => {

@@ -6,6 +6,7 @@ import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all
 import { operatorPresets, runOperator, OPERATOR_READ_TOOLS, OPERATOR_BIND_TOOL } from "../core/dispatch/operator.js";
 import { routableCommands, type RouteModel } from "../core/dispatch/route.js";
 import { candidateDoorSmokeCases, candidateDoorSmokeInput, candidateRepositoryBriefs } from "./candidateDoorSmoke.js";
+import { operatorSettingsEvidence } from "../core/testing/operatorSettings.js";
 
 const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, capabilities: ALL_CAPABILITIES });
 registerCoreCommands(registry);
@@ -15,10 +16,58 @@ const probe = candidateDoorSmokeCases(projection).find(
 )!;
 const work = {
   tool: OPERATOR_BIND_TOOL,
-  input: { preset: "ship", shipEntry: "work_from_thread", repo: "acme/api", reason: "Fix the original issue." },
+  input: {
+    preset: "ship",
+    shipEntry: "work_from_thread",
+    repo: "acme/api",
+    reason: "Fix the original issue.",
+    settingsEvidence: operatorSettingsEvidence(),
+  },
 };
 
 describe("fixed candidate smoke named command", () => {
+  it("repairs a raw Review bind that omits the requested renewal assessment", async () => {
+    const entry = candidateDoorSmokeCases(projection).find(
+      (candidate) => candidate.name === "review with requested renewals",
+    )!;
+    const target = { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" };
+    const replies = [
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          reason: "Review the specified pull request and provide high-quality findings.",
+          repo: "acme/api",
+          prTarget: target,
+        },
+      },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "review",
+          repo: "acme/api",
+          prTarget: target,
+          renewals: 2,
+          settingsEvidence: operatorSettingsEvidence({ renewals: { intent: "requested", quote: "two renewals" } }),
+          reason: "Review the exact PR with the requested renewals.",
+        },
+      },
+    ];
+    const model = vi.fn<RouteModel>(async () => replies.shift()!);
+    const answer = await runOperator(candidateDoorSmokeInput(entry, projection, "openai"), model);
+    expect(answer.attempts).toMatchObject([
+      { outcome: "violation", violation: expect.stringContaining("settingsEvidence") },
+      { outcome: "accepted" },
+    ]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ preset: "ship", shipEntry: "review", repo: "acme/api", prTarget: target, renewals: 2 }],
+    });
+    if (answer.decision.kind !== "binds") throw new Error("Expected the repaired fixed candidate binding");
+    expect(entry.expected(answer.decision.binds[0]!)).toBe(true);
+    expect(model).toHaveBeenCalledTimes(2);
+  });
   it.each([
     { text: "status show", command: "status_show", accepted: true },
     { text: "status show", command: "plane_show", accepted: false },
@@ -137,6 +186,7 @@ describe("fixed candidate smoke repository dependency", () => {
         input: {
           preset,
           reason: "Requested fixed fixture route.",
+          settingsEvidence: operatorSettingsEvidence(),
           ...(preset !== "general"
             ? {
                 repo: "acme/api",
@@ -145,7 +195,12 @@ describe("fixed candidate smoke repository dependency", () => {
             : {}),
           ...(preset === "ship" ? { shipEntry: "review" } : {}),
           ...(entry.name === "review with requested renewals"
-            ? { renewals: 2, settingsEvidence: { renewals: { quote: "two renewals", intent: "requested" } } }
+            ? {
+                renewals: 2,
+                settingsEvidence: operatorSettingsEvidence({
+                  renewals: { quote: "two renewals", intent: "requested" },
+                }),
+              }
             : {}),
         },
       }));

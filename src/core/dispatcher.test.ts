@@ -1,3 +1,4 @@
+import { operatorSettingsEvidence } from "./testing/operatorSettings.js";
 import { prepareFreshTurn } from "./dispatch/settle.js";
 import { withChatActor } from "./authz/actor.js";
 import { ALL_GRANTS } from "./authz/grants.js";
@@ -892,7 +893,7 @@ describe("dispatch", () => {
       await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
       deps.operatorModel = async () => ({
         tool: "bind_preset",
-        input: { preset: "general", reason: "Current question" },
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "Current question" },
       });
       const { io, replies, statuses } = fakeIO();
       const outcome = await dispatch(deps, msg("Continue explaining", "slack:UADMIN"), io, {
@@ -943,6 +944,7 @@ describe("dispatch", () => {
           : {
               tool: "bind_preset",
               input: {
+                settingsEvidence: operatorSettingsEvidence(),
                 preset: "review",
                 repo: "acme/api",
                 prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -997,6 +999,7 @@ describe("dispatch", () => {
           ? {
               tool: "bind_preset",
               input: {
+                settingsEvidence: operatorSettingsEvidence(),
                 preset: "review",
                 repo: "acme/api",
                 prTarget: { number: 7, source: "thread", quote: identifier },
@@ -1645,7 +1648,15 @@ describe("dispatch", () => {
       deps.operatorModel = async (prompt) => {
         prompts.push(prompt);
         if (prompts.length === 1) return { tool: OPERATOR_READ_TOOLS.threadState, input: {} };
-        return { tool: "bind_preset", input: { preset: "general", request: "Explain leases", reason: "Read ask" } };
+        return {
+          tool: "bind_preset",
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "general",
+            request: "Explain leases",
+            reason: "Read ask",
+          },
+        };
       };
       const { io, replies } = fakeIO([{ role: "user", text: marker }]);
       expect(
@@ -1773,7 +1784,7 @@ describe("dispatch", () => {
       const ledger = wireChildLedger(deps);
       deps.operatorModel = vi.fn<RouteModel>(async () => ({
         tool: "bind_preset",
-        input: { preset: "orchestrator", reason: "already selected" },
+        input: { settingsEvidence: operatorSettingsEvidence(), preset: "orchestrator", reason: "already selected" },
       }));
       const request = {
         ...msg("agent:orchestrator Show the active work", "slack:UADMIN"),
@@ -1818,7 +1829,7 @@ describe("dispatch", () => {
     );
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "general", reason: "must not run" },
+      input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "must not run" },
     }));
     const { io, replies } = fakeIO();
 
@@ -6492,6 +6503,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
         deps.operatorModel = async () => ({
           tool: "bind_preset",
           input: {
+            settingsEvidence: operatorSettingsEvidence(),
             preset: "review",
             repo: "acme/api",
             prTarget: { number: 42, source: "request", quote: "https://github.com/acme/api/pull/42" },
@@ -8322,7 +8334,7 @@ describe("review post-step", () => {
           severity: "major",
           repo: "acme/api",
           prTarget: { number: 42, source: "request", quote: "https://github.com/acme/api/pull/42" },
-          settingsEvidence: { severity: { quote: "major findings", intent: "requested" } },
+          settingsEvidence: operatorSettingsEvidence({ severity: { quote: "major findings", intent: "requested" } }),
           reason: "requested review bar",
         },
       }));
@@ -14998,7 +15010,13 @@ workspaceDir: __WORKDIR__
   const shipOperator = (request: string) =>
     vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "work", request, reason: "the ask" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "work",
+        request,
+        reason: "the ask",
+      },
     }));
 
   it("sends an explicit MCP recover-unit command to the original unit with the operator enabled", async () => {
@@ -15191,7 +15209,13 @@ workspaceDir: __WORKDIR__
     deps.recoverOriginalUnit = recover;
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "continue", repo: "acme/api", reason: "recover the original unit" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "continue",
+        repo: "acme/api",
+        reason: "recover the original unit",
+      },
     }));
     const registry = new RunRegistry({ genId: () => "run-shadow-recovery", genToken: () => "tok" });
     deps.runRegistry = registry;
@@ -15226,7 +15250,13 @@ workspaceDir: __WORKDIR__
     });
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "plan", repo: "acme/api", reason: "the explicit plan" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "plan",
+        repo: "acme/api",
+        reason: "the explicit plan",
+      },
     }));
     deps.runRegistry = new RunRegistry({ genId: () => "run-ship-explicit-plan", genToken: () => "tok" });
     const { io } = fakeIO();
@@ -15249,6 +15279,7 @@ workspaceDir: __WORKDIR__
       deps.operatorModel = vi.fn<RouteModel>(async () => ({
         tool: "bind_preset",
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "ship",
           shipEntry: "review",
           repo: "acme/api",
@@ -15283,6 +15314,7 @@ workspaceDir: __WORKDIR__
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         repo: "acme/api",
         shipEntry: "review",
@@ -15321,7 +15353,7 @@ workspaceDir: __WORKDIR__
     const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "general", reason: "uncertain" },
+      input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "uncertain" },
     }));
     deps.runRegistry = new RunRegistry({ genId: () => "run-ship-no-stage", genToken: () => "tok" });
     const { io, replies } = fakeIO();
@@ -15356,6 +15388,7 @@ workspaceDir: __WORKDIR__
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         shipEntry: "work",
         workObjective: "fix the failing check",
@@ -15394,6 +15427,7 @@ workspaceDir: __WORKDIR__
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         shipEntry: "work",
         workObjective: "fix the failing check",
@@ -15421,7 +15455,14 @@ workspaceDir: __WORKDIR__
     let objective = "fix the first check";
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "work", workObjective: objective, repo: "acme/api", reason: "separate work" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "work",
+        workObjective: objective,
+        repo: "acme/api",
+        reason: "separate work",
+      },
     }));
     const now = 1_000_000;
     deps.clock = () => now;
@@ -15498,10 +15539,10 @@ workspaceDir: __WORKDIR__
         shipEntry: "work",
         severity: "major",
         renewals: 2,
-        settingsEvidence: {
+        settingsEvidence: operatorSettingsEvidence({
           severity: { quote: "major findings", intent: "requested" },
           renewals: { quote: "two renewals", intent: "requested" },
-        },
+        }),
         reason: "requested review bar",
       },
     }));
@@ -15519,7 +15560,13 @@ workspaceDir: __WORKDIR__
       expect(prompt.user).toContain("Onboarded repository candidates: `acme/api`");
       return {
         tool: "bind_preset",
-        input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "the attached plan" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "ship",
+          shipEntry: "work",
+          repo: "acme/api",
+          reason: "the attached plan",
+        },
       };
     });
     deps.runRegistry = new RunRegistry({ genId: () => "run-ship-file", genToken: () => "tok" });
@@ -28546,7 +28593,12 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
   const armContinuationOperator = (deps: TestDeps) => {
     const operator = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "continue", reason: "continue the original unit" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "continue",
+        reason: "continue the original unit",
+      },
     }));
     deps.operatorModel = operator;
     return operator;
@@ -29099,6 +29151,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "review",
         repo: "acme/api",
         prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
@@ -29159,7 +29212,12 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const s = await repeatedEndedPrSetup();
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "continue", reason: "continue the prior work" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "continue",
+        reason: "continue the prior work",
+      },
     }));
     const { io, replies } = fakeIO();
     await dispatch(s.deps, msg("continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
@@ -29175,7 +29233,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     seedRetainedUnits(s.instances, [{ ...unit!, ending: undefined }]);
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
-      input: { preset: "review", reason: "review the PR" },
+      input: { settingsEvidence: operatorSettingsEvidence(), preset: "review", reason: "review the PR" },
     }));
     const { io, replies } = fakeIO();
     await dispatch(s.deps, msg("please review https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
@@ -29210,6 +29268,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "review",
         repo: "acme/api",
         prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
@@ -29306,7 +29365,12 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       {
         answer: {
           tool: "bind_preset",
-          input: { preset: "ship", shipEntry: "continue", reason: "continue the review" },
+          input: {
+            settingsEvidence: operatorSettingsEvidence(),
+            preset: "ship",
+            shipEntry: "continue",
+            reason: "continue the review",
+          },
         },
         expected:
           "Unit U12 exhausted the ended pipeline's review-round budget, so continuation did not start. Nothing else ran.",
@@ -29344,6 +29408,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "review",
         repo: "acme/api",
         prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
@@ -29459,7 +29524,13 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const s = await endedPrContinuationSetup();
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "work", workObjective: "review the PR", reason: "misbound review" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "work",
+        workObjective: "review the PR",
+        reason: "misbound review",
+      },
     }));
     s.deps.fetchPrFacts = vi.fn(async () => ({
       state: "open" as const,
@@ -29488,6 +29559,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         shipEntry: "work",
         workObjective: "Add an endpoint",
@@ -29521,7 +29593,13 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const s = await endedPrContinuationSetup();
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "work on the named PR" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "work",
+        repo: "acme/api",
+        reason: "work on the named PR",
+      },
     }));
     const { io, replies } = fakeIO();
 
@@ -29543,7 +29621,13 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const s = await endedPrContinuationSetup();
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "work", repo: "acme/api", reason: "work on the named PR" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "work",
+        repo: "acme/api",
+        reason: "work on the named PR",
+      },
     }));
     s.deps.fetchPrFacts = vi.fn(async () => ({
       state: "open" as const,
@@ -29646,6 +29730,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "ship",
         shipEntry: "work",
         workObjective: "Add an endpoint",
@@ -29971,7 +30056,13 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const task = "Please fix PR #7's title so it passes the repository's title check.";
     const operator = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "work", request: task, reason: "new work on the existing pull request" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "work",
+        request: task,
+        reason: "new work on the existing pull request",
+      },
     }));
     s.deps.operatorModel = operator;
     // A hosted ship record carries no PR field: the completed unit does.
@@ -30010,6 +30101,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "review",
         request: "agent:review in acme/api: PR #8. Read only.",
         repo: "acme/api",
@@ -30067,7 +30159,12 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const s = await endedPrContinuationSetup();
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "explore", request: "agent:explore PR #8. Read only.", reason: "read the named PR" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "explore",
+        request: "agent:explore PR #8. Read only.",
+        reason: "read the named PR",
+      },
     }));
     const newerId = "ship-newer";
     seedRetainedUnits(s.instances, [
@@ -30184,7 +30281,13 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const task = "Please fix this PR's title.";
     s.deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "ship", shipEntry: "work", request: task, reason: "new work on the latest pull request" },
+      input: {
+        settingsEvidence: operatorSettingsEvidence(),
+        preset: "ship",
+        shipEntry: "work",
+        request: task,
+        reason: "new work on the latest pull request",
+      },
     }));
     s.deps.resolveRepoContext = vi.fn((_msg, _history, records) => {
       expect(records).toMatchObject({ pr: { repo: "acme/api", number: 8 } });
@@ -30910,6 +31013,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           return {
             tool: "bind_preset",
             input: {
+              settingsEvidence: operatorSettingsEvidence(),
               preset,
               request: bind.line,
               reason: bind.reason ?? "why",
@@ -30967,11 +31071,11 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         effort: "high",
         budget: 25,
         verbosity: "debug",
-        settingsEvidence: {
+        settingsEvidence: operatorSettingsEvidence({
           effort: { quote: "high effort", intent: "requested" },
           budget: { quote: "25 minute budget", intent: "requested" },
           verbosity: { quote: "debug detail", intent: "requested" },
-        },
+        }),
         reason: "requested controls",
       },
     }));
@@ -31010,10 +31114,10 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           prTarget: { number: 7, source: "request", quote: url },
           effort: "high",
           budget: 15,
-          settingsEvidence: {
+          settingsEvidence: operatorSettingsEvidence({
             effort: { quote: "effort:high", intent: "requested" },
             budget: { quote: "budget:15", intent: "requested" },
-          },
+          }),
           reason: "requested Review",
         },
       }));
@@ -31060,7 +31164,12 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       const { deps, provider } = operatorDeps(ON_YAML);
       deps.operatorModel = vi.fn<RouteModel>(async () => ({
         tool: "bind_preset",
-        input: { preset: "general", model: "anthropic/coding-model", reason: "requested model" },
+        input: {
+          settingsEvidence: operatorSettingsEvidence(),
+          preset: "general",
+          model: "anthropic/coding-model",
+          reason: "requested model",
+        },
       }));
       await dispatch(deps, msg(request, "slack:UADMIN"), fakeIO().io);
       expect(provider.requests[0]?.model).toBe("coding-model");
@@ -31073,7 +31182,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const request = "Explain what `model:anthropic/coding-model` means.";
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "general", reason: "explain the example" },
+      input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "explain the example" },
     }));
     await dispatch(deps, msg(request, "slack:UADMIN"), fakeIO().io);
     expect(provider.requests[0]?.model).toBe("general-model");
@@ -31086,7 +31195,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const request = "Explain why the example says effort:high budget:20 verbosity:debug.";
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "general", reason: "answer the question" },
+      input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: "answer the question" },
     }));
     const { io, replies } = fakeIO();
     await dispatch(deps, msg(request, "slack:UADMIN"), io);
@@ -31105,6 +31214,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "review",
         repo: "acme/try-catch",
         prTarget: { number: 7, source: "request", quote: "PR #7" },
@@ -31299,6 +31409,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       deps.operatorModel = vi.fn<RouteModel>(async () => ({
         tool: "bind_preset",
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: url },
@@ -31329,6 +31440,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
       input: {
+        settingsEvidence: operatorSettingsEvidence(),
         preset: "review",
         repo: "acme/api",
         prTarget: { number: 7, source: "request", quote: url },
@@ -31882,7 +31994,11 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { deps, registry } = operatorDeps(ON_YAML);
     deps.operatorModel = decides({
       reason: "a fork the run cannot resolve",
-      question: { text: QUESTION_TEXT, proposal: "agent:explore acme/company", proposalSettings: {} },
+      question: {
+        text: QUESTION_TEXT,
+        proposal: "agent:explore acme/company",
+        proposalSettings: { settingsEvidence: operatorSettingsEvidence() },
+      },
     });
     await dispatch(deps, msg(QUESTION_REQUEST, "slack:UADMIN"), fakeIO().io);
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
@@ -33060,6 +33176,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       deps.operatorModel = async () => ({
         tool: "bind_preset",
         input: {
+          settingsEvidence: operatorSettingsEvidence(),
           preset: "review",
           repo: "acme/api",
           prTarget: { number: 42, source: "request", quote: url },
@@ -34202,7 +34319,10 @@ describe("durable operator conversation without an agent run", () => {
           return decision === "question"
             ? { tool: "ask", input: { text: secret, reason: "a preference" } }
             : decision === "route"
-              ? { tool: "bind_preset", input: { preset: "general", reason: secret } }
+              ? {
+                  tool: "bind_preset",
+                  input: { settingsEvidence: operatorSettingsEvidence(), preset: "general", reason: secret },
+                }
               : { tool: mcpToolName("runs.list"), input: { reason: secret } };
         });
         const channel = fakeIO();

@@ -27,10 +27,24 @@ restrict: { agents: [research] }
 
 describe("conversation read binding", () => {
   it("reuses the permitted preset projection and preserves a narrower child request", async () => {
-    const { deps, message } = fixture("agent:orchestrator budget:20 research storage");
-    expect(
-      await bindConversationRead(deps, message, { preset: "research", prompt: "Explain storage.", budget: 5 }),
-    ).toEqual({ kind: "bound", request: { preset: "research", prompt: "Explain storage.", budget: 5 } });
+    const { deps, message } = fixture("agent:orchestrator budget:20 effort:high research storage");
+    const request = {
+      preset: "research",
+      prompt: "Explain storage.",
+      budget: 5,
+      effort: "low" as const,
+      model: "anthropic/model",
+    };
+    expect(await bindConversationRead(deps, message, request)).toEqual({
+      kind: "bound",
+      request: {
+        preset: "research",
+        prompt: "Explain storage.",
+        budget: 5,
+        effort: "low",
+        model: "anthropic/model",
+      },
+    });
     expect(
       await bindConversationRead(
         deps,
