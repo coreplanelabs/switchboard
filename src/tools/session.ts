@@ -62,6 +62,7 @@ export interface SessionCapability {
    *  gap gives the turns before it. */
   readConversation(): Promise<ChatMessage[]>;
   readNotepad(): Promise<Notepad | null>;
+  storedNotesUnavailable?: true;
   writeNotepad(text: string): Promise<FenceResult>;
   /** The thread's files (record 0033): the catalogue its runs' records name —
    *  received and produced, held by the store or not — read fresh on each call
@@ -142,6 +143,7 @@ export function sessionCapabilityFor(
       readTurn: async (idx) => (await read())[idx],
       readConversation: read,
       readNotepad: async () => null,
+      storedNotesUnavailable: true,
       writeNotepad: async () => ({ ok: false, reason: "fenced" }),
       assets: async () => [],
       captureHandoff: async (source, captureDependencies) => {
@@ -520,6 +522,7 @@ export const notesTool: RunnableTool = {
       const current = await selected?.readNotepad();
       return current?.text || "(parent notes are unavailable)";
     }
+    if (ctx.session.storedNotesUnavailable) return "Stored notes are unavailable in this source view.";
     if (typeof input.text !== "string") {
       const current = await ctx.session.readNotepad();
       return current && current.text.length > 0 ? current.text : "(your notes for this thread are empty)";

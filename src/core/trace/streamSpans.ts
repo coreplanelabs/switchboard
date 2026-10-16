@@ -49,6 +49,7 @@ export const STREAMED_SPANS = [
   "run.pr_post_step",
   "run.review_post_step",
   "run.publication_context_check",
+  "run.model_source_check",
   "run.reading_diff_join",
   "run.pr_description_join",
   "model.turn",
@@ -107,6 +108,7 @@ const FINISHING_UP: ReadonlySet<string> = new Set([
   "run.pr_description_join",
 ]);
 const UNCOUNTED: ReadonlySet<string> = new Set([
+  "run.model_source_check",
   "model.capacity_wait",
   "request",
   "run.agent",
@@ -172,6 +174,7 @@ export const PARENTS: Readonly<Record<string, readonly string[]>> = {
   "run.pr_post_step": ["request", "ship.round"],
   "run.review_post_step": ["request", "ship.round"],
   "run.publication_context_check": ["request", "ship.round"],
+  "run.model_source_check": ["request", "ship.round"],
   "run.reading_diff_join": ["request", "ship.round"],
   "run.pr_description_join": ["request", "ship.round"],
   "model.turn": ["run.agent"],

@@ -36,6 +36,7 @@ export const DISPLAY_NAMES = {
   "run.pr_post_step": "posting the PR",
   "run.review_post_step": "posting the review",
   "run.publication_context_check": "checking source evidence",
+  "run.model_source_check": "checking model source access",
   "run.reading_diff_join": "waiting for the diff",
   "run.pr_description_join": "waiting for the PR description",
   "model.turn": "a model turn",

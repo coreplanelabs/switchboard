@@ -1,4 +1,5 @@
 import { withOrganizationPrivateAudience } from "./privateDestination.js";
+import { markPrivateConversation } from "./privateConversation.js";
 import { bindConversationRead } from "./conversationRead.js";
 import { createSpanLog } from "../trace/spanLog.js";
 import { humanReview } from "../testing/humanReview.js";
@@ -580,6 +581,63 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it.each(["Error", "TypeError", "string"] as const)(
+    "retains the failed model source check without copying private exception text: %s",
+    async (failureClass) => {
+      let historyAvailable = true;
+      const decisions: boolean[] = [];
+      const harness = watched(piHarness);
+      harness.harness.open = async () => {
+        decisions.push(await bearers.sourceGuardFor(s.run.id).check());
+        historyAvailable = false;
+        decisions.push(await bearers.sourceGuardFor(s.run.id).check());
+        return { answer: "Guard checked.", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+      };
+      const s = setup("unused", {
+        io: {
+          authoritativePrivateHistory: async () => {
+            if (!historyAvailable) {
+              if (failureClass === "TypeError") throw new TypeError("PRIVATE_SOURCE_BYTES");
+              if (failureClass === "string") throw "PRIVATE_SOURCE_BYTES";
+              throw Object.assign(new Error("PRIVATE_SOURCE_BYTES"), { name: "PRIVATE_SOURCE_NAME" });
+            }
+            return [];
+          },
+        },
+        harness: {
+          harnesses: roster(harness.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      const bearers = new RunBearerStore({ clock: () => NOW });
+      s.deps.runBearers = bearers;
+      mintFor(bearers, s);
+      const trace = startRequestRoot({ clock: () => NOW }, { channel: "slack", receivedAt: NOW });
+      trace.bindRun(s.run.id, (event) => s.registry.publish(s.run.id, event));
+      await runLoop(s.deps, { ...s.ctx, root: trace.root, msg: markPrivateConversation(s.ctx.msg) });
+      expect(decisions).toEqual([true, false]);
+      expect(
+        trace
+          .spansSoFar()
+          .filter((span) => span.name === "run.model_source_check")
+          .map((span) => span.attrs),
+      ).toEqual([{ outcome: "allowed" }, { outcome: "history_exception", errorCode: failureClass }]);
+      expect(JSON.stringify(trace.spansSoFar())).not.toContain("PRIVATE_SOURCE_BYTES");
+      expect(JSON.stringify(trace.spansSoFar())).not.toContain("PRIVATE_SOURCE_NAME");
+      s.ending.drain(true);
+      await s.writer.settled();
+      const record = (await s.store.get(s.run.id))!;
+      expect(
+        record.events
+          .filter((event) => event.type === "span_end" && event.name === "run.model_source_check")
+          .map((event) => (event.type === "span_end" ? event.attrs : undefined)),
+      ).toEqual([{ outcome: "allowed" }, { outcome: "history_exception", errorCode: failureClass }]);
+    },
+  );
+
   it.each([false, true])(
     "checks the final private destination after model-source validation: %s",
     async (invalidate) => {

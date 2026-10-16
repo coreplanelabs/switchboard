@@ -1538,7 +1538,7 @@ describe("dispatch", () => {
     expect(oldTailReads).toBe(0);
     expect(requests).toHaveLength(2);
     expect(JSON.stringify(requests[1].messages)).toContain("Current retained context");
-    expect(JSON.stringify(requests[1].messages)).toContain("your notes for this thread are empty");
+    expect(JSON.stringify(requests[1].messages)).toContain("Stored notes are unavailable in this source view.");
     expect(JSON.stringify(requests)).not.toContain(marker);
     const stored = ledger.finished.get(runId)!;
     expect(stored).toMatchObject({ authoritativeHistory: true, session: { key: `private:${runId}:@context-v1` } });
