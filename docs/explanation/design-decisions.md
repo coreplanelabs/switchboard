@@ -8,6 +8,8 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 
 [Retire native work after a run ends](../plans/2026-10-16-001-terminal-native-retirement-design.md) extends the existing isolation controls to close leftover work after a run ends and preserve unknown outcomes.
 
+[Cancel deployment checks before upload is allowed](../plans/2026-10-16-002-cancel-unsealed-deploy-preparation.md) binds a deployment check to its original fence and keeps cancellation separate from sealed upload readiness.
+
 [Retain original native timeout ending proof](../plans/2026-10-16-003-retain-native-timeout-ending-proof.md) keeps the original process ending before journal removal so an interrupted check can retire without running again.
 
 <!-- generated:decision-records · npm run docs:gen — generated from the code, do not edit by hand -->

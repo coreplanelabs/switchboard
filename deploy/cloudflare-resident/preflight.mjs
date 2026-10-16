@@ -16,6 +16,7 @@
 // (preflight.test.mjs); `main()` only does I/O around it.
 
 import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
 import { deploymentClock } from "../bin/deploy-clock.mjs";
 
 /** The env var naming this Worker's origin. `deploy all` sets it from the deployment profile; the
@@ -103,7 +104,10 @@ function fenceHttpDiagnostic(status, body) {
   let nextStep = "inspect-worker-response";
   if (
     status === 409 &&
-    body.value?.error === "deploy-fence requires a live fleet drain with time for upload and readiness"
+    [
+      "deploy-fence requires a live fleet drain with time for upload and readiness",
+      "deploy-fence-acquisition-refused",
+    ].includes(body.value?.error)
   ) {
     phase = "fence-acquisition";
     reason = "fence-acquisition-refused";
@@ -147,35 +151,169 @@ function fenceHttpDiagnostic(status, body) {
   };
 }
 
-/** POST /deploy-fence closes registered reattach and reads activity. Never throws. */
-export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000, attempt } = {}) {
-  if (!token) return { ok: false, error: "no bearer in the environment" };
-  const url = new URL("/deploy-fence", baseUrl).toString();
-  let httpStatus;
+function acquisitionReceipt(value, id) {
+  const uuid = (v) => typeof v === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(v);
+  const build = (v) => typeof v === "string" && /^[a-f0-9]{40}(?:@\d{4}-\d\d-\d\dT[\d:.]+Z)?$/.test(v);
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).some(
+      (key) => !["schema", "purpose", "id", "phase", "workerVersion", "build", "disposition"].includes(key),
+    ) ||
+    value.schema !== 1 ||
+    value.purpose !== "deploy-fence-acquisition" ||
+    value.id !== id ||
+    !uuid(value.id) ||
+    !uuid(value.workerVersion) ||
+    !build(value.build) ||
+    !["preparing", "sealed", "abandoned"].includes(value.phase) ||
+    (value.phase === "abandoned"
+      ? !["cancelled-before-install", "fence-withdrawn"].includes(value.disposition)
+      : Object.hasOwn(value, "disposition"))
+  )
+    return null;
+  return value;
+}
+
+/** One original cancellation write, then only retained readback if its reply is lost. */
+async function abandonAcquisition(baseUrl, token, id, timeoutMs) {
+  const signal = AbortSignal.timeout(timeoutMs);
+  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
   try {
+    const res = await fetch(new URL("/abandon-deploy-fence-acquisition", baseUrl).toString(), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ id }),
+      signal,
+    });
+    if (res.status === 401 || res.status === 403) return null;
+    const body = await readRefusalBody(res);
+    const receipt = acquisitionReceipt(body.value?.acquisition, id);
+    if (res.ok && receipt?.phase === "abandoned") return receipt;
+    if (receipt?.phase === "sealed") return null;
+  } catch {
+    /* A lost write reply is not permission to repeat it. */
+  }
+  try {
+    const url = new URL("/deploy-fence-acquisition", baseUrl);
+    url.searchParams.set("id", id);
+    const res = await fetch(url.toString(), { method: "GET", headers, signal });
+    if (!res.ok) return null;
+    const body = await readRefusalBody(res);
+    const receipt = acquisitionReceipt(body.value?.acquisition, id);
+    return receipt?.phase === "abandoned" ? receipt : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Capability reads and preparation share one deadline; failure cleanup has one separate bounded budget. */
+export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000, attempt, legacy = false } = {}) {
+  if (!token) return { ok: false, error: "no bearer in the environment" };
+  const signal = AbortSignal.timeout(timeoutMs);
+  let id;
+  let protocol = "legacy";
+  let httpStatus;
+  const failed = async (result) => {
+    if (!id) return result;
+    const receipt = await abandonAcquisition(baseUrl, token, id, timeoutMs);
+    return { ...result, protocol, acquisitionId: id, acquisition: receipt, acquisitionUnverified: receipt === null };
+  };
+  try {
+    if (!legacy && !attempt) {
+      let healthStatus;
+      try {
+        const response = await fetch(new URL("/healthz", baseUrl).toString(), { method: "GET", signal });
+        healthStatus = response.status;
+        const body = await readRefusalBody(response);
+        const health = body.value;
+        if (
+          !response.ok ||
+          body.state !== "parsed" ||
+          health?.ok !== true ||
+          health.features?.nativeRunScopes !== "native-v1" ||
+          !/^[a-f0-9]{40}$/.test(health.build?.commit ?? "")
+        )
+          throw new Error("capability-unverified");
+        const capability = health.features.deployFenceAcquisition;
+        if (capability !== undefined && capability !== "v1") throw new Error("capability-unverified");
+        if (capability === "v1") {
+          protocol = "v1";
+          id = randomUUID();
+          try {
+            console.error(
+              "[resident-deploy-fence-acquisition] " + JSON.stringify({ schema: 1, id, phase: "requested" }),
+            );
+          } catch {
+            /* Diagnostics cannot change preparation. */
+          }
+        }
+      } catch {
+        return {
+          ok: false,
+          error: "capability-unverified",
+          ...(healthStatus === undefined ? {} : { httpStatus: healthStatus }),
+          diagnostic: {
+            schema: 1,
+            phase: "capability",
+            reason: "capability-unverified",
+            requestOutcome: "not-started",
+            nativeOutcome: "unverified",
+          },
+        };
+      }
+    }
+    const url = new URL(id ? "/prepare-deploy-fence" : "/deploy-fence", baseUrl).toString();
     const res = await fetch(url, {
       method: "POST",
-      headers: { authorization: `Bearer ${token}` },
-      ...(attempt ? { body: JSON.stringify({ attempt }) } : {}),
-      signal: AbortSignal.timeout(timeoutMs),
+      headers: { authorization: `Bearer ${token}`, ...(id ? { "content-type": "application/json" } : {}) },
+      ...(id ? { body: JSON.stringify({ id }) } : attempt ? { body: JSON.stringify({ attempt }) } : {}),
+      signal,
     });
     httpStatus = res.status;
-    if (!res.ok)
-      return {
+    if (!res.ok) {
+      const body = await readRefusalBody(res);
+      const result = {
         ok: false,
         error: `http-status:${res.status}`,
         httpStatus: res.status,
-        diagnostic: fenceHttpDiagnostic(res.status, await readRefusalBody(res)),
+        diagnostic: fenceHttpDiagnostic(res.status, body),
       };
-    const text = await res.text();
-    try {
-      return { ok: true, payload: JSON.parse(text) };
-    } catch {
-      return { ok: false, error: "malformed-json", httpStatus: res.status };
+      if (!id) return result;
+      const receipt = acquisitionReceipt(body.value?.acquisition, id);
+      if (receipt?.phase === "abandoned") return { ...result, protocol, acquisitionId: id, acquisition: receipt };
+      if (res.status === 401 || res.status === 403 || res.status === 400)
+        return { ...result, protocol, acquisitionId: id, acquisitionUnverified: true };
+      if (res.status === 409 && body.value?.error === "deploy-fence-acquisition-refused")
+        return { ...result, protocol, acquisitionId: id, acquisitionRefused: true };
+      return await failed(result);
     }
+    const text = await res.text();
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      return await failed({ ok: false, error: "malformed-json", httpStatus: res.status });
+    }
+    if (id) {
+      const receipt = acquisitionReceipt(payload?.acquisition, id);
+      const sealed =
+        receipt?.phase === "sealed" &&
+        payload.fenceReady === true &&
+        payload.draining?.swapAcquisitionId === id &&
+        payload.draining?.swapVersion === receipt.workerVersion &&
+        payload.draining?.swapBuild === receipt.build &&
+        payload.deployDiagnostic?.producer?.workerVersion === receipt.workerVersion &&
+        payload.deployDiagnostic?.producer?.build === receipt.build;
+      const abandoned = receipt?.phase === "abandoned" && payload.fenceReady === false;
+      if (!sealed && !abandoned)
+        return await failed({ ok: false, error: "acquisition-response-unverified", httpStatus: res.status });
+    }
+    return { ok: true, payload, ...(id ? { protocol, acquisitionId: id } : {}) };
   } catch (err) {
     const error = err?.name === "TimeoutError" || err?.name === "AbortError" ? "timeout" : "transport";
-    return {
+    return await failed({
       ok: false,
       error,
       ...(httpStatus === undefined ? {} : { httpStatus }),
@@ -192,7 +330,7 @@ export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000, attem
         nativeOutcome: "unverified",
         nextStep: "reconcile-original-request",
       },
-    };
+    });
   }
 }
 
@@ -704,6 +842,13 @@ export function decide(
     now,
   } = {},
 ) {
+  if (fetched?.acquisitionUnverified === true)
+    return {
+      allow: false,
+      forced: false,
+      message: "deployment check outcome is unverified; the original acquisition remains held",
+    };
+  if (fetched?.protocol === "v1") force = false;
   const successorBootstrap =
     bootstrapPreviousWorkerVersion !== undefined &&
     Number.isSafeInteger(now) &&
@@ -752,11 +897,13 @@ export function decide(
 
   if (!fetched || fetched.ok !== true) {
     problems.push(
-      Number.isSafeInteger(fetched?.httpStatus)
-        ? `resident Worker responded HTTP ${fetched.httpStatus}: ${fetched.error}`
-        : fetched?.diagnostic?.requestOutcome === "unknown"
-          ? `resident deploy-fence request outcome is unknown: ${fetched.error}`
-          : `resident Worker not consulted: ${fetched?.error ?? "unknown error"}`,
+      fetched?.diagnostic?.phase === "capability"
+        ? `resident deployment capability is unverified: ${fetched.error}`
+        : Number.isSafeInteger(fetched?.httpStatus)
+          ? `resident Worker responded HTTP ${fetched.httpStatus}: ${fetched.error}`
+          : fetched?.diagnostic?.requestOutcome === "unknown"
+            ? `resident deploy-fence request outcome is unknown: ${fetched.error}`
+            : `resident Worker not consulted: ${fetched?.error ?? "unknown error"}`,
     );
   } else {
     const maintenance = fetched.payload?.stagingMaintenance;
@@ -983,7 +1130,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, { cl
       return 2;
     }
   }
-  const fetched = await fetchResidents(baseUrl, readToken(env), { attempt });
+  const fetched = await fetchResidents(baseUrl, readToken(env), {
+    attempt,
+    legacy: force || env.RESIDENT_BOOTSTRAP_PREVIOUS_VERSION !== undefined,
+  });
   const d = decide(fetched, {
     force,
     attempt,

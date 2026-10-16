@@ -1,4 +1,15 @@
 import {
+  FENCE_ACQUISITION_PREFIX,
+  fenceAcquisitionOf,
+  fenceAcquisitionReceipt,
+  fenceAcquisitionRequestId,
+  hasFenceAcquisition,
+  ordinaryAcquisitionDrain,
+  ownsAcquisitionFence,
+  validFenceAcquisitionId,
+  type FenceAcquisition,
+} from "./fenceAcquisition.js";
+import {
   nativeRetirementTargetSchema,
   nativeRetirementPermitSchema,
   nativeRetirementTargetKey,
@@ -1969,6 +1980,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     )
       return false;
     return this.ctx.storage.transaction(async (txn) => {
+      if (hasFenceAcquisition(await txn.get(DRAIN_KEY))) return false;
       const now = systemClock();
       const held = await this.getStagingMaintenance(txn);
       const fence = liveDrain(await txn.get(DRAIN_KEY), now);
@@ -2146,6 +2158,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     versionTimestamp: string | null,
   ): Promise<boolean> {
     return this.ctx.storage.transaction(async (txn) => {
+      if (hasFenceAcquisition(await txn.get(DRAIN_KEY))) return false;
       const held = await this.getStagingMaintenance(txn);
       const window = releaseWindowSchema.safeParse(await txn.get(stagingEpisodeKeys(held?.policy).window));
       const fence = liveDrain(await txn.get(DRAIN_KEY), systemClock());
@@ -2753,6 +2766,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     expected: AdmissionRecoveryQuote,
   ): Promise<boolean> {
     return this.ctx.storage.transaction(async (txn) => {
+      if (hasFenceAcquisition(await txn.get(DRAIN_KEY))) return false;
       const now = systemClock();
       const fence = liveDrain(await txn.get(DRAIN_KEY), now);
       if (!fence?.swapFence || fence.since !== since || fence.until !== until || fence.swapVersion !== versionId)
@@ -2855,7 +2869,10 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   }
 
   async verifyDeployFence(since: string, until: string, versionId: string | null): Promise<boolean> {
-    return this.ctx.storage.transaction((txn) => this.deployFenceVerified(txn, since, until, versionId));
+    return this.ctx.storage.transaction(async (txn) => {
+      if (hasFenceAcquisition(await txn.get(DRAIN_KEY))) return false;
+      return this.deployFenceVerified(txn, since, until, versionId);
+    });
   }
 
   /** Admin-only by construction (reached solely via POST /drain): replaces
@@ -2865,7 +2882,9 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   async setDrain(record: DrainRecord, attempt?: unknown): Promise<DrainRecord | null> {
     const stored = await this.ctx.storage.transaction(async (txn) => {
       const now = systemClock();
-      const current = liveDrain(await txn.get(DRAIN_KEY), now);
+      const original = await txn.get(DRAIN_KEY);
+      const current = liveDrain(original, now);
+      if (current && hasFenceAcquisition(original)) return false;
       const held = await this.getStagingMaintenance(txn);
       if (held?.state === "held") {
         if (!selectedStagingAttempt(held, attempt, now)) return false;
@@ -2913,8 +2932,9 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     const now = systemClock();
     const held = await this.getStagingMaintenance(txn);
     if (held?.state === "held" && !selectedStagingAttempt(held, attempt, now)) return null;
-    const record = liveDrain(await txn.get(DRAIN_KEY), now);
-    if (record === null || record.swapFence) return null;
+    const original = await txn.get(DRAIN_KEY);
+    const record = liveDrain(original, now);
+    if (record === null || record.swapFence || hasFenceAcquisition(original)) return null;
     const fenced = {
       ...record,
       swapFence: true,
@@ -2944,11 +2964,127 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     return this.ctx.storage.transaction((txn) => this.installDeployFence(txn, versionId, attempt));
   }
 
+  /** A distinct RPC makes an older Registry refuse before its first write. */
+  async prepareDeployFenceAcquisition(
+    id: string,
+    versionId: string | null,
+    producerBuild: string,
+  ): Promise<FenceAcquisition | null> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (
+        !validFenceAcquisitionId(id) ||
+        !validFenceAcquisitionId(versionId) ||
+        versionId !== workerVersionId(this.env) ||
+        producerBuild !== BUILD_ID ||
+        (await txn.get(FENCE_ACQUISITION_PREFIX + id)) !== undefined ||
+        (await this.getStagingMaintenance(txn))?.state === "held"
+      )
+        return null;
+      const originalDrain = ordinaryAcquisitionDrain(await txn.get(DRAIN_KEY));
+      if (!originalDrain) return null;
+      const installed = await this.installDeployFence(txn, versionId);
+      if (!installed) return null;
+      const fencedRecord = { ...installed, swapAcquisitionId: id };
+      const prepared = fenceAcquisitionOf({
+        schema: 1,
+        purpose: "deploy-fence-acquisition",
+        id,
+        workerVersion: versionId,
+        build: BUILD_ID,
+        phase: "preparing",
+        originalDrain,
+        fencedRecord,
+      });
+      // The shared installer already wrote within this transaction. Roll it
+      // back instead of leaving an untracked fence after a schema refusal.
+      if (!prepared) throw new Error("deploy-fence-acquisition-invalid");
+      await txn.put(DRAIN_KEY, fencedRecord);
+      await txn.put(FENCE_ACQUISITION_PREFIX + id, prepared);
+      return prepared;
+    });
+  }
+
+  async sealDeployFenceAcquisition(
+    id: string,
+    versionId: string | null,
+    producerBuild: string,
+  ): Promise<FenceAcquisition | null> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (
+        !validFenceAcquisitionId(id) ||
+        versionId !== workerVersionId(this.env) ||
+        producerBuild !== BUILD_ID ||
+        (await this.getStagingMaintenance(txn))?.state === "held"
+      )
+        return null;
+      const current = fenceAcquisitionOf(await txn.get(FENCE_ACQUISITION_PREFIX + id));
+      if (
+        current?.id !== id ||
+        current.phase !== "preparing" ||
+        !ownsAcquisitionFence(current, await txn.get(DRAIN_KEY), workerVersionId(this.env), BUILD_ID) ||
+        !(await this.deployFenceVerified(txn, current.fencedRecord.since, current.fencedRecord.until, versionId))
+      )
+        return null;
+      const sealed: FenceAcquisition = { ...current, phase: "sealed" };
+      await txn.put(FENCE_ACQUISITION_PREFIX + id, sealed);
+      return sealed;
+    });
+  }
+
+  async abandonDeployFenceAcquisition(
+    id: string,
+    versionId: string | null,
+    producerBuild: string,
+  ): Promise<FenceAcquisition | null> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!validFenceAcquisitionId(id)) return null;
+      const raw = await txn.get(FENCE_ACQUISITION_PREFIX + id);
+      const current = fenceAcquisitionOf(raw);
+      if (current?.id === id && current.phase === "abandoned") return current;
+      if (
+        !validFenceAcquisitionId(versionId) ||
+        versionId !== workerVersionId(this.env) ||
+        producerBuild !== BUILD_ID ||
+        (raw !== undefined && !current) ||
+        (current &&
+          (current.id !== id ||
+            current.phase !== "preparing" ||
+            !ownsAcquisitionFence(current, await txn.get(DRAIN_KEY), workerVersionId(this.env), BUILD_ID)))
+      )
+        return null;
+      const abandoned = fenceAcquisitionOf(
+        current
+          ? { ...current, phase: "abandoned", disposition: "fence-withdrawn" }
+          : {
+              schema: 1,
+              purpose: "deploy-fence-acquisition",
+              id,
+              workerVersion: versionId,
+              build: BUILD_ID,
+              phase: "abandoned",
+              disposition: "cancelled-before-install",
+            },
+      );
+      if (!abandoned) return null;
+      if (current?.phase === "preparing") await txn.put(DRAIN_KEY, current.originalDrain);
+      await txn.put(FENCE_ACQUISITION_PREFIX + id, abandoned);
+      return abandoned;
+    });
+  }
+
+  async readDeployFenceAcquisition(id: string): Promise<FenceAcquisition | null> {
+    if (!validFenceAcquisitionId(id)) return null;
+    const current = fenceAcquisitionOf(await this.ctx.storage.get(FENCE_ACQUISITION_PREFIX + id));
+    return current?.id === id ? current : null;
+  }
+
   /** A refused preflight reopens owned reattach, but cannot clear a newer
    * deployment's drain. */
   async clearDeployFence(since: string, until: string, versionId: string | null): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
-      const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
+      const original = await txn.get(DRAIN_KEY);
+      if (hasFenceAcquisition(original)) return;
+      const record = liveDrain(original, systemClock());
       if (record?.since !== since || record.until !== until || !record.swapFence || record.swapVersion !== versionId)
         return;
       const { swapFence: _fence, swapBuild: _build, swapVersion: _version, swapAt: _at, ...rest } = record;
@@ -2968,10 +3104,32 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       typeof original !== "object" ||
       Array.isArray(original) ||
       Object.keys(original).some(
-        (key) => !["since", "until", "by", "reason", "swapFence", "swapBuild", "swapVersion", "swapAt"].includes(key),
+        (key) =>
+          ![
+            "since",
+            "until",
+            "by",
+            "reason",
+            "swapFence",
+            "swapBuild",
+            "swapVersion",
+            "swapAt",
+            "swapAcquisitionId",
+          ].includes(key),
       )
     )
       return null;
+    if (hasFenceAcquisition(original)) {
+      const id = (original as Record<string, unknown>).swapAcquisitionId;
+      if (!validFenceAcquisitionId(id)) return null;
+      const acquisition = fenceAcquisitionOf(await store.get(FENCE_ACQUISITION_PREFIX + id));
+      if (
+        acquisition?.id !== id ||
+        acquisition.phase !== "sealed" ||
+        !ownsAcquisitionFence(acquisition, original, workerVersionId(this.env), BUILD_ID)
+      )
+        return null;
+    }
     const record = liveDrain(original, systemClock());
     if (
       record?.swapFence !== true ||
@@ -3013,7 +3171,14 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       if (await txn.get(key)) return false;
       const originalRecord = await txn.get<DrainRecord>(DRAIN_KEY);
       if (!originalRecord) return false;
-      const { swapFence: _fence, swapBuild: _build, swapVersion: _version, swapAt: _at, ...drain } = originalRecord;
+      const {
+        swapFence: _fence,
+        swapBuild: _build,
+        swapVersion: _version,
+        swapAt: _at,
+        swapAcquisitionId: _acquisition,
+        ...drain
+      } = originalRecord;
       await txn.put(key, {
         schema: 1,
         originalRecordSha256: recordSha256,
@@ -15230,6 +15395,9 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/reset": { scope: "admin", method: "POST" },
   "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
   "/deploy-fence": { scope: "drain", method: "POST" }, // fence reattach and read executing activity
+  "/prepare-deploy-fence": { scope: "drain", method: "POST" },
+  "/abandon-deploy-fence-acquisition": { scope: "drain", method: "POST" },
+  "/deploy-fence-acquisition": { scope: "drain", method: "GET" },
   "/deploy-fence-recovery": { scope: "admin", method: "GET" },
   "/release-deploy-fence": { scope: "admin", method: "POST" },
   "/deploy-admissions": { scope: "admin", method: "GET" }, // targeted recovery inventory, never a drain-bearer route
@@ -15321,7 +15489,7 @@ async function countR2Prefix(bucket: R2Bucket, prefix: string): Promise<number> 
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // Unauthenticated wake ping for `npm run deploy` — touches no DO, no data.
@@ -15336,7 +15504,7 @@ export default {
         ok: true,
         build: BUILD,
         backupTransfer: transfer.mode,
-        features: { nativeRunScopes: "native-v1" },
+        features: { nativeRunScopes: "native-v1", deployFenceAcquisition: "v1" },
         ...(transfer.missing.length > 0 ? { backupTransferMissing: transfer.missing } : {}),
       });
     }
@@ -15427,6 +15595,12 @@ export default {
             return await handleDrain(env, body);
           case "/deploy-fence":
             return await handleDeployFence(env, body.attempt);
+          case "/prepare-deploy-fence":
+            return await handlePrepareDeployFence(env, request, ctx, body);
+          case "/abandon-deploy-fence-acquisition":
+            return await handleAbandonDeployFenceAcquisition(env, ctx, body);
+          case "/deploy-fence-acquisition":
+            return await handleReadDeployFenceAcquisition(env, url);
           case "/deploy-fence-recovery":
             return await handleDeployFenceRecovery(env, url);
           case "/release-deploy-fence":
@@ -16163,18 +16337,7 @@ async function handleDeployFence(env: Env, attempt?: unknown): Promise<Response>
     const admissionReadback = await registry.getDeployAdmissionReadback().catch(() => null);
     const sameFence = await registry.verifyDeployFence(fence.since, fence.until, versionId);
     const activeAdmissions = await registry.activeDeployAdmissions();
-    const safe =
-      sameFence &&
-      enriched.every(({ live }) => {
-        const state = live as Record<string, unknown>;
-        return (
-          Number.isSafeInteger(state.executingRuns) &&
-          Number(state.executingRuns) === 0 &&
-          Number.isSafeInteger(state.unknownRuns) &&
-          Number(state.unknownRuns) === 0 &&
-          ["warm", "degraded", "down", "refreshing", "restoring"].includes(String(state.state))
-        );
-      });
+    const safe = sameFence && residentDeployViewsReady(enriched);
     if (!safe) await registry.clearDeployFence(fence.since, fence.until, versionId);
     return json({
       draining: safe ? fence : { ...fence, swapFence: false },
@@ -16194,6 +16357,164 @@ async function handleDeployFence(env: Env, attempt?: unknown): Promise<Response>
     await registry.clearDeployFence(fence.since, fence.until, versionId);
     return json({ error: "deploy-fence-read-unavailable" }, 503);
   }
+}
+
+function residentDeployViewsReady(residents: readonly { live: unknown }[]): boolean {
+  return residents.every(({ live }) => {
+    const state = live as Record<string, unknown>;
+    return (
+      Number.isSafeInteger(state.executingRuns) &&
+      Number(state.executingRuns) === 0 &&
+      Number.isSafeInteger(state.unknownRuns) &&
+      Number(state.unknownRuns) === 0 &&
+      ["warm", "degraded", "down", "refreshing", "restoring"].includes(String(state.state))
+    );
+  });
+}
+
+/** Incoming cancellation is local to this preparation, never a native stop signal. */
+async function handlePrepareDeployFence(
+  env: Env,
+  request: Request,
+  ctx: ExecutionContext,
+  body: unknown,
+): Promise<Response> {
+  const id = fenceAcquisitionRequestId(body);
+  if (!id) return json({ error: "an exact deployment acquisition id is required" }, 400);
+  const versionId = workerVersionId(env);
+  if (!versionId || !workerVersionTimestamp(env)) return json({ error: "Worker version metadata is unavailable" }, 503);
+  const registry = registryStub(env);
+  let withdrawal: Promise<FenceAcquisition | null> | undefined;
+  const abandon = () =>
+    (withdrawal ??= (async () => {
+      try {
+        const result = fenceAcquisitionOf(await registry.abandonDeployFenceAcquisition(id, versionId, BUILD_ID));
+        if (result?.id === id && result.phase === "abandoned") return result;
+      } catch {
+        /* Qualify only the original retained disposition after a lost reply. */
+      }
+      try {
+        const saved = fenceAcquisitionOf(await registry.readDeployFenceAcquisition(id));
+        return saved?.id === id && saved.phase === "abandoned" ? saved : null;
+      } catch {
+        return null;
+      }
+    })());
+  const onAbort = () => ctx.waitUntil(abandon());
+  const refused = async (status: number, observations: Record<string, unknown> = {}): Promise<Response> => {
+    const disposition = await abandon();
+    emitDeployAdmission({
+      phase: "fence-acquisition-withdrawal",
+      id,
+      workerVersion: versionId,
+      commit: disposition ? "acknowledged" : "unverified",
+      nativeOutcome: "unverified",
+    });
+    return json(
+      {
+        ...observations,
+        error: disposition
+          ? status === 200
+            ? "deploy-fence-not-ready"
+            : "deploy-fence-read-unavailable"
+          : "deploy-fence-acquisition-unverified",
+        fenceReady: false,
+        acquisition: disposition ? fenceAcquisitionReceipt(disposition) : null,
+        ...(disposition?.originalDrain ? { draining: { ...disposition.originalDrain, swapFence: false } } : {}),
+        deployDiagnostic: {
+          schema: 1,
+          producer: { build: BUILD_ID, workerVersion: versionId },
+          fenceDisposition: disposition ? "withdrawn" : "unavailable",
+        },
+      },
+      disposition ? status : 503,
+    );
+  };
+  request.signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    if (request.signal.aborted) return await refused(503);
+    const prepared = fenceAcquisitionOf(await registry.prepareDeployFenceAcquisition(id, versionId, BUILD_ID));
+    if (!prepared || prepared.id !== id || prepared.phase !== "preparing")
+      return json({ error: "deploy-fence-acquisition-refused", fenceReady: false }, 409);
+    const residents = await registry.list();
+    const settled = await Promise.allSettled(
+      residents.map((record) => residentStub(env, residentAddress(record)).getResidentDeployInfo()),
+    );
+    const enriched = residents.map((record, i) => {
+      const result = settled[i];
+      return { ...record, live: result.status === "fulfilled" ? result.value : { error: "resident-view-unavailable" } };
+    });
+    const admissionReadback = await registry.getDeployAdmissionReadback().catch(() => null);
+    const activeAdmissions = await registry.activeDeployAdmissions();
+    const stagingMaintenance = await registry.getStagingMaintenanceReadback();
+    const observations = { residents: enriched, admissionReadback, activeAdmissions, stagingMaintenance };
+    if (request.signal.aborted || activeAdmissions > 0 || !residentDeployViewsReady(enriched))
+      return await refused(200, observations);
+    const sealed = fenceAcquisitionOf(await registry.sealDeployFenceAcquisition(id, versionId, BUILD_ID));
+    if (!sealed || sealed.id !== id || sealed.phase !== "sealed") return await refused(200, observations);
+    // Nothing that can stall remains between the durable seal and the ready reply.
+    if (request.signal.aborted) return json({ error: "deploy-fence-acquisition-unverified", fenceReady: false }, 503);
+    emitDeployAdmission({ phase: "fence-acquisition-sealed", id, workerVersion: versionId, commit: "acknowledged" });
+    return json({
+      ...observations,
+      draining: sealed.fencedRecord,
+      fenceReady: true,
+      acquisition: fenceAcquisitionReceipt(sealed),
+      deployDiagnostic: {
+        schema: 1,
+        producer: { build: BUILD_ID, workerVersion: versionId },
+        fenceDisposition: "retained",
+        admissionReadback: admissionReadback === null ? "unavailable" : "reported",
+      },
+    });
+  } catch {
+    return await refused(503);
+  } finally {
+    request.signal.removeEventListener("abort", onAbort);
+  }
+}
+
+async function handleAbandonDeployFenceAcquisition(env: Env, ctx: ExecutionContext, body: unknown): Promise<Response> {
+  const id = fenceAcquisitionRequestId(body);
+  if (!id) return json({ error: "an exact deployment acquisition id is required" }, 400);
+  const registry = registryStub(env);
+  let outcome: FenceAcquisition | undefined;
+  try {
+    const commit = registry.abandonDeployFenceAcquisition(id, workerVersionId(env), BUILD_ID);
+    ctx.waitUntil(commit.catch(() => undefined));
+    outcome = fenceAcquisitionOf(await commit);
+  } catch {
+    try {
+      outcome = fenceAcquisitionOf(await registry.readDeployFenceAcquisition(id));
+    } catch {
+      /* An unreadable disposition grants nothing. */
+    }
+  }
+  const abandoned = outcome?.id === id && outcome.phase === "abandoned";
+  emitDeployAdmission({
+    phase: "fence-acquisition-abandon",
+    id,
+    workerVersion: workerVersionId(env),
+    commit: abandoned ? "acknowledged" : "unverified",
+    nativeOutcome: "unverified",
+  });
+  return json(
+    {
+      acquisition: outcome?.id === id ? fenceAcquisitionReceipt(outcome) : null,
+      ...(!abandoned ? { error: "deployment acquisition is not confirmed abandoned" } : {}),
+    },
+    abandoned ? 200 : 409,
+  );
+}
+
+async function handleReadDeployFenceAcquisition(env: Env, url: URL): Promise<Response> {
+  const id = url.searchParams.get("id");
+  if (!validFenceAcquisitionId(id) || url.searchParams.size !== 1)
+    return json({ error: "an exact deployment acquisition id is required" }, 400);
+  const outcome = fenceAcquisitionOf(await registryStub(env).readDeployFenceAcquisition(id));
+  return outcome?.id === id
+    ? json({ acquisition: fenceAcquisitionReceipt(outcome) })
+    : json({ error: "deployment acquisition is unverified", acquisition: null }, 409);
 }
 
 async function handleDeployFenceRecovery(env: Env, url: URL): Promise<Response> {

@@ -50,6 +50,8 @@ export interface DrainRecord {
   swapVersion?: string;
   /** The fence's own creation time; another version must be newer than this. */
   swapAt?: string;
+  /** Presence blocks tuple-only controls even when a corrupt value grants no authority. */
+  swapAcquisitionId?: string | null;
 }
 
 /** The longest a drain may run, and the default, from the one clock table
@@ -139,6 +141,9 @@ export function liveDrain(stored: unknown, now: number): DrainRecord | null {
     ...(typeof r.swapBuild === "string" ? { swapBuild: r.swapBuild } : {}),
     ...(typeof r.swapVersion === "string" ? { swapVersion: r.swapVersion } : {}),
     ...(typeof r.swapAt === "string" ? { swapAt: r.swapAt } : {}),
+    ...(Object.hasOwn(r, "swapAcquisitionId")
+      ? { swapAcquisitionId: typeof r.swapAcquisitionId === "string" ? r.swapAcquisitionId : null }
+      : {}),
   };
 }
 
