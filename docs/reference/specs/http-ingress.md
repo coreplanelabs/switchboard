@@ -106,7 +106,7 @@ An asynchronous admission or synchronous response with a finished run includes t
 
 ## GitHub comment conversion
 
-The inactive `normalizeGithubComment` adapter converts top-level PR comments, inline comments and replies, and submitted reviews into the common `SourceEvent` format. It handles comment creation, edits and deletion, plus review submission, edits and dismissal. Human and bot authors use the same `source-evidence` kind. Native authors, bodies, URLs, repository IDs and original payloads remain source data. They do not become requester identity, task selection or worker authority.
+The inactive `normalizeGithubActivity` adapter converts top-level PR comments, inline comments and replies, and submitted reviews into the common `SourceEvent` format. It handles comment creation, edits and deletion, plus review submission, edits and dismissal. Human and bot authors use the same `source-evidence` kind. Native authors, bodies, URLs, repository IDs and original payloads remain source data. They do not become requester identity, task selection or worker authority.
 
 The caller must first verify the raw-body signature and configured host/App/installation/repository. The converter checks the supplied installation and repository IDs against the native payload and checks link hosts. Source, delivery, object and revision IDs stay separate. Canonical native-object snapshots distinguish same-time edits and deletions without treating JSON property order as a change. The existing source-event codec rejects unsafe or oversized data and returns a detached record.
 
@@ -118,3 +118,16 @@ This module does not change the webhook receiver, acknowledge a delivery, start 
 | Stable native object revisions are independent of delivery IDs and JSON key order; same-time edits and deletion/dismissal state remain distinct source evidence | `[unit]` `src/channels/githubActivity.test.ts::GitHub comment normalization::separates delivery identity…`; `::retains deletions and review dismissals…` |
 | The converter uses existing receipt and job semantics: duplicate input returns its original receipt and changed data under one delivery ID is held | `[unit]` `src/channels/githubActivity.test.ts::GitHub comment normalization::uses the existing source receipt…` |
 | Unsafe accessors, malformed identity, a foreign repository/installation or link host, and oversized records are held; ordinary issue comments stay outside PR conversion | `[unit]` `src/channels/githubActivity.test.ts::GitHub comment normalization::holds…`; `::ignores ordinary issue comments…` |
+
+
+### PR state, review threads and commit comments
+
+The same inactive converter also accepts PR `opened`, `edited`, `reopened`, `closed`, `synchronize`, `converted_to_draft` and `ready_for_review` actions, review-thread `resolved` and `unresolved` actions, and commit-comment creation. PR and thread updates use `source-fact`; comment bodies remain `source-evidence`. These kinds describe source data, not requester authority or a command to a worker. The supported actions follow the [GitHub webhook reference](https://docs.github.com/en/webhooks/webhook-events-and-payloads) and the [native thread schema](https://github.com/octokit/webhooks/blob/main/payload-schemas/api.github.com/pull_request_review_thread/resolved.schema.json).
+
+A PR fact retains native PR identity, title/body, lifecycle state, draft/merge fields and separate head/base repository IDs, refs and SHAs. Synchronization also retains before/after SHAs and holds a mismatch between `after` and the supplied head. A deleted fork keeps a null repository ID. A thread uses its native node ID; it does not borrow a comment ID. A commit comment retains its commit SHA without a fabricated PR number. Every record retains the full native snapshot. Delivery order does not prove current source state; overlap, recovery and ordering still need shared processing before activation.
+
+| Criterion | Proof |
+| --- | --- |
+| PR synchronization keeps fork head/base and before/after identities; malformed source or branch identity is held | `[unit]` `src/channels/githubActivity.test.ts::GitHub pull and commit activity normalization::keeps fork head…`; `::holds malformed branch…`; `::holds malformed PR lifecycle states…` |
+| PR lifecycle and same-head edits remain distinct from delivery identity; deleted forks and unknown actors retain explicit null values | `[unit]` `src/channels/githubActivity.test.ts::GitHub pull and commit activity normalization::retains the snapshot…`; `::distinguishes a same-head…`; `::retains a deleted fork…` |
+| Thread resolution uses the native thread ID and retains each state; commit comments keep their SHA without becoming PR requests | `[unit]` `src/channels/githubActivity.test.ts::GitHub pull and commit activity normalization::uses the native thread…`; `::retains commit comments…` |

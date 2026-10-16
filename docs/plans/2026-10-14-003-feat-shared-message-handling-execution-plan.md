@@ -221,6 +221,12 @@ The inactive GitHub converter maps top-level comments, inline comments/replies a
 
 The caller still owns raw-signature and configured-source verification. No receiver, producer, source match or worker delivery is enabled by this cut. API baseline/recovery merging, other event families, relevance and source echoes remain pending. Step 4 remains in progress.
 
+### PR state and related comments, 2026-10-15
+
+The same inactive converter now covers selected PR head/base and lifecycle updates, review-thread resolution, and commit-comment creation. PR and thread facts keep native object identity and state without gaining requester authority. Fork repository IDs, refs and SHAs stay separate from the base repository. A commit comment keeps its SHA without a guessed PR. Human/bot comments retain one evidence path.
+
+The converter still has no receiver importer. Check/status and ref events, access changes, API baseline/recovery merging, matching, relevance, ordering and delivery remain pending. A converted fact is not proof of the latest head or a successful delivery. Step 4 remains in progress.
+
 ## Step 5: continue a review when its head changes
 
 **Current source:** [head classification](../../src/core/headMoved.ts), [review settlement](../../src/core/reviewRound.ts), [run loop](../../src/core/dispatch/runLoop.ts), [history](../../src/core/reviewHistory.ts), and existing workspace/runtime contracts.
