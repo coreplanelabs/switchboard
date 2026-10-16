@@ -77,6 +77,8 @@ export async function normalizeGithubActivity(
       "check_run",
       "check_suite",
       "status",
+      "push",
+      "delete",
     ].includes(event ?? "")
   )
     return { kind: "ignored", reason: "event" };
@@ -101,8 +103,8 @@ export async function normalizeGithubActivity(
               : event === "pull_request_review"
                 ? ["submitted", "edited", "dismissed"]
                 : ["created", "edited", "deleted"];
-  // Commit status has no action field in GitHub's webhook contract.
-  if (event !== "status") {
+  // Status and ref events have no action field in GitHub's webhook contract.
+  if (event !== "status" && event !== "push" && event !== "delete") {
     if (typeof payload.action !== "string") return refused("invalid-payload");
     if (!actions.includes(payload.action)) return { kind: "ignored", reason: "action" };
   }
@@ -143,6 +145,50 @@ export async function normalizeGithubActivity(
       return refused("invalid-event");
     }
   };
+  if (event === "push" || event === "delete") {
+    const actor = authorOf(payload.sender ?? null);
+    if (actor === undefined || !text(payload.ref)) return refused("invalid-payload");
+    if (event === "delete" && payload.ref_type !== "branch" && payload.ref_type !== "tag")
+      return refused("invalid-payload");
+    const ref =
+      event === "push" ? payload.ref : `refs/${payload.ref_type === "branch" ? "heads" : "tags"}/${payload.ref}`;
+    const match = /^refs\/(heads|tags)\/(.+)$/.exec(ref);
+    if (!match || Array.from(ref).some((character) => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127))
+      return refused("invalid-payload");
+    if (
+      event === "push" &&
+      (!sha(payload.before) ||
+        !sha(payload.after) ||
+        typeof payload.created !== "boolean" ||
+        typeof payload.deleted !== "boolean" ||
+        typeof payload.forced !== "boolean" ||
+        (payload.created && payload.deleted) ||
+        (payload.before === "0".repeat(40)) !== payload.created ||
+        (payload.after === "0".repeat(40)) !== payload.deleted ||
+        optionalText(payload.base_ref) === undefined)
+    )
+      return refused("invalid-payload");
+    return finish(
+      "ref",
+      ref,
+      "source-fact",
+      actor,
+      {
+        surface: "ref",
+        action: event,
+        ref,
+        refType: match[1] === "heads" ? "branch" : "tag",
+        before: event === "push" ? payload.before : null,
+        after: event === "push" ? payload.after : null,
+        created: event === "push" ? payload.created : null,
+        deleted: event === "push" ? payload.deleted : true,
+        forced: event === "push" ? payload.forced : null,
+        baseRef: event === "push" ? (payload.base_ref ?? null) : null,
+        actor,
+      },
+      { surface: "ref", event, native },
+    );
+  }
   if (event === "check_run" || event === "check_suite" || event === "status") {
     const actor = authorOf(payload.sender ?? null);
     if (actor === undefined) return refused("invalid-payload");

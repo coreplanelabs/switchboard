@@ -221,7 +221,7 @@ describe("GitHub comment normalization", () => {
         { ...payload(), issue: { number: 7 } },
       ),
     ).toEqual({ kind: "ignored", reason: "not-pull-request" });
-    expect(await normalizeGithubActivity(source, { event: "push", delivery: "two" }, {})).toEqual({
+    expect(await normalizeGithubActivity(source, { event: "workflow_run", delivery: "two" }, {})).toEqual({
       kind: "ignored",
       reason: "event",
     });
@@ -605,5 +605,198 @@ describe("GitHub check and status normalization", () => {
         { ...native, action: "unknown" },
       ),
     ).toEqual({ kind: "ignored", reason: "action" });
+  });
+});
+
+describe("GitHub ref activity normalization", () => {
+  const push = {
+    installation: { id: 2 },
+    repository: { id: 3, full_name: "acme/api" },
+    ref: "refs/heads/fix/retry",
+    before: "a".repeat(40),
+    after: "b".repeat(40),
+    created: false,
+    deleted: false,
+    forced: false,
+    base_ref: null,
+    commits: [{ id: "b".repeat(40), message: "Fix retries" }],
+    head_commit: { id: "b".repeat(40) },
+    sender: user,
+  };
+  const deletion = {
+    installation: { id: 2 },
+    repository: { id: 3, full_name: "acme/api" },
+    ref: "fix/retry",
+    ref_type: "branch",
+    pusher_type: "deploy_key",
+    sender: user,
+  };
+
+  it("retains branch SHAs and force-push facts without selecting a PR", async () => {
+    const native = { ...push, forced: true, pull_request: { number: 99 } };
+    expect(await normalizeGithubActivity(source, { event: "push", delivery: "one" }, native)).toMatchObject({
+      kind: "normalized",
+      event: {
+        kind: "source-fact",
+        authorId: "github:github.com:user:4",
+        objectId: "github:github.com:repository:3:ref:refs/heads/fix/retry",
+        payload: {
+          activity: {
+            surface: "ref",
+            action: "push",
+            ref: "refs/heads/fix/retry",
+            refType: "branch",
+            before: "a".repeat(40),
+            after: "b".repeat(40),
+            created: false,
+            deleted: false,
+            forced: true,
+            baseRef: null,
+            actor: user,
+          },
+          native,
+        },
+      },
+    });
+    const result = await normalizeGithubActivity(source, { event: "push", delivery: "one" }, native);
+    if (result.kind !== "normalized") throw new Error("expected ref fact");
+    expect(Object.keys(result.event.payload as object).sort()).toEqual(["activity", "native", "repository", "version"]);
+  });
+
+  it("keeps creation and deletion zero-SHA sentinels without guessing a commit", async () => {
+    const created = { ...push, created: true, before: "0".repeat(40) };
+    const deleted = { ...push, deleted: true, after: "0".repeat(40), commits: [], head_commit: null };
+    expect(await normalizeGithubActivity(source, { event: "push", delivery: "created" }, created)).toMatchObject({
+      kind: "normalized",
+      event: { payload: { activity: { created: true, before: "0".repeat(40), after: "b".repeat(40) } } },
+    });
+    expect(await normalizeGithubActivity(source, { event: "push", delivery: "deleted" }, deleted)).toMatchObject({
+      kind: "normalized",
+      event: {
+        payload: { activity: { deleted: true, before: "a".repeat(40), after: "0".repeat(40) }, native: deleted },
+      },
+    });
+  });
+
+  it("keeps delete facts on the same full ref and preserves absent SHA facts as null", async () => {
+    const result = await normalizeGithubActivity(source, { event: "delete", delivery: "delete" }, deletion);
+    expect(result).toMatchObject({
+      kind: "normalized",
+      event: {
+        kind: "source-fact",
+        objectId: "github:github.com:repository:3:ref:refs/heads/fix/retry",
+        payload: {
+          activity: {
+            action: "delete",
+            ref: "refs/heads/fix/retry",
+            refType: "branch",
+            before: null,
+            after: null,
+            created: null,
+            deleted: true,
+            forced: null,
+            baseRef: null,
+            actor: user,
+          },
+          native: deletion,
+        },
+      },
+    });
+  });
+
+  it("keeps branch and tag identities separate and does not strip literal ref prefixes", async () => {
+    const tag = await normalizeGithubActivity(
+      source,
+      { event: "push", delivery: "tag" },
+      { ...push, ref: "refs/tags/fix/retry" },
+    );
+    expect(tag).toMatchObject({
+      kind: "normalized",
+      event: {
+        objectId: "github:github.com:repository:3:ref:refs/tags/fix/retry",
+        payload: { activity: { refType: "tag" } },
+      },
+    });
+    const literal = await normalizeGithubActivity(
+      source,
+      { event: "delete", delivery: "nested" },
+      { ...deletion, ref: "refs/heads/fix/retry" },
+    );
+    expect(literal).toMatchObject({
+      kind: "normalized",
+      event: { objectId: "github:github.com:repository:3:ref:refs/heads/refs/heads/fix/retry" },
+    });
+  });
+
+  it("separates delivery identity and changed ref snapshots while freezing input", async () => {
+    const native = structuredClone(push);
+    const pending = normalizeGithubActivity(source, { event: "push", delivery: "one" }, native);
+    native.after = "c".repeat(40);
+    const first = await pending;
+    const again = await normalizeGithubActivity(source, { event: "push", delivery: "two" }, push);
+    const changed = await normalizeGithubActivity(
+      source,
+      { event: "push", delivery: "three" },
+      { ...push, forced: true },
+    );
+    if (first.kind !== "normalized" || again.kind !== "normalized" || changed.kind !== "normalized")
+      throw new Error("expected ref facts");
+    expect(first.event).toMatchObject({ deliveryId: "one", payload: { activity: { after: "b".repeat(40) } } });
+    expect(first.event.changeId).toMatch(/^[a-f0-9]{64}$/);
+    expect(again.event.changeId).toBe(first.event.changeId);
+    expect(changed.event.changeId).not.toBe(first.event.changeId);
+    expect(changed.event.objectId).toBe(first.event.objectId);
+  });
+
+  it("preserves unknown actors and treats bot actors as source data", async () => {
+    expect(
+      await normalizeGithubActivity(source, { event: "push", delivery: "unknown" }, { ...push, sender: null }),
+    ).toMatchObject({ kind: "normalized", event: { kind: "source-fact", payload: { activity: { actor: null } } } });
+    expect(
+      await normalizeGithubActivity(
+        source,
+        { event: "delete", delivery: "bot" },
+        { ...deletion, sender: { ...user, type: "Bot" } },
+      ),
+    ).toMatchObject({
+      kind: "normalized",
+      event: {
+        kind: "source-fact",
+        authorId: "github:github.com:user:4",
+        payload: { activity: { actor: { type: "Bot" } } },
+      },
+    });
+  });
+
+  it("holds malformed transitions and foreign source identity while accepting a valid push", async () => {
+    expect(await normalizeGithubActivity(source, { event: "push", delivery: "valid" }, push)).toMatchObject({
+      kind: "normalized",
+    });
+    for (const invalid of [
+      { ...push, before: "bad" },
+      { ...push, created: "false" },
+      { ...push, created: true, deleted: true },
+      { ...push, before: "0".repeat(40) },
+      { ...push, after: "0".repeat(40) },
+      { ...push, created: true },
+      { ...push, deleted: true },
+      { ...push, ref: "fix/retry" },
+      { ...push, ref: "refs/heads/" },
+      { ...push, base_ref: {} },
+      { ...push, installation: { id: 99 } },
+      { ...push, repository: { id: 99, full_name: "acme/api" } },
+    ]) {
+      expect(await normalizeGithubActivity(source, { event: "push", delivery: "invalid" }, invalid)).toMatchObject({
+        kind: "refused",
+      });
+    }
+    for (const invalid of [
+      { ...deletion, ref_type: "tree" },
+      { ...deletion, ref: "" },
+    ]) {
+      expect(await normalizeGithubActivity(source, { event: "delete", delivery: "invalid" }, invalid)).toMatchObject({
+        kind: "refused",
+      });
+    }
   });
 });
