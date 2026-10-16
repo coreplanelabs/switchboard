@@ -498,7 +498,9 @@ const REVIEW_UNIT_CONTRACT = `   3b. UNIT CONTRACT, when this prompt carries a \
 // The REVIEW TARGET block states the PR's size from GitHub and the digest
 // states its own totals, so a short read is recognizable — and the post-step
 // refuses a verdict whose digest covered less than the PR.
-const REVIEW_WHOLE_CHANGE = `   - READ THE WHOLE CHANGE: the REVIEW TARGET block states the PR's size as GitHub reports it (files, +/−) and \`diff_digest\` states the totals of what it covered — they must agree, and every file the digest lists must be in the diff you read. A tool output ending in \`...[truncated N chars]\` was cut short; when the digest or your diff shows fewer files or lines than the PR, read the rest file by file (\`git diff <base>...HEAD -- <path>\`) until every file is covered. Never judge from a partial diff: Switchboard does not post a verdict whose digest covered less than the PR.`;
+const REVIEW_WHOLE_CHANGE = `   - READ THE WHOLE CHANGE: the REVIEW TARGET block states the PR's size as GitHub reports it (files, +/−) and \`diff_digest\` states the totals of what it covered. They must agree, and every file the digest lists must be in the diff you read. Prefer \`review_read\` with \`kind: "diff"\` when available and permitted by the request. Use its default page size and continue with each returned nextOffset and sourceHash until eof. Do not request tiny pages or use repeated shell slices to read a diff.
+   - When the request requires \`run_check\` for source collection, or no source reader is available, save the complete read-only diff ONCE under \`$TMPDIR\`, for example \`git diff origin/<base>...HEAD > "$TMPDIR/review.diff"\`. Read that saved file with \`read\` at its normal page size. Follow its continuation offsets to the end. Do not spend recorded checks on \`head\`, \`tail\`, \`sed\` or \`dd\` slices of saved output. Keep \`run_check\` for the required HEAD check and relevant repository checks. Do not repeat a check merely to recover output or bypass an unknown outcome.
+   - A tool output ending in \`...[truncated N chars]\`, a receipt with \`truncated: true\`, or a reader that has not reached EOF is partial evidence. Recover the missing source through the permitted reader. If complete source is unavailable, report the gap and leave the review incomplete. Never judge from a partial diff: Switchboard does not post a verdict whose digest covered less than the PR.`;
 
 // Keep the publication bar in the system prompt even when the optional skill
 // store is unavailable. The detailed method lives in code-review-and-quality.
@@ -514,11 +516,11 @@ You have bash and read_file tools in a workspace directory. ${SANDBOX_TOOLCHAIN}
 
 Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your context window is large enough to hold the entire change. Speed matters: a review should take minutes, not an hour.
 
-1. GATHER, in 2-4 batched tool calls total:
-   - \`gh pr view <ref> --json title,body,url,baseRefName\` and \`gh pr diff <ref>\` (the complete diff) in one command
+1. GATHER in a small batch, with complete source pages as needed:
+   - read PR metadata with \`github_pull_get\` or \`gh pr view <ref> --json title,body,url,baseRefName\`; collect the diff with the source-reading method below
    - for a PR review, use the checkout Switchboard provisioned at the head named in the REVIEW TARGET block — do not clone or check out another ref — then call the \`diff_digest\` tool to orient: per-file churn, totals, and risky-file flags (migrations/schema, auth/permission, whole-file deletions, lockfiles, very large files) so you know where to look hardest before you read a line
 ${REVIEW_WHOLE_CHANGE}
-   - in ONE command, print the full current contents of every changed source file, e.g.: \`gh pr diff <ref> --name-only | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
+   - read the changed source files with \`read\`, or \`review_read\` with \`kind: "file"\` for pinned source. Batch independent reads. Use normal page sizes and follow the returned continuation rather than repeated small shell reads
    - if the PR is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
 ${REVIEW_HISTORY_INSTRUCTION}
@@ -554,11 +556,11 @@ You have bash and read_file tools inside a resident repository environment: a re
 
 Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your context window is large enough to hold the entire change. Speed matters: a review should take minutes, not an hour.
 
-1. GATHER, in 2-4 batched tool calls total:
-   - \`origin/<base>\` (the PR's base branch, named in the REVIEW TARGET block) is already present in the clone — no fetch needed or allowed: \`git log --oneline origin/<base>..HEAD\` and \`git diff origin/<base>...HEAD\` (the complete diff) in one command
+1. GATHER in a small batch, with complete source pages as needed:
+   - \`origin/<base>\` (the PR's base branch, named in the REVIEW TARGET block) is already present in the clone. No fetch is needed or allowed. Read PR metadata with \`github_pull_get\`; collect the diff with the source-reading method below
    - call the \`diff_digest\` tool to orient: it gives per-file churn, totals, and risky-file flags (migrations/schema, auth/permission, whole-file deletions, lockfiles, very large files) so you know where to look hardest before you read a line
 ${REVIEW_WHOLE_CHANGE}
-   - in ONE command, print the full current contents of every changed source file, e.g.: \`git diff --name-only origin/<base>...HEAD | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
+   - read the changed source files with \`read\`, or \`review_read\` with \`kind: "file"\` for pinned source. Batch independent reads. Use normal page sizes and follow the returned continuation rather than repeated small shell reads
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
 ${REVIEW_HISTORY_INSTRUCTION}
@@ -595,11 +597,11 @@ You have bash and read_file tools in a dedicated sandbox. ${SANDBOX_TOOLCHAIN} D
 
 Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your context window is large enough to hold the entire change. Speed matters: a review should take minutes, not an hour.
 
-1. GATHER, in 2-4 batched tool calls total:
-   - from \`/workspace/checkout\`: \`gh pr view <ref> --json title,body,url,baseRefName\` and \`git diff origin/<base>...HEAD\` (the complete diff; \`origin/<base>\` — the PR's base branch, named in the REVIEW TARGET block — is already present) in one command
+1. GATHER in a small batch, with complete source pages as needed:
+   - from \`/workspace/checkout\`, read PR metadata with \`github_pull_get\` or \`gh pr view <ref> --json title,body,url,baseRefName\`. The PR's base branch \`origin/<base>\` is already present. Collect the diff with the source-reading method below
    - call the \`diff_digest\` tool to orient: it gives per-file churn, totals, and risky-file flags (migrations/schema, auth/permission, whole-file deletions, lockfiles, very large files) so you know where to look hardest before you read a line
 ${REVIEW_WHOLE_CHANGE}
-   - in ONE command, print the full current contents of every changed source file, e.g.: \`git diff --name-only origin/<base>...HEAD | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
+   - read the changed source files with \`read\`, or \`review_read\` with \`kind: "file"\` for pinned source. Batch independent reads. Use normal page sizes and follow the returned continuation rather than repeated small shell reads
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
 ${REVIEW_HISTORY_INSTRUCTION}

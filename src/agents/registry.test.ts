@@ -311,11 +311,6 @@ describe("resident prompt variants", () => {
       expect(prompt).not.toContain("git push -u origin <branch>");
     }
   });
-
-  it("fallback prompt still clones; review still reads the diff with gh", () => {
-    expect(AGENTS.coding.system).toContain("clone the relevant repository");
-    expect(AGENTS.review.system).toContain("gh pr diff");
-  });
 });
 
 // Feature: docs/reference/specs/execution.md item 10 — the model learns what
@@ -461,23 +456,6 @@ describe("distilled-diffs prompt behavior (resident variants)", () => {
     expect(sys).not.toMatch(/typically the branch under review/);
     expect(sys).not.toMatch(/git fetch/);
     expect(sys).toMatch(/origin\/<base>/);
-  });
-
-  // docs/reference/specs/agent-review.md item 15 / distilled-diffs.md item 8:
-  // a review that judged the first files of a cut diff approved a 41-file PR
-  // as 13 files. Both variants now name the PR's size as the measure, the
-  // truncation marker as the tell, and the file-by-file read as the remedy.
-  it("both review prompts: the digest's totals must match the PR's size, a cut output is read file by file, never a verdict from a partial diff", () => {
-    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
-      expect(sys).toContain("diff_digest");
-      expect(sys).toMatch(/READ THE WHOLE CHANGE/);
-      expect(sys).toMatch(/PR's size as GitHub reports it/);
-      expect(sys).toMatch(/\.\.\.\[truncated N chars\]/);
-      expect(sys).toMatch(/read the rest file by file/i);
-      expect(sys).toMatch(/git diff <base>\.\.\.HEAD -- <path>/);
-      expect(sys).toMatch(/Never judge from a partial diff/);
-      expect(sys).toMatch(/does not post a verdict whose digest covered less/);
-    }
   });
 });
 

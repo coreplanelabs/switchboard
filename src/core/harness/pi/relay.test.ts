@@ -1434,6 +1434,42 @@ describe.each(["pi", "opencode"])("hosted %s check lifecycle", (name) => {
       });
     return { hard, original, saved, execResult, save, harness, events, ask };
   }
+  it("reports a full receipt ledger as not started and preserves recorded replay", async () => {
+    const w = setupCheck();
+    w.harness.toolContext.recovery = new ToolRecovery(undefined, async () => true);
+    for (let i = 0; i < 32; i++) {
+      expect(await w.ask(`check-${i}`)).toMatchObject({
+        isError: false,
+        content: [{ type: "text", text: expect.stringContaining("Command completed with exit 0.") }],
+      });
+    }
+    const saved = structuredClone(w.saved);
+    const refused = {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "error: recorded check receipt limit reached; command did not start. Use read or review_read for source and saved output; do not retry this check under another call id.",
+        },
+      ],
+    };
+    expect(await Promise.all(Array.from({ length: 6 }, (_, i) => w.ask(`overflow-${i}`)))).toEqual(
+      Array.from({ length: 6 }, () => refused),
+    );
+    expect(w.events).toEqual(
+      Array.from({ length: 6 }, (_, i) => ({
+        type: "run_note",
+        kind: "harness_error",
+        summary: `run_check overflow-${i}: ${refused.content[0]!.text}`,
+      })),
+    );
+    expect(await w.ask("check-0")).toMatchObject({
+      isError: false,
+      content: [{ type: "text", text: expect.stringContaining('"stdout":"done"') }],
+    });
+    expect(w.saved).toEqual(saved);
+    expect(w.execResult.mock.calls).toHaveLength(64);
+  });
   it("retains the original check failure before recovery stops native result delivery", async () => {
     const w = setupCheck();
     let beforeStop: RunEvent[] = [];

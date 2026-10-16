@@ -66,7 +66,7 @@
     "scripts/web-preview.ts": "b16e15c92b6b1a56b1df70bcb924ec5974c080305610745bb047cd1f47bb3be9",
     "scripts/web-review-fixture.ts": "ca73c51b9c8d8345fc0304e1d550026bc7e7f5df52df669e7cb9f689e643bf37",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
-    "src/agents/registry.ts": "dbf74ae200eaf6903728f9536c144b04eb4c779abb1131d147cada8f85cb34fa",
+    "src/agents/registry.ts": "8488d5544506a85d7c517f19ef4183765bc798547de39516eb86da19f5f8f5d6",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
@@ -500,7 +500,7 @@
       "response:*/*:/assets/536024deca28e1ce.js": "2c8faa55777b3bd108e1917eada2b5201f7798b2b8b1bdc7c1b7a642f2660c44",
       "response:*/*:/assets/6cc5f6bbe4a3ebcc.js": "9c85a9b329073ed96fc3f06f0bf4352ee8013d4b37dcd6b4c225c080fb3b0643",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
-      "response:*/*:/assets/7704038c40f6cb06.js": "e61e7b9ddf30576fb2c6c1cd77d8ce8f62abcb5ce499a5a6b8e49a64775563b9",
+      "response:*/*:/assets/7704038c40f6cb06.js": "6b067f608d9cd62bdc9455d1fa434eaca7848dbe9df3465e8aa739650ac430db",
       "response:*/*:/assets/801c8f91d5264208.js": "838778f8bffbced50ec9141ef5243c50b42e81bf7b75b6a7ba90de6ce2fc203a",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
       "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
@@ -519,8 +519,8 @@
       "response:*/*:/assets/green.css": "910b7d4303c281ffc4a9abd83e0d5af751a49010657bf5fb94f94c3be4333bc7",
       "response:*/*:/runs/hist-1": "df049aac77e446d906d4f1378a415bdb432f46850fca8869b2255fdbd44e1ef2",
       "response:*/*:/runs/hist-1/artifacts/runs/hist-1/out/1-metrics-dashboard.png": "2c271a30469c1a02bffa178d23f5a52db44ae4715ea9a9d257caef9dc8e6b17f",
-      "response:application/json:/home/session": "4e480a74d6088dfeaf5596973469c8dc7289372f4bfe938ce0ef1e5c66e61556",
-      "response:text/event-stream:/home/events": "a8b7f8b2e6cfc0b1faa17f210c96f7c3e19fc0b5a865a3d72b301a885c406521"
+      "response:application/json:/home/session": "bed4ce31672a9040033ddd5929f925d5e2303fbeaff18a511ffc1631c8fed669",
+      "response:text/event-stream:/home/events": "f0abe9712f7f96f8a85aad36a86e00e204d56265fc4a9ce28c678b65519fc72d"
     }
   }
 }

@@ -66,7 +66,7 @@
     "scripts/web-preview.ts": "b16e15c92b6b1a56b1df70bcb924ec5974c080305610745bb047cd1f47bb3be9",
     "scripts/web-review-fixture.ts": "ca73c51b9c8d8345fc0304e1d550026bc7e7f5df52df669e7cb9f689e643bf37",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
-    "src/agents/registry.ts": "dbf74ae200eaf6903728f9536c144b04eb4c779abb1131d147cada8f85cb34fa",
+    "src/agents/registry.ts": "8488d5544506a85d7c517f19ef4183765bc798547de39516eb86da19f5f8f5d6",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
@@ -445,7 +445,7 @@
       "response:*/*:/assets/444409e028e282d3.js": "765003fe0939b3b0322e844cbabda0ddf0f07f711e8f24838368a869cf7c3199",
       "response:*/*:/assets/6cc5f6bbe4a3ebcc.js": "9c85a9b329073ed96fc3f06f0bf4352ee8013d4b37dcd6b4c225c080fb3b0643",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
-      "response:*/*:/assets/7704038c40f6cb06.js": "e61e7b9ddf30576fb2c6c1cd77d8ce8f62abcb5ce499a5a6b8e49a64775563b9",
+      "response:*/*:/assets/7704038c40f6cb06.js": "6b067f608d9cd62bdc9455d1fa434eaca7848dbe9df3465e8aa739650ac430db",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
       "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
       "response:*/*:/assets/92945a3a5a7d8c72.js": "ffb27fbaa147a46ec18a6e7948fd7ed2ffbb982b524e3463fa4d874898dd6925",
@@ -457,8 +457,8 @@
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
       "response:*/*:/assets/green.css": "910b7d4303c281ffc4a9abd83e0d5af751a49010657bf5fb94f94c3be4333bc7",
       "response:*/*:/home": "3b1aca99fd193db1c3f980be6d25524038977a608e7d0bec87b3d36c7d0ebe2e",
-      "response:application/json:/home/session": "fa02b17a0064c1ce95f6b8de4a6f52692cd330c2417767108a895cbdffd11507",
-      "response:text/event-stream:/home/events": "b1cc55aefb26dc9fa837e35d0f3e9ab809c87bb731d2e032cf099abb294e18cf"
+      "response:application/json:/home/session": "35a13a2c9dea380c030da78f5b77111fcb44e5d50d7d9053666b5eec16d8a27c",
+      "response:text/event-stream:/home/events": "2f417851023ae2907b0faf9270c059a852718d4066f1c90ce75b9e049f3f569c"
     }
   }
 }
