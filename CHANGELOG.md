@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.301.0](https://github.com/coreplanelabs/switchboard/compare/v1.300.1...v1.301.0) (2026-10-16)
+
+
+### Features
+
+* **core:** retain native GitHub source context on active tasks ([#3204](https://github.com/coreplanelabs/switchboard/issues/3204)) ([4361c16](https://github.com/coreplanelabs/switchboard/commit/4361c1615b1975e3bef42c4e746b9a479f4848e1))
+
 ## [1.300.1](https://github.com/coreplanelabs/switchboard/compare/v1.300.0...v1.300.1) (2026-10-16)
 
 
