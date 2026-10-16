@@ -2253,6 +2253,7 @@ export class InMemoryRunLedger implements RunLedger {
     if (!input || !runId || runId.length > 512) return { kind: "refused", reason: "invalid-delivery" };
     const receipts = this.inboxDeliveries.get(runId) ?? new Map<string, InboxDeliveryReceipt>();
     if (receipts.has(input.key)) return replayInboxDelivery(receipts.get(input.key), runId, input);
+    if (this.live.get(runId)?.phase === "finishing") return { kind: "refused", reason: "not-live" };
     if (receipts.size >= INBOX_DELIVERY_RECEIPTS_MAX) return { kind: "refused", reason: "capacity" };
     const pushed = this.appendInbox(runId, input.message);
     if (!pushed.ok || pushed.seq === undefined)

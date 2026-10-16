@@ -17256,6 +17256,50 @@ describe("saved source-event jobs in SQLite", () => {
 });
 
 describe("keyed SQLite inbox delivery receipts", () => {
+  it("refuses a new key after finishing while keeping replay and ordinary follow-ups", async () => {
+    const key = "keyed-delivery-finishing";
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:keyed"));
+    const input = { version: 1, key: "first", message: { text: "Original input", userId: "slack:UALICE" } };
+    const send = (delivery = input) => post("/runs/inbox/deliver", { storeKey: key, runId: "r1", delivery });
+    const first = await send();
+    expect(first.data).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+    expect(await post("/runs/finishing", { storeKey: key, runId: "r1", gen: "g1" })).toEqual({
+      status: 200,
+      data: { ok: true },
+    });
+    expect((await send({ ...input, key: "late" })).data).toEqual({ kind: "refused", reason: "not-live" });
+    expect((await send()).data).toEqual({ kind: "duplicate", receipt: first.data.receipt });
+    expect((await send({ ...input, message: { ...input.message, text: "Changed input" } })).data).toEqual({
+      kind: "refused",
+      reason: "delivery-conflict",
+    });
+    const rows = await post("/runs/inbox/read", { storeKey: key, runId: "r1" });
+    expect(
+      rows.data.items.map((item: { seq: number; message: { text: string } }) => [item.seq, item.message.text]),
+    ).toEqual([[1, "Original input"]]);
+    expect(
+      await post("/runs/inbox", {
+        storeKey: key,
+        runId: "r1",
+        message: { text: "Requester follow-up", userId: "slack:UALICE" },
+      }),
+    ).toEqual({ status: 200, data: { ok: true, seq: 2 } });
+  });
+
+  it("keeps a new keyed delivery available during owner handoff", async () => {
+    const key = "keyed-delivery-handoff";
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:keyed"));
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      expect(await owner.handoff("g1", ["r1"])).toEqual({ marked: ["r1"] });
+      expect(
+        await owner.deliverInbox("r1", { version: 1, key: "first", message: { text: "Retained input" } }),
+      ).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+      expect((await owner.readInbox("r1", 0)).map((item) => [item.seq, item.message.text])).toEqual([
+        [1, "Retained input"],
+      ]);
+    });
+  });
+
   it("commits one inbox row and returns its original receipt after a lost acknowledgement", async () => {
     const key = "keyed-delivery-replay";
     await post("/runs/claim", claimBody(key, "r1", "slack:C1:keyed"));

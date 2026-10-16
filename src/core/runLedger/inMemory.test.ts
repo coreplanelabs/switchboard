@@ -2725,6 +2725,42 @@ describe("saved source-event jobs", () => {
 });
 
 describe("keyed inbox delivery receipts", () => {
+  it("refuses a new key when finishing wins the hash wait and preserves exact replay", async () => {
+    const ledger = new InMemoryRunLedger(() => 123);
+    await ledger.claim(claimReq("delivery-run", "slack:C1:delivery"));
+    const input = { version: 1, key: "first", message: { text: "Original input", userId: "slack:UALICE" } };
+    const first = await ledger.deliverInbox("delivery-run", input);
+    expect(first).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+    if (first.kind !== "delivered") throw new Error("expected saved delivery");
+    const late = ledger.deliverInbox("delivery-run", { ...input, key: "late" });
+    expect(await ledger.finishing("delivery-run", "g1")).toEqual({ ok: true });
+    expect(await late).toEqual({ kind: "refused", reason: "not-live" });
+    expect(await ledger.deliverInbox("delivery-run", input)).toEqual({ kind: "duplicate", receipt: first.receipt });
+    expect(await ledger.deliverInbox("delivery-run", { ...input, message: { text: "Changed input" } })).toEqual({
+      kind: "refused",
+      reason: "delivery-conflict",
+    });
+    expect((await ledger.readInbox("delivery-run", 0)).map((item) => [item.seq, item.message.text])).toEqual([
+      [1, "Original input"],
+    ]);
+    expect(await ledger.pushInbox("delivery-run", { text: "Requester follow-up", userId: "slack:UALICE" })).toEqual({
+      ok: true,
+      seq: 2,
+    });
+  });
+
+  it("keeps a new keyed delivery available during owner handoff", async () => {
+    const ledger = new InMemoryRunLedger(() => 123);
+    await ledger.claim(claimReq("delivery-run", "slack:C1:delivery"));
+    expect(await ledger.handoff("g1", ["delivery-run"])).toEqual({ marked: ["delivery-run"] });
+    expect(
+      await ledger.deliverInbox("delivery-run", { version: 1, key: "first", message: { text: "Retained input" } }),
+    ).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+    expect((await ledger.readInbox("delivery-run", 0)).map((item) => [item.seq, item.message.text])).toEqual([
+      [1, "Retained input"],
+    ]);
+  });
+
   it("returns the original sequence across concurrent retries and holds changed input", async () => {
     const ledger = new InMemoryRunLedger(() => 123);
     await ledger.claim(claimReq("delivery-run", "slack:C1:delivery"));
