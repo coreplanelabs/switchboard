@@ -1,3 +1,4 @@
+import { isNativeMediaSource, type NativeMediaSource } from "../dispatch/originalOrganizationInput.js";
 import { isUnitStatusReference, unitStatusIdentity, type UnitStatusReference } from "./unitStatusReference.js";
 import { isSlackSourceReceipt, type SlackSourceReceipt } from "./sourceReceipt.js";
 
@@ -16,7 +17,8 @@ export interface ContextOrigin {
 /** Cumulative dependencies of everything admitted to a context, including
  * summaries and notes. Each leaf keeps its original audience and action. */
 export interface ContextDependencies {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
+  nativeMediaSources?: readonly NativeMediaDependency[];
   status: "known" | "unknown" | "revoked";
   revision: number;
   origins: readonly ContextOrigin[];
@@ -31,6 +33,28 @@ export interface ContextDependencies {
   /** Immutable typed work status in the existing coordinator/session stores. */
   unitStatuses?: readonly UnitStatusReference[];
   reason?: "legacy" | "overflow" | "equivocation" | "invalid";
+}
+export interface NativeMediaDependency {
+  executionRunId: string;
+  executionSequence: number;
+  reference: NativeMediaSource;
+}
+const savedNativeKey = (leaf: NativeMediaDependency) => JSON.stringify([leaf.executionRunId, leaf.executionSequence]);
+export function isNativeMediaDependency(value: unknown): value is NativeMediaDependency {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const leaf = value as NativeMediaDependency;
+  return (
+    Object.keys(leaf).every((key) => ["executionRunId", "executionSequence", "reference"].includes(key)) &&
+    typeof leaf.executionRunId === "string" &&
+    leaf.executionRunId.length > 0 &&
+    leaf.executionRunId.length <= 2048 &&
+    Number.isSafeInteger(leaf.executionSequence) &&
+    leaf.executionSequence > 0 &&
+    isNativeMediaSource(leaf.reference) &&
+    (leaf.reference.kind === "original"
+      ? leaf.reference.sourceRunId === leaf.executionRunId && leaf.reference.sourceSequence === leaf.executionSequence
+      : leaf.reference.sourceRunId !== leaf.executionRunId)
+  );
 }
 export interface ExecutionGithubReference {
   runId: string;
@@ -68,7 +92,33 @@ export function isContextDependencies(value: unknown): value is ContextDependenc
   if (!value || typeof value !== "object") return false;
   const c = value as ContextDependencies;
   return (
-    (c.version === 1 ? c.executionGithub === undefined : c.version === 2) &&
+    !("savedNativeMediaSources" in c) &&
+    (c.version !== 3 ||
+      Object.keys(c).every((key) =>
+        [
+          "version",
+          "status",
+          "revision",
+          "origins",
+          "slack",
+          "mcp",
+          "githubRepos",
+          "executionGithub",
+          "memoryScopes",
+          "unitStatuses",
+          "nativeMediaSources",
+          "reason",
+        ].includes(key),
+      )) &&
+    (c.version === 1 ? c.executionGithub === undefined : c.version === 2 || c.version === 3) &&
+    (c.version === 3
+      ? (c.nativeMediaSources === undefined && c.status !== "known") ||
+        (Array.isArray(c.nativeMediaSources) &&
+          (c.nativeMediaSources.length > 0 || c.status !== "known") &&
+          c.nativeMediaSources.length <= CONTEXT_DEPENDENCY_MAX &&
+          c.nativeMediaSources.every(isNativeMediaDependency) &&
+          new Set(c.nativeMediaSources.map(savedNativeKey)).size === c.nativeMediaSources.length)
+      : c.nativeMediaSources === undefined) &&
     (c.executionGithub === undefined ||
       (Array.isArray(c.executionGithub) &&
         c.executionGithub.length <= 256 &&
@@ -153,7 +203,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
     const memoryScopes = [...(previous.memoryScopes ?? [])];
     const unitStatuses = [...(previous.unitStatuses ?? [])];
     const executionGithub = [...(previous.executionGithub ?? [])];
-    const version = previous.version === 2 || next.version === 2 ? (2 as const) : (1 as const);
+    const version = Math.max(previous.version, next.version) as ContextDependencies["version"];
     const groups = [
       ["githubRepos", githubRepos, next.githubRepos ?? [], CONTEXT_GITHUB_REPO_MAX],
       ["memoryScopes", memoryScopes, next.memoryScopes ?? [], CONTEXT_MEMORY_SCOPE_MAX],
@@ -381,6 +431,29 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       }
       executionGithub.push(reference);
     }
+    const nativeMediaSources = [...(previous.nativeMediaSources ?? [])];
+    for (const leaf of next.nativeMediaSources ?? []) {
+      const existing = nativeMediaSources.find((old) => savedNativeKey(old) === savedNativeKey(leaf));
+      if (existing) {
+        if (canonical(existing) !== canonical(leaf)) {
+          if (status !== "revoked") status = "unknown";
+          reason = "equivocation";
+        }
+      } else nativeMediaSources.push(leaf);
+    }
+    const otherCount =
+      origins.length +
+      slack.length +
+      mcp.length +
+      (executionGithub.length ? 1 : 0) +
+      (githubRepos.length ? 1 : 0) +
+      (memoryScopes.length ? 1 : 0) +
+      (unitStatuses.length ? 1 : 0);
+    if (otherCount + nativeMediaSources.length > CONTEXT_DEPENDENCY_MAX) {
+      if (status !== "revoked") status = "unknown";
+      reason = "overflow";
+      nativeMediaSources.splice(Math.max(0, CONTEXT_DEPENDENCY_MAX - otherCount));
+    }
     const revision = Math.max(previous.revision, next.revision);
     const merged = normalize({
       version,
@@ -393,6 +466,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       ...(memoryScopes.length ? { memoryScopes } : {}),
       ...(unitStatuses.length ? { unitStatuses } : {}),
       ...(executionGithub.length ? { executionGithub } : {}),
+      ...(nativeMediaSources.length ? { nativeMediaSources } : {}),
       ...(status !== "known" && reason ? { reason } : {}),
     });
     if (sameContent(previous, merged)) result = { ...merged, revision };
@@ -408,6 +482,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
     const memoryScopes = [...(result!.memoryScopes ?? [])];
     const unitStatuses = [...(result!.unitStatuses ?? [])];
     const executionGithub = [...(result!.executionGithub ?? [])];
+    const nativeMediaSources = [...(result!.nativeMediaSources ?? [])];
     result = {
       ...result!,
       status: result!.status === "revoked" ? "revoked" : "unknown",
@@ -419,9 +494,11 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       ...(memoryScopes.length ? { memoryScopes } : {}),
       ...(unitStatuses.length ? { unitStatuses } : {}),
       ...(executionGithub.length ? { executionGithub } : {}),
+      ...(nativeMediaSources.length ? { nativeMediaSources } : {}),
     };
     while (bytes(result) > CONTEXT_DEPENDENCY_MAX_BYTES) {
-      if (executionGithub.length) executionGithub.pop();
+      if (nativeMediaSources.length) nativeMediaSources.pop();
+      else if (executionGithub.length) executionGithub.pop();
       else if (unitStatuses.length) unitStatuses.pop();
       else if (memoryScopes.length) memoryScopes.pop();
       else if (githubRepos.length) githubRepos.pop();
@@ -456,6 +533,9 @@ export function contextDependenciesContain(current: ContextDependencies, snapsho
           (o.checkpoint === undefined || c.checkpoint === o.checkpoint),
       ),
     ) &&
+    (snapshot.nativeMediaSources ?? []).every((leaf) =>
+      current.nativeMediaSources?.some((current) => canonical(leaf) === canonical(current)),
+    ) &&
     snapshot.slack.every((r) => current.slack.some((c) => canonical(c) === canonical(r))) &&
     snapshot.mcp.every((r) => current.mcp.some((c) => canonical(c) === canonical(r))) &&
     (snapshot.executionGithub ?? []).every((r) =>
@@ -476,9 +556,14 @@ export async function contextDependenciesHash(value: ContextDependencies): Promi
 }
 
 function normalize(value: ContextDependencies): ContextDependencies {
-  const { githubRepos, memoryScopes, unitStatuses, executionGithub, ...rest } = value;
+  const { githubRepos, memoryScopes, unitStatuses, executionGithub, nativeMediaSources, ...rest } = value;
   return {
     ...rest,
+    ...(nativeMediaSources?.length
+      ? {
+          nativeMediaSources: [...nativeMediaSources].sort((a, b) => compareText(savedNativeKey(a), savedNativeKey(b))),
+        }
+      : {}),
     ...(executionGithub?.length
       ? { executionGithub: [...executionGithub].sort((a, b) => compareText(executionKey(a), executionKey(b))) }
       : {}),

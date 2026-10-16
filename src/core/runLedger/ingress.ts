@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { redactSecrets } from "../redact.js";
+import { ORG_RECEIPT_TTL_MS } from "../budgets.js";
 import { TRANSCRIPT_REQUEST_BYTES } from "./types.js";
 import { envelopeSchema } from "../organization/contract.js";
 
@@ -56,6 +57,39 @@ export const ingressRecordSchema = ingressRequestSchema
   })
   .strict();
 export type IngressRecord = z.infer<typeof ingressRecordSchema>;
+/** Trusted owner/config metadata on the existing erasure operation. */
+export const ingressClearProtectionSchema = z
+  .object({ expiresAt: instant.optional(), receiptTtlMs: instant.positive() })
+  .strict();
+export type IngressClearProtection = z.infer<typeof ingressClearProtectionSchema>;
+export function ingressDeletionDeadline(
+  prior: IngressRecord | null,
+  existing: number | undefined,
+  protection: IngressClearProtection | undefined,
+  now: number,
+): number {
+  if (existing !== undefined) return existing;
+  return (
+    prior?.originExpiresAt ??
+    protection?.expiresAt ??
+    Math.min(Number.MAX_SAFE_INTEGER, now + (protection?.receiptTtlMs ?? ORG_RECEIPT_TTL_MS))
+  );
+}
+/** Expiry alone never settles uncertain work or an unacknowledged repair. */
+export function retiredIngressCandidate(value: unknown, now: number): value is IngressRecord {
+  const parsed = ingressRecordSchema.safeParse(value);
+  return (
+    parsed.success &&
+    parsed.data.status === "completed" &&
+    !parsed.data.refusalPending &&
+    parsed.data.unread?.status !== "pending" &&
+    typeof parsed.data.outcome === "string" &&
+    !!parsed.data.origin &&
+    parsed.data.origin.digest === parsed.data.digest &&
+    parsed.data.originExpiresAt !== undefined &&
+    parsed.data.originExpiresAt <= now
+  );
+}
 export type IngressResult =
   | { status: "unread"; records: IngressRecord[] }
   | { status: "refusals"; records: IngressRecord[] }
@@ -85,7 +119,8 @@ export function consumeIngress(prior: IngressRecord | null, input: IngressReques
       return { status: "conflict" };
     return { status: "duplicate", record: retainedIngress(prior, now) };
   }
-  if (input.contentExpiresAt <= now) return { status: "invalid" };
+  if (input.contentExpiresAt <= now || (input.originExpiresAt !== undefined && input.originExpiresAt <= now))
+    return { status: "invalid" };
   return {
     status: "claimed",
     record: ingressRecordSchema.parse({

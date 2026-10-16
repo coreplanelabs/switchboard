@@ -88,6 +88,24 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
         snapshotRevision = observed.revision;
         accessRevision = observed.accessRevision;
       }
+      // Native catalogue checks can outlive the viewer's signed credential.
+      // Reprove this receiver after those awaits before publishing its epoch.
+      const receiver = await options.authentication.resolveAuthorization({
+        ...resolved,
+        source: context.authentication.source,
+        sourceReference: reference,
+        destination: { kind: "broad" },
+        target: null,
+        context: [],
+        action: "read",
+      });
+      if (
+        receiver.status !== "resolved" ||
+        receiver.policyFingerprint !== current.policyFingerprint ||
+        !authorize(receiver.actor, "organization:read", { type: "organization", id: options.organizationId }).allow ||
+        options.policyEpoch() !== nativePolicy
+      )
+        return;
       const final = await options.store.execute({ action: "get", organization: options.organizationId });
       if (
         final.status !== "state" ||

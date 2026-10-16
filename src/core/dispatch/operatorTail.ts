@@ -1,3 +1,4 @@
+import { RequiredTranscriptError } from "../runLedger/transcript.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 import {
   contextDependenciesOf,
@@ -119,6 +120,7 @@ export async function readOperatorTailContext(input: {
         turns[0].text === `user: ${input.msg.text.trim()}`;
       return { empty: false, turns, currentOnly };
     } catch (error) {
+      if (error instanceof RequiredTranscriptError) throw error;
       unavailable.push(
         `Saved conversation for ${key} is unavailable: ${error instanceof Error ? error.message : "saved-context-unproved"}.`,
       );

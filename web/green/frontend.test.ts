@@ -329,6 +329,54 @@ describe("Green browser frontend", () => {
     expect(empty.findAll("button").map((button) => button.text())).toContain("Reply in this thread");
     home.dispose();
   });
+  it("moves focus to the revoked thread explanation while preserving the broad destination and draft", async () => {
+    const streams = fakeEventSourceFactory();
+    const local = session({
+      destination: { kind: "thread", thread: "slack:C1:1", label: "Original thread", revision: 4, canWrite: true },
+    });
+    const home = createHomeSession(
+      (async (url: string) => json(url.includes("?thread=") ? local : session())) as typeof fetch,
+      streams.factory,
+    );
+    await home.load();
+    const host = defineComponent({ render: () => h("div", [h(ThreadPage), h(ConversationDock)]) });
+    const page = mountApp(host, { seed: thread, eventSource: streams.factory, provides: [[HomeSessionKey, home]] });
+    const observer = streams.created.find((source) => source.url.includes("observe=1"))!;
+    observer.emitMessage(local);
+    await flushPromises();
+    await page.get("textarea").setValue("Keep my broad draft");
+    const reply = page.findAll("button").find((button) => button.text() === "Reply in this thread")!;
+    (reply.element as HTMLElement).focus();
+    expect(document.activeElement).toBe(reply.element);
+    observer.emitNamed("revoked");
+    await flushPromises();
+    const explanation = page.find('[role="alert"][tabindex="-1"]');
+    expect(explanation.exists()).toBe(true);
+    expect(document.activeElement).toBe(explanation.element);
+    expect(home.session.value?.destination.kind).toBe("broad");
+    expect(page.get("textarea").element.value).toBe("Keep my broad draft");
+    expect(page.findAll("button").map((button) => button.text())).not.toContain("Reply in this thread");
+    home.dispose();
+  });
+  it("keeps initial unavailable thread reads from stealing focus from the broad draft", async () => {
+    const streams = fakeEventSourceFactory();
+    const home = createHomeSession(
+      (async (url: string) =>
+        url.includes("?thread=") ? new Response("{}", { status: 404 }) : json(session())) as typeof fetch,
+      streams.factory,
+    );
+    await home.load();
+    const host = defineComponent({ render: () => h("div", [h(ThreadPage), h(ConversationDock)]) });
+    const page = mountApp(host, { seed: thread, eventSource: streams.factory, provides: [[HomeSessionKey, home]] });
+    await flushPromises();
+    const composer = page.get("textarea");
+    (composer.element as HTMLElement).focus();
+    streams.created.find((source) => source.url.includes("observe=1"))?.emitNamed("unavailable");
+    await flushPromises();
+    expect(page.text()).toContain("Conversation is unavailable");
+    expect(document.activeElement).toBe(composer.element);
+    home.dispose();
+  });
   it.each([
     { label: "a full browser key", conversation: "web:alice:conv-1", elsewhere: undefined, target: "web:alice:conv-1" },
     { label: "a short browser id", conversation: "conv-1", elsewhere: undefined, target: "web:alice:conv-1" },
@@ -504,6 +552,8 @@ describe("Green browser frontend", () => {
     const page = mountApp(UnitPage, { seed });
     expect(page.get(".green-badge").text()).toBe("Merged");
     expect(page.text()).toContain("Original reviewed head aaaaaaa.");
+    expect(page.text()).not.toContain("This unit has not started");
+    expect(page.text()).toContain("No retained run evidence");
   });
   it("opens an artifact-proven unit PR in the canonical run query route", async () => {
     const seed: UnitSeed = {

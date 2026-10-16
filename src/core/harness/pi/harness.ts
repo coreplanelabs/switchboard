@@ -83,6 +83,14 @@ import {
   turnLeaseMs,
 } from "../../budgets.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
+import {
+  prepareNativeFollowUps,
+  requiresNativeMedia,
+  discardNativeMedia,
+  nativeFollowUpText,
+  guardNativeSource,
+  requiresNativeSource,
+} from "../nativeMedia.js";
 import { isReissueSteerText } from "../../plane/decide.js";
 import { PLANE_ACTOR_ID } from "../../authz/grants.js";
 import { PiBridge, type PiTerminalFailure } from "./bridge.js";
@@ -1156,6 +1164,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (earlier.length > 0) session = { stem: "seed", messages: earlier, compactions: [] };
       }
       let sessionPath: string | undefined;
+      if (requiresNativeSource(run)) await guardNativeSource(run);
       if (session) {
         sessionPath = `${paths.sessionDir}/${session.stem}-${now()}.jsonl`;
         // The session's working directory is where THIS pi runs, the
@@ -1307,6 +1316,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       await saveRecovery({ ...recovery, retries: recovery.retries + 1, until: Math.min(loopEnd, recovery.until) });
       if (now() >= Math.min(loopEnd, recovery.until)) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
     }
+    if (requiresNativeSource(run)) await guardNativeSource(run);
     if (reattached)
       // The pi found alive may be inside a tool call — its extension waiting on
       // the relay for the answer the dead generation never sent — and pi
@@ -1671,10 +1681,18 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         maybeReissue();
         return;
       }
-      const images = inputs.flatMap((i) =>
-        (i.images ?? []).map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mediaType })),
-      );
       steers = steers.then(async () => {
+        try {
+          if (requiresNativeSource(run)) await guardNativeSource(run);
+        } catch (err) {
+          discardNativeMedia(inputs);
+          run.inbox?.requeue(inputs);
+          throw err;
+        }
+        if (inputs.some(requiresNativeMedia) && !(await prepareNativeFollowUps(inputs, run.prepareFollowUps))) {
+          run.inbox?.requeue(inputs);
+          return;
+        }
         // The staged files land before pi reads the steer that names them — the
         // native loop's order (src/runner.ts `drainFollowUps`). A hook that throws
         // (a store the bot cannot reach) still steers the words, saying so, rather
@@ -1685,9 +1703,28 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             stagedLine = await run.stageFollowUps(inputs);
           } catch (err) {
             stagedLine = `Attached files could not be staged: ${err instanceof Error ? err.message : String(err)}`;
+            if (inputs.some(requiresNativeMedia)) {
+              discardNativeMedia(inputs);
+              run.inbox?.requeue(inputs);
+              return;
+            }
             note("follow_up", `staging the follow-up's files failed: ${redactSecrets(stagedLine)}`);
           }
         }
+        try {
+          if (requiresNativeSource(run)) await guardNativeSource(run);
+        } catch (err) {
+          discardNativeMedia(inputs);
+          run.inbox?.requeue(inputs);
+          throw err;
+        }
+        if (inputs.some(requiresNativeMedia) && !(await prepareNativeFollowUps(inputs, run.prepareFollowUps))) {
+          run.inbox?.requeue(inputs);
+          return;
+        }
+        const images = inputs.flatMap((i) =>
+          (i.images ?? []).map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mediaType })),
+        );
         if (loopEnded) {
           // The loop ended — pi settled, a stop, a throw — before the steer
           // could go: the follow-ups are the run stage's to run as a fresh
@@ -1721,7 +1758,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         const steered = reissued.length === 0 ? inputs : inputs.filter((i) => !reissued.includes(i));
         pendingReissue.push(...reissued);
         if (steered.length > 0) {
-          const prompt = followUpPrompt(steered);
+          const prompt = nativeFollowUpText(steered, followUpPrompt(steered));
           const message = stagedLine ? `${prompt}\n\n${stagedLine}` : prompt;
           unechoed.push({ message, seq: Math.max(0, ...steered.map((i) => i.ledgerSeq ?? 0)), inputs: steered });
           sends.send({ type: "steer", message, ...(images.length > 0 ? { images } : {}) });

@@ -10,6 +10,7 @@ import { useHomeSession, type AttachedContext } from "../lib/homeSession";
 import { createPrReviewCollector } from "../../src/lib/prReviewCollector";
 import type { HomeTurnSeed } from "@core/channels/webSeed.js";
 const home = useHomeSession();
+const props = defineProps<{ pageUnavailable?: boolean }>();
 const now = useWallClock();
 const historyLine = computed(() => {
   const history = home?.session.value?.history;
@@ -31,9 +32,17 @@ const globalSeed = inject(SeedKey, null);
 const transcript = ref<HTMLElement | null>(null);
 const expanded = ref(false);
 const unavailableExplanation = ref<HTMLElement | null>(null);
+const explicitLoss = ref(false);
+watch(
+  () => home?.focused.value,
+  (focused) => {
+    if (focused) explicitLoss.value = false;
+  },
+);
 watch(
   () => home?.revocations.value,
   async () => {
+    explicitLoss.value = true;
     await nextTick();
     unavailableExplanation.value?.focus();
   },
@@ -45,6 +54,7 @@ const destinationKey = computed(() => {
     : null;
 });
 const currentContext = computed<AttachedContext | null>(() => {
+  if (props.pageUnavailable) return null;
   if (route.path.startsWith("/runs/unit/") && route.params.key)
     return {
       kind: "unit",
@@ -164,20 +174,30 @@ watch([destinationKey, transcript], () => {
         </li>
       </ul>
     </section>
-    <div v-if="home.status.value === 'loading'" class="green-dock-transcript p-5 text-xs text-muted" role="status">
-      Loading your conversation…
-    </div>
     <div
-      v-else-if="home.status.value === 'unavailable'"
+      v-if="explicitLoss || home.status.value === 'unavailable'"
       ref="unavailableExplanation"
       tabindex="-1"
       class="p-5 text-xs text-muted"
       role="alert"
     >
-      <p>{{ home.notice.value }}</p>
-      <button class="green-button mt-3" type="button" @click="home.load()">Load conversation</button>
+      <p>
+        {{
+          home.status.value === "unavailable"
+            ? home.notice.value
+            : home.status.value === "loading"
+              ? "This reply is no longer available. Checking your messages…"
+              : "This reply is no longer available. Your messages are available."
+        }}
+      </p>
+      <button v-if="home.status.value === 'unavailable'" class="green-button mt-3" type="button" @click="home.load()">
+        Load conversation
+      </button>
     </div>
-    <template v-else-if="home.session.value">
+    <div v-if="home.status.value === 'loading'" class="green-dock-transcript p-5 text-xs text-muted" role="status">
+      Loading your conversation…
+    </div>
+    <template v-else-if="home.status.value === 'ready' && home.session.value">
       <div
         ref="transcript"
         class="green-dock-transcript"
@@ -313,7 +333,7 @@ watch([destinationKey, transcript], () => {
           <UIcon name="i-lucide-paperclip" />Attach this
           {{ currentContext.kind === "pull-request" ? "pull request" : currentContext.kind }}
         </button>
-        <ConversationComposer />
+        <ConversationComposer :autofocus="!explicitLoss" />
       </div>
     </template>
   </aside>

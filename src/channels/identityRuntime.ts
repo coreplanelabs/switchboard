@@ -285,6 +285,29 @@ export function createIdentityRuntime(options: IdentityRuntimeOptions) {
           }
         }
       const pending = canAcknowledge ? await ceremony.notices(context.evidence) : undefined;
+      const receiver = await access.verify(context.evidence);
+      if (
+        !receiver ||
+        receiver.expiresAt <= options.now() ||
+        receiver.identity.issuer !== proof.identity.issuer ||
+        receiver.identity.tenant !== proof.identity.tenant ||
+        receiver.identity.subject !== proof.identity.subject ||
+        receiver.audience !== proof.audience ||
+        context.actor.id !== `access:${receiver.identity.subject}` ||
+        !authorize(context.actor, "organization:read", { type: "organization", id: options.organization! }).allow
+      ) {
+        page(
+          {
+            page: "identities",
+            view: null,
+            canWrite: false,
+            canAcknowledge: false,
+            unavailable: "Account verification requires a current signed-in browser account.",
+          },
+          403,
+        );
+        return;
+      }
       const noticeRequest = new Request(url, {
         headers: { cookie: cookie ? cookie.split(";")[0] : (req.headers.cookie ?? "") },
       });

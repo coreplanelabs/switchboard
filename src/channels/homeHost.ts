@@ -45,6 +45,12 @@ export interface HomeHostOptions {
   repositories?(context: HomeRuntimeContext): Promise<HomeRepositories>;
   refreshProjection?(previous: HomeRuntimeContext, fresh: HomeRuntimeContext): Promise<HomeRuntimeContext | undefined>;
   canReadOffer?(context: HomeRuntimeContext, offer: Confirmation): Promise<boolean>;
+  historyContext?(
+    receiptId: string,
+    reader: HomeRuntimeContext,
+    request: Omit<OrganizationExecutionRequest, "io">,
+    role: "user" | "assistant",
+  ): Promise<import("../core/references/contextDependencies.js").ContextDependencies | undefined>;
   prepareAdmission?(
     context: HomeRuntimeContext,
     input: OrganizationAdmissionInput,
@@ -141,13 +147,32 @@ export function createHomeHost(options: HomeHostOptions) {
       (captured && captured !== (await currentEpoch({ actor: final.actor, authentication: final.authentication })))
     )
       throw new Error("The private conversation is unavailable.");
-    return history.entries
-      .filter((entry) => entry.receiptId !== request.receipt.id && entry.role !== "receipt")
-      .map((entry) => ({
+    const turns: TextTurn[] = [];
+    for (const entry of history.entries) {
+      if (entry.receiptId === request.receipt.id || entry.role === "receipt") continue;
+      const context = await options.historyContext?.(
+        entry.receiptId,
+        { actor: final.actor, authentication: final.authentication },
+        request,
+        entry.role as "user" | "assistant",
+      );
+      turns.push({
         role: entry.role as "user" | "assistant",
         text: entry.content,
         ...(entry.role === "user" && entry.authorId ? { user: entry.authorId } : {}),
-      }));
+        ...(context ? { context } : {}),
+      });
+    }
+    // Context metadata can await source reads after the earlier epoch check.
+    const complete = await options.authentication.resolveEnvelope(request.envelope);
+    if (
+      complete.status !== "resolved" ||
+      !complete.privateSource ||
+      (captured &&
+        captured !== (await currentEpoch({ actor: complete.actor, authentication: complete.authentication })))
+    )
+      throw new Error("The private conversation is unavailable.");
+    return turns;
   }
   async function originalInput(
     message: IncomingMessage,

@@ -486,6 +486,10 @@ export interface ThreadEvent {
   questionDigest?: string;
   text: string;
   attachments?: ThreadEventAttachment[];
+  /** Exact ordered accepted media before the durable cap; staged references hash metadata only. */
+  attachmentsDigest?: string;
+  /** Protected original source input, including original text and file ordering. */
+  nativeMediaDigest?: string;
   /** How many attachments were dropped because the event was over the cap. */
   attachmentsDropped?: number;
   /** How many characters were cut from the end of `text` because the row was
@@ -576,6 +580,8 @@ export function isThreadEvent(v: unknown): v is ThreadEvent {
   )
     return false;
   if (typeof r.text !== "string") return false;
+  for (const digest of [r.attachmentsDigest, r.nativeMediaDigest])
+    if (digest !== undefined && (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest))) return false;
   if (r.attachments !== undefined && (!Array.isArray(r.attachments) || !r.attachments.every(isThreadEventAttachment)))
     return false;
   if (r.attachmentsDropped !== undefined && !isCount(r.attachmentsDropped)) return false;

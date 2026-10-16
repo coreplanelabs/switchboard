@@ -1,3 +1,6 @@
+import { contextAccessForMessage } from "../core/dispatch/contextAccess.js";
+import { COMMAND_RUN_AGENT } from "../core/runOwner.js";
+import { isContextDependencies } from "../core/references/contextDependencies.js";
 import { SingleShotIO } from "./singleShotDispatch.js";
 import { withChatActor } from "../core/authz/actor.js";
 import type { CommandInvoker } from "../core/commandRegistry.js";
@@ -55,6 +58,8 @@ import { createHomeThreadProjection, homeQuestionDigest, homeQuestionRevision } 
 import { parsePrivateWorkerThreadKey, type PrivateWorkerLog } from "../core/privateWorkerLog.js";
 import { privateWorkerAudienceFor } from "./privateWorker.js";
 import { isUnitContext } from "../core/dispatch/unitContext.js";
+import { ownerOf, readThread as readOwnedThread } from "../core/dispatch/thread.js";
+import { nativeMediaDigest, nativeMediaSchema, matchesNativeMedia } from "../core/nativeMedia.js";
 import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js";
 import type { HomeAnswerTarget, HomeMergeAction } from "./homeSeed.js";
 import type { LegacySlackAudienceOrigin, LegacySlackRecipient } from "./legacySlackAudience.js";
@@ -94,6 +99,10 @@ export interface BrowserHomeInstallationOptions {
   now(): number;
   policyEpoch(): string;
   sourceIo(request: Omit<OrganizationExecutionRequest, "io">): ChannelIO;
+  /** Authenticated source adapter; never a URL or bearer supplied by a caller. */
+  materializeNativeMedia?(
+    envelope: OrganizationEnvelope,
+  ): Promise<Pick<IncomingMessage, "images" | "documents" | "staged"> | undefined>;
   canReadContext: Parameters<typeof createHomeHost>[0]["canReadContext"];
   /** Display facts only. Effect authority always uses the current native source. */
   provedActorIds?(context: HomeRuntimeContext): Promise<readonly string[]>;
@@ -734,20 +743,57 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     store: options.store,
     directory: options.store.directory,
     mappings: options.mappings,
-    limits: options.limits,
+    limits: {
+      ...options.limits,
+      ...(options.sourceSnapshotTtlMs !== undefined ? { sourceSnapshotTtlMs: options.sourceSnapshotTtlMs } : {}),
+    },
     authorize: (input) => host.authorize(input),
     currentIdentityRead: options.authentication.evaluateSourceIdentity,
   });
   // Receipt metadata is bodyless. Only the protected original ledger request
   // can restore input bytes; neither a pending client nor a completed offer may supply them.
   const metadata = (envelope: OrganizationEnvelope) => {
-    const { content: _content, contentExpiresAt: _expires, context: _context, ...facts } = envelope;
+    const {
+      content: _content,
+      contentExpiresAt: _expires,
+      context: _context,
+      nativeMedia: _media,
+      ...facts
+    } = envelope;
     return JSON.stringify(facts);
   };
+  async function resolveOriginalInput(envelope: OrganizationEnvelope) {
+    const resolved = await options.authentication.resolveEnvelope(envelope);
+    if (resolved.status !== "resolved" || !envelope.nativeMedia) return resolved;
+    const media = envelope.nativeMedia;
+    if (
+      !options.materializeNativeMedia ||
+      !resolved.privateSource ||
+      envelope.nativeMediaDigest !== (await nativeMediaDigest(media))
+    )
+      return { status: "fenced" as const };
+    const context = { actor: resolved.actor, authentication: resolved.authentication };
+    const epoch = await host.currentEpoch(context);
+    if (!epoch || epoch !== envelope.sourceReference?.capturedPrivateEpoch) return { status: "fenced" as const };
+    const materialized = await options.materializeNativeMedia(envelope);
+    if (!materialized || !(await matchesNativeMedia(media, materialized))) return { status: "fenced" as const };
+    const fresh = await options.authentication.resolveEnvelope(envelope);
+    if (
+      fresh.status !== "resolved" ||
+      !fresh.privateSource ||
+      fresh.actor.id !== resolved.actor.id ||
+      epoch !== (await host.currentEpoch({ actor: fresh.actor, authentication: fresh.authentication }))
+    )
+      return { status: "fenced" as const };
+    return {
+      ...fresh,
+      msg: { ...fresh.msg, ...materialized, nativeMedia: media, nativeMediaDigest: envelope.nativeMediaDigest },
+    };
+  }
   async function originalBinding(
     sourceRunId: string,
     expected?: { threadKey: string; userId: string },
-    mode: "input" | "audience" = "input",
+    mode: "input" | "audience" | "metadata" = "input",
   ) {
     const original = await options.ledger.readIngressByRun(sourceRunId);
     if (
@@ -802,15 +848,20 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     )
       return;
     const envelope =
-      mode === "audience" ? { ...origin, content: "", context: [] } : retained.success ? retained.data : undefined;
+      mode !== "input" ? { ...origin, content: "", context: [] } : retained.success ? retained.data : undefined;
     if (
       !envelope ||
-      !(await (mode === "audience" ? organization.authorizeReply(envelope) : organization.authorizeExecution(envelope)))
+      !(await (mode !== "input" ? organization.authorizeReply(envelope) : organization.authorizeExecution(envelope)))
     )
       return;
-    const current = await options.authentication.resolveEnvelope(envelope);
+    const current = await (mode === "input"
+      ? resolveOriginalInput(envelope)
+      : options.authentication.resolveEnvelope(envelope));
     if (current.status !== "resolved") return;
-    if (origin.actor.stream !== null && origin.destination.kind === "broad") {
+    if (
+      origin.actor.stream !== null &&
+      (origin.destination.kind === "broad" || origin.nativeMediaDigest !== undefined)
+    ) {
       if (
         !reference.privateSource ||
         !reference.capturedPrivateEpoch ||
@@ -828,6 +879,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       msg: withOriginalOrganizationDispatch(withChatActor({ ...current.msg, text: envelope.content }, current.actor), {
         ingressRunId: sourceRunId,
         organizationSequence: saved.receipt.revision,
+        ...(envelope.nativeMediaDigest ? { nativeMediaDigest: envelope.nativeMediaDigest } : {}),
         ...(reference.sourceRepository ? { organizationRepo: reference.sourceRepository } : {}),
       }),
     };
@@ -850,15 +902,16 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
   async function canReadOffer(context: HomeRuntimeContext, row: Parameters<ConfirmationSourceGuard>[0]) {
     if (!row.originalOrganization) return true;
     try {
-      return !!(await guardOrganizationConfirmation(row, context.actor));
+      return !!(await guardOrganizationConfirmation(row, context.actor, "read"));
     } catch {
       return false;
     }
   }
-  const guardOrganizationConfirmation: ConfirmationSourceGuard = async (row, chooser) => {
+  const guardOrganizationConfirmation: ConfirmationSourceGuard = async (row, chooser, purpose) => {
     const pointer = row.originalOrganization;
     if (!pointer || !chooser || chooser.viewingAs) return;
-    const owned = await originalBinding(pointer.ingressRunId, row.message);
+    const metadataOnly = !!pointer.nativeMediaDigest && (purpose === "cancel" || purpose === "read");
+    const owned = await originalBinding(pointer.ingressRunId, row.message, metadataOnly ? "metadata" : "input");
     const reference = owned?.envelope.sourceReference;
     if (
       !owned ||
@@ -873,8 +926,12 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       JSON.stringify(reference.approvalConnection ?? null) !== JSON.stringify(row.message.approvalConnection ?? null)
     )
       return;
-    await owned.io.authoritativePrivateHistory!();
-    return { actor: owned.actor, io: owned.io };
+    if (!metadataOnly) await owned.io.authoritativePrivateHistory!();
+    return {
+      actor: owned.actor,
+      io: owned.io,
+      ...(!metadataOnly && pointer.nativeMediaDigest ? { message: owned.msg } : {}),
+    };
   };
   async function approvalSource(
     row: Parameters<ConfirmationSourceGuard>[0],
@@ -1114,6 +1171,54 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
   }
   function sink(request: Omit<OrganizationExecutionRequest, "io">): ChannelIO {
     const io = Object.create(host.sink(request)) as ChannelIO;
+    io.readSavedNativeMedia = async (reference, message) => {
+      const pointer = originalOrganizationDispatchOf(message);
+      if (
+        !pointer?.savedNativeMediaSource ||
+        pointer.ingressRunId !== request.runId ||
+        pointer.organizationSequence !== request.receipt.revision ||
+        JSON.stringify(pointer.savedNativeMediaSource) !== JSON.stringify(reference) ||
+        reference.sourceRunId === request.runId ||
+        (await nativeMediaDigest(message.text)) !== reference.intentDigest
+      )
+        return;
+      const currentChoice = async () => {
+        const choice = await originalBinding(request.runId, message, "metadata");
+        if (
+          !choice ||
+          choice.actor.viewingAs ||
+          choice.envelope.continuation?.kind !== "confirm" ||
+          choice.envelope.continuation.id !== reference.confirmationId ||
+          !(await organization.authorizeExecution(choice.envelope)) ||
+          !options.canReadContext
+        )
+          return;
+        const actual = await options.authentication.resolveEnvelope(choice.envelope);
+        if (
+          actual.status !== "resolved" ||
+          actual.actor.id !== choice.actor.id ||
+          !(await options.canReadContext(
+            { actor: actual.actor, authentication: actual.authentication },
+            { kind: "run", key: reference.sourceRunId },
+          ))
+        )
+          return;
+        return choice;
+      };
+      const choice = await currentChoice();
+      if (!choice) return;
+      const source = await originalBinding(reference.sourceRunId);
+      if (
+        !source ||
+        source.actor.id !== choice.actor.id ||
+        source.envelope.nativeMediaDigest !== reference.sourceDigest ||
+        source.receipt.revision !== reference.sourceSequence
+      )
+        return;
+      const final = await currentChoice();
+      if (!final || final.actor.id !== choice.actor.id) return;
+      return { images: source.msg.images, documents: source.msg.documents, staged: source.msg.staged };
+    };
     io.authoritativePrivateSourceHistory = (id) =>
       id === request.runId ? originalPrivateSourceHistory(id) : Promise.resolve(undefined);
     if (request.envelope.actor.stream !== null || request.actor.kind !== "service") {
@@ -1135,11 +1240,37 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
         };
       if (rehost)
         io.rehostOrganizationInput = async (message) => {
+          const original = originalOrganizationDispatchOf(message);
+          if (original?.savedNativeMediaSource) {
+            const media = await io.readSavedNativeMedia!(original.savedNativeMediaSource, message);
+            const choice = media && (await originalBinding(original.ingressRunId, message, "metadata"));
+            if (!choice) return;
+            const restored = {
+              ...choice,
+              msg: withOriginalOrganizationDispatch({ ...choice.msg, text: message.text, ...media }, original),
+            };
+            return { msg: restored.msg, io: sink(restored) };
+          }
+          if (original?.nativeMediaDigest) {
+            const owned = await originalBinding(original.ingressRunId, message);
+            return owned && owned.envelope.nativeMediaDigest === original.nativeMediaDigest
+              ? { msg: owned.msg, io: owned.io }
+              : undefined;
+          }
           const restored = await rehost(message);
           const pointer = restored && originalOrganizationDispatchOf(restored.msg);
           const owned = pointer && (await originalBinding(pointer.ingressRunId, restored.msg));
           return owned ? { msg: owned.msg, io: owned.io } : undefined;
         };
+      const saved = originalOrganizationDispatchOf(request.msg)?.savedNativeMediaSource;
+      if (saved) {
+        const verify = io.verifyOrganizationPrivateAudience?.bind(io);
+        io.verifyOrganizationPrivateAudience = async (audience) => {
+          if (!(await io.readSavedNativeMedia!(saved, request.msg)))
+            return { ok: false, code: "saved-context-unproved" };
+          return verify ? verify(audience) : { ok: false, code: "saved-context-unproved" };
+        };
+      }
       return io;
     }
     return Object.assign(io, {
@@ -1205,7 +1336,53 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     }
     return { status: "unknown" as const };
   }
-  core.guardOrganizationConfirmation = (row, chooser) => guardOrganizationConfirmation(row, chooser);
+  core.revalidateNativeMediaSource = async (dependency, consumer) => {
+    const pointer = originalOrganizationDispatchOf(consumer.msg);
+    if (!pointer || consumer.actor.viewingAs) return false;
+    const reader = async () => {
+      const current = await originalBinding(pointer.ingressRunId, consumer.msg, "metadata");
+      if (!current || current.actor.id !== consumer.actor.id || !options.canReadContext) return;
+      const proof = await options.authentication.resolveEnvelope(current.envelope);
+      if (proof.status !== "resolved" || proof.actor.viewingAs || proof.actor.id !== current.actor.id) return;
+      const context = { actor: proof.actor, authentication: proof.authentication };
+      for (const runId of [dependency.executionRunId, dependency.reference.sourceRunId])
+        if (runId !== pointer.ingressRunId && !(await options.canReadContext(context, { kind: "run", key: runId })))
+          return;
+      return current;
+    };
+    const current = await reader();
+    const choice = current && (await originalBinding(dependency.executionRunId, undefined, "metadata"));
+    if (
+      !choice ||
+      choice.receipt.revision !== dependency.executionSequence ||
+      choice.envelope.actor.stream === null ||
+      choice.envelope.actor.stream !== current!.envelope.actor.stream
+    )
+      return false;
+    if (
+      dependency.reference.kind === "confirmed" &&
+      (choice.envelope.continuation?.kind !== "confirm" ||
+        choice.envelope.continuation.id !== dependency.reference.confirmationId)
+    )
+      return false;
+    const source = await originalBinding(dependency.reference.sourceRunId);
+    if (
+      !source ||
+      source.receipt.revision !== dependency.reference.sourceSequence ||
+      source.envelope.nativeMediaDigest !== dependency.reference.sourceDigest ||
+      source.envelope.actor.stream !== choice.envelope.actor.stream
+    )
+      return false;
+    if (
+      dependency.reference.kind === "original" &&
+      (dependency.executionRunId !== dependency.reference.sourceRunId ||
+        dependency.executionSequence !== dependency.reference.sourceSequence ||
+        (await nativeMediaDigest(source.envelope.content)) !== dependency.reference.intentDigest)
+    )
+      return false;
+    return !!(await reader());
+  };
+  core.guardOrganizationConfirmation = (row, chooser, purpose) => guardOrganizationConfirmation(row, chooser, purpose);
   const runtime = createOrganizationRuntime({
     store: options.store,
     service: organization,
@@ -1216,7 +1393,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     contentTtlMs: options.contentTtlMs,
     sourceSnapshotTtlMs: options.sourceSnapshotTtlMs,
     now: options.now,
-    resolveActor: options.authentication.resolveEnvelope,
+    resolveActor: resolveOriginalInput,
     launch: options.launch,
     readOriginalRun,
     sink,
@@ -1244,8 +1421,16 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       if (!choice) return { status: "refused", reason: "The saved choice is unavailable." };
       const choiceCore = {
         ...core,
-        guardOrganizationConfirmation: async (row: Parameters<ConfirmationSourceGuard>[0], chooser?: Actor) => {
-          const source = await guardOrganizationConfirmation(row, chooser);
+        guardOrganizationConfirmation: async (
+          row: Parameters<ConfirmationSourceGuard>[0],
+          chooser?: Actor,
+          purpose?: "confirm" | "cancel" | "read",
+        ) => {
+          const source = await guardOrganizationConfirmation(
+            row,
+            chooser,
+            purpose ?? (choice.kind === "cancel" ? "cancel" : "confirm"),
+          );
           if (!source || !row.originalOrganization) return;
           // A is read authority for this exact saved offer. The distinct choice
           // retains B's output receiver, status methods and actual credential.
@@ -1262,7 +1447,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
           };
           io.history = history;
           io.authoritativePrivateHistory = history;
-          return { actor: source.actor, io };
+          return { actor: source.actor, io, ...(source.message ? { message: source.message } : {}) };
         },
       };
       const sourceIO = Object.create(request.io) as ChannelIO;
@@ -1302,6 +1487,60 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
   host = createHomeHost({
     organizationId: options.organizationId,
     organization,
+    historyContext: async (receiptId, reader, request, role) => {
+      const resolved = await organization.resolve(reader.authentication);
+      if (!resolved) throw new Error("The history source could not be verified.");
+      const provenance = await options.store.execute({ action: "provenance", ...resolved, receiptId });
+      if (provenance.status !== "provenance") throw new Error("The history source could not be verified.");
+      const ref = provenance.provenance.sourceReference;
+      if (!ref?.messageId) return;
+      const key = provenance.provenance.source === "slack" ? `${ref.channelId}:${ref.messageId}` : ref.messageId;
+      const original = await options.store.execute({
+        action: "submission",
+        organization: options.organizationId,
+        actor: provenance.provenance.actor,
+        source: provenance.provenance.source,
+        key,
+      });
+      if (original.status !== "submission" || original.receipt.id !== receiptId || !original.receipt.ownerRunId) return;
+      const runId = original.receipt.ownerRunId;
+      const live = (await core.runLedger.readLiveRuns()).find((row) => row.runId === runId);
+      const stored = live ? undefined : await core.runStore.get(runId);
+      const context = live?.state.contextDependencies ?? stored?.contextDependencies;
+      const marked =
+        original.envelope.nativeMediaDigest !== undefined || original.envelope.continuation?.kind === "confirm";
+      if (role === "assistant" && !live && !stored)
+        throw new Error("The retained history producer could not be verified.");
+      const modelProducer = (live?.meta.agent ?? stored?.agent) !== COMMAND_RUN_AGENT;
+      if (
+        marked &&
+        role === "assistant" &&
+        modelProducer &&
+        (!isContextDependencies(context) || !context.nativeMediaSources?.length)
+      )
+        throw new Error("The retained history source could not be verified.");
+      const pointer = live?.meta.request?.originalOrganizationInput as
+        import("../core/dispatch/originalOrganizationInput.js").OriginalOrganizationDispatch | undefined;
+      if (
+        context &&
+        typeof context === "object" &&
+        ("nativeMediaSources" in context || "savedNativeMediaSources" in context) &&
+        !isContextDependencies(context)
+      )
+        throw new Error("The saved history source could not be verified.");
+      if (pointer?.savedNativeMediaSource && (!isContextDependencies(context) || !context.nativeMediaSources?.length))
+        throw new Error("The saved history source could not be verified.");
+      if (!isContextDependencies(context) || !context.nativeMediaSources?.length) return;
+      const consumer = withOriginalOrganizationDispatch(withChatActor(request.msg, reader.actor), {
+        ingressRunId: request.runId,
+        organizationSequence: request.receipt.revision,
+      });
+      if (!(await contextAccessForMessage(core, { msg: consumer, io: sink(request) }).validateDependencies(context)).ok)
+        throw new Error("The saved history source could not be verified.");
+      // Carry the same canonical envelope so the later execution keeps and
+      // rechecks this provenance through compaction, tools and publication.
+      return context;
+    },
     ledger: options.ledger,
     store: options.store,
     directory: options.store.directory,
@@ -1352,12 +1591,17 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     evidence: OrganizationNativeEvidence,
     continuation?: OrganizationAdmissionInput["continuation"],
   ) {
+    const hasMedia = !!(msg.images?.length || msg.documents?.length || msg.staged?.length);
+    const media = msg.nativeMedia && nativeMediaSchema.safeParse(msg.nativeMedia);
     if (
       evidence.source === "browser" ||
       !msg.messageId ||
-      msg.images?.length ||
-      msg.documents?.length ||
-      msg.staged?.length
+      (hasMedia &&
+        (evidence.source !== "slack" ||
+          !media?.success ||
+          !msg.nativeMediaDigest ||
+          msg.nativeMediaDigest !== (await nativeMediaDigest(media.data)) ||
+          !(await matchesNativeMedia(media.data, msg))))
     )
       return { status: "unavailable" as const };
     const current = await options.authentication.resolveNative(msg, evidence);
@@ -1371,9 +1615,46 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       workload: continuation ? "act" : "message",
       target: null,
       content: continuation ? "" : msg.text,
+      ...(hasMedia && media?.success ? { nativeMedia: media.data, nativeMediaDigest: msg.nativeMediaDigest } : {}),
       ...(continuation ? { continuation } : {}),
       context: [],
     };
+    const source = await organization.resolve(current.authentication);
+    if (!source) return { status: "not_found" as const };
+    const original = await options.store.execute({
+      action: "submission",
+      ...source,
+      source: evidence.source,
+      key: event,
+    });
+    if (original.status === "submission") {
+      const reference = original.envelope.sourceReference;
+      if (
+        !reference ||
+        reference.userId !== msg.userId ||
+        reference.channelId !== msg.channelId ||
+        reference.threadKey !== msg.threadKey ||
+        reference.messageId !== msg.messageId ||
+        reference.authenticatedAs !== msg.authenticatedAs ||
+        reference.postedBy !== msg.postedBy
+      )
+        return { status: "conflict" as const };
+      // An exact source retry retains its recorded destination after ownership changes.
+      input.destination = original.envelope.destination;
+    } else if (original.status !== "not_found") return original;
+    else if (evidence.source === "slack" && current.privateSource) {
+      const page = await readOwnedThread(options.runs, msg.threadKey);
+      if (page.kind === "unavailable") return { status: "unavailable" as const };
+      const owner = await ownerOf(page.runs, (id) => options.coordinator.listUnits(id), msg.threadKey);
+      if (owner.kind === "unavailable") return { status: "unavailable" as const };
+      if (owner.kind === "pipeline_ambiguous") return { status: "unavailable" as const };
+      if (
+        owner.kind === "unit" ||
+        owner.kind === "pipeline" ||
+        page.runs.some((run) => run.parentInstanceId !== undefined || run.parentRunId !== undefined)
+      )
+        input.destination = { kind: "thread", thread: msg.threadKey };
+    }
     const replay = await organization.replay(current.authentication, input);
     if (replay) return replay;
     const choice = continuation ? await core.confirmations?.get?.(continuation.id) : undefined;
@@ -1636,6 +1917,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       return owned ? { status: "resolved" as const, actor: owned.actor } : { status: "unavailable" as const };
     },
     guardOrganizationConfirmation,
+    revalidateNativeMediaSource: core.revalidateNativeMediaSource,
     approvalSource,
     admitNative,
     replayNativeChoice,

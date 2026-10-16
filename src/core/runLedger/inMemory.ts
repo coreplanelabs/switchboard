@@ -6,9 +6,17 @@ import {
   type InboxDeliveryReceipt,
 } from "./inboxDelivery.js";
 import { parseStoredJson } from "../storedJson.js";
+import { terminalPublicationRetentionRequired } from "../branchPublication.js";
+import { contextReferencesOf } from "./contextRetention.js";
+import { RequiredTranscriptError } from "./transcript.js";
+import { TRANSCRIPT_PART_BYTES } from "./types.js";
 import { holdUnreadIngress } from "./unreadIngress.js";
 import {
   consumeIngress,
+  retiredIngressCandidate,
+  ingressDeletionDeadline,
+  ingressClearProtectionSchema,
+  type IngressClearProtection,
   claimUnreadIngress,
   type UnreadIngressProof,
   finishIngress,
@@ -326,9 +334,90 @@ const TRIM_MARKER_BYTES_ESTIMATE = 260;
 export class InMemoryRunLedger implements RunLedger {
   readonly reviewFeedback = new InMemoryReviewFeedbackStore(() => this.now());
   private readonly ingress = new Map<string, IngressRecord>();
-  private readonly deletedIngress = new Set<string>();
+  private readonly deletedIngress = new Map<string, number>();
+  private ingressExpiryCursor = "";
   private readonly unreadCursor = new Map<string, string>();
   private readonly ingressRuns = new Map<string, string>();
+  private ingressProtected(runId: string, expected?: IngressRecord): boolean {
+    if (this.live.has(runId)) return true;
+    const record = this.finished.get(runId);
+    if (
+      record?.provisional ||
+      record?.restarting ||
+      (record !== undefined && (record.answerOutcome === undefined || record.answerOutcome.ending === "unknown"))
+    )
+      return true;
+    const evidence = this.finishedWorkEvidence.get(runId);
+    if (
+      (record && terminalPublicationRetentionRequired(record)) ||
+      evidence?.branchPublication !== undefined ||
+      evidence?.doorPublicationPending !== undefined ||
+      evidence?.reviewPublication !== undefined ||
+      evidence?.branchPushReceipts !== undefined
+    )
+      return true;
+    const archive = this.allocationArchive(runId);
+    if (
+      record &&
+      (record.id !== runId ||
+        (expected && (record.userId !== expected.requester || record.threadKey !== expected.threadKey)))
+    )
+      return true;
+    if (archive !== undefined) {
+      const owned = workspaceDurabilityArchiveOf(archive);
+      if (!owned || owned.runId !== runId || (record && owned.startedAt !== record.startedAt)) return true;
+      const closedNone =
+        owned.allocation === null &&
+        !owned.promotion &&
+        owned.disposition === undefined &&
+        !owned.promotionStepBase &&
+        record?.profile?.machine === "none" &&
+        record.answerOutcome !== undefined &&
+        record.answerOutcome.ending !== "unknown";
+      if (!closedNone && owned.disposition?.kind !== "scratch-custody-closed") return true;
+    }
+    if (record && record.profile?.machine !== "none" && archive === undefined) return true;
+    for (const obligation of this.workspaceObligations.values()) {
+      if ([...obligation.pending.values()].some((value) => value.owner.runId === runId)) return true;
+    }
+    const contexts = [
+      ...[...this.live.values()].map((value) => value.state.contextDependencies),
+      ...[...this.finishedWorkEvidence.values()].map((value) => value.contextDependencies),
+      ...[...this.sessions.values()].map((value) => value.sources?.context),
+    ];
+    for (const context of contexts) {
+      if (!context) continue;
+      if (!isContextDependencies(context)) return true;
+      if (contextReferencesOf("@ingress-retention", undefined, context).some((ref) => ref.sourceRunId === runId))
+        return true;
+    }
+    return false;
+  }
+  private retireIngress(now: number, focused?: string): void {
+    const keys = [...this.ingress.keys()].sort();
+    const ordered = [
+      ...keys.filter((key) => key > this.ingressExpiryCursor),
+      ...keys.filter((key) => key <= this.ingressExpiryCursor),
+    ].slice(0, 100);
+    if (ordered.length) this.ingressExpiryCursor = ordered.at(-1)!;
+    if (focused && !ordered.includes(focused)) ordered.push(focused);
+    for (const key of ordered) {
+      const record = this.ingress.get(key)!;
+      if (
+        !retiredIngressCandidate(record, now) ||
+        record.effectKey !== key ||
+        this.ingressProtected(record.runId, record)
+      )
+        continue;
+      this.ingress.delete(key);
+      this.ingressRuns.delete(record.runId);
+      this.deletedIngress.delete(key);
+    }
+    for (const [key] of [...this.deletedIngress]
+      .filter(([key, deadline]) => deadline <= now && !this.ingress.has(key))
+      .slice(0, 100))
+      this.deletedIngress.delete(key);
+  }
   async holdUnreadIngress(proof: UnreadIngressProof): Promise<IngressResult> {
     const key = this.ingressRuns.get(proof.ingressRunId);
     if (!key) return { status: "not_found" };
@@ -420,6 +509,7 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async consumeIngress(request: IngressRequest): Promise<IngressResult> {
+    this.retireIngress(this.now(), request.effectKey);
     if (this.deletedIngress.has(request.effectKey) && !this.ingress.has(request.effectKey)) return { status: "fenced" };
     const result = consumeIngress(this.ingress.get(request.effectKey) ?? null, request, this.now());
     if (result.status === "claimed" || result.status === "duplicate")
@@ -428,6 +518,7 @@ export class InMemoryRunLedger implements RunLedger {
     return result;
   }
   async readIngress(effectKey: string): Promise<IngressResult> {
+    this.retireIngress(this.now(), effectKey);
     const prior = this.ingress.get(effectKey);
     if (!prior) return { status: "not_found" };
     const record = retainedIngress(prior, this.now());
@@ -467,9 +558,15 @@ export class InMemoryRunLedger implements RunLedger {
     this.ingress.set(input.effectKey, record);
     return { status: "record", record: structuredClone(record) };
   }
-  async clearIngressContent(effectKey: string): Promise<IngressResult> {
-    this.deletedIngress.add(effectKey);
+  async clearIngressContent(effectKey: string, protection?: IngressClearProtection): Promise<IngressResult> {
+    if (protection !== undefined && !ingressClearProtectionSchema.safeParse(protection).success)
+      return { status: "invalid" };
+    this.retireIngress(this.now(), effectKey);
     const prior = this.ingress.get(effectKey);
+    this.deletedIngress.set(
+      effectKey,
+      ingressDeletionDeadline(prior ?? null, this.deletedIngress.get(effectKey), protection, this.now()),
+    );
     if (!prior) return { status: "not_found" };
     const record = { ...retainedIngress(prior, this.now()), request: null };
     this.ingress.set(effectKey, record);
@@ -1559,7 +1656,7 @@ export class InMemoryRunLedger implements RunLedger {
       const { rows, attachments } = turnRows(
         turn.idx,
         "message" in turn ? turn.message : { compaction: turn.compaction },
-        {},
+        { canonical: true },
         actor,
       );
       for (const row of rows) {
@@ -1567,7 +1664,11 @@ export class InMemoryRunLedger implements RunLedger {
         if (at >= 0) target.rows[at] = row;
         else target.rows.push(row);
       }
-      target.attachments.push(...attachments);
+      for (const attachment of attachments) {
+        const at = target.attachments.findIndex((old) => old.ref === attachment.ref);
+        if (at >= 0) target.attachments[at] = attachment;
+        else target.attachments.push(attachment);
+      }
     }
   }
 
@@ -1584,7 +1685,7 @@ export class InMemoryRunLedger implements RunLedger {
         turnRows(
           t.idx,
           "message" in t ? t.message : { compaction: t.compaction },
-          {},
+          { canonical: true },
           "message" in t ? t.actor : undefined,
         ).rows,
     );
@@ -1599,7 +1700,7 @@ export class InMemoryRunLedger implements RunLedger {
             turnRows(
               t.idx,
               "message" in t ? t.message : { compaction: t.compaction },
-              {},
+              { canonical: true },
               "message" in t ? t.actor : undefined,
             ).attachments,
         );
@@ -2626,6 +2727,8 @@ export class InMemoryRunLedger implements RunLedger {
       maxBytes,
     );
     if (from === undefined) {
+      if (maxBytes !== 1 && rows[0] && utf8ByteLength(rows[0].json) > TRANSCRIPT_PART_BYTES)
+        throw new RequiredTranscriptError("tail exceeds current seed budget");
       const next = await this.sessionTail(key);
       return {
         from: next,

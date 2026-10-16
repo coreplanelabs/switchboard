@@ -12,6 +12,7 @@ import { useReadonlyThread } from "../lib/readonlyThread";
 import { formatDateTime, formatLocalIso } from "../../src/lib/format";
 import MarkdownText from "../../src/components/MarkdownText.vue";
 const props = defineProps<{ thread: string }>();
+const emit = defineEmits<{ revoked: [] }>();
 const home = useHomeSession();
 const viewingAs = useViewingAs();
 const globalSeed = inject(SeedKey, null);
@@ -20,6 +21,7 @@ const { session, status, canWrite, revocations } = useReadonlyThread(() => props
 const busy = ref(false);
 const unavailableExplanation = ref<HTMLElement | null>(null);
 watch(revocations, async () => {
+  emit("revoked");
   await nextTick();
   unavailableExplanation.value?.focus();
 });

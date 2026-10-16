@@ -182,14 +182,14 @@ export const SURFACES = [
     path: "/threads/conv-1",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
     page: "web/green/pages/Thread.vue",
-    what: "a finished conversation: three turns, each a run with its receipt and reply",
+    what: "retained thread messages with source provenance and a reply action",
   },
   {
     name: "home-live",
     path: "/threads/conv-live",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
     page: "web/green/pages/Thread.vue",
-    what: "a conversation whose newest run is live: the pending row and the open work",
+    what: "the second retained thread address with source provenance and a reply action",
   },
   {
     name: "runs-index",
@@ -203,7 +203,7 @@ export const SURFACES = [
     path: "/runs?all=1&viewing=1",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
     page: "web/green/pages/Runs.vue",
-    what: "the runs index while an admin views it as a person: the banner, that person's rows, the picker",
+    what: "the runs index in a read-only Person view: its banner, marked fictional rows and account menu",
   },
   {
     name: "run-page",
@@ -295,7 +295,7 @@ export const SURFACES = [
     path: "/runs/unit/plan-acme-3:U13?session=coding&q=lockfile",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
     page: "web/green/pages/Unit.vue",
-    what: "the unit page's search over the coding thread's log, hits placed in their runs",
+    what: "the unit page opened with a coding-thread search query; results are below the initial viewport",
   },
   {
     name: "unit-search-landed",

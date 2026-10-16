@@ -1,3 +1,5 @@
+import { nativeMediaDigest } from "../nativeMedia.js";
+import { originalOrganizationDispatchOf } from "./originalOrganizationInput.js";
 import {
   privateDestinationOf,
   organizationPrivateAudienceOf,
@@ -71,6 +73,7 @@ export type ContextAccessDeps = Pick<
   | "artifacts"
   | "githubApi"
   | "coordinatorInstances"
+  | "revalidateNativeMediaSource"
 >;
 const denied = (check?: ContextRefusalCheck): Extract<AudienceCheck, { ok: false }> => ({
   ok: false,
@@ -404,6 +407,43 @@ function buildContextAccess(
       dependencies = structuredClone(dependencies);
       if (msg.threadKey.startsWith("worker:") && !(await destinationAudience()))
         return denied("worker_audience_unproved");
+      for (const leaf of dependencies.nativeMediaSources ?? []) {
+        const pointer = originalOrganizationDispatchOf(msg);
+        const current =
+          pointer?.ingressRunId === leaf.executionRunId &&
+          pointer.organizationSequence === leaf.executionSequence &&
+          (leaf.reference.kind === "confirmed"
+            ? JSON.stringify(pointer.savedNativeMediaSource) === JSON.stringify(leaf.reference)
+            : pointer.nativeMediaDigest === leaf.reference.sourceDigest &&
+              (await nativeMediaDigest(msg.text)) === leaf.reference.intentDigest);
+        if (!current) {
+          const producer = await load(leaf.executionRunId);
+          const canonical =
+            producer && ("meta" in producer ? producer.state.contextDependencies : producer.contextDependencies);
+          if (
+            !producer ||
+            !isContextDependencies(canonical) ||
+            canonical.status !== "known" ||
+            !canonical.nativeMediaSources?.some((saved) => JSON.stringify(saved) === JSON.stringify(leaf))
+          )
+            return denied("context_invalid");
+          const facts = factsOf(producer);
+          if (
+            !(await originAllowed({
+              runId: leaf.executionRunId,
+              requester: facts.userId,
+              channelId: facts.channelId,
+              threadKey: facts.threadKey,
+            }))
+          )
+            return denied("context_invalid");
+        }
+        if (
+          !deps.revalidateNativeMediaSource ||
+          !(await deps.revalidateNativeMediaSource(leaf, { actor: actor(), msg, io }))
+        )
+          return denied("context_invalid");
+      }
       if (dependencies.executionGithub?.length) {
         if (!executionConsumer) return denied("execution_consumer_missing");
         const current = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === executionConsumer.runId);

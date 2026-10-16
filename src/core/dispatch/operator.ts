@@ -1,3 +1,5 @@
+import { NativeMediaHeldError } from "../harness/nativeMedia.js";
+import { RequiredTranscriptError } from "../runLedger/transcript.js";
 import {
   candidateSmokeDiagnostic,
   type CandidateSmokeDiagnostic,
@@ -2544,6 +2546,7 @@ export async function runOperator(
           model({ ...prompt, retries: turns }, { maxTokens: maxOutputTokens, signal, observe }),
         );
       } catch (err) {
+        if (err instanceof NativeMediaHeldError) throw err;
         // A cap cut is recoverable shape, not a provider refusal: retry once
         // with a materially larger ceiling. A second cut ends at the door.
         if (err instanceof OutputCapError) {
@@ -2758,6 +2761,7 @@ export async function runOperator(
       return answered(turn.decision);
     }
   } catch (err) {
+    if (err instanceof NativeMediaHeldError) throw err;
     // Parse, catalogue and fulfillment-check failures end at the door.
     // The routing call returns its typed provider refusal above; an unavailable
     // fulfillment call cannot authorize a terminal command here.
@@ -2917,7 +2921,8 @@ export interface OperatorStageDeps {
  *  turn, then `operatorTail`'s cap. A thread not yet migrated (an empty thread
  *  session) falls back to the thread's per-agent logs, for each agent the
  *  thread's runs name in the order of their first run, as before the re-key.
- *  A ledger that cannot be read is an empty tail, never a failed dispatch.
+ *  An ordinary unavailable legacy log costs the tail its turns. Required
+ *  transcript content instead holds the dispatch.
  *  Folded reports keep their durable mark so the tail budget preserves them
  *  as complete reports. Questions can exist before any execution run. */
 export async function operatorThreadTail(
@@ -2947,7 +2952,8 @@ export async function operatorThreadTail(
   try {
     const { transcript } = await ledger.readSessionTail(threadSessionKey(threadKey), OPERATOR_TAIL_BYTES);
     if (transcript.messages.length > 0) return operatorTail(turnsOf(transcript));
-  } catch {
+  } catch (error) {
+    if (error instanceof RequiredTranscriptError) throw error;
     // A thread session that cannot be read falls back to the per-agent logs.
   }
   const agents: string[] = [];
@@ -2962,7 +2968,8 @@ export async function operatorThreadTail(
     try {
       const { transcript } = await ledger.readSessionTail(sessionKey(threadKey, agent), OPERATOR_TAIL_BYTES);
       turns.push(...turnsOf(transcript));
-    } catch {
+    } catch (error) {
+      if (error instanceof RequiredTranscriptError) throw error;
       // A log that cannot be read costs the tail its turns, never the dispatch.
     }
   }
@@ -3278,11 +3285,11 @@ export async function prepareActionContext(
  * request — onto the live run a reply is folded into, the inline run a typed
  * line becomes, or the agent run the request starts. An unavailable operator
  * under `on` records a failed door instead of handing the text to a reader.
- * Never throws: a model failure is a typed provider refusal rendered once.
+ * Model failures become typed refusals. Required private media failures propagate as a hold.
  */
 export async function operatorStage(
   deps: OperatorStageDeps,
-  ctx: ActionContextRequest & { mode: "shadow" | "on" },
+  ctx: ActionContextRequest & { mode: "shadow" | "on"; beforeModel?: () => Promise<void> },
 ): Promise<OperatorEventFields | undefined> {
   const { msg, mode } = ctx;
   const now = deps.clock ?? Date.now;
@@ -3345,6 +3352,13 @@ export async function operatorStage(
       console.log(`[operator] ${msg.threadKey} not run: ${err instanceof Error ? err.message : String(err)}`);
       return unavailable();
     }
+  }
+  if (ctx.beforeModel) {
+    const selected = model;
+    model = async (...args) => {
+      await ctx.beforeModel!();
+      return selected(...args);
+    };
   }
   const presets = operatorPresets(cfg);
   const actor = chatActorOf(deps.config, msg);

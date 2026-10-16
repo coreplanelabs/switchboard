@@ -88,6 +88,224 @@ const json = (value: unknown) =>
   new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
 const host = defineComponent({ render: () => h("div", [h(Home), h(ConversationDock)]) });
 describe("Home actions", () => {
+  it.each([
+    "SSE",
+    401,
+    403,
+    404,
+    "redacted sibling",
+    "failed snapshot",
+    "review-only sibling",
+    "titleless sibling",
+    "plain403",
+    "empty404",
+    "html401",
+  ] as const)(
+    "reproves Home work and retains another original saved choice after inline target loss via %s",
+    async (loss) => {
+      const stream = fakeEventSourceFactory();
+      const sendRefusal = typeof loss === "number" || ["plain403", "empty404", "html401"].includes(loss);
+      const second = {
+        ...need,
+        unit: {
+          ...need.unit,
+          unit: "i:second",
+          id: "second",
+          title: "Second work",
+          pr: { number: 43, url: "https://github.com/sample/api/pull/43" },
+          threads:
+            loss === "review-only sibling" ? { review: "slack:C1:review" } : { coding: "worker:private-sibling:1" },
+          ending: { kind: "merge_ready", at: 100 },
+        },
+        conditions: [
+          {
+            id: "i:second:merge",
+            unitKey: "i:second",
+            revision: 100,
+            state: "open" as const,
+            owner: { kind: "person" as const, id: "access:alice" },
+            summary: "Review completed for this recorded head.",
+            nextAction: "Inspect current checks and merge the reviewed pull request when allowed.",
+          },
+        ],
+      };
+      let recovering = false;
+      let authorize!: (value: Response) => void;
+      const broad = new Promise<Response>((resolve) => {
+        authorize = resolve;
+      });
+      const privateSends: unknown[] = [];
+      const home = createHomeSession(
+        (async (url: string, init?: RequestInit) => {
+          if (url === "/home/session") return recovering ? broad : json(session());
+          if (url === "/home/focus") return json(session(JSON.parse(String(init?.body)).thread));
+          if (url === "/home/send") {
+            privateSends.push(JSON.parse(String(init?.body)));
+            recovering = true;
+            return new Response(
+              loss === "plain403"
+                ? "forbidden"
+                : loss === "empty404"
+                  ? ""
+                  : loss === "html401"
+                    ? "<html>Sign in</html>"
+                    : "{}",
+              { status: Number(String(loss).match(/\d+/)?.[0]) },
+            );
+          }
+          throw new Error(`Unexpected private request ${url}`);
+        }) as typeof fetch,
+        stream.factory,
+      );
+      await home.load();
+      const choices: unknown[] = [];
+      const workReads: string[] = [];
+      vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+        if (url.startsWith("/home/snapshot")) {
+          workReads.push(url);
+          if (loss === "failed snapshot") return new Response("{}", { status: 503 });
+          return json({
+            ...seed.snapshot,
+            needsYou: [
+              {
+                ...second,
+                unit: {
+                  ...second.unit,
+                  title:
+                    loss === "redacted sibling" || loss === "titleless sibling" ? undefined : "Current second work",
+                  threads: loss === "redacted sibling" ? {} : second.unit.threads,
+                },
+                conditions: loss === "redacted sibling" ? [] : second.conditions,
+              },
+            ],
+            waiting: [need],
+          });
+        }
+        if (url !== "/api/pulls.merge") throw new Error(`Unexpected work request ${url}`);
+        const body = JSON.parse(String(init?.body));
+        choices.push(body);
+        if (!body._confirmation)
+          return new Response(
+            JSON.stringify({
+              error: "confirmation_required",
+              confirmation: {
+                id: "saved-second",
+                line: "pulls merge sample/api#43",
+              },
+            }),
+            { status: 409 },
+          );
+        throw new Error("Original merge outcome remains unknown");
+      });
+      const page = mountApp(host, {
+        seed: {
+          ...seed,
+          answers: {
+            ...seed.answers,
+            "i:second": { thread: "worker:private-sibling:1", revision: 9, question: "Private sibling question" },
+          },
+          snapshot: { ...seed.snapshot, needsYou: [need, second] },
+          actions: { "i:second": { kind: "merge", pr: "sample/api#43", head: "a".repeat(40) } },
+        },
+        provides: [[HomeSessionKey, home]],
+      });
+      await page.get("textarea").setValue("Keep my broad draft");
+      for (let click = 0; click < 2; click++) {
+        await page
+          .get('[data-unit="i:second"]')
+          .findAll("button")
+          .find((b) => b.text() === "Merge")!
+          .trigger("click");
+        await flushPromises();
+      }
+      expect(page.text()).toContain("Check saved action");
+      await page.get('[aria-label="Answer: Verify staging"]').trigger("click");
+      await flushPromises();
+      if (!sendRefusal) {
+        recovering = true;
+        stream.created.at(-1)!.emitNamed("revoked");
+      } else {
+        await page
+          .get('[aria-label="Answer original unit question"]')
+          .findAll("button")
+          .find((b) => b.text() === "Confirm")!
+          .trigger("click");
+      }
+      await flushPromises();
+      expect(page.find('[aria-label="Answer original unit question"]').exists()).toBe(false);
+      authorize(json(session()));
+      await flushPromises();
+      expect(page.get("textarea").element.value).toBe("Keep my broad draft");
+      if (loss === "failed snapshot") {
+        expect(workReads).toEqual(["/home/snapshot"]);
+        expect(page.text()).toContain("Current work access could not be confirmed.");
+        expect(page.text()).not.toContain("Merge recorded");
+        expect(page.text()).not.toContain("Second work");
+        expect(page.text()).not.toContain("pulls merge sample/api#43");
+        expect(choices).toEqual([
+          { pr: "sample/api#43", head: "a".repeat(40) },
+          { _confirmation: { kind: "confirm", id: "saved-second" } },
+        ]);
+        expect(privateSends).toEqual([]);
+        home.dispose();
+        return;
+      }
+      if (loss !== "redacted sibling" && loss !== "titleless sibling")
+        expect(page.text()).toContain("Current second work");
+      if (loss === "titleless sibling") expect(page.text()).not.toContain("Second work");
+      expect(workReads).toEqual(["/home/snapshot"]);
+      expect(page.find('[aria-label="Answer: Verify staging"]').exists()).toBe(false);
+      expect(page.text()).not.toContain("Work access changed");
+      const check = page.findAll("button").find((b) => b.text() === "Check saved action")!;
+      if (loss === "redacted sibling") {
+        expect(check).toBeUndefined();
+        expect(page.find('a[href="/threads/worker%3Aprivate-sibling%3A1"]').exists()).toBe(false);
+        expect(page.find('[aria-label="Answer: second"]').exists()).toBe(false);
+        expect(page.text()).not.toContain("Private sibling question");
+        expect(
+          page
+            .get('[data-unit="i:second"]')
+            .findAll("button")
+            .map((button) => button.text()),
+        ).not.toContain("Merge");
+        expect(page.text()).not.toContain("pulls merge sample/api#43");
+        expect(page.text()).toContain(
+          "Saved action result is unknown. Its work cannot be confirmed with current access.",
+        );
+        expect(choices).toEqual([
+          { pr: "sample/api#43", head: "a".repeat(40) },
+          { _confirmation: { kind: "confirm", id: "saved-second" } },
+        ]);
+        expect(privateSends).toEqual([]);
+        home.dispose();
+        return;
+      }
+      if (loss !== "review-only sibling")
+        expect(page.find('a[href="/threads/worker%3Aprivate-sibling%3A1"]').exists()).toBe(true);
+      expect(page.findAll("button").map((button) => button.text())).toContain("Check saved action");
+      await check!.trigger("click");
+      await flushPromises();
+      expect(choices).toEqual([
+        { pr: "sample/api#43", head: "a".repeat(40) },
+        { _confirmation: { kind: "confirm", id: "saved-second" } },
+        { _confirmation: { kind: "confirm", id: "saved-second" } },
+      ]);
+      expect(privateSends).toEqual(
+        !sendRefusal
+          ? []
+          : [
+              {
+                key: "issued:question",
+                revision: 9,
+                destination: { kind: "thread", thread: "slack:C1:1" },
+                text: "confirm",
+                context: [],
+              },
+            ],
+      );
+      home.dispose();
+    },
+  );
   it("keeps owned work visible when the first chat frame matches the page account and organization", async () => {
     const home = createHomeSession((async () => json(session())) as typeof fetch, fakeEventSourceFactory().factory);
     const page = mountApp(Home, { seed, provides: [[HomeSessionKey, home]] });

@@ -28,6 +28,8 @@ export const APPEND_FLUSH_MS = 500;
 export const APPEND_FLUSH_EVENTS = 32;
 /** Request-body ceiling for a transcript write (the Worker's `/runs/put` fence). */
 export const TRANSCRIPT_REQUEST_BYTES = 2 * 1024 * 1024;
+/** Existing platform serialized RPC ceiling; required reads hold before crossing it. */
+export const TRANSCRIPT_READ_BYTES = 32 * 1024 * 1024;
 /** One content part per row; a row must stay under the Durable Object's 2 MB
  *  row limit with headroom for the JSON envelope. */
 export const TRANSCRIPT_PART_BYTES = 1_500_000;

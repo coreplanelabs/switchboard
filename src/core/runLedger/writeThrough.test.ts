@@ -1795,18 +1795,50 @@ describe("open — claim and seed", () => {
     expect(warnings[0]).toContain("no run-ledger routes");
   });
 
-  it("a seed the transcript refuses (a part over the row budget) detaches the run — it stays claimed, so its finish still clears the row", async () => {
-    const { ledger, wt, warnings, fallbackPuts } = harness();
+  it("a seed an older Memory codec refuses detaches the run — it stays claimed, so its finish still clears the row", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const oldMemory = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "fixture-token",
+      storeKey: "runs:default",
+      fetch: async () => Response.json({ ok: true }),
+    });
+    const { ledger, wt, warnings, fallbackPuts } = harness({
+      ledger: overriding(inner, { seed: (...args) => oldMemory.seed(...args) }),
+    });
     const run = (await openRun(
       wt,
       openReq({ seed: { messages: [user("x".repeat(TRANSCRIPT_PART_BYTES + 1))], budgetMs: 600_000 } }),
     ))!;
     expect(run.tracked()).toBe(false);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/detached: seed failed/);
+    expect(warnings[0]).toMatch(/detached: seed failed.*Memory codec unavailable/);
     expect(ledger.live.has("r1")).toBe(true);
+    expect(await ledger.readSession("slack:C1:1.0:review", 0)).toMatchObject({
+      complete: true,
+      turns: 0,
+      messages: [],
+    });
     await run.step(step()); // a no-op after the detach
     expect(ledger.steps.get("r1")).toBeUndefined();
+    await run.sink.put(record("r1"));
+    expect(ledger.live.has("r1")).toBe(false);
+    expect(ledger.finished.has("r1")).toBe(true);
+    expect(fallbackPuts).toEqual([]);
+  });
+
+  it("a supported large seed stays tracked and stores the exact original part", async () => {
+    const { ledger, wt, warnings, fallbackPuts } = harness();
+    const original = user("x".repeat(TRANSCRIPT_PART_BYTES + 1));
+    const run = (await openRun(wt, openReq({ seed: { messages: [original], budgetMs: 600_000 } })))!;
+    expect(run.tracked()).toBe(true);
+    expect(await ledger.readSession("slack:C1:1.0:review", 0)).toMatchObject({
+      complete: true,
+      turns: 1,
+      messages: [original],
+    });
+    expect(warnings).toEqual([]);
+    expect(ledger.live.has("r1")).toBe(true);
     await run.sink.put(record("r1"));
     expect(ledger.live.has("r1")).toBe(false);
     expect(ledger.finished.has("r1")).toBe(true);

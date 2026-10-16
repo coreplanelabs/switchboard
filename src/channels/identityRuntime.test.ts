@@ -8,6 +8,10 @@ import { GREEN_PAGE_CSP, makePageSender } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import type { IdentitySeed } from "./identitySeed.js";
 import { createIdentityRuntime, IDENTITY_PATH, type IdentityRuntimeContext } from "./identityRuntime.js";
+import { AccessHumanProofAdapter } from "./linkProofAccess.js";
+import type { AccessProofProvider } from "../core/identity/humanProof.js";
+import type { AccessJwk } from "./accessAuth.js";
+import { generateKeyPairSync, sign } from "node:crypto";
 
 const origin = "https://app.test",
   now = 1000;
@@ -26,23 +30,28 @@ function fixture(
     missingSecret?: boolean;
     publicBaseUrl?: string;
     deliver?: (notice: import("../core/identity/linkContract.js").IdentityNotice) => Promise<boolean>;
+    clock?: () => number;
+    accessProof?: AccessProofProvider;
   } = {},
 ) {
-  const directory = new InMemoryPersonDirectory(() => now);
+  const clock = options.clock ?? (() => now);
+  const directory = new InMemoryPersonDirectory(clock);
   const config = { slackClientId: "client-a", slackTeamId: "TDEMO", slackClientSecretEnv: "SLACK_LINK_SECRET" };
   const policy = { tenant: "TDEMO", audience: "client-a", callbackUri: `${origin}${IDENTITY_PATH}/callback` };
-  const access = new FakeAccessProofProvider([
-    {
-      credential: "fixture-jwt",
-      proof: {
-        kind: "human",
-        identity: accessIdentity,
-        audience: "access-app",
-        issuedAt: now,
-        expiresAt: now + 600_000,
+  const access =
+    options.accessProof ??
+    new FakeAccessProofProvider([
+      {
+        credential: "fixture-jwt",
+        proof: {
+          kind: "human",
+          identity: accessIdentity,
+          audience: "access-app",
+          issuedAt: now,
+          expiresAt: now + 600_000,
+        },
       },
-    },
-  ]);
+    ]);
   const slack = new FakeSlackProofProvider({
     identity: slackIdentity,
     audience: policy.audience,
@@ -55,7 +64,7 @@ function fixture(
     directory,
     access: { teamDomain: "app.cloudflareaccess.com", aud: "access-app" },
     publicBaseUrl: options.publicBaseUrl ?? origin,
-    now: () => now,
+    now: clock,
     readSecret: (_name: string) => (options.missingSecret ? undefined : "fixture-client-secret"),
     authorize: (_actor: import("../core/authz/types.js").Actor) => true,
     providers: { access, slack },
@@ -124,6 +133,76 @@ function fixture(
 }
 
 describe("browser identity activation", () => {
+  it.each([false, true])(
+    "rechecks the signed receiver after addressed notice retries before exposing linked accounts: expired %s",
+    async (expire) => {
+      let at = now,
+        hold = false,
+        enter: () => void = () => {},
+        release: () => void = () => {};
+      const clock = () => at;
+      const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const jwk: AccessJwk = { ...publicKey.export({ format: "jwk" }), kid: "fixture-key" };
+      const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+      const unsigned = `${encode({ alg: "RS256", kid: "fixture-key" })}.${encode({ iss: accessIdentity.issuer, aud: "access-app", sub: "alice", iat: 1, exp: 60 })}`;
+      const token = `${unsigned}.${sign("RSA-SHA256", Buffer.from(unsigned), privateKey).toString("base64url")}`;
+      const accessProof = new AccessHumanProofAdapter(
+        { teamDomain: "app.cloudflareaccess.com", aud: "access-app" },
+        { now: clock, fetchJwks: async () => [jwk] },
+      );
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const resumed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const delivery = vi.fn(async () => {
+        if (hold) {
+          enter();
+          await resumed;
+        }
+        return false;
+      });
+      const h = fixture({ clock, accessProof, deliver: delivery });
+      const signedContext = { actor: actorAlice, evidence: { strategy: "access", token } };
+      const initial = (await h.request(IDENTITY_PATH, undefined, signedContext)).seed!.view!;
+      if (initial.stage !== "start") throw new Error("No current signed proof");
+      const begin = await h.request(`${IDENTITY_PATH}/begin`, { csrf: initial.csrf }, signedContext);
+      const authorization = new URL(begin.headers.location);
+      await h.request(
+        `${IDENTITY_PATH}/callback?${new URLSearchParams({ state: authorization.searchParams.get("state")!, code: "fixture-code" })}`,
+        undefined,
+        signedContext,
+      );
+      const consent = (await h.request(IDENTITY_PATH, undefined, signedContext)).seed!.view!;
+      if (consent.stage !== "awaiting-consent") throw new Error("No verified pair");
+      expect(
+        (
+          await h.request(
+            `${IDENTITY_PATH}/commit`,
+            { csrf: consent.csrf, revision: "3", consent: "yes" },
+            signedContext,
+          )
+        ).status,
+      ).toBe(303);
+      hold = true;
+      const pending = h.request(IDENTITY_PATH, undefined, signedContext);
+      await entered;
+      if (expire) at = 61000;
+      expect((await accessProof.verify(signedContext.evidence))?.identity ?? null).toEqual(
+        expire ? null : accessIdentity,
+      );
+      release();
+      const read = await pending;
+      expect({
+        status: read.status,
+        accountCount: read.seed?.accounts?.length ?? 0,
+        canWrite: read.seed?.canWrite,
+      }).toEqual({ status: expire ? 403 : 200, accountCount: expire ? 0 : 2, canWrite: !expire });
+      if (expire) expect(read.seed?.view).toBeNull();
+      expect(h.slack.exchanges).toBe(1);
+    },
+  );
   it("keeps exact signed-in identity reads and notice acknowledgment available when Slack setup is removed, while binding changes stay unavailable", async () => {
     const h = fixture();
     const start = (await h.request()).seed!.view!;

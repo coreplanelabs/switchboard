@@ -96,6 +96,8 @@ export type RunBearerFacts = Omit<RunBearerGrant, "span" | "publish"> & {
 
 interface Entry {
   recovery?: ToolRecovery;
+  sourceGuardRequired: boolean;
+  sourceGuard?: () => Promise<boolean>;
   grant: RunBearerGrant;
   /** The SHA-256 of every secret that buys this run's calls: the provision's
    *  mint, an operator's `issue`, and a previous generation's bearer a pi
@@ -133,6 +135,39 @@ export class RunBearerStore {
     if (entry && !entry.revoked) entry.recovery = recovery;
   }
 
+  /** Trusted source proof stays on the entry across adopt, issue and rotation.
+   * A fresh mint must bind its own proof before any private model call. */
+  bindSourceGuard(runId: string, guard: () => Promise<boolean>): void {
+    const entry = this.entries.get(runId);
+    if (entry && !entry.revoked) {
+      entry.sourceGuardRequired = true;
+      entry.sourceGuard = guard;
+    }
+  }
+
+  /** Capture the authenticated entry before body/capacity waits. A replacement
+   * mint cannot authorize an already admitted request with the same run id. */
+  sourceGuardFor(runId: string) {
+    const entry = this.entries.get(runId);
+    const current = (): "revoked" | "expired" | undefined => {
+      if (!entry || this.entries.get(runId) !== entry || entry.revoked) return "revoked";
+      if (this.opts.clock() >= entry.grant.expiresAt) return "expired";
+      return undefined;
+    };
+    return {
+      current,
+      check: async (): Promise<boolean> => {
+        if (current() || !entry) return false;
+        if (!entry.sourceGuardRequired) return true;
+        try {
+          return !!entry.sourceGuard && (await entry.sourceGuard()) && current() === undefined;
+        } catch {
+          return false;
+        }
+      },
+    };
+  }
+
   async settleRecovery(runId: string, joinNative = true): Promise<ToolRecoveryState["stopped"]> {
     const recovery = this.entries.get(runId)?.recovery;
     await recovery?.settled(joinNative);
@@ -142,11 +177,12 @@ export class RunBearerStore {
   /** The run's first bearer. A second mint for the same run replaces the
    *  entry — the earlier bearers stop verifying — so a resumed run under a new
    *  attach never leaves a stale credential valid. Sweeps expired entries first. */
-  mint(grant: RunBearerGrant): string {
+  mint(grant: RunBearerGrant, options: { sourceGuardRequired?: boolean } = {}): string {
     this.sweep();
     const secret = randomBytes(SECRET_BYTES);
     this.entries.set(grant.runId, {
       grant,
+      sourceGuardRequired: options.sourceGuardRequired === true,
       hashes: [hashOf(secret)],
       turns: 0,
       revoked: false,

@@ -152,7 +152,10 @@ export interface RunLedger {
   ackIngressRefusal(
     request: Pick<import("./ingress.js").IngressSettlement, "effectKey" | "digest" | "runId">,
   ): Promise<import("./ingress.js").IngressResult>;
-  clearIngressContent(effectKey: string): Promise<import("./ingress.js").IngressResult>;
+  clearIngressContent(
+    effectKey: string,
+    protection?: import("./ingress.js").IngressClearProtection,
+  ): Promise<import("./ingress.js").IngressResult>;
   finishIngress(request: import("./ingress.js").IngressSettlement): Promise<import("./ingress.js").IngressResult>;
   prepareCancellation?(
     runId: string,

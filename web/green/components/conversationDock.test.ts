@@ -32,6 +32,93 @@ function session(thread: string | null): HomeSession {
   };
 }
 describe("Conversation dock scroll", () => {
+  it.each([
+    "unit SSE",
+    "thread SSE",
+    "inline SSE",
+    "send401",
+    "send403",
+    "send404",
+    "send401html",
+    "send403plain",
+    "send404empty",
+    "denied broad",
+    "unknown broad",
+  ] as const)("focuses a persistent permission-safe explanation during focused %s recovery", async (loss) => {
+    const stream = fakeEventSourceFactory();
+    let recovering = false;
+    let authorize!: (value: Response) => void;
+    let fail!: (reason: Error) => void;
+    const broad = new Promise<Response>((resolve, reject) => {
+      authorize = resolve;
+      fail = reject;
+    });
+    const thread = "slack:C1:1";
+    const sent: unknown[] = [];
+    const home = createHomeSession(
+      (async (url: string, init?: RequestInit) => {
+        if (url === "/home/session") return recovering ? broad : new Response(JSON.stringify(session(null)));
+        if (url === "/home/focus") return new Response(JSON.stringify(session(thread)));
+        if (url === "/home/send") {
+          sent.push(JSON.parse(String(init?.body)));
+          recovering = true;
+          return new Response(
+            loss.endsWith("plain")
+              ? "forbidden"
+              : loss.endsWith("html")
+                ? "<html>Sign in</html>"
+                : loss.endsWith("empty")
+                  ? ""
+                  : "{}",
+            { status: Number.parseInt(loss.slice(4)) },
+          );
+        }
+        throw new Error(`Unexpected request ${url}`);
+      }) as typeof fetch,
+      stream.factory,
+    );
+    await home.load();
+    const page = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
+    await page.get("textarea").setValue("Keep my broad draft");
+    if (loss === "inline SSE")
+      await home.beginInlineAnswer("i:q", "Question", { thread, revision: 1, question: "Approve?" });
+    else await home.focus(thread);
+    await flushPromises();
+    if (loss.startsWith("send")) {
+      await page.get("textarea").setValue("Original local reply");
+      await page.get("form").trigger("submit");
+    } else {
+      recovering = true;
+      stream.created.at(-1)!.emitNamed("revoked");
+    }
+    await flushPromises();
+    expect(document.activeElement?.getAttribute("tabindex")).toBe("-1");
+    expect(document.activeElement?.textContent).toContain("This reply is no longer available.");
+    if (loss === "denied broad") authorize(new Response("{}", { status: 403 }));
+    else if (loss === "unknown broad") fail(new Error("Unknown broad proof"));
+    else authorize(new Response(JSON.stringify(session(null))));
+    await flushPromises();
+    expect(document.activeElement?.getAttribute("tabindex")).toBe("-1");
+    expect(document.activeElement?.textContent).toContain(
+      loss === "denied broad" || loss === "unknown broad" ? "unavailable" : "This reply is no longer available.",
+    );
+    if (loss !== "denied broad" && loss !== "unknown broad")
+      expect(page.get("textarea").element.value).toBe("Keep my broad draft");
+    expect(sent).toEqual(
+      loss.startsWith("send")
+        ? [
+            {
+              key: "issued:first",
+              revision: 1,
+              destination: { kind: "thread", thread },
+              text: "Original local reply",
+              context: [],
+            },
+          ]
+        : [],
+    );
+    home.dispose();
+  });
   it("checks an earlier uncertain choice after a real reload without restoring its offer or sending it again", async () => {
     localStorage.clear();
     const stream = fakeEventSourceFactory(),

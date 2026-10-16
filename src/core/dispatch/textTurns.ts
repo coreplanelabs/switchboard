@@ -15,6 +15,8 @@ export interface TextTurn {
   text: string;
   /** Optional adapter-proved user author; text reduction never invents it. */
   user?: string;
+  /** Server-proved read provenance carried with retained history. */
+  context?: import("../references/contextDependencies.js").ContextDependencies;
 }
 
 /**

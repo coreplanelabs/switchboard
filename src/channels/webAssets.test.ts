@@ -1,8 +1,23 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  renameSync,
+  symlinkSync,
+  fstatSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadWebAssets, WEB_DIST_DIR, webDistDir } from "./webAssets.js";
+
+vi.mock("node:fs", async (original) => {
+  const fs = await original<typeof import("node:fs")>();
+  return { ...fs, readFileSync: vi.fn(fs.readFileSync) };
+});
+afterEach(() => vi.mocked(readFileSync).mockReset());
 
 /** A minimal Vite dist: manifest + entry js/css + a lazy chunk. */
 function fixtureDist(): string {
@@ -48,6 +63,47 @@ function fakeRes(): FakeRes {
 const req = (url: string, method = "GET") => ({ url, method }) as import("node:http").IncomingMessage;
 
 describe("loadWebAssets", () => {
+  it("refuses external asset symlinks while safe directory entries remain unserved", () => {
+    const dir = fixtureDist();
+    mkdirSync(join(dir, "assets", "nested"));
+    const safe = loadWebAssets(dir);
+    const regular = fakeRes();
+    safe.serve(req("/assets/main-AbC123.js"), regular);
+    expect(regular.body).toBe("console.log('entry')");
+    const directory = fakeRes();
+    safe.serve(req("/assets/nested"), directory);
+    expect(directory.status).toBe(404);
+    const external = join(mkdtempSync(join(tmpdir(), "sb-web-external-")), "secret.js");
+    writeFileSync(external, "private external bytes");
+    symlinkSync(external, join(dir, "assets", "linked.js"));
+    expect(() => loadWebAssets(dir)).toThrow();
+  });
+  it("caches the inspected original file when its pathname is replaced before reading and closes the descriptor", async () => {
+    const dir = fixtureDist();
+    const path = join(dir, "assets", "main-AbC123.js");
+    const inode = statSync(path).ino;
+    const external = join(mkdtempSync(join(tmpdir(), "sb-web-replacement-")), "secret.js");
+    writeFileSync(external, "private replacement bytes");
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    let swapped = false;
+    let descriptor: number | undefined;
+    vi.mocked(readFileSync).mockImplementation(((input: string | number, options?: unknown) => {
+      if (!swapped && (input === path || (typeof input === "number" && fstatSync(input).ino === inode))) {
+        swapped = true;
+        if (typeof input === "number") descriptor = input;
+        renameSync(path, `${path}.original`);
+        symlinkSync(external, path);
+      }
+      return actual.readFileSync(input, options as Parameters<typeof readFileSync>[1]);
+    }) as typeof readFileSync);
+    const assets = loadWebAssets(dir);
+    const response = fakeRes();
+    assets.serve(req("/assets/main-AbC123.js"), response);
+    expect(response.status).toBe(200);
+    expect(response.body).toBe("console.log('entry')");
+    expect(swapped).toBe(true);
+    expect(() => fstatSync(descriptor!)).toThrow(/bad file descriptor|EBADF/i);
+  });
   it("selects the requested frontend and includes its shared static styles", () => {
     const dir = fixtureDist();
     writeFileSync(

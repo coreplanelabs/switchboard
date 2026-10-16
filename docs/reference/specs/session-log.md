@@ -186,3 +186,18 @@ Readers normalize a row through a currently authorized checkpoint before checkin
 | --- | --- |
 | New handoffs from an orchestrator root retain its run, requester, channel and thread as an explicit owner link. Nested workers keep that original link through saved handoffs and restart. A standalone specialist or an unlinked inherited context does not acquire an owner link. | `[unit]` `src/tools/session.test.ts::inherited session context::keeps the original orchestrator owner…`; `::does not invent an orchestrator owner…` |
 | A claimed orchestrator owner must match the canonical source agent and original source identity. Foreign owner fields and a specialist posing as an orchestrator are refused. Older unlinked context remains readable without gaining an owner claim. | `[unit]` `src/core/dispatch/handoffValidation.test.ts::canonical child handoff validation::checks the claimed orchestrator owner…`; `::refuses a nested handoff…` |
+
+
+## Bounded internal Memory parts
+
+Internal chunks stay in the existing session object. References participate in pins, shared-reference checks, trim, owner-close orphan collection and object retention drop. Tail budgets charge hydrated logical bytes. A `maxBytes: 1` metadata-only read keeps sources and context without claiming model history. Successful ordinary READ projects legacy rows and attachments; unknown or corrupt required bytes are unavailable, not blank text.
+
+Legacy-only search keeps its original FTS5 ranking. Once a log includes internal large parts, bounded whitespace-safe cells use the same FTS5 tokenizer and retained query expression. A logical part ranks by its best matching cell’s `bm25` score, then by newest turn/part; it appears once. This is bounded-cell relevance, not a whole-document `bm25` claim. An unindexable long token or incomplete required index is explicitly unavailable. No JavaScript token approximation supplies a false match or no-match.
+
+| Criterion | Proof |
+| --- | --- |
+| Partial uploads stay private until the complete row; owner, immutable-content and pinned-row refusals preserve the original payload. Exact owner closure removes only unreferenced chunks; retention drop clears the same object | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::original ingress SQLite owner::retains partial chunk uploads until owner closure and preserves published pinned bytes under refusal` |
+| Actual FTS Unicode matching, tail/cell boundary text and mixed bounded-cell relevance remain truthful; metadata-only reads preserve the complete version-3 dependency leaf and source stamping | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::original ingress SQLite owner::uses actual FTS Unicode matching and bounded-cell relevance while metadata-only source reads stay usable` |
+| Byte-policy trimming projects the canonical tool-result marker and removes only its unshared internal chunks | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::original ingress SQLite owner::trims an oversized internal tool result and its unshared chunks through the existing byte policy` |
+
+Internal-codec emission requires an exact compatible Memory and bot-reader deployment receipt. Memory rollback must retain codec projection, reference accounting, search and cleanup while any internal row or orphan remains. Legacy bot/CLI success DTO compatibility does not authorize rolling Memory back to an unaware build; typed required-history failure guards are also part of the bot minimum. This source change grants no deployment or activation.

@@ -35,28 +35,79 @@ const base: IncomingMessage = {
 };
 
 describe("durable inbox continuity", () => {
-  it("retains merged source context and refuses malformed approval metadata", () => {
-    const approvalConnection = {
-      id: "connection",
-      credentialId: "credential",
-      requestHash: "hash",
-      mode: "form" as const,
+  it("stores a saved A read leaf with B custody and no copied media or private URLs", () => {
+    const pointer = {
+      ingressRunId: "execution-B",
+      organizationSequence: 2,
+      savedNativeMediaSource: {
+        version: 1 as const,
+        kind: "confirmed" as const,
+        sourceRunId: "source-A",
+        sourceSequence: 1,
+        sourceDigest: "a".repeat(64),
+        confirmationId: "saved-choice",
+        intentDigest: "b".repeat(64),
+      },
     };
-    const row = durableInboxMessage({ ...base, approvalConnection, mergedFollowUps: true }, base.text, 1);
-    expect(messageFromInbox(row, 0)?.msg).toEqual({ ...base, approvalConnection, mergedFollowUps: true });
-    for (const approvalConnection of [
-      null,
-      [],
-      "connection",
-      { id: "connection" },
-      { id: 1, credentialId: "c", requestHash: "h" },
-      { id: "c", credentialId: "c", requestHash: "h", mode: "anything" },
-    ]) {
-      expect(messageFromInbox({ ...row, approvalConnection }, 0)).toBeUndefined();
-    }
-    expect(messageFromInbox({ ...row, mergedFollowUps: "true" }, 0)).toBeUndefined();
+    const msg = withOriginalOrganizationDispatch(
+      {
+        channelId: "http:one",
+        userId: "http:person",
+        threadKey: "http:one:t",
+        text: "Saved proposal",
+        images: [{ mediaType: "image/png", data: "a".repeat(3 * 1024 * 1024) }],
+        staged: [clip],
+      },
+      pointer,
+    );
+    const row = durableInboxMessage(msg, msg.text, 1);
+    expect(row.originalOrganizationInput).toEqual(pointer);
+    expect(JSON.stringify(row).length).toBeLessThan(2048);
+    expect(row.images).toBeUndefined();
+    expect(row.staged).toBeUndefined();
+    expect(row.nativeMediaDigest).toBeUndefined();
+    expect(originalOrganizationDispatchOf(messageFromInbox(row, 1)!.msg)).toEqual(pointer);
+    expect(
+      messageFromInbox(
+        {
+          ...row,
+          originalOrganizationInput: {
+            ...pointer,
+            savedNativeMediaSource: { ...pointer.savedNativeMediaSource, sourceDigest: "invalid" },
+          },
+        },
+        1,
+      ),
+    ).toBeUndefined();
   });
-
+  it("stores only a protected media owner and digest for an accepted image above both JSON ceilings", () => {
+    const source = withOriginalOrganizationDispatch(
+      {
+        ...base,
+        nativeMediaDigest: "a".repeat(64),
+        images: [{ mediaType: "image/png", data: "x".repeat(3 * 1024 * 1024) }],
+        staged: [clip],
+      },
+      { ingressRunId: "original", organizationSequence: 1, nativeMediaDigest: "a".repeat(64) },
+    );
+    const stored = JSON.parse(JSON.stringify(durableInboxMessage(source, source.text, 2)));
+    expect(Object.keys(stored).sort()).toEqual([
+      "at",
+      "channelId",
+      "kind",
+      "nativeMediaDigest",
+      "originalOrganizationInput",
+      "text",
+      "threadKey",
+      "userId",
+      "userName",
+      "version",
+    ]);
+    expect(JSON.stringify(stored).length).toBeLessThan(4096);
+    const restored = messageFromInbox(stored, 2);
+    expect(restored?.msg.nativeMediaDigest).toBe("a".repeat(64));
+    expect(originalOrganizationDispatchOf(restored!.msg)?.nativeMediaDigest).toBe("a".repeat(64));
+  });
   it("preserves the original owned input pointer across JSON without restoring private proof or Actor grants", () => {
     const original = withOriginalOrganizationDispatch(
       { ...base, messageId: "browser:once" },
@@ -81,6 +132,28 @@ describe("durable inbox continuity", () => {
       messageFromInbox({ ...stored, originalOrganizationInput: { ingressRunId: 7, organizationSequence: 1 } }, 2),
     ).toBeUndefined();
   });
+  it("retains merged source context and refuses malformed approval metadata", () => {
+    const approvalConnection = {
+      id: "connection",
+      credentialId: "credential",
+      requestHash: "hash",
+      mode: "form" as const,
+    };
+    const row = durableInboxMessage({ ...base, approvalConnection, mergedFollowUps: true }, base.text, 1);
+    expect(messageFromInbox(row, 0)?.msg).toEqual({ ...base, approvalConnection, mergedFollowUps: true });
+    for (const approvalConnection of [
+      null,
+      [],
+      "connection",
+      { id: "connection" },
+      { id: 1, credentialId: "c", requestHash: "h" },
+      { id: "c", credentialId: "c", requestHash: "h", mode: "anything" },
+    ]) {
+      expect(messageFromInbox({ ...row, approvalConnection }, 0)).toBeUndefined();
+    }
+    expect(messageFromInbox({ ...row, mergedFollowUps: "true" }, 0)).toBeUndefined();
+  });
+
   it("binds the canonical destination independently of a named steer's source route", () => {
     const destination = {
       runId: "target-run",

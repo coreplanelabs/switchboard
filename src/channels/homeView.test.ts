@@ -662,7 +662,7 @@ describe("authorized Home pages", () => {
           },
         ],
       },
-      liveUnitKeys: async () => new Set(["moving:unit"]),
+      liveUnitRuns: async () => new Map([["moving:unit", new Set(["original-child"])]]),
     });
     const read = createHomeViewHandler(
       home,

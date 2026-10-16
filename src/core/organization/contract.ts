@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { identitySchema } from "../identity/contract.js";
+import { nativeMediaSchema, nativeMediaDigestSchema } from "../nativeMedia.js";
 
 const text = z
   .string()
@@ -108,6 +109,8 @@ export const envelopeSchema = z
     workload: z.enum(["message", "act", "reconciliation"]),
     target: z.object({ key: text, revision }).strict().nullable(),
     content: z.string().max(32_768),
+    nativeMedia: nativeMediaSchema.optional(),
+    nativeMediaDigest: nativeMediaDigestSchema.optional(),
     contentExpiresAt: instant.optional(),
     context: z
       .array(
@@ -124,6 +127,16 @@ export const envelopeSchema = z
   })
   .strict()
   .refine((e) => e.actor.kind === "human" || e.actor.stream === null || e.actor.onBehalfOf !== null)
+  .refine(
+    (e) =>
+      !e.nativeMedia ||
+      (e.source === "slack" &&
+        !!e.nativeMediaDigest &&
+        e.nativeMedia.channelId === e.sourceReference?.channelId &&
+        e.nativeMedia.userId === e.sourceReference?.userId &&
+        e.nativeMedia.threadKey === e.sourceReference?.threadKey &&
+        e.nativeMedia.messageId === e.sourceReference?.messageId),
+  )
   .refine((e) => !e.continuation || (e.content === "" && e.workload === "act"));
 export type OrganizationEnvelope = z.infer<typeof envelopeSchema>;
 export const sourceProvenanceSchema = z
@@ -211,6 +224,7 @@ export const limitsSchema = z
     pendingPerOrganization: z.number().int().positive().max(100_000),
     reservedReconciliation: z.number().int().positive().max(10_000),
     contentTtlMs: z.number().int().positive(),
+    sourceSnapshotTtlMs: z.number().int().positive().optional(),
     receiptTtlMs: z.number().int().positive(),
   })
   .strict();
@@ -393,7 +407,7 @@ export const resultSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("owner-clears"),
-      items: z.array(z.object({ receiptId: text, effectKey: text }).strict()),
+      items: z.array(z.object({ receiptId: text, effectKey: text, expiresAt: instant.optional() }).strict()),
     })
     .strict(),
   z

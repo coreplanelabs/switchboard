@@ -597,6 +597,8 @@ export type WebSeed = PageSeed & {
    *  what the app sets on an in-app navigation. */
   title: string;
   capabilities: Capabilities;
+  /** Server-stamped actual viewer, independent of the selected read target. */
+  pageAccess?: { actor: string; organization?: string };
   /** The person this session is viewing the page as (record 0053), stamped by the shell renderer
    *  from the viewer's actor — the banner and every write control read it. Absent otherwise. */
   viewingAs?: ViewablePerson;

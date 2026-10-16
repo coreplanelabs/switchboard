@@ -6,6 +6,7 @@ import type { DirectorySqlStorage } from "../identity/sqlite.js";
 import { InMemoryOrganizationStore } from "./memory.js";
 import { OrganizationService } from "./service.js";
 import type { OrganizationEnvelope, OrganizationLimits, OrganizationStore } from "./contract.js";
+import { nativeMediaDigest } from "../nativeMedia.js";
 
 const identity = { issuer: "access:test", tenant: null, subject: "alice" };
 const limits: OrganizationLimits = {
@@ -42,6 +43,98 @@ function organizationContract(
   _name: string,
 ) {
   describe("organization store contract", () => {
+    it("expires native pending manifests at the source deadline without shortening stream text or renewing receipts", async () => {
+      let now = 1;
+      const store = factory(() => now);
+      const native = {
+        ...envelope(),
+        source: "slack" as const,
+        sourceReference: {
+          actorId: "slack:UALICE",
+          userId: "slack:UALICE",
+          channelId: "slack:D1",
+          threadKey: "slack:D1:1",
+          messageId: "1",
+        },
+      };
+      const media = {
+        version: 1 as const,
+        channelId: "slack:D1",
+        userId: "slack:UALICE",
+        threadKey: "slack:D1:1",
+        messageId: "1",
+        rawTextDigest: "a".repeat(64),
+        sourceFilesDigest: "b".repeat(64),
+        files: [
+          {
+            id: "slack:file:F1",
+            kind: "image" as const,
+            slot: 0,
+            index: 0,
+            mediaType: "image/png",
+            size: 12,
+            representationDigest: "c".repeat(64),
+          },
+        ],
+      };
+      const value = { ...native, nativeMedia: media, nativeMediaDigest: await nativeMediaDigest(media) };
+      const admitted = await store.execute({
+        action: "admit",
+        envelope: value,
+        limits: { ...limits, sourceSnapshotTtlMs: 30 },
+      });
+      expect(admitted).toMatchObject({ status: "receipt", receipt: { createdAt: 1, expiresAt: 366 } });
+      const claimed = await store.execute({
+        action: "claim",
+        organization: value.organization,
+        owner: "lane",
+        leaseMs: 100,
+      });
+      if (claimed.status !== "state" || !claimed.state.lease) throw new Error("No lease");
+      const read = () =>
+        store.execute({
+          action: "pending",
+          organization: value.organization,
+          owner: "lane",
+          generation: claimed.state.lease!.generation,
+          limit: 10,
+        });
+      expect(await read()).toMatchObject({
+        status: "pending",
+        envelopes: [{ nativeMedia: media, contentExpiresAt: 31 }],
+      });
+      now = 31;
+      expect(await read()).toMatchObject({ status: "pending", envelopes: [] });
+      const submission = await store.execute({
+        action: "submission",
+        organization: value.organization,
+        actor: value.actor,
+        source: "slack",
+        key: value.key,
+      });
+      expect(submission).toMatchObject({
+        status: "submission",
+        envelope: { nativeMediaDigest: value.nativeMediaDigest },
+        receipt: { expiresAt: 366 },
+      });
+      if (submission.status !== "submission") throw new Error("No receipt");
+      expect(submission.envelope.nativeMedia).toBeUndefined();
+      expect(
+        await store.execute({ action: "admit", envelope: value, limits: { ...limits, sourceSnapshotTtlMs: 300 } }),
+      ).toMatchObject({ status: "receipt", duplicate: true, receipt: { expiresAt: 366 } });
+      expect(await read()).toMatchObject({ status: "pending", envelopes: [] });
+      expect(
+        await store.execute({
+          action: "stream",
+          organization: value.organization,
+          actor: value.actor,
+          stream: value.actor.stream!,
+          identities: [value.actor.identity],
+          after: 0,
+          limit: 10,
+        }),
+      ).toMatchObject({ status: "stream", entries: [{ content: "Private request", expiresAt: 91 }] });
+    });
     it("keeps source deletion bounded and durable across joined partitions without exposing unprocessed copies", async () => {
       const store = factory(() => 1);
       const address = {
@@ -256,7 +349,13 @@ function organizationContract(
       ).toEqual({ status: "not_found" });
       expect(await store.execute({ action: "owner-clears", organization: value.organization, limit: 10 })).toEqual({
         status: "owner-clears",
-        items: [{ receiptId: admitted.receipt.id, effectKey: admitted.receipt.effectKey }],
+        items: [
+          {
+            receiptId: admitted.receipt.id,
+            effectKey: admitted.receipt.effectKey,
+            expiresAt: admitted.receipt.expiresAt,
+          },
+        ],
       });
       expect(
         await store.execute({
@@ -275,7 +374,13 @@ function organizationContract(
         }),
       ).toEqual({
         status: "owner-clears",
-        items: [{ receiptId: admitted.receipt.id, effectKey: admitted.receipt.effectKey }],
+        items: [
+          {
+            receiptId: admitted.receipt.id,
+            effectKey: admitted.receipt.effectKey,
+            expiresAt: admitted.receipt.expiresAt,
+          },
+        ],
       });
       expect(
         await store.execute({

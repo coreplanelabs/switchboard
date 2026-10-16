@@ -3,6 +3,43 @@ import type { ChildHandoff } from "../dispatch/handoff.js";
 import { contextReferencesOf, retainContextSources } from "./contextRetention.js";
 
 describe("context retention — bounded references follow their live holders", () => {
+  it("pins the exact original and execution sources of a retained native media dependency", () => {
+    const context = {
+      version: 3 as const,
+      status: "known" as const,
+      revision: 1,
+      origins: [],
+      slack: [],
+      mcp: [],
+      nativeMediaSources: [
+        {
+          executionRunId: "source-B",
+          executionSequence: 2,
+          reference: {
+            version: 1 as const,
+            kind: "confirmed" as const,
+            sourceRunId: "source-A",
+            sourceSequence: 1,
+            sourceDigest: "a".repeat(64),
+            confirmationId: "saved-choice",
+            intentDigest: "b".repeat(64),
+          },
+        },
+      ],
+    };
+    const refs = contextReferencesOf("consumer-C", undefined, context);
+    expect(refs).toEqual([
+      { holderRunId: "consumer-C", sourceRunId: "source-A" },
+      { holderRunId: "consumer-C", sourceRunId: "source-B" },
+    ]);
+    const items = ["source-A", "source-B", "consumer-C", "unrelated"].map((id) => ({ id }));
+    expect(retainContextSources(items, [items[2]!], refs).map((row) => row.id)).toEqual([
+      "source-A",
+      "source-B",
+      "consumer-C",
+    ]);
+    expect(retainContextSources(items, [], refs)).toEqual([]);
+  });
   const ref = (holderRunId: string, sourceRunId: string) => ({ holderRunId, sourceRunId });
   it("keeps existing dependencies of ordinary retained and live holders until those holders retire", () => {
     const items = ["old-source", "live-source", "child", "unrelated"].map((id) => ({ id }));

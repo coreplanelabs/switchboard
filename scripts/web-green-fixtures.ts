@@ -331,7 +331,9 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
       return true;
     }
     if (url.pathname === "/home/session") {
-      json(response, 200, session(null));
+      const thread = url.searchParams.get("thread");
+      if (thread !== null && !allowedThreads.has(thread)) json(response, 404, { status: "not_found", preview: true });
+      else json(response, 200, session(thread));
       return true;
     }
     if (url.pathname === "/home/key") {

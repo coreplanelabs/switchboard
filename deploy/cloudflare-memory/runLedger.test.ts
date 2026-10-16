@@ -15,9 +15,11 @@ import {
   buildExpectedSeedManifest,
   encodeExpectedSeedHeader,
   EXPECTED_SEED_HEADER,
+  seedContentHash,
 } from "../../src/core/runLedger/seedManifest.ts";
 import { MAX_RECORD_BYTES } from "../../src/core/runRecord.ts";
 import { turnRows } from "../../src/core/runLedger/transcript.ts";
+import { RequiredTranscriptError, boundedTranscript } from "../../src/core/runLedger/transcript.ts";
 import { getAgent } from "../../src/agents/registry.ts";
 import { originalColdAllocation, workspaceDurabilityKey } from "../../src/core/runLedger/workspaceDurability.ts";
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
@@ -34,7 +36,7 @@ import {
 } from "../../src/core/publicationSettlement.ts";
 import { PRIVATE_WORKER_REPLY_MAX_CHARS } from "../../src/core/privateWorkerLog.ts";
 import { assertNoPendingBackgroundTasks } from "./backgroundTasks.ts";
-import memoryWorker, { type RunHistoryDO, type SessionLogDO } from "./worker.ts";
+import memoryWorker, { RunHistoryDO, type SessionLogDO } from "./worker.ts";
 import {
   coordinatorReportAdmission,
   freezeAdmittedCoordinatorReport,
@@ -110,6 +112,1296 @@ const unreadOrigin = {
   },
 };
 describe("original ingress SQLite owner", () => {
+  it.each(["completed", "content cleared", "pending", "uncertain", "refusal", "live custody", "dependent consumer"])(
+    "bounds unread continuation metadata after its original horizon in SQLite: %s",
+    async (kind) => {
+      const stub = env.RUNS.get(env.RUNS.idFromName(`unread-retention-${crypto.randomUUID()}`));
+      await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+        const now = Date.now();
+        const input = {
+          effectKey: "original-continuation",
+          digest: "a".repeat(64),
+          requester: "access:alice",
+          threadKey: "http:home:alice",
+          request: { text: "Start original work" },
+          contentExpiresAt: now + 30000,
+          originExpiresAt: now + 60000,
+          origin: unreadOrigin,
+        };
+        const owned = await instance.ingress({ action: "consume", request: input }, now);
+        if (owned.status !== "claimed") throw new Error("original owner not claimed");
+        const profile = { preset: "general", machine: "none" as const, identity: "none" as const, minutes: 1 };
+        const claim = (runId: string, runState = {}) =>
+          instance.claim(
+            {
+              runId,
+              gen: "g",
+              threadKey: input.threadKey,
+              leaseMs: 30000,
+              startedAt: now,
+              meta: { channelId: "http:home", userId: input.requester, threadKey: input.threadKey, profile },
+              state: runState,
+              system: "",
+              tools: [],
+              card: null,
+            },
+            now,
+          );
+        const finish = (runId: string) =>
+          instance.finish(runId, "g", {
+            ...record(runId, input.threadKey),
+            channelId: "http:home",
+            userId: input.requester,
+            startedAt: now,
+            finishedAt: now + 1,
+            profile,
+            answerOutcome: { version: 1, ending: "answered", output: "absent" },
+          });
+        expect(await claim("receiver")).toMatchObject({ ok: true });
+        const { withOriginalOrganizationDispatch } =
+          await import("../../src/core/dispatch/originalOrganizationInput.ts");
+        const { durableInboxMessage } = await import("../../src/core/runLedger/inboxMessage.ts");
+        const message = withOriginalOrganizationDispatch(
+          {
+            channelId: "http:home",
+            userId: input.requester,
+            threadKey: input.threadKey,
+            messageId: "exact-original",
+            text: "Start original work",
+          },
+          { ingressRunId: owned.record.runId, organizationSequence: 7 },
+        );
+        expect(await instance.pushInbox("receiver", durableInboxMessage(message, message.text, now))).toMatchObject({
+          ok: true,
+          seq: 1,
+        });
+        expect(
+          instance.unreadIngress(
+            {
+              action: "hold",
+              proof: { ingressRunId: owned.record.runId, receiverRunId: "receiver", receiverGen: "g", inboxSeq: 1 },
+            },
+            now,
+          ),
+        ).toMatchObject({ status: "record", record: { unread: { status: "pending" } } });
+        expect(await finish("receiver")).toMatchObject({ ok: true });
+        if (kind !== "pending")
+          expect(instance.unreadIngress({ action: "claim", runId: owned.record.runId }, now)).toMatchObject({
+            status: "claimed",
+            record: { runId: owned.record.runId, unread: { status: "claimed" } },
+          });
+        if (kind !== "pending" && kind !== "uncertain") {
+          expect(await claim(owned.record.runId)).toMatchObject({ ok: true });
+          if (kind !== "live custody") expect(await finish(owned.record.runId)).toMatchObject({ ok: true });
+        }
+        const status = kind === "uncertain" ? "uncertain" : "completed";
+        expect(
+          await instance.ingress(
+            {
+              action: "finish",
+              request: {
+                effectKey: input.effectKey,
+                digest: input.digest,
+                runId: owned.record.runId,
+                status,
+                outcome: "Original continuation returned.",
+                ...(kind === "refusal" ? { refusalPending: true } : {}),
+              },
+            },
+            now,
+          ),
+        ).toMatchObject({ status: "record", record: { status } });
+        if (kind === "content cleared")
+          expect(await instance.ingress({ action: "clear", effectKey: input.effectKey }, now)).toMatchObject({
+            status: "record",
+            record: { request: null, unread: { status: "claimed" } },
+          });
+        if (kind === "dependent consumer")
+          expect(
+            await claim("consumer", {
+              contextDependencies: {
+                version: 3,
+                status: "known",
+                revision: 1,
+                origins: [],
+                slack: [],
+                mcp: [],
+                nativeMediaSources: [
+                  {
+                    executionRunId: "execution-source",
+                    executionSequence: 2,
+                    reference: {
+                      version: 1,
+                      kind: "confirmed",
+                      sourceRunId: owned.record.runId,
+                      sourceSequence: 1,
+                      sourceDigest: input.digest,
+                      confirmationId: "saved-choice",
+                      intentDigest: "b".repeat(64),
+                    },
+                  },
+                ],
+              },
+            }),
+          ).toMatchObject({ ok: true });
+        expect(await instance.ingress({ action: "consume", request: input }, now + 59999)).toMatchObject({
+          status: "duplicate",
+          record: {
+            runId: owned.record.runId,
+            status,
+            unread: { status: kind === "pending" ? "pending" : "claimed" },
+          },
+        });
+        expect(await instance.ingressByRun(owned.record.runId, now + 59999)).toMatchObject({
+          status: "record",
+          record: { runId: owned.record.runId, origin: { sourceEvent: "original" } },
+        });
+        if (kind === "completed" || kind === "content cleared") {
+          expect(await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 60000)).toEqual({
+            status: "not_found",
+          });
+          expect(await instance.ingressByRun(owned.record.runId, now + 60000)).toEqual({ status: "not_found" });
+          expect(await instance.ingress({ action: "consume", request: input }, now + 60000)).toEqual({
+            status: "invalid",
+          });
+          expect(
+            state.storage.sql
+              .exec("SELECT effect_key FROM ingress_deletions WHERE effect_key=?", input.effectKey)
+              .toArray(),
+          ).toEqual([]);
+        } else {
+          expect(await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 60000)).toMatchObject({
+            status: "record",
+            record: { runId: owned.record.runId, status, request: null },
+          });
+          expect(await instance.ingress({ action: "consume", request: input }, now + 60000)).toMatchObject({
+            status: "duplicate",
+            record: { runId: owned.record.runId },
+          });
+        }
+        expect(instance.unreadIngress({ action: "claim", runId: owned.record.runId }, now + 60000)).toEqual({
+          status: kind === "completed" || kind === "content cleared" ? "not_found" : "fenced",
+        });
+      });
+    },
+  );
+  it("uses the configured original deletion horizon through the existing Worker client", async () => {
+    const storeKey = `client-${crypto.randomUUID()}`;
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "test-token",
+      storeKey,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    const deadline = Date.now() + 60000;
+    expect(
+      await ledger.clearIngressContent("original-client-key", { expiresAt: deadline, receiptTtlMs: 999999 }),
+    ).toEqual({ status: "not_found" });
+    const stub = env.RUNS.get(env.RUNS.idFromName(storeKey));
+    expect(
+      await runInDurableObject(
+        stub,
+        (_instance: RunHistoryDO, state) =>
+          state.storage.sql
+            .exec<{ protect_until: number }>(
+              "SELECT protect_until FROM ingress_deletions WHERE effect_key='original-client-key'",
+            )
+            .one().protect_until,
+      ),
+    ).toBe(deadline);
+    expect(
+      await ledger.consumeIngress({
+        effectKey: "original-client-key",
+        digest: "a".repeat(64),
+        requester: "access:alice",
+        threadKey: "http:home:alice",
+        request: {},
+        contentExpiresAt: deadline,
+        origin: unreadOrigin,
+        originExpiresAt: deadline,
+      }),
+    ).toEqual({ status: "fenced" });
+  });
+  it("sweeps expired owner indexes in bounded rotating batches and schedules more work on the existing alarm", async () => {
+    const stub = env.RUNS.get(env.RUNS.idFromName(`batch-${crypto.randomUUID()}`));
+    const counts = await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+      const now = Date.now();
+      for (let i = 0; i < 130; i++) {
+        const input = {
+          effectKey: `batch:${String(i).padStart(3, "0")}`,
+          digest: "a".repeat(64),
+          requester: "access:alice",
+          threadKey: "http:home:alice",
+          request: {},
+          contentExpiresAt: now + 30000,
+          originExpiresAt: now + 60000,
+          origin: unreadOrigin,
+        };
+        const owned = await instance.ingress({ action: "consume", request: input }, now);
+        if (owned.status !== "claimed") throw new Error("not claimed");
+        await instance.ingress(
+          {
+            action: "finish",
+            request: {
+              effectKey: input.effectKey,
+              digest: input.digest,
+              runId: owned.record.runId,
+              status: "completed",
+              outcome: "handler returned",
+            },
+          },
+          now,
+        );
+      }
+      await state.storage.deleteAlarm();
+      await instance.ingress({ action: "read", effectKey: "not-an-owner" }, now + 60001);
+      const first = state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM ingress_owners").one().n;
+      const due = await state.storage.getAlarm();
+      await instance.ingress({ action: "read", effectKey: "not-an-owner" }, now + 60001);
+      const second = state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM ingress_owners").one().n;
+      return { first, second, alarmAtOriginalExpiry: due === now + 60001 };
+    });
+    expect(counts).toEqual({ first: 30, second: 0, alarmAtOriginalExpiry: true });
+  });
+  it("backfills native dependency roots in bounded durable passes before retiring an expired source", async () => {
+    const stub = env.RUNS.get(env.RUNS.idFromName(`context-backfill-${crypto.randomUUID()}`));
+    const result = await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+      const now = Date.now() + LEASE_MS;
+      const input = {
+        effectKey: "backfill-source",
+        digest: "a".repeat(64),
+        requester: "access:alice",
+        threadKey: "http:home:alice",
+        request: {},
+        origin: unreadOrigin,
+        contentExpiresAt: now + 500,
+        originExpiresAt: now + 1000,
+      };
+      const owned = await instance.ingress({ action: "consume", request: input }, now);
+      if (owned.status !== "claimed") throw new Error("not claimed");
+      await instance.ingress(
+        {
+          action: "finish",
+          request: {
+            effectKey: input.effectKey,
+            digest: input.digest,
+            runId: owned.record.runId,
+            status: "completed",
+            outcome: "handler returned",
+          },
+        },
+        now,
+      );
+      const profile = { preset: "general", machine: "none" as const, identity: "none" as const, minutes: 1 };
+      for (let i = 0; i < 102; i++) {
+        const runId = `root-C${String(i).padStart(3, "0")}`;
+        const context = {
+          version: 3 as const,
+          status: "known" as const,
+          revision: 1,
+          origins: [],
+          slack: [],
+          mcp: [],
+          nativeMediaSources: [
+            {
+              executionRunId: "source-B",
+              executionSequence: 2,
+              reference: {
+                version: 1 as const,
+                kind: "confirmed" as const,
+                sourceRunId: i === 101 ? owned.record.runId : "source-D",
+                sourceSequence: 1,
+                sourceDigest: "a".repeat(64),
+                confirmationId: "saved-choice",
+                intentDigest: "b".repeat(64),
+              },
+            },
+          ],
+        };
+        expect(
+          await instance.claim(
+            {
+              runId,
+              gen: "g",
+              threadKey: input.threadKey,
+              startedAt: now,
+              leaseMs: LEASE_MS,
+              meta: { channelId: "http:home", userId: input.requester, threadKey: input.threadKey, profile },
+              state: { contextDependencies: context },
+              system: "",
+              tools: [],
+              card: null,
+            },
+            now,
+          ),
+        ).toMatchObject({ ok: true });
+        expect(
+          await instance.finish(runId, "g", {
+            ...record(runId, input.threadKey),
+            channelId: "http:home",
+            userId: input.requester,
+            contextDependencies: context,
+            startedAt: now,
+            finishedAt: now + 1,
+            profile,
+            answerOutcome: { version: 1, ending: "answered", output: "absent" },
+          }),
+        ).toMatchObject({ ok: true });
+      }
+      // Existing rows simulate the pre-upgrade reference index; no source data is changed.
+      state.storage.sql.exec("DELETE FROM context_refs WHERE holder_run_id LIKE 'root-C%'");
+      const first = await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 1001);
+      const firstRoots = state.storage.sql
+        .exec<{ n: number }>(
+          "SELECT COUNT(DISTINCT holder_run_id) AS n FROM context_refs WHERE holder_run_id LIKE 'root-C%'",
+        )
+        .one().n;
+      const checkpoint = state.storage.sql
+        .exec<{ value: string }>("SELECT value FROM meta WHERE key='ingress_context_census'")
+        .one().value;
+      const corruptCensus: string[] = [];
+      for (const changes of [
+        { upper: "bad/key", cursor: "bad/key", complete: true },
+        { cursor: "bad/key" },
+        { complete: true },
+        { version: 999 },
+      ]) {
+        state.storage.sql.exec(
+          "UPDATE meta SET value=? WHERE key='ingress_context_census'",
+          JSON.stringify({ ...JSON.parse(checkpoint), ...changes }),
+        );
+        corruptCensus.push((await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 1001)).status);
+      }
+      state.storage.sql.exec("UPDATE meta SET value=? WHERE key='ingress_context_census'", checkpoint);
+      const savedSummary = state.storage.sql
+        .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id='root-C101'")
+        .one().summary_json;
+      state.storage.sql.exec(
+        "UPDATE runs SET summary_json=json_set(summary_json,'$.contextDependencies.nativeMediaSources[0].reference.sourceDigest','bad') WHERE run_id='root-C101'",
+      );
+      const replacement = new RunHistoryDO(state, env);
+      const corrupt = await replacement.ingress({ action: "read", effectKey: input.effectKey }, now + 1001);
+      const heldCheckpoint = state.storage.sql
+        .exec<{ value: string }>("SELECT value FROM meta WHERE key='ingress_context_census'")
+        .one().value;
+      state.storage.sql.exec("UPDATE runs SET summary_json=? WHERE run_id='root-C101'", savedSummary);
+      // A lower ID accepted during migration must be indexed by its writer,
+      // even though it lies behind the frozen backfill cursor.
+      const futureContext = JSON.parse(savedSummary).contextDependencies;
+      expect(
+        await replacement.claim(
+          {
+            runId: "older-consumer",
+            gen: "g",
+            threadKey: input.threadKey,
+            startedAt: now,
+            leaseMs: LEASE_MS,
+            meta: { channelId: "http:home", userId: input.requester, threadKey: input.threadKey, profile },
+            state: {},
+            system: "",
+            tools: [],
+            card: null,
+          },
+          now,
+        ),
+      ).toMatchObject({ ok: true });
+      expect(await replacement.setState("older-consumer", "g", { contextDependencies: futureContext })).toMatchObject({
+        ok: true,
+      });
+      const futurePins = state.storage.sql
+        .exec<{ source_run_id: string }>(
+          "SELECT source_run_id FROM context_refs WHERE holder_run_id='older-consumer' ORDER BY source_run_id",
+        )
+        .toArray()
+        .map((row) => row.source_run_id);
+      const second = await replacement.ingress({ action: "read", effectKey: input.effectKey }, now + 1001);
+      expect(
+        await replacement.finish("older-consumer", "g", {
+          ...record("older-consumer", input.threadKey),
+          channelId: "http:home",
+          userId: input.requester,
+          startedAt: now,
+          finishedAt: now + 1,
+          profile,
+          contextDependencies: futureContext,
+          answerOutcome: { version: 1, ending: "answered", output: "absent" },
+        }),
+      ).toMatchObject({ ok: true });
+      const secondRoots = state.storage.sql
+        .exec<{ n: number }>(
+          "SELECT COUNT(DISTINCT holder_run_id) AS n FROM context_refs WHERE holder_run_id LIKE 'root-C%'",
+        )
+        .one().n;
+      const pins = state.storage.sql
+        .exec<{ source_run_id: string }>(
+          "SELECT source_run_id FROM context_refs WHERE holder_run_id='root-C101' ORDER BY source_run_id",
+        )
+        .toArray()
+        .map((r) => r.source_run_id);
+      const expired = await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 366 * 86400000);
+      return {
+        first: first.status,
+        firstRoots,
+        corruptCensus,
+        durablePartial: JSON.parse(checkpoint).complete === false && JSON.parse(checkpoint).cursor === "root-C099",
+        corrupt: corrupt.status,
+        checkpointHeld: heldCheckpoint === checkpoint,
+        second: second.status,
+        secondRoots,
+        exactPins: pins.includes(owned.record.runId) && pins.includes("source-B"),
+        futurePinsExact:
+          futurePins.includes(owned.record.runId) && futurePins.includes("source-B") && futurePins.length === 2,
+        expired: expired.status,
+      };
+    });
+    expect(result).toEqual({
+      first: "record",
+      firstRoots: 100,
+      corruptCensus: ["record", "record", "record", "record"],
+      durablePartial: true,
+      corrupt: "record",
+      checkpointHeld: true,
+      second: "record",
+      secondRoots: 102,
+      exactPins: true,
+      futurePinsExact: true,
+      expired: "not_found",
+    });
+  });
+  it("keeps native source pins on accepted live state finish and session writers after the census", async () => {
+    const stub = env.RUNS.get(env.RUNS.idFromName(`future-context-${crypto.randomUUID()}`));
+    const result = await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+      const now = Date.now() + LEASE_MS;
+      const profile = { preset: "general", machine: "none" as const, identity: "none" as const, minutes: 1 };
+      const input = {
+        effectKey: "complete-empty-census",
+        digest: "a".repeat(64),
+        requester: "access:alice",
+        threadKey: "http:home:alice",
+        request: {},
+        origin: unreadOrigin,
+        contentExpiresAt: now + 5,
+        originExpiresAt: now + 10,
+      };
+      const owned = await instance.ingress({ action: "consume", request: input }, now);
+      if (owned.status !== "claimed") throw new Error("not claimed");
+      await instance.ingress(
+        {
+          action: "finish",
+          request: {
+            effectKey: input.effectKey,
+            digest: input.digest,
+            runId: owned.record.runId,
+            status: "completed",
+            outcome: "handler returned",
+          },
+        },
+        now,
+      );
+      expect(await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 11)).toEqual({
+        status: "not_found",
+      });
+      const context = {
+        version: 3 as const,
+        status: "known" as const,
+        revision: 1,
+        origins: [],
+        slack: [],
+        mcp: [],
+        nativeMediaSources: [
+          {
+            executionRunId: "source-B",
+            executionSequence: 2,
+            reference: {
+              version: 1 as const,
+              kind: "confirmed" as const,
+              sourceRunId: "source-A",
+              sourceSequence: 1,
+              sourceDigest: "a".repeat(64),
+              confirmationId: "saved-choice",
+              intentDigest: "b".repeat(64),
+            },
+          },
+        ],
+      };
+      for (const runId of ["source-A", "source-B", "older-consumer"]) {
+        expect(
+          await instance.claim(
+            {
+              runId,
+              gen: "g",
+              threadKey: input.threadKey,
+              startedAt: now,
+              leaseMs: LEASE_MS,
+              meta: { channelId: "http:home", userId: input.requester, threadKey: input.threadKey, profile },
+              state: runId === "older-consumer" ? { contextDependencies: context } : {},
+              system: "",
+              tools: [],
+              card: null,
+            },
+            now,
+          ),
+        ).toMatchObject({ ok: true });
+        if (runId !== "older-consumer")
+          expect(
+            await instance.finish(runId, "g", {
+              ...record(runId, input.threadKey),
+              channelId: "http:home",
+              userId: input.requester,
+              startedAt: now,
+              finishedAt: now + 1,
+              profile,
+              answerOutcome: { version: 1, ending: "answered", output: "absent" },
+            }),
+          ).toMatchObject({ ok: true });
+      }
+      const pins = (holder: string) =>
+        state.storage.sql
+          .exec<{ source_run_id: string }>(
+            "SELECT source_run_id FROM context_refs WHERE holder_run_id=? ORDER BY source_run_id",
+            holder,
+          )
+          .toArray()
+          .map((row) => row.source_run_id);
+      const live = pins("older-consumer");
+      state.storage.sql.exec("DELETE FROM context_refs WHERE holder_run_id='older-consumer'");
+      expect(await instance.setState("older-consumer", "g", { contextDependencies: context })).toMatchObject({
+        ok: true,
+      });
+      const updated = pins("older-consumer");
+      state.storage.sql.exec("DELETE FROM context_refs WHERE holder_run_id='older-consumer'");
+      expect(
+        await instance.finish("older-consumer", "g", {
+          ...record("older-consumer", input.threadKey),
+          channelId: "http:home",
+          userId: input.requester,
+          startedAt: now,
+          finishedAt: now + 1,
+          profile,
+          contextDependencies: context,
+          answerOutcome: { version: 1, ending: "answered", output: "absent" },
+        }),
+      ).toMatchObject({ ok: true });
+      const finished = pins("older-consumer");
+      expect(await instance.registerThreadSession(`${input.threadKey}:@thread`, input.threadKey, now, context)).toEqual(
+        { ok: true },
+      );
+      return { live, updated, finished, session: pins(`@session:${input.threadKey}:@thread`) };
+    });
+    expect(result).toEqual({
+      live: ["source-A", "source-B"],
+      updated: ["source-A", "source-B"],
+      finished: ["source-A", "source-B"],
+      session: ["source-A", "source-B"],
+    });
+  });
+  it("keeps exact native media dependency pins and fails closed on a corrupt retained root", async () => {
+    const stub = env.RUNS.get(env.RUNS.idFromName(`pins-${crypto.randomUUID()}`));
+    const result = await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+      const now = Date.now();
+      const input = {
+        effectKey: "source-A",
+        digest: "a".repeat(64),
+        requester: "access:alice",
+        threadKey: "http:home:alice",
+        request: { text: "original" },
+        contentExpiresAt: now + 30000,
+        originExpiresAt: now + 60000,
+        origin: unreadOrigin,
+      };
+      const owned = await instance.ingress({ action: "consume", request: input }, now);
+      if (owned.status !== "claimed") throw new Error("owner not claimed");
+      await instance.ingress(
+        {
+          action: "finish",
+          request: {
+            effectKey: input.effectKey,
+            digest: input.digest,
+            runId: owned.record.runId,
+            status: "completed",
+            outcome: "handler returned",
+          },
+        },
+        now,
+      );
+      const context = {
+        version: 3 as const,
+        status: "known" as const,
+        revision: 1,
+        origins: [],
+        slack: [],
+        mcp: [],
+        nativeMediaSources: [
+          {
+            executionRunId: "source-B",
+            executionSequence: 2,
+            reference: {
+              version: 1 as const,
+              kind: "confirmed" as const,
+              sourceRunId: owned.record.runId,
+              sourceSequence: 1,
+              sourceDigest: "a".repeat(64),
+              confirmationId: "saved-choice",
+              intentDigest: "b".repeat(64),
+            },
+          },
+        ],
+      };
+      expect(
+        await instance.claim(
+          {
+            runId: "consumer-C",
+            gen: "g",
+            threadKey: input.threadKey,
+            leaseMs: LEASE_MS,
+            startedAt: now,
+            meta: {
+              channelId: "http:home",
+              userId: input.requester,
+              threadKey: input.threadKey,
+              agent: "general",
+              profile: { machine: "none", identity: "none", minutes: 1 },
+            },
+            state: { contextDependencies: context },
+            system: "",
+            tools: [],
+            card: null,
+          },
+          now,
+        ),
+      ).toMatchObject({ ok: true });
+      const protectedRead = await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 60001);
+      const pins = state.storage.sql
+        .exec<{ source_run_id: string }>(
+          "SELECT source_run_id FROM context_refs WHERE holder_run_id='consumer-C' ORDER BY source_run_id",
+        )
+        .toArray()
+        .map((row) => row.source_run_id);
+      state.storage.sql.exec(
+        "UPDATE live_runs SET state_json=json_set(state_json,'$.contextDependencies.nativeMediaSources[0].reference.sourceDigest','bad') WHERE run_id='consumer-C'",
+      );
+      const corruptRead = await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 60002);
+      // Restore the exact retained root, then finish through the real owner seam.
+      state.storage.sql.exec(
+        "UPDATE live_runs SET state_json=json_set(state_json,'$.contextDependencies',json(?)) WHERE run_id='consumer-C'",
+        JSON.stringify(context),
+      );
+      expect(
+        await instance.finish("consumer-C", "g", {
+          ...record("consumer-C", input.threadKey),
+          channelId: "http:home",
+          userId: input.requester,
+          startedAt: now,
+          finishedAt: now + 1,
+          answerOutcome: { version: 1, ending: "answered", output: "absent" },
+          profile: { preset: "general", machine: "none", identity: "none", minutes: 1 },
+        }),
+      ).toMatchObject({ ok: true });
+      const retainedRead = await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 60003);
+      const completed = state.storage.sql
+        .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id='consumer-C'")
+        .one().summary_json;
+      const archive = state.storage.sql
+        .exec<{ allocation_json: string }>(
+          "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+        )
+        .one().allocation_json;
+      const held: string[] = [];
+      for (const changes of [
+        { answerOutcome: { version: 1, ending: "unknown", output: "absent" } },
+        { answerOutcome: undefined },
+        { profile: { preset: "general", machine: "repo-cold", identity: "none", minutes: 1 } },
+        { profile: null },
+        { provisional: true },
+        { restarting: true },
+      ]) {
+        state.storage.sql.exec(
+          "UPDATE runs SET summary_json=? WHERE run_id='consumer-C'",
+          JSON.stringify({ ...JSON.parse(completed), ...changes }),
+        );
+        held.push(
+          (await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 366 * 86400000)).status,
+        );
+      }
+      state.storage.sql.exec("UPDATE runs SET summary_json=? WHERE run_id='consumer-C'", completed);
+      state.storage.sql.exec(
+        "UPDATE workspace_settlements SET allocation_json=json_set(allocation_json,'$.allocation',json(?)) WHERE allocation_json IS NOT NULL",
+        JSON.stringify({ version: 1, kind: "unexpected-physical-allocation" }),
+      );
+      held.push((await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 366 * 86400000)).status);
+      state.storage.sql.exec(
+        "UPDATE workspace_settlements SET allocation_json=?,json=? WHERE allocation_json IS NOT NULL",
+        archive,
+        JSON.stringify({ owner: { runId: "consumer-C" } }),
+      );
+      held.push((await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 366 * 86400000)).status);
+      state.storage.sql.exec("UPDATE workspace_settlements SET json=NULL WHERE allocation_json IS NOT NULL");
+      const retiredRead = await instance.ingress({ action: "read", effectKey: input.effectKey }, now + 366 * 86400000);
+      return {
+        held,
+        source: owned.record.runId,
+        protected: protectedRead.status,
+        corrupt: corruptRead.status,
+        retained: retainedRead.status,
+        retired: retiredRead.status,
+        pins,
+      };
+    });
+    expect(result).toEqual({
+      held: ["record", "record", "record", "record", "record", "record", "record", "record"],
+      source: result.source,
+      protected: "record",
+      corrupt: "record",
+      retained: "record",
+      retired: "not_found",
+      pins: [result.source, "source-B"].sort(),
+    });
+  });
+  it("advances legacy deletion markers past a corrupt retained-owner backlog", async () => {
+    const stub = env.RUNS.get(env.RUNS.idFromName(`legacy-batch-${crypto.randomUUID()}`));
+    const result = await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+      const now = Date.now() + LEASE_MS;
+      for (let i = 0; i < 100; i++) {
+        const key = `blocked:${String(i).padStart(3, "0")}`;
+        state.storage.sql.exec(
+          "INSERT INTO ingress_owners(effect_key,content_expires_at,data) VALUES(?,?,?)",
+          key,
+          now + 1000,
+          JSON.stringify({ version: 999, runId: key }),
+        );
+        state.storage.sql.exec("INSERT INTO ingress_deletions(effect_key,protect_until) VALUES(?,NULL)", key);
+      }
+      state.storage.sql.exec("INSERT INTO ingress_deletions(effect_key,protect_until) VALUES('standalone',NULL)");
+      await state.storage.deleteAlarm();
+      await instance.ingress({ action: "read", effectKey: "absent" }, now);
+      const schedulesNextBatch = (await state.storage.getAlarm()) === now;
+      for (let pass = 0; pass < 2; pass++)
+        expect(
+          await instance.ingress({ action: "clear", effectKey: "trigger", protection: { receiptTtlMs: 50 } }, now),
+        ).toEqual({ status: "not_found" });
+      const deadline = state.storage.sql
+        .exec<{ protect_until: number | null }>(
+          "SELECT protect_until FROM ingress_deletions WHERE effect_key='standalone'",
+        )
+        .one().protect_until;
+      const retry = await instance.ingress(
+        {
+          action: "consume",
+          request: {
+            effectKey: "standalone",
+            digest: "a".repeat(64),
+            requester: "access:alice",
+            threadKey: "http:home:alice",
+            request: {},
+            origin: unreadOrigin,
+            originExpiresAt: now + 50,
+            contentExpiresAt: now + 1000,
+          },
+        },
+        now + 51,
+      );
+      return {
+        deadlineMatches: deadline === now + 50,
+        schedulesNextBatch,
+        retry: retry.status,
+        owners: state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM ingress_owners").one().n,
+        protectedMarkers: state.storage.sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM ingress_deletions WHERE protect_until IS NULL")
+          .one().n,
+      };
+    });
+    expect(result).toEqual({
+      deadlineMatches: true,
+      schedulesNextBatch: true,
+      retry: "invalid",
+      owners: 100,
+      protectedMarkers: 100,
+    });
+  });
+  it("stamps one protected deletion deadline and preserves legacy or corrupt associated owners", async () => {
+    const stub = env.RUNS.get(env.RUNS.idFromName(`markers-${crypto.randomUUID()}`));
+    const result = await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+      const now = Date.now();
+      const key = "marker-only";
+      expect(
+        await instance.ingress(
+          { action: "clear", effectKey: key, protection: { expiresAt: now + 50, receiptTtlMs: 1000 } },
+          now,
+        ),
+      ).toEqual({ status: "not_found" });
+      await instance.ingress(
+        { action: "clear", effectKey: key, protection: { expiresAt: now + 900, receiptTtlMs: 9000 } },
+        now + 20,
+      );
+      const deadline = state.storage.sql
+        .exec<{ protect_until: number }>("SELECT protect_until FROM ingress_deletions WHERE effect_key=?", key)
+        .one().protect_until;
+      const input = {
+        effectKey: key,
+        digest: "a".repeat(64),
+        requester: "access:alice",
+        threadKey: "http:home:alice",
+        request: { protection: { expiresAt: 1 } },
+        contentExpiresAt: now + 1000,
+        origin: unreadOrigin,
+        originExpiresAt: now + 50,
+      };
+      const inside = await instance.ingress({ action: "consume", request: input }, now + 49);
+      const after = await instance.ingress({ action: "consume", request: input }, now + 50);
+      const legacy = { ...input, effectKey: "legacy", origin: undefined, originExpiresAt: undefined };
+      const owned = await instance.ingress({ action: "consume", request: legacy }, now);
+      if (owned.status !== "claimed") throw new Error("legacy owner not claimed");
+      await instance.ingress(
+        {
+          action: "finish",
+          request: {
+            effectKey: legacy.effectKey,
+            digest: legacy.digest,
+            runId: owned.record.runId,
+            status: "completed",
+            outcome: "handler returned",
+          },
+        },
+        now,
+      );
+      const legacyRead = await instance.ingress({ action: "read", effectKey: legacy.effectKey }, now + 9000);
+      state.storage.sql.exec(
+        "UPDATE ingress_owners SET data=json_set(data,'$.originExpiresAt',1,'$.origin',json(?)) WHERE effect_key='legacy'",
+        JSON.stringify({ ...unreadOrigin, version: 999 }),
+      );
+      await instance.ingress({ action: "read", effectKey: "unrelated" }, now + 9001);
+      const corruptCount = state.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM ingress_owners WHERE effect_key='legacy'")
+        .one().n;
+      state.storage.sql.exec("INSERT INTO ingress_deletions(effect_key) VALUES('old-marker')");
+      await instance.ingress({ action: "read", effectKey: "unrelated" }, now + 9002);
+      const first = state.storage.sql
+        .exec<{ protect_until: number }>("SELECT protect_until FROM ingress_deletions WHERE effect_key='old-marker'")
+        .one().protect_until;
+      await instance.ingress({ action: "clear", effectKey: "other", protection: { receiptTtlMs: 999999 } }, now + 9003);
+      const second = state.storage.sql
+        .exec<{ protect_until: number }>("SELECT protect_until FROM ingress_deletions WHERE effect_key='old-marker'")
+        .one().protect_until;
+      return {
+        expectedDeadline: now + 50,
+        deadline,
+        inside: inside.status,
+        after: after.status,
+        legacy: legacyRead.status,
+        corruptCount,
+        immutableBaseline: first === second,
+      };
+    });
+    expect(result).toMatchObject({
+      deadline: result.expectedDeadline,
+      inside: "fenced",
+      after: "invalid",
+      legacy: "record",
+      corruptCount: 1,
+      immutableBaseline: true,
+    });
+  });
+  it("retires expired completed ingress classes and bounded deletion fences in real SQLite", async () => {
+    const stub = env.RUNS.get(env.RUNS.idFromName(`expiry-${crypto.randomUUID()}`));
+    const results = await runInDurableObject(stub, async (instance: RunHistoryDO) => {
+      const now = Date.now();
+      const observations: unknown[] = [];
+      for (const kind of ["ordinary", "target answer", "saved confirmation", "deleted owner"] as const) {
+        const input = {
+          effectKey: `expired:${kind}`,
+          digest: "a".repeat(64),
+          requester: "access:alice",
+          threadKey: "http:home:alice",
+          request: { text: "original input" },
+          contentExpiresAt: now + 30000,
+          originExpiresAt: now + 60000,
+          origin: {
+            ...unreadOrigin,
+            ...(kind === "target answer" ? { target: { key: "unit:question", revision: 1 } } : {}),
+            ...(kind === "saved confirmation"
+              ? {
+                  workload: "act" as const,
+                  continuation: { kind: "confirm" as const, id: "00000000-0000-4000-8000-000000000001" },
+                }
+              : {}),
+          },
+        };
+        const owned = await instance.ingress({ action: "consume", request: input }, now);
+        if (owned.status !== "claimed") throw new Error("original owner not claimed");
+        await instance.ingress(
+          {
+            action: "finish",
+            request: {
+              effectKey: input.effectKey,
+              digest: input.digest,
+              runId: owned.record.runId,
+              status: "completed",
+              outcome: "handler returned",
+            },
+          },
+          now,
+        );
+        if (kind === "deleted owner") await instance.ingress({ action: "clear", effectKey: input.effectKey }, now);
+        observations.push({
+          kind,
+          inside: (await instance.ingress({ action: "read", effectKey: input.effectKey }, now)).status,
+          after: (await instance.ingress({ action: "read", effectKey: input.effectKey }, Number.MAX_SAFE_INTEGER - 1))
+            .status,
+        });
+      }
+      const key = "deleted-before-consume";
+      await instance.ingress({ action: "clear", effectKey: key }, now);
+      const expired = {
+        effectKey: key,
+        digest: "b".repeat(64),
+        requester: "access:alice",
+        threadKey: "http:home:alice",
+        request: { text: "original input" },
+        contentExpiresAt: now + 30000,
+        origin: unreadOrigin,
+        originExpiresAt: now + 60000,
+      };
+      observations.push({
+        kind: "deletion-before-consume",
+        inside: (await instance.ingress({ action: "consume", request: expired }, now)).status,
+        after: (await instance.ingress({ action: "consume", request: expired }, Number.MAX_SAFE_INTEGER - 1)).status,
+      });
+      return observations;
+    });
+    expect(results).toEqual([
+      { kind: "ordinary", inside: "record", after: "not_found" },
+      { kind: "target answer", inside: "record", after: "not_found" },
+      { kind: "saved confirmation", inside: "record", after: "not_found" },
+      { kind: "deleted owner", inside: "record", after: "not_found" },
+      { kind: "deletion-before-consume", inside: "fenced", after: "invalid" },
+    ]);
+  });
+  it("stores bounded Unicode text and PDF chunks on the original owner and returns an exact legacy transcript", async () => {
+    const skey = "slack:chunks:bounded:review";
+    const requests: number[] = [];
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "test-token",
+      storeKey: crypto.randomUUID(),
+      fetch: (input, init) => {
+        requests.push(new TextEncoder().encode(String(init?.body ?? "")).byteLength);
+        return fetchMemoryTest(String(input), init);
+      },
+    });
+    await ledger.claimSession(skey, "original-chunk-owner", "gen-original");
+    const csv = '"🧭漢字","quoted \\" cell"\r\n'.repeat(90_000) + "original needle across boundary";
+    const pdf = "AQID".repeat(600_000);
+    const message: ChatMessage = {
+      role: "user",
+      content: [
+        { type: "text", text: csv },
+        { type: "document", mediaType: "application/pdf", name: "source.pdf", data: pdf },
+      ],
+    };
+    expect(
+      await ledger.seed("original-chunk-owner", "gen-original", [{ idx: 0, message, actor: "slack:original" }], skey),
+    ).toEqual({ ok: true });
+    expect(await ledger.readSession(skey, 0)).toMatchObject({
+      complete: true,
+      turns: 1,
+      messages: [message],
+      actors: ["slack:original"],
+    });
+    expect(
+      await ledger.seed("original-chunk-owner", "gen-original", [{ idx: 0, message, actor: "slack:original" }], skey),
+    ).toEqual({ ok: true });
+    expect((await ledger.readSession(skey, 0)).turns).toBe(1);
+    const hits = await ledger.searchSession(skey, "needle", 1);
+    expect(hits.hits).toEqual([
+      expect.objectContaining({
+        idx: 0,
+        part: 0,
+        role: "user",
+        text: expect.stringContaining("original needle across boundary"),
+      }),
+    ]);
+    expect((await post("/runs/transcript/owner", { runId: "original-chunk-run", gen: "gen-original" })).data).toEqual({
+      ok: true,
+    });
+    expect(
+      await ledger.seed("original-chunk-run", "gen-original", [{ idx: 0, message, actor: "slack:original" }]),
+    ).toEqual({ ok: true });
+    expect(await ledger.readTranscript("original-chunk-run")).toMatchObject({
+      complete: true,
+      turns: 1,
+      messages: [message],
+      actors: ["slack:original"],
+    });
+    expect(Math.max(...requests)).toBeLessThanOrEqual(2 * 1024 * 1024);
+    const stub = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(skey));
+    const physical = await runInDurableObject(stub, (_instance: SessionLogDO, state) => ({
+      largest: state.storage.sql
+        .exec<{ bytes: number }>("SELECT MAX(length(CAST(json AS BLOB))) AS bytes FROM turns")
+        .one().bytes,
+      largestBlob: state.storage.sql
+        .exec<{ bytes: number }>("SELECT MAX(length(CAST(data AS BLOB))) AS bytes FROM attachments")
+        .one().bytes,
+      owner: state.storage.sql.exec<{ run_id: string; gen: string }>("SELECT run_id,gen FROM owner").one(),
+    }));
+    expect(physical.owner).toEqual({ run_id: "original-chunk-owner", gen: "gen-original" });
+    expect(physical.largest).toBeLessThanOrEqual(1_500_000);
+    expect(physical.largestBlob).toBeLessThanOrEqual(1_500_000);
+    await expect(ledger.readSessionTail(skey, 1000)).rejects.toBeInstanceOf(RequiredTranscriptError);
+    await runInDurableObject(stub, (_instance: SessionLogDO, state) => {
+      state.storage.sql.exec("UPDATE attachments SET data='changed' WHERE ref=(SELECT ref FROM attachments LIMIT 1)");
+    });
+    await expect(ledger.readSession(skey, 0)).rejects.toBeInstanceOf(RequiredTranscriptError);
+    await expect(ledger.searchSession(skey, "needle", 1)).rejects.toBeInstanceOf(RequiredTranscriptError);
+  });
+  it("retains partial chunk uploads until owner closure and preserves published pinned bytes under refusal", async () => {
+    const skey = "slack:chunks:lifecycle:review";
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "test-token",
+      storeKey: crypto.randomUUID(),
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    await ledger.claimSession(skey, "chunk-owner", "gen-one");
+    const message: ChatMessage = {
+      role: "user",
+      content: [{ type: "text", text: "original retained text ".repeat(90_000) }],
+    };
+    expect(await ledger.seed("chunk-owner", "gen-one", [{ idx: 0, message }], skey)).toEqual({ ok: true });
+    const stub = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(skey));
+    const original = await runInDurableObject(stub, (_instance: SessionLogDO, state) =>
+      state.storage.sql
+        .exec<{ ref: string; data: string; media_type: string }>(
+          "SELECT ref,data,media_type FROM attachments ORDER BY ref",
+        )
+        .toArray(),
+    );
+    const first = original[0]!;
+    expect(
+      (
+        await post("/runs/session/write", {
+          key: skey,
+          runId: "chunk-owner",
+          gen: "gen-other",
+          rows: [],
+          attachments: [{ ref: first.ref, mediaType: first.media_type, data: first.data }],
+        })
+      ).data,
+    ).toEqual({ ok: false, reason: "fenced" });
+    expect(
+      (
+        await post("/runs/session/write", {
+          key: skey,
+          runId: "chunk-owner",
+          gen: "gen-one",
+          rows: [],
+          attachments: [{ ref: first.ref, mediaType: first.media_type, data: "changed" }],
+        })
+      ).data,
+    ).toEqual({ ok: false, reason: "fenced" });
+    await runInDurableObject(stub, (_instance: SessionLogDO, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO meta(key,value) VALUES('range_pins',?)",
+        JSON.stringify({ holder: [{ from: 0, to: 0 }] }),
+      );
+    });
+    const replace = boundedTranscript(
+      ...(() => {
+        const c = turnRows(
+          0,
+          { role: "user", content: [{ type: "text", text: "replacement ".repeat(150_000) }] },
+          { canonical: true },
+        );
+        return [c.rows, c.attachments] as const;
+      })(),
+    );
+    for (const attachment of replace.attachments)
+      expect(
+        (
+          await post("/runs/session/write", {
+            key: skey,
+            runId: "chunk-owner",
+            gen: "gen-one",
+            rows: [],
+            attachments: [attachment],
+          })
+        ).data,
+      ).toMatchObject({ ok: true });
+    expect(
+      (
+        await post("/runs/session/write", {
+          key: skey,
+          runId: "chunk-owner",
+          gen: "gen-one",
+          rows: replace.rows,
+          attachments: [],
+        })
+      ).data,
+    ).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.readSession(skey, 0)).toMatchObject({ complete: true, messages: [message] });
+    expect(await ledger.releaseSession(skey, "chunk-owner", "gen-other")).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.releaseSession(skey, "chunk-owner", "gen-one")).toEqual({ ok: true });
+    const after = await runInDurableObject(stub, (_instance: SessionLogDO, state) =>
+      state.storage.sql
+        .exec<{ ref: string; data: string; media_type: string }>(
+          "SELECT ref,data,media_type FROM attachments ORDER BY ref",
+        )
+        .toArray(),
+    );
+    expect(after).toEqual(original);
+    await runInDurableObject(stub, async (instance: SessionLogDO) => {
+      await instance.drop();
+    });
+    expect(await ledger.readSession(skey, 0)).toMatchObject({ complete: true, turns: 0, messages: [] });
+  });
+  it("uses actual FTS Unicode matching and bounded-cell relevance while metadata-only source reads stay usable", async () => {
+    const skey = "slack:chunks:search:review";
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "test-token",
+      storeKey: crypto.randomUUID(),
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    await ledger.claim({
+      runId: "search-owner",
+      gen: "gen-search",
+      threadKey: "slack:chunks:search",
+      leaseMs: 30000,
+      startedAt: Date.now(),
+      meta: {
+        channelId: "slack:chunks",
+        userId: "slack:owner",
+        threadKey: "slack:chunks:search",
+        agent: "review",
+        session: { key: skey, seedFrom: 0, request: 0, range: "broken" },
+      },
+      system: "",
+      tools: [],
+      card: null,
+    });
+    await ledger.claimSession(skey, "search-owner", "gen-search");
+    const large = "unrelated café value\n".repeat(110_000) + "needle exact boundary phrase";
+    expect(
+      await ledger.seed(
+        "search-owner",
+        "gen-search",
+        [
+          { idx: 0, message: { role: "user", content: [{ type: "text", text: large }] } },
+          { idx: 1, message: { role: "user", content: [{ type: "text", text: "needle" }] } },
+        ],
+        skey,
+      ),
+    ).toEqual({ ok: true });
+    expect((await ledger.searchSession(skey, "caf", 5)).hits).toEqual([]);
+    expect((await ledger.searchSession(skey, "cafe", 5)).hits).toEqual([expect.objectContaining({ idx: 0, part: 0 })]);
+    expect((await ledger.searchSession(skey, "needle", 5)).hits.map((hit) => hit.idx)).toEqual([1, 0]);
+    expect((await ledger.searchSession(skey, "boundary phrase", 5)).hits).toEqual([
+      expect.objectContaining({ idx: 0, text: expect.stringContaining("needle exact boundary phrase") }),
+    ]);
+    const metadata = await ledger.readSessionTail(skey, 1);
+    expect(metadata).toMatchObject({ from: 2, transcript: { complete: true, turns: 0, messages: [] } });
+    const context = {
+      version: 3 as const,
+      status: "known" as const,
+      revision: 1,
+      origins: [],
+      slack: [],
+      mcp: [],
+      nativeMediaSources: [
+        {
+          executionRunId: "choice-B",
+          executionSequence: 2,
+          reference: {
+            version: 1 as const,
+            kind: "confirmed" as const,
+            sourceRunId: "source-A",
+            sourceSequence: 1,
+            sourceDigest: "a".repeat(64),
+            confirmationId: "saved-choice",
+            intentDigest: "b".repeat(64),
+          },
+        },
+        {
+          executionRunId: "source-original",
+          executionSequence: 3,
+          reference: {
+            version: 1 as const,
+            kind: "original" as const,
+            sourceRunId: "source-original",
+            sourceSequence: 3,
+            sourceDigest: "c".repeat(64),
+            intentDigest: "d".repeat(64),
+          },
+        },
+      ],
+    };
+    const sources = { version: 1 as const, status: "unknown" as const, context };
+    expect(await ledger.writeSessionSources(skey, "search-owner", "gen-search", sources)).toEqual({ ok: true });
+    expect((await ledger.readSessionTail(skey, 1)).sources).toEqual(sources);
+    const stub = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(skey));
+    const snapshots = await runInDurableObject(stub, async (instance: SessionLogDO) => ({
+      seed: await instance.observeExpectedSeed(0, 1),
+      checkpoint: await instance.checkpointSnapshot(0, 1),
+    }));
+    const canonical = turnRows(0, { role: "user", content: [{ type: "text", text: large }] }, { canonical: true });
+    expect(snapshots.seed.context).toEqual(context);
+    expect(snapshots.checkpoint.context).toEqual(context);
+    expect(await seedContentHash(snapshots.seed.rows.filter((row) => row.idx === 0))).toBe(
+      await seedContentHash(canonical.rows.map((row) => ({ ...row, trimmed: 0 }))),
+    );
+    expect(await seedContentHash(snapshots.checkpoint.rows.filter((row) => row.idx === 0))).toBe(
+      await seedContentHash(canonical.rows),
+    );
+    expect(
+      await ledger.seed(
+        "search-owner",
+        "gen-search",
+        [{ idx: 2, message: { role: "user", content: [{ type: "text", text: "x".repeat(2_400_000) }] } }],
+        skey,
+      ),
+    ).toEqual({ ok: true });
+    await expect(ledger.searchSession(skey, "needle", 5)).rejects.toBeInstanceOf(RequiredTranscriptError);
+    expect((await ledger.readSession(skey, 2)).messages[0]?.content).toEqual([
+      { type: "text", text: "x".repeat(2_400_000) },
+    ]);
+  });
+  it("trims an oversized internal tool result and its unshared chunks through the existing byte policy", async () => {
+    const skey = "slack:chunks:trim:review";
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "test-token",
+      storeKey: crypto.randomUUID(),
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    await ledger.claimSession(skey, "trim-owner", "gen-trim", 16 * 1024 * 1024);
+    const message: ChatMessage = {
+      role: "user",
+      content: [
+        { type: "tool_result", toolUseId: "original-call", content: "original tool output\n".repeat(440_000) },
+        { type: "tool_result", toolUseId: "next-call", content: "original tool output\n".repeat(440_000) },
+      ],
+    };
+    expect(await ledger.seed("trim-owner", "gen-trim", [{ idx: 0, message }], skey)).toEqual({ ok: true });
+    const saved = await ledger.readSession(skey, 0);
+    expect(saved).toMatchObject({
+      complete: true,
+      turns: 1,
+      messages: [expect.objectContaining({ role: "user" })],
+    });
+    expect(saved.messages[0]?.content[0]).toMatchObject({
+      type: "tool_result",
+      toolUseId: "original-call",
+      content: expect.stringContaining("was dropped to keep the session under its byte policy"),
+    });
+    const stub = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(skey));
+    expect(
+      await runInDurableObject(
+        stub,
+        (_instance: SessionLogDO, state) =>
+          state.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM attachments WHERE ref LIKE 't0p0:%'").one()
+            .n,
+      ),
+    ).toBe(0);
+  });
   it("reconciles a lost unread handback acknowledgement after a step-free terminal closure", async () => {
     const storeKey = crypto.randomUUID();
     const client = () =>

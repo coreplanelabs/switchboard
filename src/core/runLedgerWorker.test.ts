@@ -195,6 +195,56 @@ describe("WorkerRunLedger", () => {
     }
   });
 
+  it("holds oversized canonical compaction before uploading any content", async () => {
+    const w = stubWorker();
+    await expect(
+      w.ledger.seed("original-owner", "original-gen", [
+        { idx: 0, compaction: { summary: "unbounded compaction\n".repeat(130_000) } },
+      ]),
+    ).rejects.toThrow("compaction exceeds existing row budget");
+    expect(w.calls).toEqual([]);
+    expect(
+      await w.ledger.seed("original-owner", "original-gen", [{ idx: 0, compaction: { summary: "ordinary summary" } }]),
+    ).toEqual({ ok: true });
+    expect((w.calls[0]!.body.rows as Array<{ json: string }>).map((row) => JSON.parse(row.json))).toEqual([
+      { compaction: { summary: "ordinary summary" } },
+    ]);
+  });
+  it("keeps a lost chunk acknowledgement uncertain and never publishes its logical row", async () => {
+    let uploads = 0;
+    const w = stubWorker((path, body) => {
+      if (path === "/runs/session/write") {
+        if ((body.attachments as unknown[]).length) {
+          uploads++;
+          throw new Error("lost acknowledgement");
+        }
+        return { status: 200, data: { ok: true, transcriptCodec: 1 } };
+      }
+      return { status: 200, data: { ok: true } };
+    });
+    const message: ChatMessage = {
+      role: "user",
+      content: [{ type: "text", text: "original pending row\n".repeat(130_000) }],
+    };
+    await expect(
+      w.ledger.seed("original-owner", "original-gen", [{ idx: 0, message }], "slack:original:1:review"),
+    ).rejects.toMatchObject({
+      name: "UncertainStoreError",
+      request: expect.objectContaining({
+        operation: "/runs/session/write",
+        digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    });
+    expect(uploads).toBe(1);
+    expect(
+      w.calls.filter((call) => call.path === "/runs/session/write").map((call) => (call.body.rows as unknown[]).length),
+    ).toEqual([0, 0]);
+    const legacy = stubWorker(() => ({ status: 200, data: { ok: true } }));
+    await expect(
+      legacy.ledger.seed("original-owner", "original-gen", [{ idx: 0, message }], "slack:original:1:review"),
+    ).rejects.toThrow("Memory codec unavailable");
+    expect(legacy.calls).toHaveLength(1);
+  });
   it("reads and acknowledges only an exact retained workspace version and rejects ambiguous responses", async () => {
     const owner = { runId: "r1", ownerGen: "g1", ownerFence: 7 };
     const settlement = {

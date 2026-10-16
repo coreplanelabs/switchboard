@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { withOriginalOrganizationDispatch } from "../../dispatch/originalOrganizationInput.js";
 import { createCheckExecution } from "../../checkExecution.js";
 import type { CheckExecutionState } from "../../checkExecutionTypes.js";
 import { runCheckTool } from "../../../tools/check.js";
@@ -5764,6 +5765,110 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(w.notes).not.toContain(finaleTimedOutNote());
   });
 
+  it("holds required inherited media context when its guard capability is missing despite no original media digest", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (_n, container) => finalTurn(container, "Must not receive inherited context"));
+    Object.assign(w.run, { sourceContextRequired: true });
+    await expect(w.start()).rejects.toThrow("original media input is held");
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toEqual([]);
+  });
+  it("holds the original native media prompt when source proof is lost during seed import", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (_n, container) => finalTurn(container, "Must not receive media"));
+    let available = true;
+    w.run.nativeMediaDigest = "a".repeat(64);
+    w.run.prepareSourceMedia = async () => available;
+    w.run.messages = [
+      { role: "user", content: [{ type: "text", text: "Earlier context" }] },
+      { role: "assistant", content: [{ type: "text", text: "Earlier reply" }] },
+      {
+        role: "user",
+        content: [
+          { type: "image", mediaType: "image/png", data: "AAA=" },
+          { type: "text", text: "Original media" },
+        ],
+      },
+    ];
+    const write = w.container.writeFile.bind(w.container);
+    w.container.writeFile = async (path, text) => {
+      await write(path, text);
+      if (path.endsWith(".jsonl")) available = false;
+    };
+    await expect(w.start()).rejects.toThrow("original media input is held");
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toEqual([]);
+  });
+  it("captures freshly prepared native images and fenced text documents only after the final source proof", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, () => {});
+    let prepared = 0;
+    w.run.prepareFollowUps = async (inputs) => {
+      prepared++;
+      for (const input of inputs) {
+        input.images = [{ mediaType: "image/png", data: "AAA=" }];
+        input.documents = [{ mediaType: "text/csv", name: "rows.csv", data: "id,total\n7,9" }];
+      }
+      return true;
+    };
+    const source = withOriginalOrganizationDispatch(
+      { text: "Read these", userId: "user:test", at: NOW, ledgerSeq: 17 },
+      { ingressRunId: "source-owner", organizationSequence: 1, nativeMediaDigest: "a".repeat(64) },
+    );
+    w.inbox.push(source);
+    const stdin = w.container.onStdin!;
+    w.container.onStdin = (line, container) => {
+      stdin(line, container);
+      const command = JSON.parse(line);
+      if (command.type === "steer") {
+        container.emit({
+          type: "message_end",
+          message: { role: "user", content: [{ type: "text", text: command.message }] },
+        });
+        finalTurn(container, "Read original media.");
+      }
+    };
+    expect(await w.start()).toBe("Read original media.");
+    const steer = w.container.commands().find((command) => command.type === "steer");
+    expect(steer?.images).toEqual([{ type: "image", mimeType: "image/png", data: "AAA=" }]);
+    expect(String(steer?.message)).toContain("[file: rows.csv]\n```\nid,total\n7,9\n```");
+    expect(prepared).toBe(2);
+  });
+  it.each(["missing", "refused", "after staging"] as const)(
+    "holds protected native media on %s proof without delivery or consumption",
+    async (failure) => {
+      const w = tickingWorld();
+      scriptedPi(w.container, () => {});
+      let staged = false;
+      if (failure !== "missing") w.run.prepareFollowUps = async () => failure === "after staging" && !staged;
+      w.run.stageFollowUps = async () => {
+        staged = true;
+        return "files staged";
+      };
+      const input = withOriginalOrganizationDispatch(
+        {
+          text: "Private image",
+          userId: "user:test",
+          at: NOW,
+          ledgerSeq: 17,
+          images: [{ mediaType: "image/png", data: "Private bytes" }],
+        },
+        { ingressRunId: "source-owner", organizationSequence: 1, nativeMediaDigest: "a".repeat(64) },
+      );
+      w.inbox.push(input);
+      const read = w.container.readLog.bind(w.container);
+      let reads = 0;
+      w.container.readLog = async (path, offset, max) => {
+        const result = await read(path, offset, max);
+        if (++reads > 3) w.control.requestStop("hard");
+        return result;
+      };
+      expect(await w.start()).toBe(HARD_STOP_MESSAGE);
+      const held = w.inbox.drain();
+      expect(held.map((item) => ({ text: item.text, ledgerSeq: item.ledgerSeq, images: item.images }))).toEqual([
+        { text: "Private image", ledgerSeq: 17, images: undefined },
+      ]);
+      expect(w.container.commands().filter((command) => command.type === "steer")).toEqual([]);
+    },
+  );
   it("a follow-up whose staging is still in flight when the loop ends is requeued for the run stage, never sent through the emptied gate after the loop — its inputs are not lost", async () => {
     const w = tickingWorld();
     scriptedPi(w.container, () => {}); // pi works on

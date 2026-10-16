@@ -1,6 +1,8 @@
 import { nextUnitProgress, currentUnitProgress } from "../../src/core/coordinator/unitProgress.ts";
 import type { CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { env } from "cloudflare:test";
+import worker, { type Env } from "./worker.ts";
 import { fetchMemoryTest } from "./testFetch.ts";
 import type { CoordinatorInstance } from "../../src/core/coordinator/contract.ts";
 
@@ -29,6 +31,53 @@ async function post(path: string, body: unknown, token = "test-token") {
 }
 
 describe("durable pipeline census", () => {
+  it.each([
+    [new TypeError("PRIVATE_INVENTORY_DETAIL"), "type_error"],
+    [new SyntaxError("PRIVATE_INVENTORY_DETAIL"), "syntax_error"],
+    [Object.assign(new Error("PRIVATE_INVENTORY_DETAIL"), { name: "PRIVATE_ERROR_NAME" }), "error"],
+    ["PRIVATE_INVENTORY_DETAIL", "non_error"],
+  ])("keeps inventory failure responses and logs only a closed error kind %s", async (failure, errorKind) => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const body = JSON.stringify({ storeKey: "runs:inventory-diagnostic", limit: 2 });
+      const response = await worker.fetch(
+        new Request("https://memory.test/runs/coordinator/list", {
+          method: "POST",
+          headers: {
+            authorization: "Bearer test-token",
+            "content-type": "application/json",
+            "content-length": String(body.length),
+          },
+          body,
+        }),
+        {
+          ...env,
+          RUNS: {
+            idFromName: env.RUNS.idFromName.bind(env.RUNS),
+            get: () => ({
+              listInstances: async () => {
+                throw failure;
+              },
+            }),
+          } as unknown as Env["RUNS"],
+        },
+      );
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "pipeline inventory unavailable" });
+      expect(warning.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            event: "home.read.failed",
+            phase: "pipeline_inventory_list",
+            errorKind,
+          }),
+        ],
+      ]);
+      expect(JSON.stringify(warning.mock.calls)).not.toContain("PRIVATE_");
+    } finally {
+      warning.mockRestore();
+    }
+  });
   it("persists only the winning original progress CAS and refuses malformed progress rows", async () => {
     const storeKey = `runs:census-${crypto.randomUUID()}`;
     const parent = instance("progress");

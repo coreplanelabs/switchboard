@@ -4943,7 +4943,25 @@ export async function recoverOriginalUnit(
       let current: CoordinatorUnit[];
       try {
         current = await deps.instances.listUnits(instance.id);
-      } catch {
+      } catch (error) {
+        try {
+          (deps.log ?? console.warn)(
+            JSON.stringify({
+              event: "coordinator.read.failed",
+              phase: "recovery_snapshot_reread",
+              errorKind:
+                error instanceof TypeError
+                  ? "type_error"
+                  : error instanceof SyntaxError
+                    ? "syntax_error"
+                    : error instanceof Error
+                      ? "error"
+                      : "non_error",
+            }),
+          );
+        } catch {
+          /* Diagnostics cannot change the failed read's response. */
+        }
         return json(503, { ok: false, error: "recovery_history_unavailable", at });
       }
       const sameUnit = current.filter((candidate) => candidate.unit === row.unit);

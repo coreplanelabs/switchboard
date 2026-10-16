@@ -6,6 +6,7 @@ import {
   withOriginalOrganizationDispatch,
 } from "./dispatch/originalOrganizationInput.js";
 import type { Actor } from "./authz/types.js";
+import { durableInboxMessage, messageFromInbox } from "./runLedger/inboxMessage.js";
 import type { ChannelIO } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -97,10 +98,12 @@ export interface RedispatchConfirmation {
 export interface ConfirmationSource {
   actor: Actor;
   io: ChannelIO;
+  message?: IncomingMessage;
 }
 export type ConfirmationSourceGuard = (
   row: Confirmation,
   chooserActor?: Actor,
+  purpose?: "confirm" | "cancel" | "read",
 ) => Promise<ConfirmationSource | undefined>;
 
 /** One pending confirmation as the store holds it: the discriminated union of
@@ -275,7 +278,16 @@ export function parsePendingConfirmation(v: unknown): PendingConfirmation | unde
     const pointer = v.originalOrganization;
     if (
       !isRecord(pointer) ||
-      Object.keys(pointer).some((key) => !["ingressRunId", "organizationSequence", "organizationRepo"].includes(key))
+      Object.keys(pointer).some(
+        (key) =>
+          ![
+            "ingressRunId",
+            "organizationSequence",
+            "organizationRepo",
+            "nativeMediaDigest",
+            "savedNativeMediaSource",
+          ].includes(key),
+      )
     )
       return;
     try {
@@ -349,6 +361,11 @@ function isRefusal(v: unknown): v is ConfirmationRefusal {
 function confirmationForStorage(row: PendingConfirmation): PendingConfirmation {
   const { originalOrganization: _untrusted, ...rest } = row;
   const original = originalOrganizationDispatchOf(row.message);
+  if (original?.nativeMediaDigest || original?.savedNativeMediaSource) {
+    const bounded = messageFromInbox(durableInboxMessage(row.message, row.message.text, 0), 0);
+    if (!bounded) throw new Error("The original media offer could not be retained.");
+    return { ...rest, message: bounded.msg, originalOrganization: { ...original } } as PendingConfirmation;
+  }
   return { ...rest, ...(original ? { originalOrganization: { ...original } } : {}) } as PendingConfirmation;
 }
 

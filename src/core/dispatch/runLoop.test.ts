@@ -1,3 +1,4 @@
+import { withOrganizationPrivateAudience } from "./privateDestination.js";
 import { bindConversationRead } from "./conversationRead.js";
 import { createSpanLog } from "../trace/spanLog.js";
 import { humanReview } from "../testing/humanReview.js";
@@ -6,6 +7,7 @@ import { checkStateFixture } from "../testing/checkState.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import { preparedHarnessLaunch } from "../harness/sessionPolicy.js";
 import { ToolRecovery, ToolRecoveryStoppedError } from "../harness/toolRecovery.js";
+import { withOriginalOrganizationDispatch } from "./originalOrganizationInput.js";
 import { CloudflareSandboxExecutor } from "../../execution/cloudflareSandbox.js";
 import { ExecHarnessContainer } from "../harness/container.js";
 import { HarnessEndingUnconfirmedError } from "../harness/container.js";
@@ -572,6 +574,62 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it.each([false, true])(
+    "checks the final private destination after model-source validation: %s",
+    async (invalidate) => {
+      let available = true,
+        checking = false,
+        checks = 0;
+      const decisions: boolean[] = [];
+      const harness = watched(piHarness);
+      harness.harness.open = async () => {
+        checking = true;
+        decisions.push(await bearers.sourceGuardFor(s.run.id).check());
+        checking = false;
+        return { answer: "Guard checked.", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+      };
+      const s = setup("unused", {
+        agent: "orchestrator",
+        harness: {
+          harnesses: roster(harness.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      const bearers = new RunBearerStore({ clock: () => NOW });
+      s.deps.runBearers = bearers;
+      mintFor(bearers, s);
+      const audience = {
+        kind: "organization-private" as const,
+        organization: "fixture",
+        stream: "person:alice",
+        actorId: s.ctx.msg.userId,
+        userId: s.ctx.msg.userId,
+        channelId: s.ctx.msg.channelId,
+        threadKey: s.ctx.msg.threadKey,
+      };
+      await runLoop(s.deps, {
+        ...s.ctx,
+        msg: withOrganizationPrivateAudience(s.ctx.msg, audience),
+        io: {
+          ...s.ctx.io,
+          organizationPrivateAudience: () => audience,
+          verifyOrganizationPrivateAudience: async () =>
+            available ? { ok: true } : { ok: false, code: "direct-audience-unavailable" },
+        },
+        privateAudienceLatch: {
+          revoked: false,
+          revalidateSources: async () => {
+            if (checking && ++checks === 2 && invalidate) available = false;
+            return { ok: true };
+          },
+        },
+      });
+      expect(decisions).toEqual([!invalidate]);
+    },
+  );
   it.each(["first", "repeated", "varied", "unavailable", "unknown", "thrown", "native"] as const)(
     "holds the original run when its %s tool recovery checkpoint is unconfirmed",
     async (mode) => {
@@ -1909,6 +1967,134 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const finished = await afterRehost.getRun(s.run.id, { include: "messages" });
     expect(finished.ok).toBe(true);
     expect(JSON.stringify(finished)).not.toContain("private signup count");
+  });
+  it("binds the initial source guard to the exact current media turn and original message address", async () => {
+    const source = withOriginalOrganizationDispatch(
+      {
+        ...msg("Read file"),
+        messageId: "1.1",
+        nativeMediaDigest: "a".repeat(64),
+        images: [{ mediaType: "image/png", data: "AAA=" }],
+      },
+      { ingressRunId: "original-owner", organizationSequence: 1, nativeMediaDigest: "a".repeat(64) },
+    );
+    let wrongAddress = false;
+    const harness = watched(piHarness);
+    harness.harness.open = async (_deps, run) => {
+      expect(await run.prepareSourceMedia!()).toBe(true);
+      wrongAddress = true;
+      expect(await run.prepareSourceMedia!()).toBe(false);
+      wrongAddress = false;
+      run.messages.at(-1)!.content.push({ type: "image", mediaType: "image/png", data: "AQI=" });
+      expect(await run.prepareSourceMedia!()).toBe(false);
+      return { answer: "Guard checked.", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      io: {
+        rehostOrganizationInput: async () => ({
+          msg: { ...source, messageId: wrongAddress ? "2.0" : source.messageId },
+          io: s.ctx.io,
+        }),
+      },
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    expect(
+      answered(
+        await runLoop(s.deps, {
+          ...s.ctx,
+          msg: source,
+          admitSourceContext: async () => true,
+          validateExecutionContext: async () => ({ ok: true }),
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "image", mediaType: "image/png", data: "AAA=" },
+                { type: "text", text: "Read file" },
+              ],
+            },
+          ],
+        }),
+      ).answer,
+    ).toBe("Guard checked.");
+  });
+  it("prepares native media through original source IO atomically and refuses an unproved second input without retaining first bytes", async () => {
+    const source = (id: string) =>
+      withOriginalOrganizationDispatch(
+        {
+          channelId: "slack:CX",
+          userId: "slack:UX",
+          threadKey: "slack:CX:1",
+          messageId: id,
+          text: "Read file",
+          nativeMediaDigest: "a".repeat(64),
+        },
+        { ingressRunId: id, organizationSequence: 1, nativeMediaDigest: "a".repeat(64) },
+      );
+    const seen: string[] = [];
+    const sourceIO = {
+      rehostOrganizationInput: async (message: IncomingMessage) => {
+        seen.push(message.messageId!);
+        return message.messageId === "first"
+          ? {
+              msg: { ...source("first"), images: [{ mediaType: "image/png", data: "AAA=" }] },
+              io: sourceIO as ChannelIO,
+            }
+          : undefined;
+      },
+    };
+    const first = {
+      text: "Read file",
+      userId: "slack:UX",
+      at: 1,
+      ledgerSeq: 17,
+      msg: source("first"),
+      io: sourceIO as ChannelIO,
+    };
+    const second = {
+      text: "Read file",
+      userId: "slack:UX",
+      at: 2,
+      ledgerSeq: 18,
+      msg: source("second"),
+      io: sourceIO as ChannelIO,
+    };
+    const harness = watched(piHarness);
+    const open = harness.harness.open;
+    harness.harness.open = async (deps, run) => {
+      expect(await run.prepareFollowUps!([first, second])).toBe(false);
+      expect((first as typeof first & { images?: unknown }).images).toBeUndefined();
+      expect(await run.prepareFollowUps!([first])).toBe(true);
+      expect((first as typeof first & { images?: unknown }).images).toEqual([{ mediaType: "image/png", data: "AAA=" }]);
+      expect(
+        await run.prepareFollowUps!([
+          {
+            text: "Forged",
+            userId: "slack:UX",
+            at: 3,
+            msg: { ...source("first"), nativeMediaDigest: "b".repeat(64) },
+          } as typeof first,
+        ]),
+      ).toBe(false);
+      return open(deps, run);
+    };
+    const s = setup("Done.", {
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    expect(answered(await runLoop(s.deps, s.ctx)).answer).toBe("Done.");
+    expect(seen).toEqual(["first", "second", "first"]);
   });
   it("withdraws linked-work authority before a relayed follow-up reaches the model", async () => {
     let before: unknown;

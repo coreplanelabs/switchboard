@@ -1,11 +1,13 @@
+import { NativeMediaHeldError } from "./harness/nativeMedia.js";
 import { bindConversationRead } from "./dispatch/conversationRead.js";
 import { wrapUntrusted } from "./untrusted.js";
 import { isResearchBrief, renderResearchBrief } from "./research/brief.js";
 import { researchFromRun, researchInputAnswers } from "./research/source.js";
 import { isDelegatedMainRequester } from "./coordinator/mainStart.js";
 import { envelopeSchema } from "./organization/contract.js";
+import { nativeMediaDigest } from "./nativeMedia.js";
 import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
-import { markPrivateConversation } from "./dispatch/privateConversation.js";
+import { isPrivateConversation, markPrivateConversation } from "./dispatch/privateConversation.js";
 import {
   isOrganizationPrivateAudience,
   copyPrivateSourceFacts,
@@ -268,6 +270,7 @@ import { sessionCapabilityFor } from "../tools/session.js";
 import {
   endedPipelineForPrOf,
   establishedMainDmOf,
+  instanceOf,
   PrOwnerConflictError,
   newestFinishedRunOf,
   ownerOf,
@@ -283,6 +286,7 @@ import {
   type ThreadPullRequest,
 } from "./dispatch/thread.js";
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
+import { isQuestionAnswerRetry } from "./coordinator/questionAnswer.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService, PRIVATE_WORKER_INTERNAL_READ, type RunsService, type RunView } from "./runsService.js";
@@ -354,6 +358,10 @@ export interface CoreDeps
   mcp: McpToolSource;
   /** Canonical context storage and current source authorization. */
   handoffAccessForRun?: HandoffAccessFactory;
+  revalidateNativeMediaSource?(
+    dependency: import("./references/contextDependencies.js").NativeMediaDependency,
+    consumer: { actor: Actor; msg: IncomingMessage; io: ChannelIO },
+  ): Promise<boolean>;
   /** The configured providers used to build the one door's model call. */
   completions: ProviderTable;
   /** The operator's model call (record 0057; routing-and-config item 29).
@@ -407,6 +415,7 @@ async function answerUnitOwnedThread(
     /** The request's level (routing-and-config item 28): the ack is `verbose` material. */
     verbosity: Verbosity;
     expectedQuestion?: import("./ship/coordinator.js").HumanGatePending;
+    acceptedAnswer?: import("./coordinator/contract.js").ThreadEvent;
     ingressRunId?: string;
   },
 ): Promise<"acked" | "route-fresh" | "unconfirmed" | "refused" | "uncertain"> {
@@ -424,24 +433,44 @@ async function answerUnitOwnedThread(
     mediaType: a.mediaType,
     data: a.data,
     ...(a.name !== undefined ? { name: a.name } : {}),
+    ...(a.staged !== undefined ? { staged: a.staged } : {}),
   }));
+  attachments.push(
+    ...(msg.staged ?? []).map((file) => ({ mediaType: file.type, data: "", name: file.name, staged: file })),
+  );
+  const mediaDigest = originalOrganizationDispatchOf(msg)?.nativeMediaDigest;
+  const event = {
+    ...(messageId !== undefined ? { id: messageId } : {}),
+    sender: msg.userId,
+    ...(ctx.ingressRunId !== undefined ? { organizationIngressRunId: ctx.ingressRunId } : {}),
+    ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+    ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+    ...(msg.userName !== undefined ? { senderName: msg.userName } : {}),
+    text: ctx.text,
+    ...(attachments.length > 0 ? { attachments } : {}),
+    ...(attachments.length > 0 ? { attachmentsDigest: await nativeMediaDigest(JSON.stringify(attachments)) } : {}),
+    ...(mediaDigest ? { nativeMediaDigest: mediaDigest } : {}),
+    mode: owner.unit.idle !== undefined ? ("wake" as const) : ("steer" as const),
+    at,
+  };
+  if (ctx.acceptedAnswer !== undefined) {
+    if (!isQuestionAnswerRetry(ctx.acceptedAnswer, event)) {
+      await io.reply("This answer's original message changed. No new work started.");
+      return "refused";
+    }
+    await replyAck(
+      io,
+      ctx.verbosity,
+      `📌 Already noted for unit ${owner.unit.unit} (\`${unitKey}\`). No new work started.`,
+    );
+    return "acked";
+  }
   // A failed acknowledgment can follow a committed append. Keep this request
   // with its known owner; absence or failure does not select a fresh task.
   const appended = await store
     .appendEvent(
       key,
-      {
-        ...(messageId !== undefined ? { id: messageId } : {}),
-        sender: msg.userId,
-        ...(ctx.ingressRunId !== undefined ? { organizationIngressRunId: ctx.ingressRunId } : {}),
-        ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
-        ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
-        ...(msg.userName !== undefined ? { senderName: msg.userName } : {}),
-        text: ctx.text,
-        ...(attachments.length > 0 ? { attachments } : {}),
-        mode: owner.unit.idle !== undefined ? "wake" : "steer",
-        at,
-      },
+      event,
       ctx.expectedQuestion !== undefined ? true : undefined,
       undefined,
       undefined,
@@ -464,6 +493,10 @@ async function answerUnitOwnedThread(
     }
     console.warn(`[dispatch] ${msg.threadKey}: unit ${unitKey} event append not confirmed (${appended.reason})`);
     return "unconfirmed";
+  }
+  if (owner.unit.recoveryHold?.cause === "human") {
+    await io.reply("Your answer is stored with the original unit. Its execution remains held; no new work started.");
+    return "acked";
   }
   // The nudge (record 0051): every append nudges, so the send doubles as the liveness probe.
   try {
@@ -1554,6 +1587,9 @@ export async function dispatch(
                       ...(canReviewEndedPr ? { allowReview: true } : {}),
                     }
                   : undefined;
+      const originalOperatorIntent = originalOrganizationDispatchOf(msg)?.nativeMediaDigest
+        ? await nativeMediaDigest(msg.text)
+        : undefined;
       operatorEvent = await root.span("dispatch.operator", async (span) => {
         const github = githubCapabilityFor(deps, chatActorOf(deps.config, msg), {
           requesterId: msg.userId,
@@ -1571,10 +1607,68 @@ export async function dispatch(
           {
             msg: doorMsg,
             mode: operatorMode,
+            beforeModel: async () => {
+              const inherited = [
+                ...(opts.seed?.flatMap((turn) =>
+                  turn.context?.version === 3 || turn.context?.nativeMediaSources?.length ? [turn.context] : [],
+                ) ?? []),
+                ...(operatorContext.version === 3 || operatorContext.nativeMediaSources?.length
+                  ? [operatorContext]
+                  : []),
+              ];
+              if (
+                inherited.length &&
+                !(await contextReader.validateDependencies(mergeContextDependencies(freshContext(), ...inherited))).ok
+              )
+                throw new NativeMediaHeldError();
+              const pointer = originalOrganizationDispatchOf(msg);
+              if (!pointer?.nativeMediaDigest && !pointer?.savedNativeMediaSource) return;
+              const media = pointer.savedNativeMediaSource
+                ? await io.readSavedNativeMedia?.(pointer.savedNativeMediaSource, msg)
+                : (await io.rehostOrganizationInput?.(msg))?.msg;
+              if (
+                !media ||
+                ["images", "documents", "staged"].some(
+                  (key) =>
+                    JSON.stringify(media[key as keyof typeof media] ?? []) !==
+                    JSON.stringify(msg[key as "images" | "documents" | "staged"] ?? []),
+                )
+              )
+                throw new NativeMediaHeldError();
+            },
             ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
             pending: pendingQuestion,
             onContext: (context) => {
-              operatorContext = mergeContextDependencies(context, ...(pendingContext ? [pendingContext] : []));
+              const pointer = originalOrganizationDispatchOf(msg);
+              const originalSource = pointer?.nativeMediaDigest
+                ? {
+                    version: 3 as const,
+                    status: "known" as const,
+                    revision: 0,
+                    origins: [],
+                    slack: [],
+                    mcp: [],
+                    nativeMediaSources: [
+                      {
+                        executionRunId: pointer.ingressRunId,
+                        executionSequence: pointer.organizationSequence,
+                        reference: {
+                          version: 1 as const,
+                          kind: "original" as const,
+                          sourceRunId: pointer.ingressRunId,
+                          sourceSequence: pointer.organizationSequence,
+                          sourceDigest: pointer.nativeMediaDigest,
+                          intentDigest: originalOperatorIntent!,
+                        },
+                      },
+                    ],
+                  }
+                : undefined;
+              operatorContext = mergeContextDependencies(
+                context,
+                ...(pendingContext ? [pendingContext] : []),
+                ...(originalSource ? [originalSource] : []),
+              );
             },
             readTail: () =>
               opts.authoritativeHistory
@@ -2021,6 +2115,54 @@ export async function dispatch(
           return ended;
         }
       }
+      // A released unit is no longer a work owner, but its admitted answer is
+      // still the receipt for an exact native retry. Do not route that ID fresh.
+      if ((owner.kind === "none" || owner.kind === "session") && msg.messageId !== undefined) {
+        const instanceId = instanceOf(thread);
+        if (instanceId !== undefined) {
+          try {
+            const candidates = (await deps.coordinatorInstances.listUnits(instanceId)).filter(
+              (unit) => unit.threadKey === msg.threadKey,
+            );
+            const savedAnswers: Array<{
+              unit: CoordinatorUnit;
+              acceptedAnswer: import("./coordinator/contract.js").ThreadEvent;
+            }> = [];
+            for (const unit of candidates) {
+              const acceptedAnswer = (await deps.coordinatorInstances.listEvents({ instanceId, unit: unit.unit })).find(
+                (event) => event.id === msg.messageId && event.questionDigest !== undefined,
+              );
+              if (acceptedAnswer !== undefined) savedAnswers.push({ unit, acceptedAnswer });
+            }
+            if (savedAnswers.length > 1) {
+              await io.reply("This answer matches multiple original units. No new work started.");
+              await recordPendingOperator();
+              return ended;
+            }
+            const saved = savedAnswers[0];
+            if (saved !== undefined) {
+              if ((await authorizeAgent(deps, { msg, io, refuse, agentName: "coding" })).kind !== "refused") {
+                await answerUnitOwnedThread(deps, {
+                  msg,
+                  io,
+                  text: directives.text,
+                  owner: { instanceId, unit: saved.unit },
+                  acceptedAnswer: saved.acceptedAnswer,
+                  ingressRunId: opts.ingressRunId,
+                  clock,
+                  verbosity: deps.config.verbosityFor(msg.channelId, msg.userId, directives.verbosity),
+                });
+              }
+              await recordPendingOperator();
+              return ended;
+            }
+          } catch {
+            await io.reply("The original answer could not be verified. No new work started.");
+            await recordPendingOperator();
+            return ended;
+          }
+        }
+      }
       if (
         !originalUnitRecovery &&
         (directives.agent === undefined || directives.agent === "ship") &&
@@ -2092,6 +2234,66 @@ export async function dispatch(
         await recordPendingOperator();
         return ended;
       }
+      const expectedQuestion =
+        owner.kind === "unit" || owner.kind === "pipeline"
+          ? (owner.unit.idle?.humanGate ??
+            (owner.unit.recoveryHold?.cause === "human" ? owner.unit.recoveryHold.gate : undefined))
+          : undefined;
+      let acceptedAnswer: import("./coordinator/contract.js").ThreadEvent | undefined;
+      if ((owner.kind === "unit" || owner.kind === "pipeline") && msg.messageId !== undefined) {
+        try {
+          acceptedAnswer = (
+            await deps.coordinatorInstances.listEvents({ instanceId: owner.instanceId, unit: owner.unit.unit })
+          ).find((event) => event.id === msg.messageId && event.questionDigest !== undefined);
+        } catch {
+          await io.reply("The original answer could not be verified. No new work started.");
+          await recordPendingOperator();
+          return ended;
+        }
+      }
+      if (
+        (owner.kind === "unit" && (directives.agent === undefined || owner.unit.idle?.researchGate !== undefined)) ||
+        ((owner.kind === "unit" || owner.kind === "pipeline") &&
+          (expectedQuestion !== undefined || acceptedAnswer !== undefined))
+      ) {
+        // The same gate a live steer passes (admission's allowlist check): the
+        // event is read by the unit's next coding child — a write-identity run
+        // — so its sender must be allowed to run `coding`, refused the same
+        // named way, before anything is appended. "Run" includes "is heard by".
+        if ((await authorizeAgent(deps, { msg, io, refuse, agentName: "coding" })).kind === "refused") {
+          await recordPendingOperator();
+          return ended;
+        }
+        const answer = await root.span("dispatch.unit_owned_thread", () =>
+          answerUnitOwnedThread(deps, {
+            msg,
+            io,
+            text: directives.text,
+            owner,
+            expectedQuestion,
+            acceptedAnswer,
+            ingressRunId: opts.ingressRunId,
+            clock,
+            verbosity: deps.config.verbosityFor(msg.channelId, msg.userId, directives.verbosity),
+          }),
+        );
+        if (answer === "unconfirmed") {
+          await refuse(
+            refusalOf(
+              "unit_delivery_unconfirmed",
+              "I could not confirm delivery to the existing task. No replacement work started.",
+            ),
+          );
+          return ended;
+        }
+        if (answer !== "route-fresh") {
+          await recordPendingOperator();
+          return ended;
+        }
+        // `route-fresh`: the instance is gone — the row was ended `terminated`
+        // and the thread told — so the request runs on as if the thread were
+        // unowned by any unit.
+      }
       if (
         operatorMode === "on" &&
         operatorEvent !== undefined &&
@@ -2158,49 +2360,8 @@ export async function dispatch(
         });
         operatorPreset = "ship";
         settled = resolveCurrent();
-        ({ sticky, resolved, agentSource } = settled);
+        ({ sticky, resolved } = settled);
         agentSource = "sticky";
-      }
-      if (
-        owner.kind === "unit" &&
-        (directives.agent === undefined ||
-          owner.unit.idle?.humanGate !== undefined ||
-          owner.unit.idle?.researchGate !== undefined)
-      ) {
-        // The same gate a live steer passes (admission's allowlist check): the
-        // event is read by the unit's next coding child — a write-identity run
-        // — so its sender must be allowed to run `coding`, refused the same
-        // named way, before anything is appended. "Run" includes "is heard by".
-        if ((await authorizeAgent(deps, { msg, io, refuse, agentName: "coding" })).kind === "refused") {
-          await recordPendingOperator();
-          return ended;
-        }
-        const answer = await root.span("dispatch.unit_owned_thread", () =>
-          answerUnitOwnedThread(deps, {
-            msg,
-            io,
-            text: directives.text,
-            owner,
-            clock,
-            verbosity: deps.config.verbosityFor(msg.channelId, msg.userId, directives.verbosity),
-          }),
-        );
-        if (answer === "unconfirmed") {
-          await refuse(
-            refusalOf(
-              "unit_delivery_unconfirmed",
-              "I could not confirm delivery to the existing task. No replacement work started.",
-            ),
-          );
-          return ended;
-        }
-        if (answer === "acked") {
-          await recordPendingOperator();
-          return ended;
-        }
-        // `route-fresh`: the instance is gone — the row was ended `terminated`
-        // and the thread told — so the request runs on as if the thread were
-        // unowned by any unit.
       }
     }
     // A sticky follow-up may carry a historical router decision so its old
@@ -3121,6 +3282,7 @@ export async function dispatch(
       freshContext(),
       operatorContext,
       ...(opts.seed ? [opts.authoritativeHistory ? freshContext() : UNKNOWN_CONTEXT_DEPENDENCIES] : []),
+      ...(opts.seed?.flatMap((turn) => (turn.context ? [turn.context] : [])) ?? []),
       contextForReferences(references, msg),
       ...(session ? [candidateContext] : []),
       ...(threadArtifacts?.context ? [threadArtifacts.context] : []),
@@ -3798,6 +3960,7 @@ export async function dispatch(
       throw new Error("the coordinator coding unit has no durable branch target");
     const bearer = mintRunBearer(deps, {
       runId,
+      sourceGuardRequired: privateAudienceRequired(msg) || isPrivateConversation(msg) || !!msg.nativeMediaDigest,
       agent,
       ...(modelCard ? { card: modelCard } : {}),
       profile,
@@ -5050,6 +5213,10 @@ export async function dispatch(
       captureUnitContext,
       admitSourceContext,
       validateExecutionContext,
+      currentNativeMediaContext: () =>
+        admittedContext.version === 3 || admittedContext.nativeMediaSources?.length
+          ? structuredClone(admittedContext)
+          : undefined,
       ...(route !== undefined ? { route } : {}),
       parentRunId,
       coordinator,
@@ -5881,7 +6048,12 @@ export async function dispatchClick(
         return ended;
       }
       if (row) {
-        const source = await currentConfirmationSource(row, click.actor, deps.guardOrganizationConfirmation);
+        const source = await currentConfirmationSource(
+          row,
+          click.actor,
+          deps.guardOrganizationConfirmation,
+          click.kind === "cancel" ? "cancel" : "confirm",
+        );
         if (source === false) {
           await refuse(refusalOf("confirmation_unreadable", OFFER_CONTEXT_LINE));
           return ended;
@@ -5940,8 +6112,8 @@ export async function dispatchClick(
       io,
       ending,
       trace,
-      (row) =>
-        dispatch(deps, opts.ingressRunId ? withChatActor(row.message, executionActor) : row.message, io, {
+      (row, savedIo) =>
+        dispatch(deps, opts.ingressRunId ? withChatActor(row.message, executionActor) : row.message, savedIo ?? io, {
           ingressRunId: opts.ingressRunId,
           authoritativeHistory: opts.authoritativeHistory,
           organizationConversation: opts.organizationConversation,

@@ -2,7 +2,8 @@ import { RunControl } from "../../runRegistry/runControl.js";
 import { createCheckExecution } from "../../checkExecution.js";
 import type { CheckExecutionState } from "../../checkExecutionTypes.js";
 import { runCheckTool } from "../../../tools/check.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { withOriginalOrganizationDispatch } from "../../dispatch/originalOrganizationInput.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { updateStatusTool } from "../../../tools/status.js";
 import type { ChatMessage } from "../../chatMessage.js";
@@ -2665,6 +2666,310 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
   });
 
+  it.each(["queue", "steer"] as const)(
+    "uses existing files for an original %s image/PDF input with its full admitted identity",
+    async (delivery) => {
+      const original = OpenCodeHarness.prototype.open;
+      let posted: Record<string, unknown> | undefined;
+      const image = { type: "image" as const, mediaType: "image/png", data: "AAA=" };
+      const pdf = { type: "document" as const, mediaType: "application/pdf", data: "JVBERg==", name: "plan.pdf" };
+      const spy = vi.spyOn(OpenCodeHarness.prototype, "open").mockImplementation(function (
+        this: OpenCodeHarness,
+        deps,
+        run,
+      ) {
+        if (delivery === "queue") {
+          run.nativeMediaDigest = "a".repeat(64);
+          run.prepareSourceMedia = async () => true;
+          run.messages.at(-1)!.content.unshift(image, pdf);
+        } else {
+          run.prepareFollowUps = async (inputs) => {
+            for (const input of inputs) {
+              input.images = [{ mediaType: image.mediaType, data: image.data }];
+              input.documents = [{ mediaType: pdf.mediaType, data: pdf.data, name: pdf.name }];
+            }
+            return true;
+          };
+          run.inbox!.push(
+            withOriginalOrganizationDispatch(
+              { text: "Original files", userId: "user:conformance", at: 1, ledgerSeq: 17 },
+              { ingressRunId: "source-owner", organizationSequence: 1, nativeMediaDigest: "a".repeat(64) },
+            ),
+          );
+        }
+        const request = deps.container.request.bind(deps.container);
+        deps.container.request = async (paths, input) => {
+          const body = input.body ? JSON.parse(input.body) : {};
+          const response = await request(paths, input);
+          if (input.path.endsWith("/prompt") && body.files?.length) {
+            posted = body;
+            const data = JSON.parse(response.body).data;
+            return {
+              ...response,
+              body: JSON.stringify({
+                data: {
+                  ...data,
+                  id: body.id,
+                  sessionID: input.path.split("/").at(-2),
+                  type: "user",
+                  payload: {
+                    text: body.text,
+                    files: body.files.map((file: { uri: string }) => {
+                      const [mime, value] = file.uri.slice(5).split(";base64,");
+                      return {
+                        data: value,
+                        mime,
+                        ...("name" in file ? { name: file.name } : {}),
+                        source: { type: "inline" },
+                      };
+                    }),
+                  },
+                },
+              }),
+            };
+          }
+          return response;
+        };
+        return original.call(this, deps, run);
+      });
+      try {
+        const r = await openCodeDriver().run(toolTurn);
+        expect(answered(r)).toBe("done");
+        expect(posted?.files).toEqual([
+          { uri: "data:image/png;base64,AAA=" },
+          { uri: "data:application/pdf;base64,JVBERg==", name: "plan.pdf" },
+        ]);
+        expect(posted?.id).toMatch(/^msg_[a-f0-9]{64}$/);
+        expect(posted?.delivery).toBe(delivery);
+        expect(r.inboxLeft).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+  it.each(["missing", "mismatch", "transport"] as const)(
+    "holds possibly admitted native media after %s ACK without a second prompt or consumed sequence",
+    async (failure) => {
+      const original = OpenCodeHarness.prototype.open;
+      let posts = 0;
+      let inbox: HarnessRun["inbox"];
+      const spy = vi.spyOn(OpenCodeHarness.prototype, "open").mockImplementation(function (
+        this: OpenCodeHarness,
+        deps,
+        run,
+      ) {
+        inbox = run.inbox;
+        run.prepareFollowUps = async (inputs) => {
+          for (const input of inputs) input.images = [{ mediaType: "image/png", data: "AAA=" }];
+          return true;
+        };
+        run.inbox!.push(
+          withOriginalOrganizationDispatch(
+            { text: "Original image", userId: "user:conformance", at: 1, ledgerSeq: 17 },
+            { ingressRunId: "source-owner", organizationSequence: 1, nativeMediaDigest: "a".repeat(64) },
+          ),
+        );
+        const request = deps.container.request.bind(deps.container);
+        deps.container.request = async (paths, input) => {
+          const body = input.body ? JSON.parse(input.body) : {};
+          const response = await request(paths, input);
+          if (input.path.endsWith("/prompt") && body.files?.length) {
+            posts++;
+            if (failure === "transport") throw new Error("transport lost");
+            return {
+              ...response,
+              body: JSON.stringify({
+                data: {
+                  id: body.id,
+                  sessionID: input.path.split("/").at(-2),
+                  type: "user",
+                  payload: {
+                    text: body.text,
+                    ...(failure === "mismatch"
+                      ? { files: [{ data: "BBB=", mime: "application/pdf", source: { type: "inline" } }] }
+                      : {}),
+                  },
+                },
+              }),
+            };
+          }
+          return response;
+        };
+        return original.call(this, deps, run);
+      });
+      try {
+        const r = await openCodeDriver().run(toolTurn);
+        expect(r.outcome).toMatchObject({ kind: "failed" });
+        expect(posts).toBe(1);
+        expect(inbox!.pendingSeqs).toEqual([17]);
+        expect(r.inboxLeft).toEqual([]);
+        expect(r.events.filter((event) => event.type === "input" && event.text.includes("Original image"))).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+  it("checks newly required inherited context after staging while ordinary input starts without an extra guard await", async () => {
+    const original = OpenCodeHarness.prototype.open;
+    let staged = 0;
+    let required = false;
+    const returned: { text: string; ledgerSeq?: number }[] = [];
+    const spy = vi.spyOn(OpenCodeHarness.prototype, "open").mockImplementation(function (
+      this: OpenCodeHarness,
+      deps,
+      run,
+    ) {
+      const drain = run.inbox!.drain.bind(run.inbox);
+      run.inbox!.drain = () => {
+        const inputs = drain();
+        if (required) returned.push(...inputs.map((input) => ({ text: input.text, ledgerSeq: input.ledgerSeq })));
+        return inputs;
+      };
+      Object.assign(run, { sourceContextRequired: () => required });
+      run.prepareSourceMedia = async () => false;
+      run.stageFollowUps = async () => {
+        staged++;
+        required = true;
+        return "";
+      };
+      run.inbox!.push({ text: "New ordinary reply", userId: "user:conformance", at: 1, ledgerSeq: 29 });
+      return original.call(this, deps, run);
+    });
+    try {
+      const result = await openCodeDriver().run(toolTurn);
+      expect(staged).toBe(1);
+      expect(result.outcome).toMatchObject({ kind: "failed" });
+      expect(returned).toEqual([{ text: "New ordinary reply", ledgerSeq: 29 }]);
+      expect(result.inboxLeft).toEqual([{ text: "New ordinary reply" }]);
+      expect(
+        result.events.filter((event) => event.type === "input" && event.text.includes("New ordinary reply")),
+      ).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it("holds an initial binary HTTP 503 as an unknown write without reposting the prompt", async () => {
+    const original = OpenCodeHarness.prototype.open;
+    let posts = 0;
+    const spy = vi.spyOn(OpenCodeHarness.prototype, "open").mockImplementation(function (
+      this: OpenCodeHarness,
+      deps,
+      run,
+    ) {
+      run.nativeMediaDigest = "a".repeat(64);
+      run.prepareSourceMedia = async () => true;
+      run.messages.at(-1)!.content.unshift({ type: "image", mediaType: "image/png", data: "AAA=" });
+      const request = deps.container.request.bind(deps.container);
+      deps.container.request = async (paths, input) => {
+        const response = await request(paths, input);
+        if (input.path.endsWith("/prompt")) {
+          posts++;
+          return { ...response, status: 503, body: "ack lost" };
+        }
+        return response;
+      };
+      return original.call(this, deps, run);
+    });
+    try {
+      const r = await openCodeDriver().run(toolTurn);
+      expect(r.outcome).toMatchObject({ kind: "failed", error: { name: "OpenCodeWriteUnresolvedError" } });
+      expect(posts).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it("holds the original native prompt when source proof is lost during initial session import", async () => {
+    const original = OpenCodeHarness.prototype.open;
+    let posts = 0;
+    const spy = vi.spyOn(OpenCodeHarness.prototype, "open").mockImplementation(function (
+      this: OpenCodeHarness,
+      deps,
+      run,
+    ) {
+      let available = true;
+      run.messages.unshift(
+        { role: "user", content: [{ type: "text", text: "Earlier context" }] },
+        { role: "assistant", content: [{ type: "text", text: "Earlier reply" }] },
+      );
+      run.nativeMediaDigest = "a".repeat(64);
+      run.prepareSourceMedia = async () => available;
+      const request = deps.container.request.bind(deps.container);
+      deps.container.request = async (paths, input) => {
+        const response = await request(paths, input);
+        if (input.path.includes("import")) available = false;
+        if (input.path.endsWith("/prompt")) posts++;
+        return response;
+      };
+      return original.call(this, deps, run);
+    });
+    try {
+      const r = await openCodeDriver().run(toolTurn);
+      expect(r.outcome).toMatchObject({ kind: "failed" });
+      expect(posts).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it("sends exact fenced native text documents after both source guards without changing the original text", async () => {
+    const original = OpenCodeHarness.prototype.open;
+    let prepared = 0;
+    const spy = vi.spyOn(OpenCodeHarness.prototype, "open").mockImplementation(function (
+      this: OpenCodeHarness,
+      deps,
+      run,
+    ) {
+      run.prepareFollowUps = async (inputs) => {
+        prepared++;
+        for (const input of inputs)
+          input.documents = [{ mediaType: "text/csv", name: "rows.csv", data: "id,total\n7,9" }];
+        return true;
+      };
+      run.inbox!.push(
+        withOriginalOrganizationDispatch(
+          { text: "Read these", userId: "user:conformance", at: 1, ledgerSeq: 17 },
+          { ingressRunId: "source-owner", organizationSequence: 1, nativeMediaDigest: "a".repeat(64) },
+        ),
+      );
+      return original.call(this, deps, run);
+    });
+    try {
+      const r = await openCodeDriver().run(toolTurn);
+      expect(answered(r)).toBe("done");
+      const steer = posts(r, "/prompt")
+        .map((request) => JSON.parse(request.body ?? "{}"))
+        .find((body) => body.delivery === "steer");
+      expect(steer.text).toContain("[file: rows.csv]\n```\nid,total\n7,9\n```");
+      expect(steer.text).toContain("Read these");
+      expect(prepared).toBe(2);
+      expect(r.inboxLeft).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  it("holds protected source media without a prepare capability even when its top-level marker is absent", async () => {
+    const original = OpenCodeHarness.prototype.open;
+    const spy = vi.spyOn(OpenCodeHarness.prototype, "open").mockImplementation(function (
+      this: OpenCodeHarness,
+      deps,
+      run,
+    ) {
+      run.inbox!.push(
+        withOriginalOrganizationDispatch(
+          { text: "private source image", userId: "user:conformance", at: 1, ledgerSeq: 17 },
+          { ingressRunId: "source-owner", organizationSequence: 1, nativeMediaDigest: "a".repeat(64) },
+        ),
+      );
+      return original.call(this, deps, run);
+    });
+    try {
+      const r = await openCodeDriver().run(toolTurn);
+      expect(answered(r)).toBe("done");
+      expect(modelSaw(r, "private source image")).toBe(false);
+      expect(r.inboxLeft).toEqual([{ text: "private source image" }]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
   it("a batch of two follow-ups whose first steer ends unresolved: both are handed back to the inbox with the run's failure, in order — the unresolved one too, since the run it may have reached is over — and no stop is asked of the run's control (the loop ends by the failure's name, no stopped note), so the dispatcher's settlement hands them on for the fresh turn rather than drop them as an operator's stop would; never a follow-up dropped", async () => {
     const r = await openCodeDriver({ controlResetOnSteer: "landed", storeListingResets: true }).run({
       ...oneTurn,

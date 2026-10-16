@@ -133,7 +133,13 @@ function clearReceiptContent(
   const scope = rows.get("receipt-key", org, id);
   if (typeof scope === "string") {
     const receipt = receiptSchema.parse(rows.get("receipt", org, scope));
-    if (receipt.effectKey) rows.put("owner-clear", org, id, { receiptId: id, effectKey: receipt.effectKey, address });
+    if (receipt.effectKey)
+      rows.put("owner-clear", org, id, {
+        receiptId: id,
+        effectKey: receipt.effectKey,
+        expiresAt: receipt.expiresAt,
+        address,
+      });
   }
   rows.remove("reply-address", org, id);
   const entries = rows
@@ -632,8 +638,12 @@ export function executeOrganization(
         rows.list("owner-clear", org, {
           limit: command.limit,
           ...(command.sourceMessage ? { sourceMessage: command.sourceMessage } : {}),
-        }) as { receiptId: string; effectKey: string }[]
-      ).map(({ receiptId, effectKey }) => ({ receiptId, effectKey })),
+        }) as { receiptId: string; effectKey: string; expiresAt?: number }[]
+      ).map(({ receiptId, effectKey, expiresAt }) => ({
+        receiptId,
+        effectKey,
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
+      })),
     };
   if (command.action === "owner-cleared") {
     const pending = rows.get("owner-clear", org, command.receiptId) as { effectKey: string } | undefined;
@@ -766,7 +776,15 @@ export function executeOrganization(
       expiresAt: now + command.limits.receiptTtlMs,
     };
     rows.put("receipt", org, scope, receiptSchema.parse(receipt), id, 0, receipt.expiresAt);
-    rows.put("submission", org, scope, envelopeSchema.parse({ ...e, content: "" }), "", 0, receipt.expiresAt);
+    rows.put(
+      "submission",
+      org,
+      scope,
+      envelopeSchema.parse({ ...e, content: "", nativeMedia: undefined }),
+      "",
+      0,
+      receipt.expiresAt,
+    );
     rows.put(
       "source-provenance",
       org,
@@ -790,10 +808,20 @@ export function executeOrganization(
         "pending",
         org,
         id,
-        envelopeSchema.parse({ ...e, contentExpiresAt: now + command.limits.contentTtlMs }),
+        envelopeSchema.parse({
+          ...e,
+          contentExpiresAt:
+            now +
+            (e.nativeMedia
+              ? Math.min(command.limits.contentTtlMs, command.limits.sourceSnapshotTtlMs ?? command.limits.contentTtlMs)
+              : command.limits.contentTtlMs),
+        }),
         e.actor.principal,
         s.revision,
-        now + command.limits.contentTtlMs,
+        now +
+          (e.nativeMedia
+            ? Math.min(command.limits.contentTtlMs, command.limits.sourceSnapshotTtlMs ?? command.limits.contentTtlMs)
+            : command.limits.contentTtlMs),
       );
       s.wakeSequence++;
       append(rows, s, e, receipt, "user", e.content, now, command.limits.contentTtlMs);
@@ -898,7 +926,7 @@ export function executeOrganization(
         receipt.id,
         replyAddressSchema.parse({
           receiptId: receipt.id,
-          envelope: { ...envelope, content: "", context: [], sourceReference: undefined },
+          envelope: { ...envelope, content: "", nativeMedia: undefined, context: [], sourceReference: undefined },
           ownerRunId: command.ownerRunId,
           expiresAt: envelope.contentExpiresAt,
         }),
@@ -1057,6 +1085,7 @@ export function executeOrganization(
         rows.put("owner-clear", org, receipt.id, {
           receiptId: receipt.id,
           effectKey: receipt.effectKey,
+          expiresAt: receipt.expiresAt,
           ...(prior?.address ? { address: prior.address } : {}),
         });
       }
@@ -1092,6 +1121,8 @@ export function executeOrganization(
     }
     if (removed > 0 || raw !== undefined || address !== undefined) {
       s.revision++;
+      // Another live owner may still hold this text in its private model seed.
+      s.accessRevision++;
       save();
     }
     return { status: "ok", removed };

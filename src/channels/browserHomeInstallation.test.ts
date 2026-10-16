@@ -1,6 +1,8 @@
+import { handleModelProxyRequest, ANTHROPIC_MESSAGES_PATH } from "./modelProxy.js";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { createOrganizationNativeSources } from "./organizationNativeSources.js";
 import { buildDashboardVerifier, tokenVerifier } from "./dashboardAuth.js";
+import { contextAccessForMessage } from "../core/dispatch/contextAccess.js";
 import {
   CLIENT_CAPABILITIES_META_KEY,
   CLIENT_INFO_META_KEY,
@@ -49,6 +51,7 @@ import { unitProgressBasis } from "../core/coordinator/unitProgress.js";
 import { contextCapsuleOf } from "../core/dispatch/unitContext.js";
 import { createHomeViewHandler } from "./homeView.js";
 import { DAY_MS } from "../core/budgets.js";
+import { nativeMediaDigest } from "../core/nativeMedia.js";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
 import { InMemoryConfirmationStore } from "../core/confirmations.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
@@ -58,6 +61,7 @@ import { readableRuns } from "./liveView/viewer.js";
 import { matchesPredicate } from "../core/authz/predicate.js";
 import { dispatch, dispatchClick, type CoreDeps } from "../core/dispatcher.js";
 import { withOriginalOrganizationDispatch } from "../core/dispatch/privateDestination.js";
+import { withChatActor } from "../core/authz/actor.js";
 import { NullMemoryStore } from "../core/memory/stores.js";
 import { NO_FLEET } from "../core/residentFleet.js";
 import { InMemoryOrganizationStore } from "../core/organization/memory.js";
@@ -125,6 +129,7 @@ async function fixture(
   personalApproved = false,
   observationBatchSize = 10,
   sqlOrganization = false,
+  materializeNativeMedia?: BrowserHomeInstallationOptions["materializeNativeMedia"],
   nativeMcp?: ReturnType<typeof createOrganizationNativeSources>,
 ) {
   let now = 1000,
@@ -166,6 +171,9 @@ async function fixture(
     ledger = new InMemoryRunLedger(() => now);
   const registry = new RunRegistry({ now: () => now });
   const runStore = new InMemoryRunStore({ now: () => now });
+  // Production's record and ledger readers share the same immutable archive.
+  const fallbackRead = runStore.get.bind(runStore);
+  runStore.get = async (id) => (ledger.finished.has(id) ? structuredClone(ledger.finished.get(id)!) : fallbackRead(id));
   const coordinator = new InMemoryCoordinatorInstanceStore(ledger);
   const github = new InMemoryGithubApi({
     "sample/api": { private: false },
@@ -195,6 +203,7 @@ async function fixture(
   });
   const effects: string[] = [];
   const nativeReplies: string[] = [];
+  const nativeReplyThreads: string[] = [];
   const tokens = { "native-token": { subject: "bot", channel: "ops", email: "alice@example.test" } };
   const commands = new CommandRegistry<null>({ audit: () => {} });
   commands.register({
@@ -277,6 +286,7 @@ async function fixture(
     };
     core.githubApi = github;
     core.runLedger = createLedgerWriteThrough({ ledger, gen: "fixture-main", fallback: runStore, warn: () => {} });
+    core.runHistoryWriter = createRunHistoryWriter({ store: runStore, warn: () => {}, sleep: async () => {} });
     core.mainTaskStart = createMainTaskStarter({
       instances: coordinator,
       privateWorkerLog,
@@ -426,10 +436,12 @@ async function fixture(
         if (request.envelope.source === "browser")
           throw new Error("Browser outputs must use the durable private stream.");
         nativeReplies.push(text);
+        nativeReplyThreads.push(request.msg.threadKey);
       },
       history: async () => [{ role: "user", text: "Untrusted raw source history" }],
       status: async () => ({ update() {}, done: async () => {} }),
     }),
+    ...(materializeNativeMedia ? { materializeNativeMedia } : {}),
     canReadContext: async (ctx, ref) => {
       if (!contextReadable) return false;
       if (ref.kind === "repository") return repoChoices.authorize(ctx.actor, ref.key);
@@ -484,7 +496,9 @@ async function fixture(
     mergeLogin: async (id) => (id === "access:alice" ? "alice" : undefined),
     mergeFacts: (...args) => mergeRead!(...args),
   });
-  core.guardOrganizationConfirmation = (row, chooser) => installation.guardOrganizationConfirmation(row, chooser);
+  core.revalidateNativeMediaSource = installation.revalidateNativeMediaSource;
+  core.guardOrganizationConfirmation = (row, chooser, purpose) =>
+    installation.guardOrganizationConfirmation(row, chooser, purpose);
   const tasks: (() => Promise<void>)[] = [];
   const resolved = await authentication.resolveBrowser(identity, {
     channelId: "web:alice",
@@ -529,6 +543,7 @@ async function fixture(
     const task = tasks.shift();
     if (!task) throw new Error("No original owner task");
     await task();
+    await core.runHistoryWriter.settled();
   }
   async function seedQuestion(recordFacts: Partial<RunRecord> = {}) {
     seedCoordinatorInstance(
@@ -591,9 +606,13 @@ async function fixture(
     expire: () => {
       now = DAY_MS + 1001;
     },
+    expireSourceSnapshot: () => {
+      now = 31 * DAY_MS + 1001;
+    },
     tokens,
     personalTokens,
     nativeReplies,
+    nativeReplyThreads,
     request,
     execute,
     seedQuestion,
@@ -641,6 +660,44 @@ async function fixture(
     },
     restoreSource: () => {
       available = true;
+    },
+  };
+}
+async function nativeImageInput(text = "memory forget", id = "1000.93") {
+  const image = { mediaType: "image/png", name: "screen.png", data: "AAA=" };
+  const nativeMedia: import("../core/nativeMedia.js").NativeMedia = {
+    version: 1 as const,
+    channelId: "slack:D1",
+    userId: "slack:UALICE",
+    threadKey: "slack:D1:media-proof",
+    messageId: id,
+    rawTextDigest: await nativeMediaDigest(text),
+    sourceFilesDigest: await nativeMediaDigest("fixture-source-files"),
+    files: [
+      {
+        id: "slack:file:FIMAGE",
+        kind: "image" as const,
+        index: 0,
+        slot: 0,
+        mediaType: image.mediaType,
+        name: image.name,
+        size: 2,
+        representationDigest: await nativeMediaDigest(image.data),
+      },
+    ],
+  };
+  return {
+    image,
+    msg: {
+      ...nativeMedia,
+      text,
+      images: [image],
+      nativeMedia,
+      nativeMediaDigest: await nativeMediaDigest(nativeMedia),
+    },
+    evidence: {
+      source: "slack" as const,
+      identity: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" },
     },
   };
 }
@@ -835,6 +892,131 @@ async function privateHome(s: Awaited<ReturnType<typeof fixture>>, enrichment?: 
   return output;
 }
 describe("browser installation", () => {
+  it.each([false, true])(
+    "guards the next original bearer model request after plain-text deletion: %s",
+    async (remove) => {
+      let entered: () => void = () => {},
+        release: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const copied = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const modelRequests: import("../core/provider.js").CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "fixture",
+        complete: async (request) => {
+          modelRequests.push(structuredClone(request));
+          if (modelRequests.length === 2) {
+            entered();
+            await held;
+          }
+          return { content: [{ type: "text", text: "Recorded answer" }], stopReason: "end_turn" };
+        },
+      };
+      const s = await fixture(false, false, provider);
+      const mintChecks: Promise<boolean>[] = [];
+      const originalBearers = new Map<string, string>();
+      const store = s.core.runBearers!;
+      const mint = store.mint.bind(store);
+      vi.spyOn(store, "mint").mockImplementation((grant, options) => {
+        const token = mint(grant, options);
+        originalBearers.set(grant.runId, token);
+        // Real dispatch mint, before attach or trusted run-loop binding.
+        mintChecks.push(store.sourceGuardFor(grant.runId).check());
+        return token;
+      });
+      async function send(text: string) {
+        const home = (await s.request("GET", "/home/session")).body;
+        const input = {
+          key: home.submissionKey,
+          revision: home.destination.revision,
+          destination: { kind: "broad" as const },
+          context: [],
+          text,
+        };
+        expect((await s.request("POST", "/home/send", input)).status).toBe(200);
+        const result = await s.installation.organization.receiptStatus(s.context.authentication, input.key);
+        if (result.status !== "receipt" || !result.receipt.ownerRunId) throw new Error("No original owner");
+        return { input, receipt: result.receipt };
+      }
+      const sourceA = await send("Private note A");
+      await s.execute();
+      const sourceB = await send("Continue B");
+      const executing = s.execute();
+      await copied;
+      const forwarded: string[] = [],
+        logs: string[] = [];
+      expect(await Promise.all(mintChecks)).toEqual([false, false]);
+      const token = originalBearers.get(sourceB.receipt.ownerRunId!);
+      if (!token) throw new Error("No original model bearer");
+      const body = JSON.stringify({
+        model: "ignored",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "Private note A\nContinue B" }],
+      });
+      const proxy = () =>
+        handleModelProxyRequest(
+          {
+            method: "POST",
+            path: ANTHROPIC_MESSAGES_PATH,
+            headers: { authorization: `Bearer ${token}` },
+            body: (async function* () {
+              yield Buffer.from(body);
+            })(),
+          },
+          {
+            bearers: store,
+            providers: () => s.core.config.config.providers,
+            secrets: secretsFrom({ UNSET_FIXTURE_PROVIDER: "fixture-only-provider-key" }),
+            clock: () => 1000,
+            log: (line) => {
+              logs.push(line);
+            },
+            fetch: (async (_url, init) => {
+              forwarded.push(String(init?.body));
+              return new Response(
+                JSON.stringify({
+                  id: "fixture-message",
+                  type: "message",
+                  role: "assistant",
+                  model: "fixture-model",
+                  content: [{ type: "text", text: "Proxy answer" }],
+                  stop_reason: "end_turn",
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                }),
+                { headers: { "content-type": "application/json" } },
+              );
+            }) as typeof fetch,
+          },
+        );
+      try {
+        expect(JSON.stringify(modelRequests[1].messages)).toContain("Private note A");
+        const first = await proxy();
+        expect(first.status).toBe(200);
+        if (remove)
+          expect(
+            (await s.installation.runtime.deleteContent(s.context.authentication, sourceA.receipt.id)).status,
+          ).toBe("ok");
+        const second = await proxy();
+        expect(second.status).toBe(remove ? 403 : 200);
+        expect(forwarded).toHaveLength(remove ? 1 : 2);
+        expect(forwarded[0]).toContain("Private note A");
+        expect(JSON.stringify(logs)).not.toContain("Private note A");
+        expect(JSON.stringify(logs)).not.toContain(token);
+      } finally {
+        release();
+        await executing;
+      }
+      const replay = await s.installation.organization.receiptStatus(s.context.authentication, sourceB.input.key);
+      expect(replay).toMatchObject({
+        status: "receipt",
+        duplicate: true,
+        receipt: { id: sourceB.receipt.id, ownerRunId: sourceB.receipt.ownerRunId },
+      });
+    },
+  );
   it.each([false, true])(
     "reads a thousand private generated pipelines with bounded fresh metadata phases (distinct sources: %s)",
     async (distinct) => {
@@ -2740,6 +2922,616 @@ describe("browser installation", () => {
     expect(await s.installation.originalBinding(binding.runId)).toBeUndefined();
     expect(s.registry.getById(binding.runId)?.status).toBe("completed");
   });
+  it.each(["image", "text"] as const)(
+    "executes a saved small %s proposal with A as its read source and distinct B as its model and output owner",
+    async (kind) => {
+      const input = await nativeImageInput("Describe the original file.");
+      const document = { mediaType: "text/csv", name: "rows.csv", data: "id,total\n7,9" };
+      if (kind === "text") {
+        delete (input.msg as Partial<typeof input.msg>).images;
+        Object.assign(input.msg, { documents: [document] });
+        input.msg.nativeMedia.files[0] = {
+          ...input.msg.nativeMedia.files[0]!,
+          kind: "document",
+          mediaType: document.mediaType,
+          name: document.name,
+          size: document.data.length,
+          representationDigest: await nativeMediaDigest(document.data),
+        };
+        input.msg.nativeMediaDigest = await nativeMediaDigest(input.msg.nativeMedia);
+      }
+      const requests: import("../core/provider.js").CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "fixture",
+        complete: async (request) => {
+          requests.push(request);
+          const text = request.messages
+            .at(-1)!
+            .content.filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n");
+          return {
+            content: [
+              {
+                type: "text",
+                text: text.includes("Describe the saved file.")
+                  ? "Saved media handled by choice B."
+                  : text.includes("Describe the original file.")
+                    ? "Original media handled by A."
+                    : "Earlier result handled by C.",
+              },
+            ],
+            stopReason: "end_turn",
+          };
+        },
+      };
+      const s = await fixture(true, true, provider, false, false, false, 10, false, async () =>
+        kind === "image" ? { images: [input.image] } : { documents: [document] },
+      );
+      const a = await s.installation.admitNative(input.msg, input.evidence);
+      expect(a).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      await s.execute();
+      if (a.status !== "receipt" || !a.receipt.ownerRunId) throw new Error("No source A");
+      const source = await s.installation.originalBinding(a.receipt.ownerRunId);
+      if (!source) throw new Error("No original A binding");
+      const id = "00000000-0000-4000-8000-000000000025";
+      const proposal = "Describe the saved file.";
+      await s.confirmations.put(
+        {
+          kind: "redispatch",
+          id,
+          message: { ...source.msg, text: proposal },
+          line: proposal,
+          evidence: "Original file",
+          code: "saved_file_proposal",
+        },
+        DAY_MS,
+      );
+      const choice = {
+        channelId: input.msg.channelId,
+        userId: input.msg.userId,
+        threadKey: input.msg.threadKey,
+        messageId: "1000.95",
+        text: `confirm ${id}`,
+      };
+      const b = await s.installation.admitNative(choice, input.evidence, { kind: "confirm", id });
+      expect(b).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      if (b.status !== "receipt" || !b.receipt.ownerRunId) throw new Error("No choice B");
+      expect(b.receipt.ownerRunId).not.toBe(a.receipt.ownerRunId);
+      await s.execute();
+      expect(s.nativeReplies.at(-1)).toBe("Saved media handled by choice B.");
+      const parts = requests.at(-1)!.messages.at(-1)!.content;
+      if (kind === "image")
+        expect(parts.find((part) => part.type === "image")).toEqual({
+          type: "image",
+          mediaType: "image/png",
+          data: "AAA=",
+        });
+      else
+        expect(
+          parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n"),
+        ).toContain("id,total\n7,9");
+      expect(
+        parts
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n"),
+      ).toContain(proposal);
+      expect(await s.ledger.readIngressByRun(b.receipt.ownerRunId)).toMatchObject({
+        status: "record",
+        record: { status: "completed", origin: { continuation: { kind: "confirm", id } } },
+      });
+      expect(s.registry.getById(b.receipt.ownerRunId)?.status).toBe("completed");
+      const closed = await s.core.runStore.get(b.receipt.ownerRunId);
+      expect(closed?.contextDependencies?.version).toBe(3);
+      expect(closed?.contextDependencies?.nativeMediaSources).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            executionRunId: b.receipt.ownerRunId,
+            reference: expect.objectContaining({
+              kind: "confirmed",
+              sourceRunId: a.receipt.ownerRunId,
+              confirmationId: id,
+            }),
+          }),
+          expect.objectContaining({
+            executionRunId: a.receipt.ownerRunId,
+            reference: expect.objectContaining({ kind: "original", sourceRunId: a.receipt.ownerRunId }),
+          }),
+        ]),
+      );
+      expect((await s.core.runLedger.readLiveRuns()).some((row) => row.runId === b.receipt.ownerRunId)).toBe(false);
+      const c = await s.installation.admitNative(
+        { ...choice, messageId: "1000.96", text: "Explain the earlier result." },
+        input.evidence,
+      );
+      expect(c).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      if (c.status !== "receipt" || !c.receipt.ownerRunId) throw new Error("No reader C");
+      const reader = await s.installation.originalBinding(c.receipt.ownerRunId);
+      if (!reader) throw new Error("No current C proof");
+      const access = contextAccessForMessage(s.core, { msg: reader.msg, io: reader.io });
+      const inherited = await access.readRunDependencies(b.receipt.ownerRunId);
+      expect(inherited?.version).toBe(3);
+      expect(inherited?.nativeMediaSources).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            executionRunId: b.receipt.ownerRunId,
+            reference: expect.objectContaining({ sourceRunId: a.receipt.ownerRunId }),
+          }),
+        ]),
+      );
+      const canonical = closed!.contextDependencies!;
+      const leaf = canonical.nativeMediaSources!.find((leaf) => leaf.executionRunId === b.receipt.ownerRunId)!;
+      expect(
+        await access.validateDependencies({
+          ...canonical,
+          nativeMediaSources: [{ ...leaf, executionSequence: leaf.executionSequence + 1 }],
+        }),
+      ).toMatchObject({ ok: false });
+      expect(
+        await access.validateDependencies({
+          ...canonical,
+          nativeMediaSources: [{ ...leaf, reference: { ...leaf.reference, intentDigest: "c".repeat(64) } }],
+        }),
+      ).toMatchObject({ ok: false });
+      const foreign = contextAccessForMessage(s.core, {
+        msg: withChatActor(reader.msg, { ...reader.actor, id: "slack:UOTHER", self: [] }),
+        io: reader.io,
+      });
+      expect(await foreign.readRunDependencies(b.receipt.ownerRunId)).toBeUndefined();
+      const beforeHealthyC = requests.length;
+      await s.execute();
+      expect(requests).toHaveLength(beforeHealthyC + 1);
+      expect(s.registry.getById(c.receipt.ownerRunId)?.status).toBe("completed");
+      const read = s.core.runStore.get.bind(s.core.runStore);
+      const pruned = vi
+        .spyOn(s.core.runStore, "get")
+        .mockImplementation(async (id) => (id === c.receipt.ownerRunId ? null : read(id)));
+      const missingC = await s.installation.admitNative(
+        { ...choice, messageId: "1000.99", text: "Explain the earlier result after its record was pruned." },
+        input.evidence,
+      );
+      expect(missingC).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      const beforePruned = requests.length;
+      await s.execute();
+      expect(requests).toHaveLength(beforePruned);
+      pruned.mockRestore();
+      await s.ledger.clearIngressContent(a.receipt.effectKey!);
+      expect(await access.readRunDependencies(b.receipt.ownerRunId)).toBeUndefined();
+      const d = await s.installation.admitNative(
+        { ...choice, messageId: "1000.98", text: "Explain the earlier result again." },
+        input.evidence,
+      );
+      expect(d).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      const beforeC = requests.length;
+      await s.execute();
+      expect(requests).toHaveLength(beforeC);
+
+      const count = requests.length;
+      expect(await s.installation.admitNative(choice, input.evidence, { kind: "confirm", id })).toMatchObject({
+        status: "receipt",
+        duplicate: true,
+        receipt: { ownerRunId: b.receipt.ownerRunId },
+      });
+      expect(requests).toHaveLength(count);
+    },
+  );
+  it("holds saved proposal B before its first model prompt when source A is deleted during launch", async () => {
+    const input = await nativeImageInput("Describe the original file.");
+    const requests: import("../core/provider.js").CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fixture",
+      complete: async (request) => {
+        requests.push(request);
+        return { content: [{ type: "text", text: "Must not consume deleted media." }], stopReason: "end_turn" };
+      },
+    };
+    const s = await fixture(true, true, provider, false, false, false, 10, false, async () => ({
+      images: [input.image],
+    }));
+    const a = await s.installation.admitNative(input.msg, input.evidence);
+    expect(a).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+    await s.execute();
+    if (a.status !== "receipt" || !a.receipt.ownerRunId) throw new Error("No A owner");
+    const source = await s.installation.originalBinding(a.receipt.ownerRunId);
+    if (!source) throw new Error("No source A");
+    const id = "00000000-0000-4000-8000-000000000027";
+    const proposal = "Describe the saved file.";
+    await s.confirmations.put(
+      {
+        kind: "redispatch",
+        id,
+        message: { ...source.msg, text: proposal },
+        line: proposal,
+        evidence: "Original file",
+        code: "saved_file_proposal",
+      },
+      DAY_MS,
+    );
+    const choice = {
+      channelId: input.msg.channelId,
+      userId: input.msg.userId,
+      threadKey: input.msg.threadKey,
+      messageId: "1000.97",
+      text: `confirm ${id}`,
+    };
+    const b = await s.installation.admitNative(choice, input.evidence, { kind: "confirm", id });
+    expect(b).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+    if (b.status !== "receipt" || !b.receipt.ownerRunId) throw new Error("No B owner");
+    const open = PiHarness.prototype.open;
+    const spy = vi.spyOn(PiHarness.prototype, "open").mockImplementation(function (this: PiHarness, deps, run) {
+      const start = deps.container.start.bind(deps.container);
+      deps.container.start = async (...args) => {
+        const result = await start(...args);
+        await s.ledger.clearIngressContent(a.receipt.effectKey!);
+        return result;
+      };
+      return open.call(this, deps, run);
+    });
+    const beforeB = requests.length;
+    try {
+      await s.execute();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(requests).toHaveLength(beforeB);
+    expect(s.registry.getById(b.receipt.ownerRunId)?.status).toBe("failed");
+    expect(await s.installation.originalBinding(a.receipt.ownerRunId)).toBeUndefined();
+    expect(await s.installation.admitNative(choice, input.evidence, { kind: "confirm", id })).toMatchObject({
+      status: "receipt",
+      duplicate: true,
+      receipt: { ownerRunId: b.receipt.ownerRunId },
+    });
+    expect(s.tasks).toEqual([]);
+  });
+  it("reads and cancels a saved native media action without redownloading source A, and rechecks A for typed execution", async () => {
+    const input = await nativeImageInput();
+    let downloads = 0;
+    const s = await fixture(true, true, undefined, false, false, false, 10, false, async () => {
+      downloads++;
+      return { images: [input.image] };
+    });
+    const accepted = await s.installation.admitNative(input.msg, input.evidence);
+    expect(accepted).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+    await s.execute();
+    if (accepted.status !== "receipt" || !accepted.receipt.ownerRunId) throw new Error("No original source owner");
+    const binding = await s.installation.originalBinding(accepted.receipt.ownerRunId);
+    if (!binding) throw new Error("No original binding");
+    const put = (id: string) =>
+      s.confirmations.put(
+        {
+          kind: "run",
+          id,
+          message: binding.msg,
+          command: "memory.forget",
+          input: { args: [], options: {} },
+          receipt: "Run saved action",
+          risk: "Fixture only",
+          model: "fixture/unused",
+        },
+        DAY_MS,
+      );
+    const canceled = await put("00000000-0000-4000-8000-000000000021");
+    const beforeRead = downloads;
+    expect((await s.installation.guardOrganizationConfirmation(canceled, binding.actor, "read"))?.actor.id).toBe(
+      "slack:UALICE",
+    );
+    expect(downloads).toBe(beforeRead);
+    await dispatchClick(s.core, { kind: "cancel", id: canceled.id, actor: binding.actor, io: binding.io });
+    expect(s.nativeReplies.at(-1)).toBe("Cancelled; nothing ran");
+    expect(downloads).toBe(beforeRead);
+    expect(s.effects).toEqual(["slack:UALICE"]);
+    expect(await s.confirmations.get(canceled.id)).toBeUndefined();
+    const confirmed = await put("00000000-0000-4000-8000-000000000022");
+    await dispatchClick(s.core, { kind: "confirm", id: confirmed.id, actor: binding.actor, io: binding.io });
+    expect(s.effects).toEqual(["slack:UALICE", "slack:UALICE"]);
+    expect(downloads).toBeGreaterThan(beforeRead);
+    await dispatchClick(s.core, { kind: "confirm", id: confirmed.id, actor: binding.actor, io: binding.io });
+    expect(s.effects).toEqual(["slack:UALICE", "slack:UALICE"]);
+  });
+  it.each(["deleted", "expired", "revoked", "changed representation"] as const)(
+    "refuses delayed native media after source %s without executing or replacing the original owner",
+    async (failure) => {
+      const input = await nativeImageInput();
+      let reads = 0;
+      let changed = false;
+      const s = await fixture(true, true, undefined, true, false, false, 10, false, async () => {
+        reads++;
+        return { images: [{ ...input.image, ...(changed ? { data: "AQI=" } : {}) }] };
+      });
+      const accepted = await s.installation.admitNative(input.msg, input.evidence);
+      expect(accepted).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      if (accepted.status !== "receipt" || !accepted.receipt.ownerRunId) throw new Error("No original source owner");
+      if (failure === "deleted") await s.ledger.clearIngressContent(accepted.receipt.effectKey!);
+      else if (failure === "expired") s.expireSourceSnapshot();
+      else if (failure === "revoked") s.revokeSlack();
+      else changed = true;
+      await s.execute();
+      expect(s.effects).toEqual([]);
+      const retained = await s.ledger.readIngressByRun(accepted.receipt.ownerRunId);
+      expect(retained).toMatchObject({
+        status: "record",
+        record: {
+          status: "completed",
+          receiptId: accepted.receipt.id,
+          outcome:
+            failure === "deleted"
+              ? "The original source snapshot is unavailable."
+              : failure === "expired"
+                ? "Access, retention or the original target changed."
+                : "Current actor could not be verified.",
+        },
+      });
+      expect(await s.installation.originalBinding(accepted.receipt.ownerRunId)).toBeUndefined();
+      const beforeRetry = reads;
+      const retry = await s.installation.admitNative(input.msg, input.evidence);
+      if (failure !== "revoked")
+        expect(retry).toMatchObject({
+          status: "receipt",
+          duplicate: true,
+          receipt: { ownerRunId: accepted.receipt.ownerRunId },
+        });
+      expect(reads).toBe(beforeRetry);
+      expect(s.created).toEqual([]);
+    },
+  );
+  it.each(["image", "text"] as const)(
+    "delivers the exact source-bound %s representation to the existing model owner",
+    async (kind) => {
+      const data = kind === "image" ? "a".repeat(3 * 1024 * 1024) : "row,7\n".repeat(1000);
+      const asset = {
+        mediaType: kind === "image" ? "image/png" : "text/csv",
+        name: kind === "image" ? "screen.png" : "rows.csv",
+        data,
+      };
+      const materialized = kind === "image" ? { images: [asset] } : { documents: [asset] };
+      const requests: import("../core/provider.js").CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "fixture",
+        complete: async (request) => {
+          requests.push(request);
+          return { content: [{ type: "text", text: "Handled original media." }], stopReason: "end_turn" };
+        },
+      };
+      const s = await fixture(true, true, provider, true, false, false, 10, false, async () => materialized);
+      const text = "Describe the attached media.";
+      const nativeMedia = {
+        version: 1 as const,
+        channelId: "slack:D1",
+        userId: "slack:UALICE",
+        threadKey: "slack:D1:model-media",
+        messageId: "1000.91",
+        rawTextDigest: await nativeMediaDigest(text),
+        sourceFilesDigest: await nativeMediaDigest("fixture-source-files"),
+        files: [
+          {
+            id: "slack:file:FMODEL",
+            kind: kind === "image" ? ("image" as const) : ("document" as const),
+            index: 0,
+            slot: 0,
+            mediaType: asset.mediaType,
+            name: asset.name,
+            size: kind === "image" ? (data.length * 3) / 4 : data.length,
+            representationDigest: await nativeMediaDigest(data),
+          },
+        ],
+      };
+      const accepted = await s.installation.admitNative(
+        { ...nativeMedia, text, ...materialized, nativeMedia, nativeMediaDigest: await nativeMediaDigest(nativeMedia) },
+        { source: "slack", identity: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" } },
+      );
+      expect(accepted).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      await s.execute();
+      expect(s.nativeReplies).toEqual(["Handled original media."]);
+      const parts = requests.flatMap((request) =>
+        request.messages.filter((message) => message.role === "user").flatMap((message) => message.content),
+      );
+      if (kind === "image")
+        expect(parts.find((part) => part.type === "image")).toEqual({ type: "image", mediaType: "image/png", data });
+      else
+        expect(
+          parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n")
+            .includes(data),
+        ).toBe(true);
+      if (accepted.status !== "receipt" || !accepted.receipt.ownerRunId) throw new Error("No owner");
+      const owner = await s.ledger.readIngressByRun(accepted.receipt.ownerRunId);
+      expect(owner).toMatchObject({ status: "record", record: { status: "completed" } });
+      const record = await s.core.runStore.get(accepted.receipt.ownerRunId);
+      expect(record?.contextDependencies).toMatchObject({
+        version: 3,
+        nativeMediaSources: [
+          {
+            executionRunId: accepted.receipt.ownerRunId,
+            reference: {
+              kind: "original",
+              sourceRunId: accepted.receipt.ownerRunId,
+              sourceSequence: accepted.receipt.revision,
+            },
+          },
+        ],
+      });
+      const next = {
+        channelId: nativeMedia.channelId,
+        userId: nativeMedia.userId,
+        threadKey: nativeMedia.threadKey,
+        messageId: "1000.92",
+        text: "Explain the earlier result.",
+      };
+      const evidence = {
+        source: "slack" as const,
+        identity: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" },
+      };
+      const c = await s.installation.admitNative(next, evidence);
+      expect(c).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      const count = requests.length;
+      await s.execute();
+      expect(requests).toHaveLength(count + 1);
+      const read = s.core.runStore.get.bind(s.core.runStore);
+      const missing = vi
+        .spyOn(s.core.runStore, "get")
+        .mockImplementation(async (id) => (id === accepted.receipt.ownerRunId ? null : read(id)));
+      const withheld = await s.installation.admitNative({ ...next, messageId: "1000.93" }, evidence);
+      expect(withheld).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      const beforePruned = requests.length;
+      await s.execute();
+      expect(requests).toHaveLength(beforePruned);
+      missing.mockRestore();
+      if (kind === "image") await s.ledger.clearIngressContent(accepted.receipt.effectKey!);
+      else s.expireSourceSnapshot();
+      const d = await s.installation.admitNative({ ...next, messageId: "1000.94" }, evidence);
+      expect(d).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      const beforeLoss = requests.length;
+      await s.execute();
+      expect(requests).toHaveLength(beforeLoss);
+      s.revokeSlack();
+      expect(await s.installation.originalBinding(accepted.receipt.ownerRunId)).toBeUndefined();
+      expect(await s.installation.admitNative({ ...next, messageId: "1000.96" }, evidence)).toMatchObject({
+        status: "fenced",
+      });
+      expect(requests).toHaveLength(beforeLoss);
+      expect(s.tasks).toEqual([]);
+    },
+  );
+  it("admits a source-bound image larger than the retained request ceiling without storing its bytes and retries only its receipt", async () => {
+    const image = { mediaType: "image/png", data: "a".repeat(3 * 1024 * 1024), name: "screen.png" };
+    let reads = 0;
+    const s = await fixture(true, true, undefined, false, false, false, 10, false, async () => {
+      reads++;
+      return { images: [image] };
+    });
+    const nativeMedia = {
+      version: 1 as const,
+      channelId: "slack:D1",
+      userId: "slack:UALICE",
+      threadKey: "slack:D1:media",
+      messageId: "1000.9",
+      rawTextDigest: await nativeMediaDigest("memory forget"),
+      sourceFilesDigest: await nativeMediaDigest("fixture-source-files"),
+      files: [
+        {
+          id: "slack:file:FIMAGE",
+          slot: 0,
+          index: 0,
+          kind: "image" as const,
+          mediaType: "image/png",
+          name: "screen.png",
+          size: ((3 * 1024 * 1024) / 4) * 3,
+          representationDigest: await nativeMediaDigest(image.data),
+        },
+      ],
+    };
+    const digest = await nativeMediaDigest(nativeMedia);
+    const msg = { ...nativeMedia, text: "memory forget", images: [image], nativeMedia, nativeMediaDigest: digest };
+    const evidence = {
+      source: "slack" as const,
+      identity: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" },
+    };
+    const accepted = await s.installation.admitNative(msg, evidence);
+    expect(accepted).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+    await s.execute();
+    if (accepted.status !== "receipt" || !accepted.receipt.ownerRunId) throw new Error("Missing original owner");
+    const original = await s.ledger.readIngressByRun(accepted.receipt.ownerRunId);
+    expect(original.status).toBe("record");
+    if (original.status !== "record") throw new Error("Missing source snapshot");
+    expect(JSON.stringify(original.record.request).length).toBeLessThan(10000);
+    expect(original.record.origin?.nativeMedia).toBeUndefined();
+    expect(original.record.origin?.nativeMediaDigest).toBe(digest);
+    const binding = await s.installation.originalBinding(accepted.receipt.ownerRunId);
+    expect(binding?.msg.images).toEqual([image]);
+    const readsBeforeRetry = reads;
+    expect(await s.installation.admitNative(msg, evidence)).toMatchObject({
+      status: "receipt",
+      duplicate: true,
+      receipt: { ownerRunId: accepted.receipt.ownerRunId },
+    });
+    expect(reads).toBe(readsBeforeRetry);
+    expect(s.effects).toEqual(["slack:UALICE"]);
+  });
+  it.each(["unit", "child"] as const)(
+    "keeps an existing %s DM destination and addressed output out of the broad stream across exact retries",
+    async (kind) => {
+      const s = await fixture(true, true);
+      const localThread = kind === "unit" ? s.targetThread : "slack:D1:child";
+      await s.seedQuestion({ threadKey: localThread });
+      const msg = {
+        channelId: "slack:D1",
+        userId: "slack:UALICE",
+        threadKey: localThread,
+        messageId: "1000.5",
+        text: "memory forget",
+        threadReply: true,
+      };
+      const evidence = {
+        source: "slack" as const,
+        identity: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" },
+      };
+      const admitted = await s.installation.admitNative(msg, evidence);
+      expect(admitted.status).toBe("receipt");
+      const resolved = await s.authentication.resolveNative(msg, evidence);
+      if (resolved.status !== "resolved") throw new Error("No source proof");
+      const addressed = await s.installation.organization.resolve(resolved.authentication);
+      if (!addressed) throw new Error("No organization");
+      const saved = await s.store.execute({
+        action: "submission",
+        ...addressed,
+        source: "slack",
+        key: "slack:D1:1000.5",
+      });
+      expect(saved).toMatchObject({
+        status: "submission",
+        envelope: { destination: { kind: "thread", thread: localThread } },
+      });
+      await s.execute();
+      expect(s.nativeReplies).toEqual(["Read-only command completed."]);
+      expect(s.nativeReplyThreads).toEqual([localThread]);
+      expect(s.effects).toEqual(["slack:UALICE"]);
+      expect((await s.request("GET", "/home/session")).body.entries).toEqual([]);
+      const binding =
+        admitted.status === "receipt" && admitted.receipt.ownerRunId
+          ? await s.installation.originalBinding(admitted.receipt.ownerRunId)
+          : undefined;
+      expect(binding?.msg.threadKey).toBe(localThread);
+      expect(await binding?.io.history()).toEqual([{ role: "user", text: "Untrusted raw source history" }]);
+      seedCoordinatorUnit(s.coordinator, {
+        ...unit,
+        threadKey: "slack:D1:changed",
+        ending: { kind: "terminated", at: 1001, report: "Changed after delivery" },
+      });
+      const retried = await s.installation.admitNative(msg, evidence);
+      expect(retried).toMatchObject({
+        status: "receipt",
+        duplicate: true,
+        receipt: { ownerRunId: admitted.status === "receipt" ? admitted.receipt.ownerRunId : "missing" },
+      });
+      expect(s.effects).toEqual(["slack:UALICE"]);
+      expect(s.nativeReplies).toEqual(["Read-only command completed."]);
+      expect(await s.installation.admitNative({ ...msg, threadKey: "slack:D1:other" }, evidence)).toEqual({
+        status: "conflict",
+      });
+    },
+  );
+  it("holds an unknown DM ownership read instead of copying its reply into broad history", async () => {
+    const s = await fixture(true, true);
+    vi.spyOn(s.runs, "listRuns").mockRejectedValue(new Error("source history unavailable"));
+    const result = await s.installation.admitNative(
+      {
+        channelId: "slack:D1",
+        userId: "slack:UALICE",
+        threadKey: s.targetThread,
+        messageId: "1000.5",
+        text: "memory forget",
+      },
+      { source: "slack", identity: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" } },
+    );
+    expect(result).toEqual({ status: "unavailable" });
+    expect(s.tasks).toEqual([]);
+  });
   it("joins only proved private Slack input to the linked broad stream and retains its native reply address", async () => {
     const s = await fixture(true, true);
     const msg = {
@@ -2840,7 +3632,7 @@ describe("browser installation", () => {
       },
     };
     const native = createOrganizationNativeSources(nativeOptions);
-    const s = await fixture(false, false, undefined, false, false, false, 10, false, native);
+    const s = await fixture(false, false, undefined, false, false, false, 10, false, undefined, native);
     const options: McpOptions = {
       auth: { tokens: s.tokens },
       sso,
@@ -3531,5 +4323,80 @@ describe("browser installation", () => {
     expect((await s.request("POST", "/home/focus", { thread: s.targetThread })).status).toBe(404);
     expect(s.context.actor.self).toEqual(["access:alice"]);
     expect(await s.coordinator.listEvents({ instanceId: "fixture", unit: "original" })).toEqual([]);
+  });
+  it("keeps queued native media without a durable receiver sequence uncertain after that receiver ends and reconciliation runs", async () => {
+    const inputA = await nativeImageInput("Describe the first image", "1000.96");
+    const inputB = await nativeImageInput("Describe the next image", "1000.97");
+    let openReceiver!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      openReceiver = resolve;
+    });
+    let endReceiver!: () => void;
+    const ended = new Promise<void>((resolve) => {
+      endReceiver = resolve;
+    });
+    let queuedText: string[] = [];
+    let openings = 0;
+    // The native transport boundary reports no acknowledgment for the queued
+    // input. Separate harness tests exercise the actual OpenCode ACK handling.
+    const receiver = vi.spyOn(PiHarness.prototype, "open").mockImplementation(async (_deps, run) => {
+      openings++;
+      openReceiver();
+      await ended;
+      queuedText = run.inbox!.drain().map((input) => input.text);
+      run.inbox!.markUntrustedFollowUp();
+      return {
+        answer: "First request finished",
+        followUp: async () => "Unused",
+        remainingMs: () => 1000,
+        end: async () => {},
+      };
+    });
+    const provider: Provider = {
+      name: "fixture",
+      complete: async () => {
+        throw new Error("The controlled receiver owns this input.");
+      },
+    };
+    const s = await fixture(true, true, provider, false, false, false, 10, false, async () => ({
+      images: [inputA.image],
+    }));
+    const first = await s.installation.admitNative(inputA.msg, inputA.evidence);
+    expect(first.status).toBe("receipt");
+    const running = s.execute();
+    await opened;
+    const noSequence = vi.spyOn(s.core.runLedger, "pushInbox").mockResolvedValue(undefined);
+    try {
+      const second = await s.installation.admitNative(inputB.msg, inputB.evidence);
+      if (second.status !== "receipt" || !second.receipt.ownerRunId) throw new Error("No original queued owner");
+      await s.execute();
+      expect(noSequence).toHaveBeenCalledOnce();
+      expect(await s.ledger.readIngressByRun(second.receipt.ownerRunId)).toMatchObject({
+        status: "record",
+        record: { status: "uncertain" },
+      });
+      endReceiver();
+      await running;
+      expect(queuedText).toEqual(["Describe the next image"]);
+      expect(openings).toBe(1);
+      await s.installation.runtime.reconcile("fixture");
+      expect(s.tasks).toEqual([]);
+      expect(await s.ledger.readIngressByRun(second.receipt.ownerRunId)).toMatchObject({
+        status: "record",
+        record: { status: "uncertain" },
+      });
+      expect(await s.installation.admitNative(inputB.msg, inputB.evidence)).toMatchObject({
+        status: "receipt",
+        duplicate: true,
+        receipt: { ownerRunId: second.receipt.ownerRunId },
+      });
+      expect(openings).toBe(1);
+      expect(s.tasks).toEqual([]);
+    } finally {
+      endReceiver();
+      await running;
+      noSequence.mockRestore();
+      receiver.mockRestore();
+    }
   });
 });

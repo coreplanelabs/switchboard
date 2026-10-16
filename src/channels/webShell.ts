@@ -123,13 +123,17 @@ export type PageSender = (
 export function makePageSender(
   assets: ShellAssets,
   capabilities: Capabilities,
-  options: { csp?: string } = {},
+  options: { csp?: string; organization?: string } = {},
 ): PageSender {
   return (req, res, status, viewer, title, seed) => {
+    const { pageAccess: _suppliedAccess, ...data } = seed as PageSeed & { pageAccess?: unknown };
     const island: WebSeed = {
-      ...seed,
+      ...data,
       title,
       capabilities,
+      ...(typeof viewer?.id === "string" && viewer.id
+        ? { pageAccess: { actor: viewer.id, ...(options.organization ? { organization: options.organization } : {}) } }
+        : {}),
       ...(viewer?.viewingAs ? { viewingAs: viewer.viewingAs } : {}),
     };
     if (wantsSeed(req)) {

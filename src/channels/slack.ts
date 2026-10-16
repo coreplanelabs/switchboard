@@ -30,6 +30,8 @@ import { parseDirectives } from "../directives.js";
 import { DEFAULT_VERBOSITY, shows, type Verbosity } from "../core/verbosity.js";
 import { renderOffer } from "../core/confirmations.js";
 import { type SlackThreadMessage, stripAppFooter, stripBotNameAddress, threadTurns } from "./slack/threadTurns.js";
+import { createSlackNativeMedia } from "./slack/nativeMedia.js";
+import { nativeMediaDigest } from "../core/nativeMedia.js";
 import {
   createStatusBudget,
   STATUS_EDITS_PER_MINUTE,
@@ -1122,6 +1124,23 @@ export async function receiveSlackMessage(
       : undefined;
   const verifiedAudience =
     directAudience && (await verifySlackDirectAudience(client, directAudience)).ok ? directAudience : undefined;
+  const nativeMedia =
+    verifiedAudience && (images.length || documents.length || staged.length)
+      ? await createSlackNativeMedia({ replies: (args) => client.conversations.replies(args), policy: () => policy })
+          .capture(
+            {
+              channelId: verifiedAudience.channelId,
+              userId: verifiedAudience.userId,
+              threadKey: verifiedAudience.threadKey,
+              messageId: ev.ts,
+              rawText: ev.rawText ?? ev.text,
+            },
+            files ?? [],
+            { images: imagePass, documents: documentPass },
+            { images, documents, staged },
+          )
+          .catch(() => undefined)
+      : undefined;
   return {
     message: {
       channelId: `${PLATFORM}:${ev.channel}`,
@@ -1137,6 +1156,7 @@ export async function receiveSlackMessage(
       userName,
       sourceUrl: team ? slackPermalink(team, ev.channel, ev.ts, ev.threadTs) : undefined,
       images: images.length > 0 ? images : undefined,
+      ...(nativeMedia ? { nativeMedia, nativeMediaDigest: await nativeMediaDigest(nativeMedia) } : {}),
       documents: documents.length > 0 ? documents : undefined,
       ...(staged.length > 0 ? { staged } : {}),
     },

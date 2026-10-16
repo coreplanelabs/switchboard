@@ -47,12 +47,17 @@ import { isHumanGatePending } from "../../src/core/coordinator/contract.js";
 import { admitQuestionAnswer, type QuestionAnswerGuard } from "../../src/core/coordinator/questionAnswer.js";
 import {
   consumeIngress,
+  retiredIngressCandidate,
+  ingressDeletionDeadline,
+  ingressClearProtectionSchema,
+  type IngressClearProtection,
   claimUnreadIngress,
   unreadIngressProofSchema,
   type UnreadIngressProof,
   finishIngress,
   retainedIngress,
   ingressRequestSchema,
+  ingressRecordSchema,
   ingressSettlementSchema,
   type IngressRecord,
   type IngressRequest,
@@ -233,7 +238,15 @@ import {
   contextDependenciesContain,
   mergeContextDependencies,
 } from "../../src/core/references/contextDependencies.js";
-import { assembleTranscript } from "../../src/core/runLedger/transcript.js";
+import {
+  assembleTranscript,
+  projectTranscriptRows,
+  validTranscriptChunk,
+  isInternalTranscript,
+  logicalTranscriptBytes,
+  RequiredTranscriptError,
+  assertTranscriptReadBudget,
+} from "../../src/core/runLedger/transcript.js";
 import {
   workspaceAllocationOf,
   workspaceDurabilityArchiveOf,
@@ -359,6 +372,7 @@ import {
   keyedAppendContextMatches,
   tailCut,
   textOfStoredRow,
+  snippetOf,
   logicalThreadOfSession,
   contextThreadSessionKey,
 } from "../../src/core/runLedger/sessionLog.ts";
@@ -2471,6 +2485,17 @@ export class RunHistoryDO extends DurableObject<Env> {
     // The live-run ledger (run-history items 28–34): live runs never enter
     // `runs` — that table's finished_at drives retention and listing — they
     // live here until `finish` moves them across in one transaction.
+    if (
+      ![...this.sql.exec<{ name: string }>("PRAGMA table_info(ingress_deletions)")].some(
+        (column) => column.name === "protect_until",
+      )
+    )
+      this.sql.exec("ALTER TABLE ingress_deletions ADD COLUMN protect_until INTEGER");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS ingress_deletions_expiry ON ingress_deletions(protect_until)");
+    this.sql.exec(
+      "CREATE INDEX IF NOT EXISTS ingress_retirement ON ingress_owners(json_extract(data, '$.status'), json_extract(data, '$.originExpiresAt'), effect_key)",
+    );
+
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS live_runs (
         run_id TEXT PRIMARY KEY,
@@ -3182,16 +3207,264 @@ export class RunHistoryDO extends DurableObject<Env> {
       ].map((row) => retainedIngress(JSON.parse(row.data) as IngressRecord, now)),
     };
   }
+  private ingressCustodyProtected(runId: string, expected?: IngressRecord): boolean {
+    try {
+      if (this.liveRow(runId)) return true;
+      const stored = this.sql
+        .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id=?", runId)
+        .toArray()[0];
+      const record = stored ? parseSummary(stored) : undefined;
+      if (stored && !record) return true;
+      if (
+        record?.provisional ||
+        record?.restarting ||
+        (record != null && (record.answerOutcome === undefined || record.answerOutcome.ending === "unknown"))
+      )
+        return true;
+      const raw = this.allocationArchive(runId);
+      if (
+        record &&
+        (record.id !== runId ||
+          (expected && (record.userId !== expected.requester || record.threadKey !== expected.threadKey)))
+      )
+        return true;
+      if (raw !== undefined) {
+        const owned = workspaceDurabilityArchiveOf(raw);
+        if (!owned || owned.runId !== runId || (record && owned.startedAt !== record.startedAt)) return true;
+        const closedNone =
+          owned.allocation === null &&
+          !owned.promotion &&
+          owned.disposition === undefined &&
+          !owned.promotionStepBase &&
+          record?.profile?.machine === "none" &&
+          record.answerOutcome !== undefined &&
+          record.answerOutcome.ending !== "unknown";
+        if (!closedNone && owned.disposition?.kind !== "scratch-custody-closed") return true;
+      }
+      if (record && record.profile?.machine !== "none" && raw === undefined) return true;
+      if (
+        this.sql
+          .exec(
+            "SELECT 1 FROM workspace_settlements WHERE json IS NOT NULL AND json_extract(json,'$.owner.runId')=? LIMIT 1",
+            runId,
+          )
+          .toArray().length
+      )
+        return true;
+      return false;
+    } catch {
+      return true;
+    }
+  }
+  private ingressOwnerProtected(runId: string, now: number, expected?: IngressRecord): boolean {
+    if (this.ingressCustodyProtected(runId, expected) || this.publicationRetains(runId)) return true;
+    try {
+      const { policy } = this.policyState();
+      return this.sql
+        .exec<{ holder_run_id: string }>(
+          "SELECT DISTINCT holder_run_id FROM context_refs WHERE source_run_id=? AND (retention_pin=1 OR ordinary_pin=1)",
+          runId,
+        )
+        .toArray()
+        .some(
+          (row) =>
+            this.contextHolderIsLiveOrKept(row.holder_run_id, policy, now) ||
+            this.ingressCustodyProtected(row.holder_run_id),
+        );
+    } catch {
+      return true;
+    }
+  }
+  private indexIngressContextRoots(): "complete" | "pending" | "held" {
+    const key = "ingress_context_census";
+    type Census = { version: 1; upper: string; cursor: string; complete: boolean };
+    let census: Census;
+    try {
+      const saved = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key=?", key).toArray()[0];
+      if (saved) {
+        const value = JSON.parse(saved.value);
+        if (
+          !value ||
+          value.version !== 1 ||
+          typeof value.upper !== "string" ||
+          typeof value.cursor !== "string" ||
+          typeof value.complete !== "boolean" ||
+          (value.upper !== "" && !RUN_ID_PATTERN.test(value.upper)) ||
+          (value.cursor !== "" && !RUN_ID_PATTERN.test(value.cursor)) ||
+          (value.complete ? value.cursor !== value.upper : value.cursor >= value.upper) ||
+          Object.keys(value).some((field) => !["version", "upper", "cursor", "complete"].includes(field))
+        )
+          return "held";
+        census = value;
+      } else {
+        const upper =
+          this.sql
+            .exec<{ id: string | null }>(
+              "SELECT MAX(run_id) AS id FROM (SELECT run_id FROM live_runs UNION SELECT run_id FROM runs)",
+            )
+            .one().id ?? "";
+        census = { version: 1, upper, cursor: "", complete: false };
+      }
+      if (census.complete) return "complete";
+      // Only small IDs are materialized. Root bodies are read one at a time.
+      // Later accepted writers already maintain these same reference pins.
+      const roots = this.sql
+        .exec<{ run_id: string }>(
+          "SELECT run_id FROM (SELECT run_id FROM live_runs UNION SELECT run_id FROM runs) WHERE run_id>? AND run_id<=? ORDER BY run_id LIMIT 101",
+          census.cursor,
+          census.upper,
+        )
+        .toArray();
+      for (const root of roots.slice(0, 100)) {
+        if (!RUN_ID_PATTERN.test(root.run_id)) return "held";
+        for (const row of this.sql.exec<{ body: string }>(
+          "SELECT state_json AS body FROM live_runs WHERE run_id=? UNION ALL SELECT summary_json AS body FROM runs WHERE run_id=?",
+          root.run_id,
+          root.run_id,
+        )) {
+          const body = JSON.parse(row.body);
+          if (!body || typeof body !== "object" || Array.isArray(body)) return "held";
+          if (body.contextDependencies === undefined) continue;
+          if (!isContextDependencies(body.contextDependencies)) return "held";
+          this.pinContext(root.run_id, undefined, body.contextDependencies);
+        }
+        census.cursor = root.run_id;
+      }
+      census.complete = roots.length <= 100;
+      if (census.complete) census.cursor = census.upper;
+      this.sql.exec(
+        "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        key,
+        JSON.stringify(census),
+      );
+      return census.complete ? "complete" : "pending";
+    } catch {
+      return "held";
+    }
+  }
+  private retireIngress(now: number, focused?: string, protection?: IngressClearProtection): boolean {
+    // Legacy key-only markers receive one baseline on first upgraded access.
+    // Once written, neither configuration changes nor retries move it.
+    const baseline = ingressDeletionDeadline(
+      null,
+      undefined,
+      protection ? { receiptTtlMs: protection.receiptTtlMs } : undefined,
+      now,
+    );
+    const markerCursor =
+      this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='ingress_marker_cursor'").toArray()[0]
+        ?.value ?? "";
+    const legacyMarkers = this.sql
+      .exec<{ effect_key: string }>(
+        "SELECT effect_key FROM ingress_deletions WHERE protect_until IS NULL ORDER BY (effect_key<=?),effect_key LIMIT 100",
+        markerCursor,
+      )
+      .toArray();
+    const markerMore = legacyMarkers.length === 100 && legacyMarkers.at(-1)!.effect_key > markerCursor;
+    if (legacyMarkers.length)
+      this.sql.exec(
+        "INSERT INTO meta(key,value) VALUES('ingress_marker_cursor',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        legacyMarkers.at(-1)!.effect_key,
+      );
+    for (const marker of legacyMarkers) {
+      const owner = this.sql
+        .exec<{ data: string }>("SELECT data FROM ingress_owners WHERE effect_key=?", marker.effect_key)
+        .toArray()[0];
+      let deadline = baseline;
+      if (owner) {
+        try {
+          const parsed = ingressRecordSchema.safeParse(JSON.parse(owner.data));
+          if (!parsed.success) continue;
+          deadline = parsed.data.originExpiresAt ?? baseline;
+        } catch {
+          continue;
+        }
+      }
+      this.sql.exec(
+        "UPDATE ingress_deletions SET protect_until=? WHERE effect_key=? AND protect_until IS NULL",
+        deadline,
+        marker.effect_key,
+      );
+    }
+    const cursor =
+      this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='ingress_retirement_cursor'").toArray()[0]
+        ?.value ?? "";
+    const candidates = this.sql
+      .exec<{ effect_key: string; data: string }>(
+        "SELECT effect_key,data FROM ingress_owners WHERE json_extract(data,'$.status')='completed' AND json_extract(data,'$.originExpiresAt')<=? ORDER BY (effect_key<=?),effect_key LIMIT 100",
+        now,
+        cursor,
+      )
+      .toArray();
+    const scanMore = candidates.length === 100 && candidates.at(-1)!.effect_key > cursor;
+    if (candidates.length)
+      this.sql.exec(
+        "INSERT INTO meta(key,value) VALUES('ingress_retirement_cursor',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        candidates.at(-1)!.effect_key,
+      );
+    if (focused && !candidates.some((row) => row.effect_key === focused)) {
+      const row = this.sql
+        .exec<{ effect_key: string; data: string }>(
+          "SELECT effect_key,data FROM ingress_owners WHERE effect_key=?",
+          focused,
+        )
+        .toArray()[0];
+      if (row) candidates.push(row);
+    }
+    const census = candidates.some((row) => {
+      try {
+        return retiredIngressCandidate(JSON.parse(row.data), now);
+      } catch {
+        return false;
+      }
+    })
+      ? this.indexIngressContextRoots()
+      : "complete";
+    const indexed = census === "complete";
+    for (const row of candidates) {
+      if (!indexed) break;
+      let record: unknown;
+      try {
+        record = JSON.parse(row.data);
+      } catch {
+        continue;
+      }
+      if (
+        !retiredIngressCandidate(record, now) ||
+        record.effectKey !== row.effect_key ||
+        this.ingressOwnerProtected(record.runId, now, record)
+      )
+        continue;
+      this.sql.exec("DELETE FROM ingress_owners WHERE effect_key=?", row.effect_key);
+      this.sql.exec("DELETE FROM ingress_deletions WHERE effect_key=?", row.effect_key);
+    }
+    const markers = this.sql.exec(
+      "DELETE FROM ingress_deletions WHERE effect_key IN (SELECT effect_key FROM ingress_deletions WHERE protect_until<=? AND NOT EXISTS(SELECT 1 FROM ingress_owners o WHERE o.effect_key=ingress_deletions.effect_key) LIMIT 100)",
+      now,
+    ).rowsWritten;
+    return census === "pending" || markerMore || (indexed && scanMore) || markers === 100;
+  }
+
   async ingress(
     command:
       | { action: "consume"; request: IngressRequest }
       | { action: "read"; effectKey: string }
-      | { action: "clear"; effectKey: string }
+      | { action: "clear"; effectKey: string; protection?: IngressClearProtection }
       | { action: "finish"; request: IngressSettlement }
       | { action: "ack"; request: Pick<IngressSettlement, "effectKey" | "digest" | "runId"> },
     now: number,
   ): Promise<IngressResult> {
+    if (
+      command.action === "clear" &&
+      command.protection !== undefined &&
+      !ingressClearProtectionSchema.safeParse(command.protection).success
+    )
+      return { status: "invalid" };
+    let more = false;
     const result = this.ctx.storage.transactionSync(() => {
+      const focused =
+        command.action === "read" || command.action === "clear" ? command.effectKey : command.request.effectKey;
+      more = this.retireIngress(now, focused, command.action === "clear" ? command.protection : undefined);
       // Erase expired content independently of a replay of that exact key.
       this.sql.exec(
         "UPDATE ingress_owners SET data = json_set(data, '$.request', NULL) WHERE content_expires_at <= ? AND json_extract(data, '$.request') IS NOT NULL",
@@ -3204,7 +3477,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       ][0];
       const prior = stored ? (JSON.parse(stored.data) as IngressRecord) : null;
       if (command.action === "clear")
-        this.sql.exec("INSERT OR IGNORE INTO ingress_deletions(effect_key) VALUES (?)", key);
+        this.sql.exec(
+          "INSERT OR IGNORE INTO ingress_deletions(effect_key,protect_until) VALUES (?,?)",
+          key,
+          ingressDeletionDeadline(prior, undefined, command.protection, now),
+        );
       if (
         command.action === "consume" &&
         !prior &&
@@ -3234,12 +3511,42 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       return result;
     });
-    if (result.status === "claimed") {
-      const due = Math.min(result.record.contentExpiresAt, now + RUN_SWEEP_INTERVAL_MS);
+    if (result.status === "claimed" || command.action === "clear") {
+      const marker = this.sql
+        .exec<{ protect_until: number }>(
+          "SELECT protect_until FROM ingress_deletions WHERE effect_key=?",
+          command.action === "clear" ? command.effectKey : result.status === "claimed" ? result.record.effectKey : "",
+        )
+        .toArray()[0];
+      const deadline =
+        result.status === "claimed"
+          ? result.record.contentExpiresAt
+          : (marker?.protect_until ?? now + RUN_SWEEP_INTERVAL_MS);
+      const due = Math.min(deadline, now + RUN_SWEEP_INTERVAL_MS);
       const alarm = await this.ctx.storage.getAlarm();
       if (alarm === null || alarm > due) await this.ctx.storage.setAlarm(due);
     }
+    await this.scheduleIngressRetirement(now, more);
     return result;
+  }
+
+  private async scheduleIngressRetirement(now: number, more = false): Promise<void> {
+    const owner = this.sql
+      .exec<{ due: number | null }>(
+        "SELECT MIN(json_extract(data,'$.originExpiresAt')) AS due FROM ingress_owners WHERE json_extract(data,'$.status')='completed'",
+      )
+      .one().due;
+    const marker = this.sql
+      .exec<{ due: number | null }>("SELECT MIN(protect_until) AS due FROM ingress_deletions")
+      .one().due;
+    const deadlines = [owner, marker].filter(
+      (value): value is number => typeof value === "number" && Number.isSafeInteger(value),
+    );
+    if (!deadlines.length && !more) return;
+    const next = Math.min(...deadlines);
+    const due = more ? now : next > now ? Math.min(next, now + RUN_SWEEP_INTERVAL_MS) : now + RUN_SWEEP_INTERVAL_MS;
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm > due) await this.ctx.storage.setAlarm(due);
   }
 
   /** The admission ask (`POST /plane/admit`, record 0064 "The queue"): one
@@ -9828,6 +10135,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       // Save the next shared deadline before starting that work.
       await this.ensureNextAlarm(now);
       await this.discoverCoordinatorWorkflows(now);
+      const ingressMore = this.ctx.storage.transactionSync(() => this.retireIngress(now));
       this.sql.exec(
         "UPDATE ingress_owners SET data = json_set(data, '$.request', NULL) WHERE content_expires_at <= ? AND json_extract(data, '$.request') IS NOT NULL",
         now,
@@ -9902,6 +10210,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
         this.pushPlaneEffects(this.openPlaneEffects());
       }
+      await this.scheduleIngressRetirement(now, ingressMore);
       root.end("ok", { swept: deleted });
     } catch (err) {
       root.fail(err);
@@ -11071,6 +11380,18 @@ export class RunTranscriptDO extends DurableObject<Env> {
   }
 
   async setOwner(gen: string): Promise<{ ok: true }> {
+    const previous = this.owner();
+    if (previous !== gen) {
+      const used = new Set(
+        this.sql
+          .exec<{ json: string }>("SELECT json FROM run_messages")
+          .toArray()
+          .flatMap((r) => attachmentRefsOf(r.json)),
+      );
+      for (const row of this.sql.exec<{ ref: string }>("SELECT ref FROM attachments").toArray())
+        if (row.ref.includes(":v1:") && !used.has(row.ref))
+          this.sql.exec("DELETE FROM attachments WHERE ref=?", row.ref);
+    }
     this.sql.exec(`INSERT INTO owner (k, gen) VALUES (1, ?) ON CONFLICT(k) DO UPDATE SET gen = excluded.gen`, gen);
     return { ok: true };
   }
@@ -11088,6 +11409,23 @@ export class RunTranscriptDO extends DurableObject<Env> {
         return;
       }
       if (owner !== gen) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      if (attachments.some((a) => !validTranscriptChunk(a))) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      const stored = this.sql
+        .exec<{ ref: string; media_type: string; data: string }>("SELECT ref,media_type,data FROM attachments")
+        .toArray()
+        .map((a) => ({ ref: a.ref, mediaType: a.media_type, data: a.data }));
+      try {
+        projectTranscriptRows(rows, [
+          ...stored.filter((a) => !attachments.some((b) => b.ref === a.ref)),
+          ...attachments,
+        ]);
+      } catch {
         out = { ok: false, reason: "fenced" };
         return;
       }
@@ -11114,7 +11452,7 @@ export class RunTranscriptDO extends DurableObject<Env> {
       .exec<{ ref: string; media_type: string; data: string }>(`SELECT ref, media_type, data FROM attachments`)
       .toArray()
       .map((a) => ({ ref: a.ref, mediaType: a.media_type, data: a.data }));
-    return { rows, attachments };
+    return projectTranscriptRows(rows, attachments);
   }
 
   async clear(): Promise<{ ok: true }> {
@@ -11166,6 +11504,9 @@ export class SessionLogDO extends DurableObject<Env> {
         UNIQUE (idx, part)
       );
       CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(text, content='turns', content_rowid='id');
+      CREATE TABLE IF NOT EXISTS transcript_search_cells (id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id INTEGER NOT NULL, ordinal INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS transcript_search_turn ON transcript_search_cells(turn_id);
+      CREATE VIRTUAL TABLE IF NOT EXISTS transcript_search_fts USING fts5(text, content='', contentless_delete=1);
       CREATE TABLE IF NOT EXISTS attachments (
         ref TEXT PRIMARY KEY,
         media_type TEXT NOT NULL,
@@ -11405,15 +11746,14 @@ export class SessionLogDO extends DurableObject<Env> {
         through,
       )
       .toArray();
-    return {
-      rows,
-      attachments: this.attachmentsOf(rows),
+    return assertTranscriptReadBudget({
+      ...projectTranscriptRows(rows, this.attachmentsOf(rows)),
       owner: this.owner(),
       next: this.next(),
       sources: this.sources(),
       context: this.sources()?.context,
       notepad: this.sql.exec<{ text: string }>("SELECT text FROM notepad WHERE k=1").toArray()[0]?.text ?? "",
-    };
+    });
   }
   async verifyExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
     const ref = sourceSeedReferenceOf(input);
@@ -11544,6 +11884,7 @@ export class SessionLogDO extends DurableObject<Env> {
         `INSERT INTO meta (key, value) VALUES ('source_start', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
         String(this.next()),
       );
+      if (this.owner()?.gen !== gen || this.owner()?.runId !== runId) this.clearInternalOrphans();
       this.sql.exec(
         `INSERT INTO owner (k, run_id, gen) VALUES (1, ?, ?) ON CONFLICT(k) DO UPDATE SET run_id = excluded.run_id, gen = excluded.gen`,
         runId,
@@ -11571,14 +11912,13 @@ export class SessionLogDO extends DurableObject<Env> {
         to,
       )
       .toArray();
-    return {
-      rows,
-      attachments: this.attachmentsOf(rows),
+    return assertTranscriptReadBudget({
+      ...projectTranscriptRows(rows, this.attachmentsOf(rows)),
       owner: this.owner(),
       next: this.next(),
       context: this.sources()?.context,
       notepad: this.sql.exec<{ text: string }>(`SELECT text FROM notepad WHERE k = 1`).toArray()[0]?.text ?? "",
-    };
+    });
   }
 
   async installCheckpoint(runId: string, gen: string, receipt: ContextCheckpointReceipt): Promise<FenceResult> {
@@ -11623,13 +11963,16 @@ export class SessionLogDO extends DurableObject<Env> {
         .toArray();
       if (
         !sessionRangesAvailable(raw, [{ from: seedFrom, to: through }]) ||
-        JSON.stringify(raw.map(({ idx, part, json }) => ({ idx, part, json }))) !== JSON.stringify(snapshot.rows)
+        JSON.stringify(
+          projectTranscriptRows(raw, this.attachmentsOf(raw)).rows.map(({ idx, part, json }) => ({ idx, part, json })),
+        ) !== JSON.stringify(snapshot.rows)
       )
         return { ok: false, reason: "fenced" };
       if (
         (this.sql.exec<{ text: string }>(`SELECT text FROM notepad WHERE k = 1`).toArray()[0]?.text ?? "") !==
           snapshot.notepad ||
-        JSON.stringify(this.attachmentsOf(raw)) !== JSON.stringify(snapshot.attachments)
+        JSON.stringify(projectTranscriptRows(raw, this.attachmentsOf(raw)).attachments) !==
+          JSON.stringify(snapshot.attachments)
       )
         return { ok: false, reason: "fenced" };
       const pins = this.rangePins();
@@ -11851,6 +12194,7 @@ export class SessionLogDO extends DurableObject<Env> {
         return;
       }
       this.sql.exec(`DELETE FROM owner`);
+      this.clearInternalOrphans();
     });
     return out;
   }
@@ -11864,6 +12208,7 @@ export class SessionLogDO extends DurableObject<Env> {
       .exec<{ id: number; text: string }>(`SELECT id, text FROM turns WHERE idx = ? AND part = ?`, row.idx, row.part)
       .toArray()[0];
     if (existing) {
+      this.removeSearchCells(existing.id);
       this.sql.exec(
         `INSERT INTO turns_fts (turns_fts, rowid, text) VALUES ('delete', ?, ?)`,
         existing.id,
@@ -11871,20 +12216,27 @@ export class SessionLogDO extends DurableObject<Env> {
       );
       this.sql.exec(`DELETE FROM turns WHERE id = ?`, existing.id);
     }
-    if (storedRowRequiresFreshSources(json)) this.setSourceMeta("requires_fresh_sources", "true");
-    const text = textOfStoredRow(json);
+    const internal = isInternalTranscript(json);
+    const projected = projectTranscriptRows([{ ...row, json }], this.attachmentsOf([{ ...row, json }]));
+    const text = internal ? "" : textOfStoredRow(json);
+    if (utf8ByteLength(json) + utf8ByteLength(text) + 512 > 1_500_000)
+      throw new RequiredTranscriptError("stored row exceeds existing budget");
+    const kind = rowKind(projected.rows[0]!.json);
+    if (storedRowRequiresFreshSources(projected.rows[0]!.json)) this.setSourceMeta("requires_fresh_sources", "true");
+    const logicalBytes = logicalTranscriptBytes({ ...row, json }, this.attachmentsOf([{ ...row, json }]));
     this.sql.exec(
       `INSERT INTO turns (idx, part, kind, bytes, trimmed, json, text) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       row.idx,
       row.part,
-      rowKind(json),
-      utf8ByteLength(json),
+      kind,
+      internal ? logicalBytes : utf8ByteLength(json),
       trimmed ? 1 : 0,
       json,
       text,
     );
     const id = this.sql.exec<{ id: number }>(`SELECT last_insert_rowid() AS id`).one().id;
     this.sql.exec(`INSERT INTO turns_fts (rowid, text) VALUES (?, ?)`, id, text);
+    this.indexSearchCells(id, textOfStoredRow(projected.rows[0]!.json));
   }
 
   /** The idempotent keyed append (session-log item 13): the parts of ONE turn
@@ -11951,7 +12303,11 @@ export class SessionLogDO extends DurableObject<Env> {
     rows = frozen.rows;
     attachments = frozen.attachments;
     sourceUpdate = frozen.sourceUpdate;
-    const verified = await verifiedSourceResults(rows);
+    const projected = projectTranscriptRows(rows, [
+      ...this.attachmentsOf(rows).filter((a) => !attachments.some((b) => b.ref === a.ref)),
+      ...attachments,
+    ]);
+    const verified = await verifiedSourceResults(projected.rows);
     let out: FenceResult & { bytes?: number; sourcesSaved?: true } = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const pending = this.sourceSeedPending();
@@ -12034,6 +12390,19 @@ export class SessionLogDO extends DurableObject<Env> {
           return;
         }
       }
+      if (attachments.some((a) => !validTranscriptChunk(a))) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      try {
+        projectTranscriptRows(rows, [
+          ...this.attachmentsOf(rows).filter((a) => !attachments.some((b) => b.ref === a.ref)),
+          ...attachments,
+        ]);
+      } catch {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
       for (const attachment of attachments) {
         const original = this.sql
           .exec<{ media_type: string; data: string }>(
@@ -12063,7 +12432,7 @@ export class SessionLogDO extends DurableObject<Env> {
         );
       }
       const tracked = this.sources();
-      if (tracked?.context && rows.some((r) => rowKind(r.json) === "tool_result")) {
+      if (tracked?.context && projected.rows.some((r) => rowKind(r.json) === "tool_result")) {
         const indices = [...new Set(rows.map((r) => r.idx))];
         const old = this.sql
           .exec<{ idx: number; part: number; json: string }>(
@@ -12071,7 +12440,15 @@ export class SessionLogDO extends DurableObject<Env> {
             JSON.stringify(indices),
           )
           .toArray();
-        if (uncoveredSourceResult(old, rows, tracked.context, seed ? undefined : owner.runId, verified))
+        if (
+          uncoveredSourceResult(
+            projectTranscriptRows(old, this.attachmentsOf(old)).rows,
+            projected.rows,
+            tracked.context,
+            seed ? undefined : owner.runId,
+            verified,
+          )
+        )
           this.setSourceMeta("sources", JSON.stringify(taintSessionSources(tracked)));
       }
       if (sourceUpdate && JSON.stringify(this.sources()) !== JSON.stringify(sourceUpdate.sources)) {
@@ -12084,23 +12461,63 @@ export class SessionLogDO extends DurableObject<Env> {
     return out;
   }
 
+  private removeSearchCells(id: number): void {
+    for (const row of this.sql
+      .exec<{ id: number }>("SELECT id FROM transcript_search_cells WHERE turn_id=?", id)
+      .toArray())
+      this.sql.exec("DELETE FROM transcript_search_fts WHERE rowid=?", row.id);
+    this.sql.exec("DELETE FROM transcript_search_cells WHERE turn_id=?", id);
+  }
+  private indexSearchCells(id: number, text: string): void {
+    let offset = 0,
+      ordinal = 0;
+    do {
+      let end = Math.min(text.length, offset + 200_000);
+      if (end < text.length) {
+        while (end > offset && !/\s/u.test(text[end - 1]!)) end--;
+        if (end === offset) {
+          this.sql.exec("INSERT INTO transcript_search_cells(turn_id,ordinal) VALUES(?,-1)", id);
+          return;
+        }
+      }
+      const cell = text.slice(offset, end);
+      this.sql.exec("INSERT INTO transcript_search_cells(turn_id,ordinal) VALUES(?,?)", id, ordinal++);
+      const row = this.sql.exec<{ id: number }>("SELECT last_insert_rowid() AS id").one().id;
+      this.sql.exec("INSERT INTO transcript_search_fts(rowid,text) VALUES(?,?)", row, cell);
+      offset = end;
+    } while (offset < text.length);
+  }
   private totalBytes(): number {
+    const rows = this.sql
+      .exec<{ idx: number; part: number; json: string }>("SELECT idx,part,json FROM turns")
+      .toArray();
     return (
-      this.sql.exec<{ b: number }>(`SELECT COALESCE(SUM(bytes), 0) AS b FROM turns`).one().b +
-      this.sql.exec<{ b: number }>(`SELECT COALESCE(SUM(bytes), 0) AS b FROM attachments`).one().b
+      rows.reduce((n, row) => n + utf8ByteLength(row.json), 0) +
+      this.sql
+        .exec<{ ref: string; bytes: number }>("SELECT ref,bytes FROM attachments")
+        .toArray()
+        .reduce((n, row) => n + row.bytes, 0)
     );
   }
 
   /** Whether any row other than `exceptId` references the attachment `ref`.
-   *  Rows carry references inside their JSON, so the check is a substring
-   *  match on the quoted field; refs are `t<idx>p<part>`, and the closing quote
-   *  keeps `t1p0` from matching `t1p01`. */
+   *  Both legacy and internal descriptors participate; matching uses the
+   *  reference graph, not prose or a substring in another row. */
   private referencedElsewhere(ref: string, exceptId: number): boolean {
-    return (
+    return this.sql
+      .exec<{ json: string }>("SELECT json FROM turns WHERE id != ?", exceptId)
+      .toArray()
+      .some((row) => attachmentRefsOf(row.json).includes(ref));
+  }
+  private clearInternalOrphans(): void {
+    const used = new Set(
       this.sql
-        .exec(`SELECT 1 FROM turns WHERE id != ? AND INSTR(json, ?) > 0 LIMIT 1`, exceptId, `"dataRef":"${ref}"`)
-        .toArray().length > 0
+        .exec<{ json: string }>("SELECT json FROM turns")
+        .toArray()
+        .flatMap((row) => attachmentRefsOf(row.json)),
     );
+    for (const row of this.sql.exec<{ ref: string }>("SELECT ref FROM attachments").toArray())
+      if (row.ref.includes(":v1:") && !used.has(row.ref)) this.sql.exec("DELETE FROM attachments WHERE ref=?", row.ref);
   }
 
   /** The bytes a trimmed row would free beyond its own: the attachments only
@@ -12146,7 +12563,7 @@ export class SessionLogDO extends DurableObject<Env> {
           )
           .toArray()[0];
         if (!row) continue;
-        const marker = droppedToolResultRow(row.json);
+        const marker = droppedToolResultRow(projectTranscriptRows([row], this.attachmentsOf([row])).rows[0]!.json);
         if (marker === undefined) {
           // Not replaceable after all: mark it so the loop never picks it again.
           this.sql.exec(`UPDATE turns SET trimmed = 1 WHERE id = ?`, id);
@@ -12194,7 +12611,11 @@ export class SessionLogDO extends DurableObject<Env> {
       )
       .toArray();
     if (!rows.length || rows.some((row) => row.trimmed === 1)) return undefined;
-    return rows.map(({ idx, part, json }) => ({ idx, part, json }));
+    return projectTranscriptRows(rows, this.attachmentsOf(rows)).rows.map(({ idx, part, json }) => ({
+      idx,
+      part,
+      json,
+    }));
   }
 
   /** The rows from `from` to `to` (inclusive; the tail when `to` is absent), in
@@ -12207,7 +12628,7 @@ export class SessionLogDO extends DurableObject<Env> {
         to ?? Number.MAX_SAFE_INTEGER,
       )
       .toArray();
-    return { rows, attachments: this.attachmentsOf(rows) };
+    return projectTranscriptRows(rows, this.attachmentsOf(rows));
   }
 
   private attachmentsOf(rows: readonly TranscriptRow[]): TranscriptAttachment[] {
@@ -12267,11 +12688,18 @@ export class SessionLogDO extends DurableObject<Env> {
       .exec<{ idx: number; bytes: number }>(`SELECT idx, bytes FROM turns ORDER BY idx DESC, part DESC`)
       .toArray();
     const from = tailCut(newestFirst, maxBytes);
+    if (maxBytes !== 1 && from === undefined && newestFirst.length) {
+      const latest = this.sql
+        .exec<{ json: string }>("SELECT json FROM turns WHERE idx=?", newestFirst[0].idx)
+        .toArray();
+      if (latest.some((row) => isInternalTranscript(row.json)))
+        throw new RequiredTranscriptError("tail exceeds current seed budget");
+    }
     const sources = this.sourceMeta("source_pending_owner") ? taintSessionSources(this.sources()) : this.sources();
     const replay = this.sourceMeta("requires_fresh_sources") === "true" ? { requiresFreshSources: true as const } : {};
     if (from === undefined)
       return { rows: [], attachments: [], from: this.next(), ...(sources ? { sources } : {}), ...replay };
-    return { ...(await this.read(from)), from, ...(sources ? { sources } : {}), ...replay };
+    return assertTranscriptReadBudget({ ...(await this.read(from)), from, ...(sources ? { sources } : {}), ...replay });
   }
 
   /** The rows whose text matches `query`, in relevance order (FTS5's bm25 rank,
@@ -12281,18 +12709,69 @@ export class SessionLogDO extends DurableObject<Env> {
   async search(query: string, limit: number): Promise<SessionHit[]> {
     const match = ftsMatchExpr(query);
     if (match === null) return [];
-    return this.sql
-      .exec<{ idx: number; part: number; kind: string; json: string; text: string }>(
-        `SELECT t.idx, t.part, t.kind, t.json, t.text FROM turns_fts f JOIN turns t ON t.id = f.rowid
-          WHERE turns_fts MATCH ? ORDER BY f.rank, t.idx DESC, t.part DESC LIMIT ?`,
-        match,
-        limit,
+    const internals = this.sql
+      .exec<{ n: number }>(
+        `SELECT count(*) AS n FROM turns WHERE json_extract(json,'$.internalTranscript') IS NOT NULL`,
       )
-      .toArray()
-      .map(({ idx, part, kind, json, text }) => {
-        const role = roleOfStoredRow(json);
-        return { idx, part, ...(role !== undefined ? { role } : {}), kind, text };
+      .one().n;
+    if (!internals)
+      return this.sql
+        .exec<{ idx: number; part: number; kind: string; json: string; text: string }>(
+          `SELECT t.idx,t.part,t.kind,t.json,t.text FROM turns_fts f JOIN turns t ON t.id=f.rowid WHERE turns_fts MATCH ? ORDER BY f.rank,t.idx DESC,t.part DESC LIMIT ?`,
+          match,
+          limit,
+        )
+        .toArray()
+        .map(({ idx, part, kind, json, text }) => ({ idx, part, kind, text, role: roleOfStoredRow(json) }));
+    // Validate every required body; a stale/corrupt index cannot claim no-match.
+    const all = this.sql
+      .exec<{ id: number; idx: number; part: number; json: string; text: string }>(
+        "SELECT id,idx,part,json,text FROM turns ORDER BY idx,part",
+      )
+      .toArray();
+    let readBytes = 0;
+    const max = Number(this.sourceMeta("max_bytes") ?? DEFAULT_SESSION_LOG_MAX_BYTES);
+    for (const row of all) {
+      if (isInternalTranscript(row.json)) {
+        readBytes += logicalTranscriptBytes(row, this.attachmentsOf([row]));
+        if (readBytes > max) throw new RequiredTranscriptError("search exceeds session budget");
+      }
+      if (!this.sql.exec("SELECT id FROM transcript_search_cells WHERE turn_id=? LIMIT 1", row.id).toArray().length)
+        this.indexSearchCells(
+          row.id,
+          isInternalTranscript(row.json)
+            ? textOfStoredRow(projectTranscriptRows([row], this.attachmentsOf([row])).rows[0]!.json)
+            : row.text,
+        );
+    }
+    if (this.sql.exec("SELECT id FROM transcript_search_cells WHERE ordinal=-1 LIMIT 1").toArray().length)
+      throw new RequiredTranscriptError("search token exceeds bounded cell");
+    const ranked = this.sql
+      .exec<{ id: number; idx: number; part: number; kind: string; json: string; rank: number }>(
+        `SELECT t.id,t.idx,t.part,t.kind,t.json,f.rank FROM transcript_search_fts f JOIN transcript_search_cells c ON c.id=f.rowid JOIN turns t ON t.id=c.turn_id WHERE transcript_search_fts MATCH ? ORDER BY f.rank,t.idx DESC,t.part DESC`,
+        match,
+      )
+      .toArray();
+    const seen = new Set<number>(),
+      hits: SessionHit[] = [];
+    for (const row of ranked) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      const projected = projectTranscriptRows([row], this.attachmentsOf([row]));
+      const text = textOfStoredRow(projected.rows[0]!.json);
+      const words = [...new Set(tokenize(query))];
+      const positions = words.map((word) => text.toLowerCase().indexOf(word)).filter((n) => n >= 0);
+      const at = positions.length ? Math.min(...positions) : 0;
+      hits.push({
+        idx: row.idx,
+        part: row.part,
+        kind: row.kind,
+        role: roleOfStoredRow(projected.rows[0]!.json),
+        text: snippetOf(text.slice(Math.max(0, at - 60), at + 300)),
       });
+      if (hits.length === limit) break;
+    }
+    return hits;
   }
 
   /** The gap markers (session-log item 9) whose turn lies in `[from, to]`: the
@@ -12418,6 +12897,8 @@ export class SessionLogDO extends DurableObject<Env> {
       this.sql.exec(`DELETE FROM owner`);
       this.sql.exec(`INSERT INTO turns_fts (turns_fts) VALUES ('delete-all')`);
       this.sql.exec(`DELETE FROM turns`);
+      this.sql.exec("DELETE FROM transcript_search_fts");
+      this.sql.exec("DELETE FROM transcript_search_cells");
       this.sql.exec(`DELETE FROM attachments`);
       this.sql.exec(`DELETE FROM notepad`);
       this.sql.exec(`DELETE FROM requester_target`);
@@ -12923,7 +13404,8 @@ function parseTranscriptRows(v: unknown): Validated<TranscriptRow[]> {
       typeof row?.part !== "number" ||
       !Number.isInteger(row.part) ||
       row.part < 0 ||
-      typeof row?.json !== "string"
+      typeof row?.json !== "string" ||
+      utf8ByteLength(row.json) > 1_500_000
     ) {
       return invalid("rows entries must be {idx, part, json}");
     }
@@ -12972,7 +13454,12 @@ function parseAttachments(v: unknown): Validated<TranscriptAttachment[]> {
   if (!Array.isArray(v)) return invalid("attachments must be an array");
   for (const a of v) {
     const att = a as Record<string, unknown>;
-    if (typeof att?.ref !== "string" || typeof att?.mediaType !== "string" || typeof att?.data !== "string") {
+    if (
+      typeof att?.ref !== "string" ||
+      typeof att?.mediaType !== "string" ||
+      typeof att?.data !== "string" ||
+      utf8ByteLength(JSON.stringify(att)) > 1_500_000
+    ) {
       return invalid("attachments entries must be {ref, mediaType, data}");
     }
   }
@@ -12993,7 +13480,7 @@ async function handleLedger(
 ): Promise<Response> {
   if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
   const b = body as Record<string, unknown>;
-  const fenced = (r: FenceResult) => (r.ok ? json(r) : json(r, 409));
+  const fenced = (r: FenceResult & { transcriptCodec?: number }) => (r.ok ? json(r) : json(r, 409));
 
   if (pathname.startsWith("/runs/session/")) {
     const key = parseSessionKey(b.key);
@@ -13084,7 +13571,7 @@ async function handleLedger(
         console.log(
           `[runs/session/write] ${key.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
         );
-        return fenced(r);
+        return fenced(b.transcriptCodec === 1 ? { ...r, transcriptCodec: 1 } : r);
       }
       if (pathname === "/runs/session/append") {
         const rowId = parseRowId(b.rowId);
@@ -13232,6 +13719,8 @@ async function handleLedger(
       }
       return json({ error: "not found" }, 404);
     } catch (error) {
+      if (error instanceof Error && error.message.startsWith("required transcript:"))
+        return json({ kind: "held", reason: "transcript_incomplete" }, 423);
       const pending = await stub.expectedSeedMutationHold();
       if (pending) return json(pending, 423);
       throw error;
@@ -13266,9 +13755,17 @@ async function handleLedger(
       console.log(
         `[runs/transcript/write] ${runId.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
       );
-      return fenced(r);
+      return fenced(b.transcriptCodec === 1 ? { ...r, transcriptCodec: 1 } : r);
     }
-    if (pathname === "/runs/transcript/read") return json(await stub.read());
+    if (pathname === "/runs/transcript/read") {
+      try {
+        return json(await stub.read());
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("required transcript:"))
+          return json({ kind: "held", reason: "transcript_incomplete" }, 423);
+        throw error;
+      }
+    }
     return json(await stub.clear());
   }
 
@@ -13337,7 +13834,16 @@ async function handleLedger(
     if (typeof b.effectKey !== "string" || !b.effectKey.length || b.effectKey.length > 2048)
       return json({ status: "invalid" }, 400);
     return json(
-      await stub.ingress({ action: pathname.endsWith("clear") ? "clear" : "read", effectKey: b.effectKey }, now),
+      await stub.ingress(
+        {
+          action: pathname.endsWith("clear") ? "clear" : "read",
+          effectKey: b.effectKey,
+          ...(pathname.endsWith("clear") && b.protection !== undefined
+            ? { protection: b.protection as IngressClearProtection }
+            : {}),
+        },
+        now,
+      ),
     );
   }
   if (pathname === "/runs/cancellation/read") {
@@ -13716,7 +14222,25 @@ async function handleLedger(
           ...(b.order === "key" ? { order: "key" as const } : {}),
         }),
       );
-    } catch {
+    } catch (error) {
+      try {
+        console.warn(
+          JSON.stringify({
+            event: "home.read.failed",
+            phase: "pipeline_inventory_list",
+            errorKind:
+              error instanceof TypeError
+                ? "type_error"
+                : error instanceof SyntaxError
+                  ? "syntax_error"
+                  : error instanceof Error
+                    ? "error"
+                    : "non_error",
+          }),
+        );
+      } catch {
+        /* Diagnostics cannot change the failed read's response. */
+      }
       return json({ error: "pipeline inventory unavailable" }, 503);
     }
   }

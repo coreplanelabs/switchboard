@@ -57,6 +57,10 @@ async function openRecordedDiff() {
 }
 const seed = useSeed("unit");
 const view = seed?.view;
+const emit = defineEmits<{ accessLost: [reference: { kind: "unit"; key: string }] }>();
+function lostThreadAccess() {
+  if (active && view) emit("accessLost", { kind: "unit", key: view.unit });
+}
 const now = useWallClock(seed?.now);
 
 const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
@@ -91,7 +95,8 @@ const parentHref = computed(() =>
 );
 
 /** The unit's standing, in the header: its ending once it has one; else the
- *  round in flight (a live run) or the last round that ran; else not started. */
+ *  round in flight (a live run) or the last retained round. Missing run rows
+ *  cannot establish that the unit never started. */
 const standing = computed(() => {
   if (!view) return { cls: "grey", text: "" };
   if (view.mergeCompletion) return { cls: "ok", text: "Merged", at: view.mergeCompletion.at };
@@ -106,7 +111,7 @@ const standing = computed(() => {
   if (live) return { cls: "live", text: `round ${live.round} · ${live.thread} running` };
   const last = view.runs.at(-1);
   if (last) return { cls: "grey", text: `round ${last.round} · ${last.thread} ended` };
-  return { cls: "grey", text: "not started" };
+  return { cls: "grey", text: view.startedAt !== undefined ? "Started" : "State not recorded" };
 });
 const STANDING_CLS: Record<string, string> = {
   ok: "border-ok/30 text-ok",
@@ -243,7 +248,7 @@ function openRun(runId: string, turn?: number): void {
         </p>
       </div>
     </section>
-    <ReadonlyThread v-if="view.threads.coding" :thread="view.threads.coding" />
+    <ReadonlyThread v-if="view.threads.coding" :thread="view.threads.coding" @revoked="lostThreadAccess" />
     <FindingsBlock v-if="view.findings" :ledger="view.findings" :runs="view.runs" @open="openRun" />
     <section v-if="sessions.length" class="green-section">
       <div class="green-section-heading"><h2>Thread search</h2></div>
@@ -271,8 +276,8 @@ function openRun(runId: string, turn?: number): void {
       </ol>
       <EmptyState
         v-else
-        title="This unit has not started"
-        description="Its first round will appear here when the pipeline begins the unit."
+        title="No retained run evidence"
+        description="This window has no readable child runs. Unit status and conversation are shown above."
       />
     </section>
   </template>

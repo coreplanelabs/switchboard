@@ -7,6 +7,7 @@ import type { IncomingMessage } from "../types.js";
 import { freshContext } from "./contextSeed.js";
 import type { ContextDependencies } from "../references/contextDependencies.js";
 import { readOperatorTailContext } from "./operatorTail.js";
+import { RequiredTranscriptError } from "../runLedger/transcript.js";
 
 const msg: IncomingMessage = { userId: "slack:UA", channelId: "slack:CA", threadKey: "slack:CA:1", text: "continue" };
 const shared = contextThreadSessionKey(msg.threadKey);
@@ -26,6 +27,29 @@ const transcript = {
 const sources = { version: 1 as const, status: "unknown" as const, context };
 
 describe("operator source-aware tail", () => {
+  it("holds required transcript failure before substituting source-aware empty history", async () => {
+    const ledger = {
+      readSessionTail: async () => {
+        throw new RequiredTranscriptError("corrupt chunk");
+      },
+    };
+    await expect(
+      readOperatorTailContext({ ledger, runs: [], msg, validateDependencies: async () => ({ ok: true }) }),
+    ).rejects.toThrow("required transcript: corrupt chunk");
+    const ordinary = {
+      readSessionTail: async () => {
+        throw new Error("legacy route unavailable");
+      },
+    };
+    expect(
+      await readOperatorTailContext({
+        ledger: ordinary,
+        runs: [],
+        msg,
+        validateDependencies: async () => ({ ok: true }),
+      }),
+    ).toMatchObject({ turns: [], unavailable: [expect.stringContaining("legacy route unavailable")] });
+  });
   it("normalizes canonical recent row identities before access checks and merging a long shared history", async () => {
     const contexts = Array.from({ length: 65 }, (_, i) => ({
       ...context,

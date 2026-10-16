@@ -85,6 +85,69 @@ describe("Global shell navigation", () => {
     await wrapper.find("button.green-mobile-close").trigger("click");
     expect(open.attributes("aria-expanded")).toBe("false");
   });
+  it("keeps appearance with the authenticated actor and organization across read-target changes", async () => {
+    const open = (actor: string, organization: string, person?: string, everyone = false) =>
+      mountApp(Shell, {
+        seed: {
+          ...island(),
+          pageAccess: { actor, organization },
+          ...(person ? { viewingAs: { id: person }, asUser: { id: person } } : {}),
+          dataView: { mode: person ? "person" : everyone ? "everyone" : "mine", canViewEveryone: true },
+        },
+      });
+    const appearance = 'select[aria-label="Appearance"]';
+    let wrapper = open("access:alice", "org:one");
+    await wrapper.get(appearance).setValue("dark");
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    wrapper.unmount();
+
+    wrapper = open("access:bob", "org:one", "access:alice");
+    expect((wrapper.get(appearance).element as HTMLSelectElement).value).toBe("system");
+    expect(document.documentElement.classList.contains("light")).toBe(true);
+    await wrapper.get(appearance).setValue("light");
+    wrapper.unmount();
+
+    wrapper = open("access:alice", "org:two");
+    expect((wrapper.get(appearance).element as HTMLSelectElement).value).toBe("system");
+    await wrapper.get(appearance).setValue("light");
+    wrapper.unmount();
+
+    wrapper = open("access:alice", "org:one", "access:bob");
+    expect((wrapper.get(appearance).element as HTMLSelectElement).value).toBe("dark");
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    await wrapper.get(appearance).setValue("system");
+    expect(document.documentElement.classList.contains("light")).toBe(true);
+    wrapper.unmount();
+
+    wrapper = open("access:alice", "org:one", undefined, true);
+    expect((wrapper.get(appearance).element as HTMLSelectElement).value).toBe("system");
+    await wrapper.get(appearance).setValue("light");
+    wrapper.unmount();
+
+    wrapper = open("access:alice", "org:one");
+    expect((wrapper.get(appearance).element as HTMLSelectElement).value).toBe("light");
+    expect(document.documentElement.classList.contains("light")).toBe(true);
+    wrapper.unmount();
+  });
+  it("does not inherit a browser-wide or unbound account appearance", async () => {
+    const appearance = 'select[aria-label="Appearance"]';
+    localStorage.setItem("vueuse-color-scheme", "dark");
+    for (const pageAccess of [undefined, { actor: "access:alice" }]) {
+      const wrapper = mountApp(Shell, { seed: { ...island(), pageAccess } });
+      expect((wrapper.get(appearance).element as HTMLSelectElement).value).toBe("system");
+      await wrapper.get(appearance).setValue("dark");
+      expect(document.documentElement.classList.contains("dark")).toBe(true);
+      wrapper.unmount();
+    }
+    const wrapper = mountApp(Shell, {
+      seed: { ...island(), pageAccess: { actor: "access:alice", organization: "org:one" } },
+    });
+    expect((wrapper.get(appearance).element as HTMLSelectElement).value).toBe("system");
+    expect(document.documentElement.classList.contains("light")).toBe(true);
+    await wrapper.get(appearance).setValue("light");
+    expect(localStorage.getItem("vueuse-color-scheme")).toBe("dark");
+    wrapper.unmount();
+  });
   it("exits the selected person's read-only view through the global Mine choice", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
     const reload = vi.spyOn(browser, "reload").mockImplementation(() => {});

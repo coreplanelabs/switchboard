@@ -20,6 +20,7 @@ import {
 import { isHomeRuntimePath, type HomeRuntimeContext } from "./channels/homeRuntime.js";
 import { workViewScopeOf } from "./channels/workViewScope.js";
 import { isIdentityPath } from "./channels/identityRuntime.js";
+import { createSlackNativeMedia } from "./channels/slack/nativeMedia.js";
 import { originalOrganizationDispatchOf } from "./core/dispatch/privateDestination.js";
 import { DAY_MS } from "./core/budgets.js";
 import type { PageSender } from "./channels/webShell.js";
@@ -44,9 +45,9 @@ import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
 import { makePageSender, GREEN_PAGE_CSP } from "./channels/webShell.js";
 import { createHomeViewHandler } from "./channels/homeView.js";
 import { createHomeService } from "./core/home/service.js";
+import { homeLiveUnitRuns } from "./core/home/live.js";
 import { createHomeConditionReader } from "./core/home/conditions.js";
 import { deriveHomeHistoryKey } from "./core/home/historyKey.js";
-import { matchesPredicate } from "./core/authz/predicate.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createWebChatHandler, orchestratorChatSeed, resumeWebIO } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
@@ -1264,7 +1265,18 @@ export async function runBot(): Promise<void> {
     verify: accessVerify,
     publicBaseUrl,
   });
+  const nativeMedia = createSlackNativeMedia({
+    replies: (args) => app.client.conversations.replies(args),
+    policy: () => ({
+      staging: artifacts !== undefined,
+      maxBytesPerMessage: config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
+    }),
+  });
   browserWiring = createBrowserHomeWiring({
+    materializeNativeMedia: (envelope) =>
+      envelope.source === "slack" && envelope.nativeMedia
+        ? nativeMedia.materialize(envelope.nativeMedia)
+        : Promise.resolve(undefined),
     config,
     dashboard: dashboardAuth,
     access: accessConfig,
@@ -1337,18 +1349,42 @@ export async function runBot(): Promise<void> {
     },
     publicBaseUrl,
   });
-  deps.guardOrganizationConfirmation = (row, chooser) => browserWiring!.guardOrganizationConfirmation(row, chooser);
+  deps.guardOrganizationConfirmation = (row, chooser, purpose) =>
+    browserWiring!.guardOrganizationConfirmation(row, chooser, purpose);
+  deps.revalidateNativeMediaSource = (dependency, consumer) =>
+    browserWiring!.revalidateNativeMediaSource(dependency, consumer);
   let initializing = false;
   const reconcileOrganization = async () => {
     if (draining || initializing) return;
     initializing = true;
+    let phase: "initialize" | "native_sources" | "reconcile" | "identity_notices" = "initialize";
     try {
       if (!browserWiring?.current()) await browserWiring?.initialize();
+      phase = "native_sources";
       await browserWiring?.refreshNativeSources();
+      phase = "reconcile";
       await browserWiring?.current()?.runtime.reconcile(config.config.organization);
+      phase = "identity_notices";
       await browserWiring?.identity()?.retryNotices();
-    } catch {
-      console.warn("[home] current durable source readiness is unavailable");
+    } catch (error) {
+      try {
+        console.warn(
+          JSON.stringify({
+            event: "home.readiness.failed",
+            phase,
+            errorKind:
+              error instanceof TypeError
+                ? "type_error"
+                : error instanceof SyntaxError
+                  ? "syntax_error"
+                  : error instanceof Error
+                    ? "error"
+                    : "non_error",
+          }),
+        );
+      } catch {
+        /* Diagnostics cannot stop later readiness checks. */
+      }
     } finally {
       initializing = false;
     }
@@ -1723,7 +1759,10 @@ export async function runBot(): Promise<void> {
     // build it; local dev runs `npm run build` in web/ once, or points
     // SWITCHBOARD_WEB_DIST elsewhere).
     const greenAssets = loadWebAssets(webDistDir(publicEnv(), PACKAGE_ROOT), "green/main.ts");
-    const greenDocument = makePageSender(greenAssets.entry, capabilities, { csp: GREEN_PAGE_CSP });
+    const greenDocument = makePageSender(greenAssets.entry, capabilities, {
+      csp: GREEN_PAGE_CSP,
+      organization: config.config.organization,
+    });
     nativePage = greenDocument;
     void browserWiring!.emoji.refresh(app.client).catch(() => {});
     const page: PageSender = (...args) => (browserWiring ? browserWiring.page(...args) : greenDocument(...args));
@@ -1739,24 +1778,8 @@ export async function runBot(): Promise<void> {
         config.config.organization,
         processSecrets.named(historyKeyName)?.reveal(),
       ),
-      liveUnitKeys: async (visibleTo) =>
-        new Set(
-          defaultRunRegistry
-            .listActive()
-            .filter(
-              (run) =>
-                !run.finished &&
-                run.parentInstanceId &&
-                run.coordinatorUnit &&
-                matchesPredicate(visibleTo, {
-                  userId: run.userId ?? "",
-                  channelId: run.channelId ?? "",
-                  repo: run.repo,
-                  channelVisibility: run.channelVisibility ?? "unknown",
-                }),
-            )
-            .map((run) => `${run.parentInstanceId}:${run.coordinatorUnit}`),
-        ),
+      liveUnitRuns: (visibleTo) =>
+        homeLiveUnitRuns({ registry: defaultRunRegistry, ledger: ledgerClient, now: systemClock }, visibleTo),
     });
     const homeView = createHomeViewHandler(homeService, greenPage, config.config.organization, {
       thread: async (context, key) =>
@@ -2214,7 +2237,9 @@ export async function runBot(): Promise<void> {
             if (!serviceTokenAllowed(path, gate.identity)) {
               if (!serviceTokenRefusalLogged) {
                 serviceTokenRefusalLogged = true;
-                console.warn(`[access] a service token requested ${path}: service tokens are served /api/* only (403)`);
+                console.warn(
+                  "[access] a service token requested a browser page: service tokens are served /api/* only (403)",
+                );
               }
               res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
               res.end("forbidden");
@@ -2232,40 +2257,47 @@ export async function runBot(): Promise<void> {
               return commandHttp(req, res, identity);
             }
             // --- end /api/* ---
-            const home = await browserWiring?.context(req, gate.identity);
+            const tokenViewer = browserWiring?.tokenPageActor(gate.identity);
+            const home = tokenViewer ? undefined : await browserWiring?.context(req, gate.identity);
             const installed = browserWiring?.current();
-            if (!home || !installed) {
+            if (!tokenViewer && (!home || !installed)) {
               res
                 .writeHead(503, { "content-type": "text/plain", "cache-control": "no-store" })
                 .end(browserWiring?.unavailable() ?? "Current source proof is unavailable.");
               return;
             }
-            const actor = home.actor;
-            const currentSource = await installed.organization.resolve(home.authentication);
-            if (
-              !currentSource ||
-              !(await installed.host.authorize({
-                ...currentSource,
-                source: home.authentication.source,
-                sourceReference: home.authentication.sourceReference,
-                action: "read",
-                destination: { kind: "broad" },
-                target: null,
-                context: [],
-              }))
-            ) {
-              res.writeHead(404).end();
-              return;
+            const actor = tokenViewer ?? home!.actor;
+            if (home && installed) {
+              const currentSource = await installed.organization.resolve(home.authentication);
+              if (
+                !currentSource ||
+                !(await installed.host.authorize({
+                  ...currentSource,
+                  source: home.authentication.source,
+                  sourceReference: home.authentication.sourceReference,
+                  action: "read",
+                  destination: { kind: "broad" },
+                  target: null,
+                  context: [],
+                }))
+              ) {
+                res.writeHead(404).end();
+                return;
+              }
+              verifiedHomeContexts.set(actor, home);
             }
             verifiedPageActors.set(identity, actor);
             verifiedPageActors.set(gate.identity, actor);
-            verifiedHomeContexts.set(actor, home);
             if (isCommandPath(path)) return commandHttp(req, res, identity);
             if (path.startsWith("/assets/emoji/")) {
               await browserWiring!.emoji.handle(req, res);
               return;
             }
             if (isIdentityPath(path)) {
+              if (!home) {
+                res.writeHead(403).end("A verified personal account is required.");
+                return;
+              }
               const identityHandler = browserWiring?.identity();
               if (!identityHandler) {
                 res.writeHead(503).end("Account verification is unavailable.");
@@ -2282,6 +2314,10 @@ export async function runBot(): Promise<void> {
               return;
             }
             if (isHomeRuntimePath(path)) {
+              if (!home || !installed) {
+                res.writeHead(403).end("A verified personal account is required.");
+                return;
+              }
               const query = new URL(req.url ?? "/", "http://localhost").searchParams;
               const scope = workViewScopeOf(actor);
               if (
@@ -2300,7 +2336,7 @@ export async function runBot(): Promise<void> {
                 organization: config.config.organization,
                 home,
                 attentionRecipients:
-                  workViewScopeOf(actor).mode === "everyone"
+                  home && workViewScopeOf(actor).mode === "everyone"
                     ? await browserWiring!.attentionRecipients(home)
                     : workViewScopeOf(actor).ownerIds,
               })
@@ -2328,6 +2364,9 @@ export async function runBot(): Promise<void> {
               metricsView(req, res, {
                 actor,
                 currentActor: async () => {
+                  if (tokenViewer) {
+                    return browserWiring!.currentTokenPageActor(req, gate.identity);
+                  }
                   const fresh = await browserWiring!.context(req, gate.identity);
                   const current = browserWiring!.current();
                   if (!fresh || !current) throw new Error("Current source proof is unavailable.");

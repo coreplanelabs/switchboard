@@ -4,6 +4,7 @@ import { ALL_GRANTS } from "../core/authz/grants.js";
 import { InMemoryOrganizationStore } from "../core/organization/memory.js";
 import { OrganizationService } from "../core/organization/service.js";
 import { handleMcpRequest, type McpOptions } from "./mcp.js";
+import { createOrganizationAuthentication } from "./organizationAuthentication.js";
 
 const deps = {
   build: { commit: "a".repeat(40), version: "fixture" },
@@ -89,6 +90,85 @@ function setup() {
 }
 
 describe("MCP organization admission", () => {
+  it.each(["Bearer credential-one", "bearer credential-one", "  bEaReR\t   credential-one  "])(
+    "retains the exact configured credential and native admission for an accepted header: %s",
+    async (authorization) => {
+      const s = setup();
+      const authentication = createOrganizationAuthentication({
+        organization: "org:test",
+        store: s.store,
+        directory: s.store.directory,
+        mappings: [{ source: "mcp", issuer: "installation:mcp", tenant: null, organization: "org:test" }],
+        grantsFor: () => ALL_GRANTS,
+        auth: () => s.options.auth,
+        currentBrowser: async () => ({ status: "fenced" }),
+        currentSlack: async () => ({ status: "fenced" }),
+      });
+      const admit = s.options.admit!;
+      const actors: Array<{ id: string; kind: string; self: readonly string[] }> = [];
+      const result = await handleMcpRequest(
+        {
+          method: "POST",
+          headers: { authorization },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: {
+              name: "dispatch",
+              arguments: { text: "Original work", channel: "machine", thread: "first", idempotencyKey: "retry-1" },
+            },
+          }),
+        },
+        deps,
+        {
+          ...s.options,
+          admit: async (msg, io, evidence) => {
+            const current = await authentication.resolveNative(msg, evidence);
+            if (current.status !== "resolved") return { status: "fenced" };
+            actors.push({ id: current.actor.id, kind: current.actor.kind, self: current.actor.self ?? [] });
+            return admit(msg, io, evidence);
+          },
+        },
+      );
+      expect(result).toMatchObject({
+        status: 200,
+        body: { result: { structuredContent: { admission: { status: "pending", duplicate: false } } } },
+      });
+      expect(actors).toEqual([{ id: "mcp:service-client", kind: "service", self: [] }]);
+      expect(s.sources).toEqual([
+        {
+          userId: "mcp:service-client",
+          messageId: "mcp:3998fbdb8d844aa01d03de09b39b7b082e03bee469c40387bf2fedb81b1883f8",
+          credentialDigest: "020f85bc4a5074beee0ff7599adc11829ded3eaa0acf3f59f5c944e0907a0332",
+        },
+      ]);
+    },
+  );
+
+  it.each(["bearer Credential-one", "Basic credential-one"])(
+    "does not admit an unknown credential or scheme after header normalization: %s",
+    async (authorization) => {
+      const s = setup();
+      expect(
+        await handleMcpRequest(
+          {
+            method: "POST",
+            headers: { authorization },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: "tools/call",
+              params: { name: "dispatch", arguments: { text: "Unadmitted work", idempotencyKey: "refused" } },
+            }),
+          },
+          deps,
+          s.options,
+        ),
+      ).toMatchObject({ status: 401, body: { error: { code: -32001 } } });
+      expect(s.sources).toEqual([]);
+    },
+  );
   it("reports the actual serving build and native thread with the original owner, ignoring caller metadata", async () => {
     const s = setup();
     const args = {

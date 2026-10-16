@@ -33,6 +33,15 @@ function eventBody(event: ThreadEvent) {
   return body;
 }
 
+/** Only a previously guarded answer can be acknowledged after its question
+ * clears. Arrival time and current wake/steer state cannot change that event. */
+export function isQuestionAnswerRetry(saved: ThreadEvent, input: Omit<ThreadEvent, "seq">): boolean {
+  return (
+    saved.questionDigest !== undefined &&
+    same(eventBody(saved), eventBody(capThreadEvent({ ...input, at: saved.at, mode: saved.mode, seq: saved.seq })))
+  );
+}
+
 /** Runs inside the original unit store transaction. A saved event is evidence
  * of admission; only an identical retry may read its sequence after the
  * question changes. Every new answer must match the complete current question. */

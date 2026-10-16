@@ -10,8 +10,8 @@ import { ALL_ON, mountApp, pickSelect, selectDisabled, selectItem, selectValue }
 // Feature: docs/reference/specs/settings-page.md items 5–8 — the settings page
 // paints one tab per seed, offers MCPs only where the capability is on, and
 // every write it composes is one POST to /api/<group>.<verb> naming the org or
-// channel tier — and `me` only for a session linked to its person (records
-// 0041, 0042). A refusal is the handler's own sentence, shown as is;
+// channel tier, or the actual account's `me` tier. Legacy asUser fixtures
+// exercise injected caller compatibility, not production identity linking. A refusal is the handler's own sentence, shown as is;
 // `canWrite` disables controls and decides nothing.
 
 const VOCABULARY = {
@@ -99,10 +99,17 @@ describe("SettingsPage", () => {
     expect(wrapper.find('a[href="/settings/connect"]').text()).toBe("Connect a client");
   });
 
-  it("without a seed keeps settings unavailable and exposes no editable controls", () => {
-    const wrapper = mountApp(SettingsPage, { seed: null });
-    expect(wrapper.text()).toContain("Settings could not be loaded");
-    expect(wrapper.find('input,textarea,button[type="submit"]').exists()).toBe(false);
+  it("without a seed keeps settings unavailable and exposes no editable controls", async () => {
+    const reload = vi.spyOn(browser, "reload").mockImplementation(() => {});
+    for (const seed of [null, { page: "runNotFound" as const, retentionDays: null }]) {
+      const wrapper = mountApp(SettingsPage, { seed });
+      expect(wrapper.text()).toContain("Settings could not be loaded");
+      expect(wrapper.find('input,textarea,button[type="submit"]').exists()).toBe(false);
+      const retry = wrapper.get('button[aria-label="Reload settings"]');
+      expect(retry.text()).toBe("Reload");
+      await retry.trigger("click");
+    }
+    expect(reload).toHaveBeenCalledTimes(2);
   });
 
   it("Installation: one row per knob with its value and the default mark; capabilities with their state", () => {

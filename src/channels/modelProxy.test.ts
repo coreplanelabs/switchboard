@@ -31,7 +31,7 @@ import {
   proxyProviderFailureIsAuthenticated,
   readProxyUnknownTerminal,
 } from "../core/modelProxy/providerFailureAuth.js";
-import { RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
+import { bearerHashOf, RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
 import type { ModelCard } from "../core/modelCard.js";
 import { classifyProviderFailure, type ProviderConfig, type ToolDef } from "../core/provider.js";
 import { shapeToolSchemasForWire } from "../core/providerToolSchemas.js";
@@ -1854,6 +1854,148 @@ describe("the turn guard — a run that ended between the door and the turn", ()
     expect(h.fetchFake).not.toHaveBeenCalled();
     expect(h.starts.filter((s) => s.name === "model.turn")).toHaveLength(0);
   });
+});
+
+describe("current model source guard", () => {
+  it.each(["anthropic-messages", "openai-chat", "openai-responses"] as const)(
+    "%s refuses missing, changed and throwing private proof locally while public calls remain allowed",
+    async (wire) => {
+      const h = harness({
+        answer: () =>
+          new Response(
+            JSON.stringify(
+              wire === "anthropic-messages"
+                ? anthropicMessage()
+                : wire === "openai-responses"
+                  ? responsesAnswer()
+                  : {
+                      id: "chat-1",
+                      choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+                      usage: { prompt_tokens: 1, completion_tokens: 1 },
+                    },
+            ),
+            { headers: { "content-type": "application/json" } },
+          ),
+      });
+      const levels: string[] = [],
+        parks: string[] = [];
+      h.deps.plane = {
+        level: (_p, side) => {
+          levels.push(side);
+        },
+        park: (id) => {
+          parks.push(id);
+        },
+      };
+      const grant = wire === "anthropic-messages" ? h.grant : wire === "openai-chat" ? h.localGrant : h.responsesGrant;
+      const path =
+        wire === "anthropic-messages"
+          ? ANTHROPIC_MESSAGES_PATH
+          : wire === "openai-chat"
+            ? OPENAI_CHAT_COMPLETIONS_PATH
+            : OPENAI_RESPONSES_PATH;
+      const body =
+        wire === "openai-responses" ? responsesRequest({ stream: false }) : { ...anthropicRequest(), stream: false };
+      const proxy = (token: string) =>
+        handleModelProxyRequest(request({ path, headers: bearer(token), json: body }).req, h.deps);
+      expect((await proxy(h.bearers.mint(grant("public")))).status).toBe(200);
+      const token = h.bearers.mint(grant("private"), { sourceGuardRequired: true });
+      const unbound = await proxy(token);
+      expect([unbound.status, errorType(unbound)]).toEqual([403, "source_unavailable"]);
+      expect(h.bearers.grantOf("private")?.turns).toBe(0);
+      h.bearers.bindSourceGuard("private", async () => true);
+      expect((await proxy(token)).status).toBe(200);
+      h.bearers.bindSourceGuard("private", async () => false);
+      const changed = await proxy(token);
+      expect([changed.status, errorType(changed)]).toEqual([403, "source_unavailable"]);
+      h.bearers.bindSourceGuard("private", async () => {
+        throw new Error("private source content");
+      });
+      const failed = await proxy(token);
+      expect([failed.status, errorType(failed)]).toEqual([403, "source_unavailable"]);
+      expect(h.calls).toHaveLength(2);
+      expect(h.calls[1].body.model).toBe(
+        wire === "anthropic-messages" ? "claude-opus-5" : wire === "openai-chat" ? "llama-3" : "gpt-5.4",
+      );
+      expect(h.bearers.grantOf("private")?.turns).toBe(1);
+      expect(levels).toEqual(["up", "up"]);
+      expect(parks).toEqual([]);
+      expect(JSON.stringify([failed.body, h.logs, h.published])).not.toContain("private source content");
+      expect(JSON.stringify(h.logs)).not.toContain(token);
+    },
+  );
+
+  it.each(["retained", "revoke", "remint", "expire"] as const)(
+    "rechecks the original entry after an asynchronous source proof: %s",
+    async (change) => {
+      const h = harness();
+      const originalGrant = h.grant("run-1");
+      const token = h.bearers.mint(originalGrant, { sourceGuardRequired: true });
+      let entered!: () => void, release!: () => void;
+      const checking = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.bearers.bindSourceGuard("run-1", async () => {
+        entered();
+        await held;
+        return true;
+      });
+      const pending = handleModelProxyRequest(
+        request({ headers: bearer(token), json: anthropicRequest({ stream: false }) }).req,
+        h.deps,
+      );
+      await checking;
+      if (change === "revoke") h.bearers.revoke("run-1");
+      if (change === "remint") {
+        h.bearers.mint(originalGrant, { sourceGuardRequired: true });
+        h.bearers.bindSourceGuard("run-1", async () => true);
+      }
+      if (change === "expire") h.clock.now = originalGrant.expiresAt;
+      release();
+      const result = await pending;
+      expect(result.status).toBe(change === "retained" ? 200 : 403);
+      if (change !== "retained") expect(errorType(result)).toBe(change === "expire" ? "expired" : "revoked");
+      expect(h.calls).toHaveLength(change === "retained" ? 1 : 0);
+      if (change === "retained") expect(h.calls[0].body.model).toBe("claude-opus-5");
+      expect(h.bearers.grantOf("run-1")?.turns).toBe(change === "retained" ? 1 : 0);
+    },
+  );
+
+  it.each(["issue", "adopt", "rotate", "reparent"] as const)(
+    "keeps current source proof on the same entry across %s",
+    async (operation) => {
+      const h = harness();
+      let token = h.bearers.mint(h.grant("run-1"), { sourceGuardRequired: true });
+      h.bearers.bindSourceGuard("run-1", async () => false);
+      if (operation === "issue") token = h.bearers.issue("run-1")!.token;
+      if (operation === "adopt") {
+        const previous = new RunBearerStore({ clock: () => h.clock.now });
+        token = previous.mint(h.grant("run-1"));
+        expect(h.bearers.adopt("run-1", bearerHashOf(token)!)).toBe(true);
+      }
+      if (operation === "rotate") {
+        const result = h.bearers.rotate("run-1", () => {});
+        if (!result.ok) throw new Error("rotation refused");
+        token = result.token;
+      }
+      if (operation === "reparent") h.bearers.reparent("run-1", h.root.start("run.agent"));
+      const proxy = () =>
+        handleModelProxyRequest(
+          request({ headers: bearer(token), json: anthropicRequest({ stream: false }) }).req,
+          h.deps,
+        );
+      const refused = await proxy();
+      expect([refused.status, errorType(refused)]).toEqual([403, "source_unavailable"]);
+      h.bearers.bindSourceGuard("run-1", async () => true);
+      expect((await proxy()).status).toBe(200);
+      expect(h.calls).toHaveLength(1);
+      expect(h.calls[0].body.model).toBe("claude-opus-5");
+      expect(h.bearers.grantOf("run-1")?.turns).toBe(1);
+    },
+  );
 });
 
 describe("upstream failures", () => {

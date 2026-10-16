@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../chatMessage.js";
-import { assembleTranscript, chunkRows, turnRows } from "./transcript.js";
+import {
+  assembleTranscript,
+  chunkRows,
+  turnRows,
+  boundedTranscript,
+  projectTranscriptRows,
+  RequiredTranscriptError,
+} from "./transcript.js";
 import { ATTACHMENT_REF_BYTES, TRANSCRIPT_PART_BYTES } from "./types.js";
 
 // The transcript on the wire (docs/reference/specs/run-history.md item 32): one row per
@@ -10,6 +17,73 @@ import { ATTACHMENT_REF_BYTES, TRANSCRIPT_PART_BYTES } from "./types.js";
 // the runner had — thinking blocks included — or reporting the gap.
 
 const text = (t: string) => ({ type: "text" as const, text: t });
+
+describe("internal bounded Memory transcript", () => {
+  it("keeps the canonical legacy DTO exact while bounding Unicode text and binary write cells", () => {
+    const message: ChatMessage = {
+      role: "user",
+      content: [
+        text('🧭,"quoted\\n"\r\n'.repeat(150_000)),
+        { type: "document", mediaType: "application/pdf", name: "original.pdf", data: "AQID".repeat(600_000) },
+      ],
+    };
+    const canonical = turnRows(0, message, { canonical: true }, "slack:original");
+    const wire = boundedTranscript(canonical.rows, canonical.attachments);
+    const projected = projectTranscriptRows(wire.rows, wire.attachments);
+    expect(projected).toEqual(canonical);
+    expect(assembleTranscript(projected.rows, projected.attachments)).toMatchObject({
+      complete: true,
+      turns: 1,
+      messages: [message],
+      actors: ["slack:original"],
+    });
+    for (const row of wire.rows) expect(Buffer.byteLength(row.json)).toBeLessThanOrEqual(1_500_000);
+    for (const part of wire.attachments)
+      expect(
+        Buffer.byteLength(JSON.stringify({ runId: "owner", gen: "gen", rows: [], attachments: [part] })),
+      ).toBeLessThanOrEqual(2 * 1024 * 1024);
+    expect(JSON.parse(projected.rows[0]!.json).part.type).toBe("text");
+  });
+  it("holds missing corrupt duplicate reordered unknown and changed-metadata internal rows", () => {
+    const canonical = turnRows(
+      0,
+      { role: "user", content: [text("Original 🧭 sentence\n".repeat(150_000))] },
+      { canonical: true },
+      "slack:original",
+    );
+    const wire = boundedTranscript(canonical.rows, canonical.attachments);
+    expect(projectTranscriptRows(wire.rows, wire.attachments)).toEqual(canonical);
+    for (const attachments of [
+      wire.attachments.slice(1),
+      [{ ...wire.attachments[0]!, data: "changed" }, ...wire.attachments.slice(1)],
+      [...wire.attachments, wire.attachments[0]!],
+    ])
+      expect(() => projectTranscriptRows(wire.rows, attachments)).toThrow(RequiredTranscriptError);
+    for (const change of [
+      "version",
+      "order",
+      "actor",
+      "null-codec",
+      "null-ref",
+      "null-ref-id",
+      "bad-hash",
+      "bad-bytes",
+    ]) {
+      const rows = structuredClone(wire.rows),
+        row = JSON.parse(rows[0]!.json);
+      if (change === "version") row.internalTranscript.version = 2;
+      if (change === "order") row.internalTranscript.refs.reverse();
+      if (change === "actor") row.actor = "slack:foreign";
+      if (change === "null-codec") row.internalTranscript = null;
+      if (change === "null-ref") row.internalTranscript.refs = [null];
+      if (change === "null-ref-id") row.internalTranscript.refs[0].ref = null;
+      if (change === "bad-hash") row.internalTranscript.refs[0].sha256 = "bad";
+      if (change === "bad-bytes") row.internalTranscript.refs[0].utf8Bytes = -1;
+      rows[0]!.json = JSON.stringify(row);
+      expect(() => projectTranscriptRows(rows, wire.attachments)).toThrow(RequiredTranscriptError);
+    }
+  });
+});
 
 describe("explicit context metadata on shared conversation rows", () => {
   it("aligns contexts across compactions and leaves absent or conflicting metadata unknown", () => {

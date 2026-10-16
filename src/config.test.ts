@@ -831,10 +831,18 @@ describe("grants config — the one shape", () => {
   });
 
   it("`*` is only ever a whole surface: a partial subject (slack:U*), schedule:*, access:svc:* and agent:* fail the load naming the id", () => {
-    for (const id of ["slack:U*", "schedule:*", "access:svc:*", "agent:*"]) {
-      expect(() => load(withGrants(`  "${id}":\n    actions: all\n`)), id).toThrow(
+    for (const id of [
+      "slack:U*",
+      "schedule:*",
+      "access:svc:*",
+      "agent:*",
+      "slack:U.+*",
+      "slack:U[ab]*",
+      "slack:U\\*",
+    ]) {
+      expect(() => load(withGrants(`  ${JSON.stringify(id)}:\n    actions: all\n`)), id).toThrow(
         new RegExp(
-          `config\\.yaml: grants\\["${id.replace(/\*/g, "\\*")}"\\].*slack:\\*, http:\\*, mcp:\\*, access:\\*`,
+          `config\\.yaml: grants\\["${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\].*slack:\\*, http:\\*, mcp:\\*, access:\\*`,
         ),
       );
     }
@@ -2311,7 +2319,7 @@ describe("Scope.mcpServers (MCP servers layered through config)", () => {
   "slack:CMCP":
     mcpServers:
       notion: { url: "https://mcp.notion.so/mcp", auth: none }
-`.replace("channels:\n", "channels:\n");
+`;
   const withDefaults = `
 organization: acme
 providers:

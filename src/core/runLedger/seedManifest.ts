@@ -329,7 +329,7 @@ export async function buildExpectedSeedManifest(input: {
         !message.content.length
       )
         return { kind: "held", reason: "missing" };
-      const turn = turnRows(from + i, message, {}, seed.actors?.[i]);
+      const turn = turnRows(from + i, message, { canonical: true }, seed.actors?.[i]);
       rows.push(...turn.rows);
       attachments.push(...turn.attachments);
     }

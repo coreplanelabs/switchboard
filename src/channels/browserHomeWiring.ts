@@ -31,7 +31,7 @@ import type { IdentityNotice } from "../core/identity/linkContract.js";
 import { WorkerOrganizationStore } from "../core/organization/worker.js";
 import { createHomeRepositories } from "./homeRepositories.js";
 import { createOriginalUnitRecipient } from "./originalUnitRecipient.js";
-import { createBrowserHomeInstallation } from "./browserHomeInstallation.js";
+import { createBrowserHomeInstallation, type BrowserHomeInstallationOptions } from "./browserHomeInstallation.js";
 import { createOrganizationAuthentication } from "./organizationAuthentication.js";
 import { createOrganizationNativeSources, type OrganizationNativeSourcesOptions } from "./organizationNativeSources.js";
 import { createIdentityRuntime } from "./identityRuntime.js";
@@ -39,7 +39,8 @@ import { FileEmojiStore, createSlackEmojiCache } from "./slackEmoji.js";
 import type { PageSender } from "./webShell.js";
 import type { PageSeed, ViewablePerson } from "./webSeed.js";
 import { readableRuns } from "./liveView/viewer.js";
-import { resolveAccessActor } from "./commandHttp.js";
+import { accessActor, resolveAccessActor } from "./commandHttp.js";
+import { isServiceToken } from "./accessAuth.js";
 import { holdsAll } from "../core/authz/viewAs.js";
 import {
   hasWorkViewScope,
@@ -109,6 +110,7 @@ export interface BrowserHomeWiringOptions {
   privateWorkerLog?: Parameters<typeof createBrowserHomeInstallation>[0]["privateWorkerLog"];
   mergeLogin?: Parameters<typeof createBrowserHomeInstallation>[0]["mergeLogin"];
   mergeFacts?: Parameters<typeof createBrowserHomeInstallation>[0]["mergeFacts"];
+  materializeNativeMedia?: BrowserHomeInstallationOptions["materializeNativeMedia"];
   launch(task: () => Promise<void>): void;
   nativeIo?(request: Omit<OrganizationExecutionRequest, "io">): ChannelIO | undefined;
   legacySlackIo?(audience: SlackDirectAudience): ChannelIO | undefined;
@@ -446,6 +448,7 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
       privateWorkerLog: options.privateWorkerLog,
       mergeLogin: options.mergeLogin,
       mergeFacts: options.mergeFacts,
+      materializeNativeMedia: options.materializeNativeMedia,
       legacyRecipient: async (origin) => await legacyAudience?.recipient(origin),
       originalUnitRecipient: (key) => sourceRecipient.read(key),
       originalUnitRecipientPhase: (groups, phaseAuthentication) =>
@@ -575,6 +578,20 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     const label = selected ? options.people().find((person) => person.id === selected)?.name : credential.email;
     if (label) viewerLabels.set(viewed.actor, label);
     return attachScope(viewed, workViewModeFromCookie(req.headers.cookie), actual.actor);
+  }
+  /** A configured dashboard bearer may read as its own caller without proving
+   * a human private stream or borrowing a linked person's authority. */
+  function tokenPageActor(credential: AccessIdentity): Actor | undefined {
+    if (options.dashboard.mode !== "token" || isServiceToken(credential) || !credential.sub) return;
+    const resolved = accessActor(credential, (id) => options.config.grantsFor(id));
+    const actor: Actor = { ...resolved, kind: "service", self: [resolved.id] };
+    return withWorkViewScope(actor, resolveWorkViewScope(actor, { organization: org }));
+  }
+  async function currentTokenPageActor(req: IncomingMessage, credential: AccessIdentity) {
+    if (options.dashboard.mode !== "token") return;
+    const gate = await options.dashboard.verify(req);
+    if (!gate.ok || gate.identity.sub !== credential.sub || isServiceToken(gate.identity)) return;
+    return tokenPageActor(gate.identity);
   }
   async function approvalSource(row: Confirmation, viewer: Actor) {
     if (
@@ -733,6 +750,8 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     dispatchSlack,
     confirmSlack,
     context,
+    tokenPageActor,
+    currentTokenPageActor,
     attentionRecipients: owners,
     page: sendPage,
     emoji,
@@ -750,6 +769,12 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     guardOrganizationConfirmation: (
       row: Parameters<NonNullable<CoreDeps["guardOrganizationConfirmation"]>>[0],
       chooser?: Parameters<NonNullable<CoreDeps["guardOrganizationConfirmation"]>>[1],
-    ) => (installation ? installation.guardOrganizationConfirmation(row, chooser) : Promise.resolve(undefined)),
+      purpose?: Parameters<NonNullable<CoreDeps["guardOrganizationConfirmation"]>>[2],
+    ) =>
+      installation ? installation.guardOrganizationConfirmation(row, chooser, purpose) : Promise.resolve(undefined),
+    revalidateNativeMediaSource: (
+      dependency: Parameters<NonNullable<CoreDeps["revalidateNativeMediaSource"]>>[0],
+      consumer: Parameters<NonNullable<CoreDeps["revalidateNativeMediaSource"]>>[1],
+    ) => (installation ? installation.revalidateNativeMediaSource(dependency, consumer) : Promise.resolve(false)),
   };
 }

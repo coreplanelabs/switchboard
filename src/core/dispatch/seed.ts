@@ -1,3 +1,4 @@
+import { RequiredTranscriptError } from "../runLedger/transcript.js";
 import type { SessionSources } from "../references/receipts.js";
 // The session seed (docs/reference/specs/session-log.md item 9; records 0034
 // and 0035): what a follow-up starts from when its thread and agent have a
@@ -292,6 +293,7 @@ export async function sessionSeedFor(input: {
       tail = await input.ledger.readSessionTail(readKey, SEED_BUDGET_BYTES);
     }
   } catch (err) {
+    if (err instanceof RequiredTranscriptError) throw err;
     const why = err instanceof Error ? err.message : String(err);
     return { notes: [`session seed: the log ${key} could not be read (${why}) — the run seeds from the channel`] };
   }
