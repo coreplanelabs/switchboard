@@ -319,6 +319,36 @@ This grants inventory proof only. For full readiness, the live operator can run 
 
 For the existing GHA credential path, dispatch `verify-sandbox.yml` from qualified `main`, with `verifier-commit` equal to that exact main SHA and `expected-commit` equal to the existing Worker commit. Its default `inspect` mode collects the observation without invoking a model or deployment. After independent image qualification, use `inventory` with both target pins; `probe` explicitly authorizes the echo. The production environment and deploy concurrency group retain the existing actor and serialization. The run keeps its observation and bounded paging artifact for seven days. A new successful observation does not rewrite the old deployment failure or establish its cause.
 
+### Release an abandoned deployment lock
+
+The Resident Worker has a separate admin operation for an abandoned pre-upload deployment fence. It removes only the swap lock. It does not upload code, restart a container, release work records, clear staging maintenance or reopen the fleet. The drain keeps its original deadline. The installed Worker must contain this operation; a missing route is a blocker, with no fallback to force or reset.
+
+First stop the original deployment controller and confirm that it is terminal. Check the original account, Worker version, container application and image through Cloudflare. The native target must be unchanged since the fence was set. Check for another active deployment. Keep an HTTPS receipt for these checks. The server does not fetch that receipt; the administrator attests to the external facts. The server separately checks its actual Worker version and current resident work.
+
+Use the selected installation's Resident origin as `RESIDENT_BASE_URL` and its existing admin bearer as `RESIDENT_ADMIN_TOKEN`. Read the quote without changing state:
+
+```sh
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer $RESIDENT_ADMIN_TOKEN" \
+  "$RESIDENT_BASE_URL/deploy-fence-recovery"
+```
+
+The response contains `quote.recordSha256`, the original fence times and the current Worker version. Select that exact hash. Send one explicit release request with the independently verified receipt URL:
+
+```sh
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer $RESIDENT_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"expectedRecordSha256":"<quote.recordSha256>","evidence":"https://example.com/receipts/stopped-deployment","controllerStopped":true,"nativeTargetUnchanged":true}' \
+  "$RESIDENT_BASE_URL/release-deploy-fence"
+```
+
+The Worker reads resident owner, lifecycle and process evidence while the fence remains set. Its final transaction checks the original record, registered membership, work obligations, maintenance and actual Worker version again. A mismatch or incomplete idle evidence refuses the release. Success reports `released: true` and `drainRetained: true`. The durable audit retains the original record and receipt hash. The native outcome is labeled `operator-attested-unchanged`; it is not a server proof of Cloudflare deployment history.
+
+If the response is lost or reports an unverified outcome, do not repeat the mutation. Read `/deploy-fence-recovery?released=<original-record-hash>` with the same admin bearer to inspect its receipt. Then read `/residents` to check the current drain. A newer lock remains independent of the original receipt.
+
+The fleet stays drained after lock release. An operator can use the existing guarded `POST /undrain` when reopening is intended, or let the next normal deployment establish its own drain. A new deployment still runs its normal work, image and readiness checks.
+
 ### Recover an unresolved native operation
 
 Use `POST /debug` with `{ "op": "native-operations", "resource": "repo:owner/repo" }` and the Resident read or admin bearer. This returns at most 25 stored operation records, their `recordHash`, owner, journal, recovery reason, termination receipts and `recoverable` flag. Follow a non-null `cursor` with the same resource. This is a metadata read; it does not wake or inspect a runtime. Legacy records report `journal: null` and `recoverable: false`. No command, output or credential value is returned.

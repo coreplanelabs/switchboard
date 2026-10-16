@@ -1650,7 +1650,21 @@ const DRAIN_KEY = "drain";
 const DEPLOY_ADMISSION_KEY_PREFIX = "deploy:admission:";
 const DEPLOY_RELEASE_RECEIPTS_KEY = "deploy:release-receipts";
 const DEPLOY_RECOVERY_KEY_PREFIX = "deploy:recovered:";
+const DEPLOY_FENCE_RELEASE_KEY_PREFIX = "deploy:fence-release:";
 const DEPLOY_ABANDONED_KEY_PREFIX = "deploy:abandoned:";
+
+interface DeployFenceReleaseReceipt {
+  schema: 1;
+  originalRecordSha256: string;
+  originalRecord: DrainRecord;
+  workerVersion: string;
+  evidenceSha256: string;
+  registrySha256: string;
+  releasedAt: number;
+  requestEnd: "operator-attested";
+  nativeOutcome: "operator-attested-unchanged";
+  drainRetained: true;
+}
 
 /** Safe request provenance, never an authority or a native completion receipt. */
 function deployAdmissionOrigin(input: unknown) {
@@ -2920,6 +2934,104 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       const { swapFence: _fence, swapBuild: _build, swapVersion: _version, swapAt: _at, ...rest } = record;
       await txn.put(DRAIN_KEY, rest);
     });
+  }
+
+  /** Quote the whole original record. A caller's copy cannot identify the current producer. */
+  async getDeployFenceRecoveryQuote(
+    versionId: string | null,
+    store: Pick<DurableObjectStorage, "get" | "list"> = this.ctx.storage,
+  ) {
+    if (!versionId || workerVersionId(this.env) !== versionId) return null;
+    const original = await store.get<unknown>(DRAIN_KEY);
+    if (
+      !original ||
+      typeof original !== "object" ||
+      Array.isArray(original) ||
+      Object.keys(original).some(
+        (key) => !["since", "until", "by", "reason", "swapFence", "swapBuild", "swapVersion", "swapAt"].includes(key),
+      )
+    )
+      return null;
+    const record = liveDrain(original, systemClock());
+    if (
+      record?.swapFence !== true ||
+      record.swapVersion !== versionId ||
+      !record.swapAt ||
+      !Number.isFinite(Date.parse(record.swapAt)) ||
+      !Number.isFinite(Date.parse(record.since)) ||
+      Date.parse(record.since) > Date.parse(record.swapAt) ||
+      Date.parse(record.swapAt) > systemClock() ||
+      JSON.stringify(original).length > 4096
+    )
+      return null;
+    return {
+      recordSha256: await stagingEvidenceSha256(original),
+      registrySha256: await stagingEvidenceSha256(
+        [...(await store.list({ prefix: REGISTRY_KEY_PREFIX })).entries()].sort(([a], [b]) => (a < b ? -1 : 1)),
+      ),
+      since: record.since,
+      until: record.until,
+      swapAt: record.swapAt,
+      workerVersion: versionId,
+    };
+  }
+
+  /** An operator can release an abandoned fence, but cannot erase the drain or any work record. */
+  async releaseDeployFence(
+    recordSha256: string,
+    versionId: string,
+    evidenceSha256: string,
+    registrySha256: string,
+  ): Promise<boolean> {
+    if (![recordSha256, evidenceSha256, registrySha256].every((value) => /^[a-f0-9]{64}$/.test(value))) return false;
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await this.getStagingMaintenance(txn))?.state === "held") return false;
+      if ((await this.getDeployObligations(txn)).stored !== 0) return false;
+      const quote = await this.getDeployFenceRecoveryQuote(versionId, txn);
+      if (!quote || quote.recordSha256 !== recordSha256 || quote.registrySha256 !== registrySha256) return false;
+      const key = `${DEPLOY_FENCE_RELEASE_KEY_PREFIX}${recordSha256}`;
+      if (await txn.get(key)) return false;
+      const originalRecord = await txn.get<DrainRecord>(DRAIN_KEY);
+      if (!originalRecord) return false;
+      const { swapFence: _fence, swapBuild: _build, swapVersion: _version, swapAt: _at, ...drain } = originalRecord;
+      await txn.put(key, {
+        schema: 1,
+        originalRecordSha256: recordSha256,
+        originalRecord,
+        workerVersion: versionId,
+        evidenceSha256,
+        registrySha256,
+        releasedAt: systemClock(),
+        requestEnd: "operator-attested",
+        nativeOutcome: "operator-attested-unchanged",
+        drainRetained: true,
+      });
+      await txn.put(DRAIN_KEY, drain);
+      return true;
+    });
+  }
+
+  async readDeployFenceReleaseReceipt(recordSha256: string): Promise<DeployFenceReleaseReceipt | null> {
+    if (!/^[a-f0-9]{64}$/.test(recordSha256)) return null;
+    const receipt = await this.ctx.storage.get<DeployFenceReleaseReceipt>(
+      `${DEPLOY_FENCE_RELEASE_KEY_PREFIX}${recordSha256}`,
+    );
+    if (
+      receipt?.schema !== 1 ||
+      receipt.originalRecordSha256 !== recordSha256 ||
+      receipt.drainRetained !== true ||
+      receipt.requestEnd !== "operator-attested" ||
+      receipt.nativeOutcome !== "operator-attested-unchanged" ||
+      typeof receipt.workerVersion !== "string" ||
+      receipt.workerVersion !== receipt.originalRecord?.swapVersion ||
+      typeof receipt.evidenceSha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(receipt.evidenceSha256) ||
+      !/^[a-f0-9]{64}$/.test(receipt.registrySha256) ||
+      !Number.isSafeInteger(receipt.releasedAt) ||
+      (await stagingEvidenceSha256(receipt.originalRecord)) !== recordSha256
+    )
+      return null;
+    return receipt;
   }
 
   /** Admin-only by construction (POST /undrain): `cleared` when a record was
@@ -14988,6 +15100,8 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/reset": { scope: "admin", method: "POST" },
   "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
   "/deploy-fence": { scope: "drain", method: "POST" }, // fence reattach and read executing activity
+  "/deploy-fence-recovery": { scope: "admin", method: "GET" },
+  "/release-deploy-fence": { scope: "admin", method: "POST" },
   "/deploy-admissions": { scope: "admin", method: "GET" }, // targeted recovery inventory, never a drain-bearer route
   "/replica-recover-native-operation": { scope: "admin", method: "POST" },
   "/recover-native-operation": { scope: "admin", method: "POST" }, // exact journal plus original native receipt
@@ -15182,6 +15296,10 @@ export default {
             return await handleDrain(env, body);
           case "/deploy-fence":
             return await handleDeployFence(env, body.attempt);
+          case "/deploy-fence-recovery":
+            return await handleDeployFenceRecovery(env, url);
+          case "/release-deploy-fence":
+            return await handleReleaseDeployFence(env, body);
           case "/deploy-admissions":
             return await handleDeployAdmissions(env, url);
           case "/replica-recover-native-operation":
@@ -15943,6 +16061,83 @@ async function handleDeployFence(env: Env, attempt?: unknown): Promise<Response>
     await registry.clearDeployFence(fence.since, fence.until, versionId);
     return json({ error: "deploy-fence-read-unavailable" }, 503);
   }
+}
+
+async function handleDeployFenceRecovery(env: Env, url: URL): Promise<Response> {
+  const registry = registryStub(env);
+  const released = url.searchParams.get("released");
+  if (released !== null) {
+    if (!/^[a-f0-9]{64}$/.test(released)) return json({ error: "an exact released fence hash is required" }, 400);
+    const receipt = await registry.readDeployFenceReleaseReceipt(released);
+    return receipt ? json({ receipt }) : json({ error: "fence release receipt is unavailable" }, 409);
+  }
+  const quote = await registry.getDeployFenceRecoveryQuote(workerVersionId(env));
+  return quote ? json({ quote }) : json({ error: "a current pre-upload fence cannot be quoted" }, 409);
+}
+
+/** The administrator verifies the stopped controller and native target outside the Worker.
+ * Fresh idle probes and the final storage transaction still enforce the local safety facts. */
+async function handleReleaseDeployFence(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const expected = body.expectedRecordSha256;
+  const evidence = recoveryEvidenceUrl(body.evidence);
+  if (
+    typeof expected !== "string" ||
+    !/^[a-f0-9]{64}$/.test(expected) ||
+    !evidence ||
+    body.controllerStopped !== true ||
+    body.nativeTargetUnchanged !== true
+  )
+    return json(
+      {
+        error: "an exact fence hash and independent stopped-controller and unchanged-target attestations are required",
+      },
+      400,
+    );
+  const registry = registryStub(env);
+  const versionId = workerVersionId(env);
+  const quote = await registry.getDeployFenceRecoveryQuote(versionId);
+  if (!versionId || !quote || quote.recordSha256 !== expected)
+    return json({ error: "fence or actual Worker version changed; nothing released" }, 409);
+  const members = await registry.list();
+  const views = await Promise.allSettled(
+    members.map(async (member) => ({
+      ...(await residentStub(env, residentAddress(member)).getResidentDeployInfo()),
+      ...(await residentStub(env, residentAddress(member)).getResidentRecoveryProbe()),
+    })),
+  );
+  if (!recoveryViewsAreIdle(views.map((result) => (result.status === "fulfilled" ? result.value : null))))
+    return json({ error: "fence release requires idle owner, lifecycle and process evidence" }, 409);
+  const evidenceSha256 = await stagingEvidenceSha256(evidence);
+  let released: boolean;
+  try {
+    released = await registry.releaseDeployFence(expected, versionId, evidenceSha256, quote.registrySha256);
+  } catch {
+    const receipt = await registry.readDeployFenceReleaseReceipt(expected).catch(() => null);
+    if (
+      receipt?.schema !== 1 ||
+      receipt.originalRecordSha256 !== expected ||
+      receipt.workerVersion !== versionId ||
+      receipt.evidenceSha256 !== evidenceSha256 ||
+      receipt.registrySha256 !== quote.registrySha256 ||
+      receipt.requestEnd !== "operator-attested" ||
+      receipt.nativeOutcome !== "operator-attested-unchanged"
+    )
+      return json(
+        { error: "fence release outcome is unverified; inspect the original receipt without another mutation" },
+        503,
+      );
+    released = true;
+  }
+  return released
+    ? json({
+        released: true,
+        originalRecordSha256: expected,
+        evidenceSha256,
+        requestEnd: "operator-attested",
+        nativeOutcome: "operator-attested-unchanged",
+        drainRetained: true,
+      })
+    : json({ error: "fence, work or maintenance changed; nothing released" }, 409);
 }
 
 /** The existing Admin inventory retains its compact legacy shape. Deployment

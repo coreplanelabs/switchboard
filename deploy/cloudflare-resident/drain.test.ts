@@ -71,6 +71,8 @@ describe("global deploy admission evidence", () => {
             "endTrackedDeployAdmission",
             "workerVersionTimestamp",
             "handleDeployFence",
+            "handleDeployFenceRecovery",
+            "handleReleaseDeployFence",
             "handleRecoverAdmission",
             "handleStagingAbandonment",
             "handleStagingMaintenanceRelease",
@@ -127,6 +129,9 @@ describe("global deploy admission evidence", () => {
       "activeDeployAdmissions",
       "setDeployFence",
       "clearDeployFence",
+      "getDeployFenceRecoveryQuote",
+      "releaseDeployFence",
+      "readDeployFenceReleaseReceipt",
       "recoverDeployAdmission",
       "recoverQuotedDeployAdmission",
       "getDeployAdmissionRecoveryQuote",
@@ -166,13 +171,22 @@ describe("global deploy admission evidence", () => {
       loseRecoveryAck = false,
       failAuditWrite = false;
     let onRecoveryProbe = () => {};
-    let recoveryView = { state: "warm", executingRuns: 0, unknownRuns: 0 };
+    let recoveryView: { state: string; executingRuns: number; unknownRuns: number; activeProcesses?: number } = {
+      state: "warm",
+      executingRuns: 0,
+      unknownRuns: 0,
+    };
     const storage = {
       setAlarm: async (_at: number) => {},
       get: async (key: string) => rows.get(key),
       put: async (key: string, value: unknown) => {
         if (failOrigin) throw new Error("private-origin-error");
-        if (failAuditWrite && (key.startsWith("deploy:recovered:") || key.startsWith("deploy:staging-installation:")))
+        if (
+          failAuditWrite &&
+          (key.startsWith("deploy:recovered:") ||
+            key.startsWith("deploy:staging-installation:") ||
+            key.startsWith("deploy:fence-release:"))
+        )
           throw new Error("audit-write-failed");
         rows.set(key, value);
       },
@@ -197,7 +211,10 @@ describe("global deploy admission evidence", () => {
           loseDeleteAck = false;
           throw new Error("private-delete-ack-error");
         }
-        if (loseRecoveryAck && [...rows.keys()].some((key) => key.startsWith("deploy:recovered:"))) {
+        if (
+          loseRecoveryAck &&
+          [...rows.keys()].some((key) => key.startsWith("deploy:recovered:") || key.startsWith("deploy:fence-release:"))
+        ) {
           loseRecoveryAck = false;
           throw new Error("lost-recovery-commit-reply");
         }
@@ -244,7 +261,7 @@ describe("global deploy admission evidence", () => {
           reconcileForDeploy: async () => ({ result: "current", verified: true }),
           getResidentRecoveryProbe: async () => {
             onRecoveryProbe();
-            return { activeProcesses: 0 };
+            return { activeProcesses: recoveryView.activeProcesses ?? 0 };
           },
         }),
         TextEncoder,
@@ -288,6 +305,8 @@ describe("global deploy admission evidence", () => {
         RESOURCE_KEY: "resource",
         DEPLOY_RELEASE_RECEIPTS_KEY: "deploy:release-receipts",
         DEPLOY_RECOVERY_KEY_PREFIX: "deploy:recovered:",
+        DEPLOY_FENCE_RELEASE_KEY_PREFIX: "deploy:fence-release:",
+        REGISTRY_KEY_PREFIX: "resident:",
         STAGING_MAINTENANCE_KEY: "deploy:staging-maintenance",
         STAGING_WINDOW_KEY: "deploy:staging-window",
         DEPLOY_ABANDONED_KEY_PREFIX: "deploy:abandoned:",
@@ -302,6 +321,7 @@ describe("global deploy admission evidence", () => {
     const env = {
       CLOUDFLARE_ACCOUNT_ID: TEST_MAINTENANCE.stagingAccount,
       RESIDENT_SCRIPT_NAME: TEST_MAINTENANCE.residentScript,
+      CF_VERSION_METADATA: { id: "00000000-0000-4000-8000-000000000002" },
       ...(options.policy ? { RESIDENT_MAINTENANCE_POLICY: JSON.stringify(options.policy) } : {}),
     };
     const api = new Registry(
@@ -333,11 +353,12 @@ describe("global deploy admission evidence", () => {
         path: string,
         body?: Record<string, unknown>,
         version = "00000000-0000-4000-8000-000000000002",
+        token = "admin-fixture",
       ) =>
         Worker.fetch(
           new Request(`https://example.com${path}`, {
             method,
-            headers: { authorization: "Bearer admin-fixture", "content-type": "application/json" },
+            headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
             ...(body
               ? {
                   body: JSON.stringify({
@@ -359,6 +380,7 @@ describe("global deploy admission evidence", () => {
             ...env,
             CF_VERSION_METADATA: { id: version, timestamp: "1970-01-01T00:00:02.000Z" },
             RESIDENT_ADMIN_TOKEN: "admin-fixture",
+            RESIDENT_OPERATOR_TOKEN: "operator-fixture",
             RESIDENT_READ_TOKEN: "read-fixture",
             RESIDENT_DRAIN_TOKEN: "drain-fixture",
           },
@@ -371,6 +393,9 @@ describe("global deploy admission evidence", () => {
       },
       setRecoveryView: (view: typeof recoveryView) => {
         recoveryView = view;
+      },
+      setRecoveryProbe: (probe: () => void) => {
+        onRecoveryProbe = probe;
       },
       recover: async (
         body: Record<string, unknown>,
@@ -472,6 +497,226 @@ describe("global deploy admission evidence", () => {
       },
     };
   }
+  describe("manual deployment fence release", () => {
+    const version = "00000000-0000-4000-8000-000000000002";
+    const original = {
+      since: "1970-01-01T00:00:00.000Z",
+      until: "1970-01-01T01:00:00.000Z",
+      by: "deploy all",
+      reason: "deploy abc1234",
+      swapFence: true,
+      swapBuild: "a".repeat(40),
+      swapVersion: version,
+      swapAt: "1970-01-01T00:00:00.500Z",
+    };
+    const evidence = "https://example.com/receipts/stopped-controller-and-unchanged-native-target";
+    const seed = () => {
+      const h = fixture();
+      h.rows.set("drain", { ...original });
+      return h;
+    };
+    const quote = async (h: ReturnType<typeof fixture>) => {
+      const response = await h.http("GET", "/deploy-fence-recovery");
+      expect(response.status).toBe(200);
+      return (await response.json()).quote;
+    };
+    const request = (recordSha256: string) => ({
+      expectedRecordSha256: recordSha256,
+      evidence,
+      controllerStopped: true,
+      nativeTargetUnchanged: true,
+    });
+
+    it("releases only the exact pre-upload fence and retains the drain and an independent audit", async () => {
+      const h = seed();
+      const selected = await quote(h);
+      const response = await h.http("POST", "/release-deploy-fence", request(selected.recordSha256));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        released: true,
+        drainRetained: true,
+        originalRecordSha256: selected.recordSha256,
+        requestEnd: "operator-attested",
+        nativeOutcome: "operator-attested-unchanged",
+      });
+      expect(h.rows.get("drain")).toEqual({
+        since: "1970-01-01T00:00:00.000Z",
+        until: "1970-01-01T01:00:00.000Z",
+        by: "deploy all",
+        reason: "deploy abc1234",
+      });
+      expect(h.rows.get(`deploy:fence-release:${selected.recordSha256}`)).toMatchObject({
+        originalRecord: original,
+        workerVersion: version,
+        releasedAt: 1000,
+        requestEnd: "operator-attested",
+        nativeOutcome: "operator-attested-unchanged",
+      });
+      const receipt = await h.http("GET", `/deploy-fence-recovery?released=${selected.recordSha256}`);
+      expect(receipt.status).toBe(200);
+      expect((await receipt.json()).receipt).toMatchObject({ originalRecordSha256: selected.recordSha256 });
+    });
+
+    it.each(["read-fixture", "drain-fixture", "operator-fixture"])(
+      "refuses %s without changing the original fence",
+      async (token) => {
+        const h = seed();
+        const selected = await quote(h);
+        expect((await h.http("GET", "/deploy-fence-recovery", undefined, version, token)).status).toBe(401);
+        expect(
+          (await h.http("POST", "/release-deploy-fence", request(selected.recordSha256), version, token)).status,
+        ).toBe(401);
+        expect(h.rows.get("drain")).toEqual(original);
+      },
+    );
+
+    it("requires both independent operator attestations and an HTTPS receipt", async () => {
+      const h = seed();
+      const selected = await quote(h);
+      for (const bad of [
+        { controllerStopped: false },
+        { nativeTargetUnchanged: false },
+        { evidence: "http://example.com/unverified" },
+      ]) {
+        const response = await h.http("POST", "/release-deploy-fence", { ...request(selected.recordSha256), ...bad });
+        expect(response.status).toBe(400);
+        expect(h.rows.get("drain")).toEqual(original);
+      }
+    });
+
+    it("refuses a stale quote or a different actual Worker version", async () => {
+      const h = seed();
+      const selected = await quote(h);
+      expect((await h.http("POST", "/release-deploy-fence", request("f".repeat(64)))).status).toBe(409);
+      expect(
+        (
+          await h.http(
+            "POST",
+            "/release-deploy-fence",
+            request(selected.recordSha256),
+            "00000000-0000-4000-8000-000000000003",
+          )
+        ).status,
+      ).toBe(409);
+      expect(h.rows.get("drain")).toEqual(original);
+    });
+
+    it.each([
+      { holds: ["repo:acme/api"] },
+      { liftAsked: true },
+      { unexpectedState: "unverified" },
+      { swapAt: "invalid" },
+      { swapAt: "1969-12-31T23:59:59.000Z" },
+    ])("cannot quote malformed or post-upload lock state: %j", async (change) => {
+      const h = seed();
+      const stored = { ...original, ...change };
+      h.rows.set("drain", stored);
+      expect((await h.http("GET", "/deploy-fence-recovery")).status).toBe(409);
+      expect(h.rows.get("drain")).toEqual(stored);
+    });
+
+    it.each([
+      { state: "warm", executingRuns: 1, unknownRuns: 0 },
+      { state: "warm", executingRuns: 0, unknownRuns: 1 },
+      { state: "onboarding", executingRuns: 0, unknownRuns: 0 },
+      { state: "warm", executingRuns: 0, unknownRuns: 0, activeProcesses: 1 },
+    ])("retains the fence when a resident is not proven idle: %j", async (view) => {
+      const h = seed();
+      const selected = await quote(h);
+      h.setRecoveryView(view);
+      expect((await h.http("POST", "/release-deploy-fence", request(selected.recordSha256))).status).toBe(409);
+      expect(h.rows.get("drain")).toEqual(original);
+    });
+
+    it("rechecks admissions and the exact stored fence after the idle probes", async () => {
+      for (const change of ["admission", "fence", "membership"] as const) {
+        const h = seed();
+        const selected = await quote(h);
+        const replacement = { ...original, until: "1970-01-01T02:00:00.000Z" };
+        h.setRecoveryProbe(() => {
+          if (change === "admission")
+            h.rows.set("deploy:admission:still-running", { startedAt: 900, kind: "watchdog" });
+          else if (change === "membership") h.rows.set("resident:repo:acme/new", { resource: "repo:acme/new" });
+          else h.rows.set("drain", replacement);
+        });
+        expect((await h.http("POST", "/release-deploy-fence", request(selected.recordSha256))).status).toBe(409);
+        expect(h.rows.get("drain")).toEqual(change === "fence" ? replacement : original);
+      }
+    });
+
+    it("cannot release a staging maintenance hold", async () => {
+      const h = fixture({
+        policy: { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } },
+      });
+      await h.boot();
+      h.rows.set("drain", original);
+      const selected = await quote(h);
+      expect((await h.http("POST", "/release-deploy-fence", request(selected.recordSha256))).status).toBe(409);
+      expect(h.rows.get("drain")).toEqual(original);
+      expect((await h.api.getStagingMaintenance())?.state).toBe("held");
+    });
+
+    it("keeps the fence when an idle probe cannot be read", async () => {
+      const h = seed();
+      const selected = await quote(h);
+      h.setRecoveryProbe(() => {
+        throw new Error("private-probe-error");
+      });
+      const response = await h.http("POST", "/release-deploy-fence", request(selected.recordSha256));
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        error: "fence release requires idle owner, lifecycle and process evidence",
+      });
+      expect(h.rows.get("drain")).toEqual(original);
+    });
+
+    it("preserves the fence if the audit cannot commit and reads the receipt after a lost commit reply", async () => {
+      const failed = seed();
+      const selected = await quote(failed);
+      failed.failAuditWrite();
+      expect((await failed.http("POST", "/release-deploy-fence", request(selected.recordSha256))).status).toBe(503);
+      expect(failed.rows.get("drain")).toEqual(original);
+      const lost = seed();
+      const retryQuote = await quote(lost);
+      lost.loseRecoveryAck();
+      const response = await lost.http("POST", "/release-deploy-fence", request(retryQuote.recordSha256));
+      expect(response.status).toBe(200);
+      expect((await response.json()).released).toBe(true);
+      expect(lost.rows.get("drain")).toEqual({
+        since: original.since,
+        until: original.until,
+        by: original.by,
+        reason: original.reason,
+      });
+    });
+
+    it("cannot confirm a failed release from an audit with different membership", async () => {
+      const h = seed();
+      const selected = await quote(h);
+      h.rows.set(`deploy:fence-release:${selected.recordSha256}`, {
+        schema: 1,
+        originalRecordSha256: selected.recordSha256,
+        originalRecord: original,
+        workerVersion: version,
+        evidenceSha256: await stagingEvidenceSha256(evidence),
+        registrySha256: "f".repeat(64),
+        releasedAt: 900,
+        requestEnd: "operator-attested",
+        nativeOutcome: "operator-attested-unchanged",
+        drainRetained: true,
+      });
+      h.api.releaseDeployFence = async () => {
+        throw new Error("lost-rpc-reply");
+      };
+      const response = await h.http("POST", "/release-deploy-fence", request(selected.recordSha256));
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({
+        error: "fence release outcome is unverified; inspect the original receipt without another mutation",
+      });
+      expect(h.rows.get("drain")).toEqual(original);
+    });
+  });
+
   const origin = {
     kind: "watchdog",
     component: "scheduler",
