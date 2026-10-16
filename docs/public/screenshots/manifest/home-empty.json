@@ -79,7 +79,7 @@
     "src/channels/residentsModel.ts": "9993779d45c0f938ab1dbb4e63031b08a3f729fb5f7d6c31916a7e58cdfe0d58",
     "src/channels/runTimeline.ts": "74aa8f4f47abbf03b16ee0d663e4df964292273b6cc9b6cc17478b91574e0302",
     "src/channels/webAssets.ts": "402b7a1bdb2c1967960dfc06673dca3e6dbaeb25718d1bdcb1f0c59302d19471",
-    "src/channels/webSeed.ts": "8a3b3c035c183c4694a4ab8e94a9f5ca04b7e178742c20a5a2bbfe15028a83c1",
+    "src/channels/webSeed.ts": "0d5b07dbb53257dfb502f0df42b1548169d74c5f273d18a55ff2f93a8facc6a6",
     "src/channels/webShell.ts": "c3f74aeb04010dd88204b86e7a782f5a45f6731bf6f0f29cc8a4b5039df8f090",
     "src/config.ts": "bee7fc0eaa693a9cbaef60ddbdcdaec1630e44a6d1a57ac4912d89545756754c",
     "src/config/agents.ts": "29371b447ce5e523157d95be63a5a4cd13b3a49c9a8eb1c5fbc0f364fdf91b9a",
@@ -279,7 +279,7 @@
     "web/src/main.ts": "84ca021b55e606fcfd533c2612e66dc777af04760e2153ed1ecfe483810e0827",
     "web/src/pages/HomePage.vue": "5f465823f319aadf0fa36faa5648b4de580a7177f9afcc281decbece159df5e6",
     "web/src/routes.ts": "0c0ce42eec94dd818944b640ac2157294abf0826f71c3ec3bf2c8ac5253a6693",
-    "web/vite.config.ts": "448df7a321d76dcd79e25bf32ce574d83cdc9260996e40457caa0be7a0e910bb"
+    "web/vite.config.ts": "5e063995a338022fc2d8d4d51b1187489886d1f3975f06a7e22ed3e9ff4d08a4"
   },
   "rendered": {
     "requests": [
@@ -381,7 +381,7 @@
       "response:*/*:/assets/2d1117dc530202a2.js": "017507c86b03f35080950aeb88dac937aad6e7587865e09d6cf7eaacea3c5174",
       "response:*/*:/assets/30519f187e29203c.js": "18bc674a3374f99d4583f0516ac016b733be6a252d7d226e12c0b08261f8c284",
       "response:*/*:/assets/4bc9835edd11b53c.woff2": "117a54f5e0a35fa3c994d46f9f3596c4029817f06b45b546594c6671d68f1149",
-      "response:*/*:/assets/4fab5baaca5c14d2.js": "c65866129d1a015b418853d8d68340740fd3196393d182424f605de6a3beab66",
+      "response:*/*:/assets/4fab5baaca5c14d2.js": "cf7a6177398dac9b86c3f27612933b39b379211902234cababf3055e0a8c20f6",
       "response:*/*:/assets/5e62d5d97dca6e65.js": "217ceb3c8348b147f1fbe89a237f1ec4d8c38a1e758faeb30b5989f906ab4a40",
       "response:*/*:/assets/5fd1e101e29ae073.js": "684922d286cbc3a1c5fc6d313421e6f262d0d379a9767aec686d3dc6c9a68d06",
       "response:*/*:/assets/7704038c40f6cb06.js": "ae484740ab91178fcc191a46ce5f421099994a23a037e268f225e510697b466e",
@@ -394,7 +394,7 @@
       "response:*/*:/assets/e84c77bd8d4c7e31.js": "bdc4ce806ebb7f3147856e84b2a18c90467a90aecdc98b89b0c1ecaa98052473",
       "response:*/*:/assets/e87d52e570baa2d6.js": "24e4ca3eb48ca0d05747443e02e3b7151d9341e214756a79f959ee370a033e8f",
       "response:*/*:/assets/f08257fe1b44dd1d.js": "3a6ce1660de8a0cd181cee9b6fdfd0ba6b83396a4110c8e1aeb31b5e3bc87856",
-      "response:*/*:/assets/main.css": "279d9a506eac5342ca37c6503bfba0d9ea7f9e44a7256c82fd1f9c98691bdee8",
+      "response:*/*:/assets/main.css": "0b134c80e6499c9ff92afc53b922917ea640de78e6cdccb240c08e254048bb0c",
       "response:*/*:/threads": "d75f5638040155268181c35559c9de89475364e540d4f8ec3c94f55eacffd02f",
       "response:text/event-stream:/runs?stream=1&mine=1": "2244c5739933d2462c3f2d703307a3ae12ba93a1ef6a3bdd11615cec5b52aef6"
     }

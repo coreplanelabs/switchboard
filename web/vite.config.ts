@@ -53,7 +53,7 @@ export default defineConfig({
     // Also a project of the root vitest.config.ts: `npx vitest run --project web`.
     name: "web",
     environment: "happy-dom",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "green/**/*.test.ts"],
     // A `beforeAll` that dynamically imports a library (runPage.test.ts loads
     // @pierre/diffs) crosses to vitest's main process, and on a saturated CI
     // shard that import can outrun the 10 s default hook timeout while the

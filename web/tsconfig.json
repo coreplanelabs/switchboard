@@ -17,6 +17,6 @@
       "@core/*": ["../src/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"],
+  "include": ["src/**/*.ts", "src/**/*.vue", "green/**/*.ts", "green/**/*.vue", "vite.config.ts"],
   "exclude": ["dist", "node_modules"]
 }
