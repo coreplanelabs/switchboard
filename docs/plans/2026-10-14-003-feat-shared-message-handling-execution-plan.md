@@ -215,6 +215,12 @@ The shared intake module now has a source-evidence policy beside Slack's address
 
 This is an inactive recommendation function. No source producer calls it. The source processor must still save each result against the original source and task context before ignoring or offering the text. Source-job handling stages, typed inbox/unit delivery, both runtimes, exact consumption and relevance-quality evaluation remain pending. Step 3 is in progress, not complete.
 
+### Typed inbox evidence format, 2026-10-15
+
+The shared inbox now has a reader-first evidence codec. It keeps native source identity, nullable author, original source receipt, text and an orchestrator decision reference. Requester credentials, private-audience claims and controls are forbidden. A stored message must match expected destination custody; the original producer generation survives reclaim. A missing version cannot turn a tagged evidence message into a legacy requester message.
+
+This defines stored data, not admission authority. Current runtimes still hold the kind. The processor must read canonical source/decision records and verify current authority before delivery. Saved handling stages, runtime and unit-event integration, exact native consumption and migration remain pending. No producer is enabled; Step 3 is still in progress.
+
 ## Step 4: connect GitHub as a thin adapter
 
 **Current source:** [webhook receiver](../../src/channels/githubWebhook.ts), [current GitHub handlers](../../src/core/coordinator/checksIntake.ts), [GitHub API](../../src/execution/githubApi.ts), and [history tools](../../src/tools/github.ts).

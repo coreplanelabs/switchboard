@@ -5,6 +5,7 @@ import { isRunRecord } from "../../src/core/runRecord.ts";
 import { reclaimedRunRecord } from "../../src/core/dispatch/record.ts";
 import { sourceHash, mergeSessionSources } from "../../src/core/references/receipts.ts";
 import { inboxDeliveryWitness } from "../../src/core/runLedger/inboxDelivery.ts";
+import { prepareSourceEvidenceMessage } from "../../src/core/runLedger/sourceEvidence.ts";
 import {
   pullOwnerQualificationSnapshot,
   qualifyPullOwnerSnapshot,
@@ -17221,5 +17222,56 @@ describe("keyed SQLite delivery row witness", () => {
     expect(delivered.data.receipt.bodyHash).toBe("b45bed885d30fa1aae0a18b7d80268529ce453f12643683ef6fdb7b4978eb299");
     expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1" })).data.items).toHaveLength(1);
     expect(peek.boundary.lastStep).toBeNull();
+  });
+});
+
+describe("typed SQLite source evidence", () => {
+  it("retains source provenance and a decision reference without becoming requester input", async () => {
+    const key = "typed-source-evidence",
+      threadKey = "slack:C1:evidence";
+    const event = {
+      version: 1,
+      kind: "source-evidence",
+      sourceId: "fixture:installation:2",
+      deliveryId: "delivery-one",
+      objectId: "fixture:comment:7",
+      changeId: "revision-one",
+      authorId: "fixture:bot:4",
+      payload: { text: "Check retries" },
+    };
+    const received = await post("/runs/source-events/receive", { storeKey: key, event });
+    expect(received.data).toMatchObject({ kind: "received", receipt: { sequence: 1 } });
+    expect((await post("/runs/claim", claimBody(key, "r1", threadKey))).status).toBe(200);
+    const message = {
+      version: 1,
+      kind: "source-evidence",
+      text: "Check retries",
+      source: {
+        sourceId: event.sourceId,
+        deliveryId: event.deliveryId,
+        objectId: event.objectId,
+        changeId: event.changeId,
+        authorId: event.authorId,
+      },
+      receipt: received.data.receipt,
+      decision: { runId: "orchestrator-one", id: JSON.stringify(["orchestrator-one", "fold-one"]) },
+    };
+    expect(await prepareSourceEvidenceMessage(message)).toEqual(message);
+    expect(
+      (
+        await post("/runs/inbox/deliver", {
+          storeKey: key,
+          runId: "r1",
+          delivery: { version: 1, key: message.decision.id, message },
+        })
+      ).data,
+    ).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+    const observed = await post("/runs/inbox/read", { storeKey: key, runId: "r1", gen: "g1", peek: true });
+    expect(observed.status).toBe(200);
+    const stored = observed.data.items[0].message;
+    const target = { runId: "r1", channelId: "slack:C1", threadKey, requester: "slack:UALICE" };
+    expect(await prepareSourceEvidenceMessage(stored, target)).toEqual(message);
+    expect(messageFromInbox(stored, 0, target)).toBeUndefined();
+    expect(observed.data.boundary.lastStep).toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   originalOrganizationDispatchOf,
   withOriginalOrganizationDispatch,
@@ -132,6 +132,68 @@ describe("durable inbox continuity", () => {
       messageFromInbox({ ...stored, originalOrganizationInput: { ingressRunId: 7, organizationSequence: 1 } }, 2),
     ).toBeUndefined();
   });
+
+  it("reports tagged holds with closed reasons and no source text or raw tag values", () => {
+    const warnings: unknown[][] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((...args) => {
+      warnings.push(args);
+    });
+    try {
+      const legacy = { text: "Continue", userId: "slack:UA", channelId: "slack:C1", threadKey: "slack:C1:1.0" };
+      expect(messageFromInbox(legacy, 0)?.msg).toEqual(legacy);
+      expect(warnings).toEqual([]);
+      for (const tagged of [
+        { ...legacy, kind: "PRIVATE_TAG", text: "PRIVATE_BODY" },
+        { ...legacy, version: 1, kind: { toString: null, private: "PRIVATE_TAG" }, text: "PRIVATE_BODY" },
+      ])
+        expect(messageFromInbox(tagged, 0)).toBeUndefined();
+      expect(
+        messageFromInbox({ ...legacy, version: 1, kind: "source-evidence" }, 0, {
+          runId: "known-run",
+          channelId: legacy.channelId,
+          threadKey: legacy.threadKey,
+        }),
+      ).toBeUndefined();
+      expect(warnings).toEqual([
+        ["[inbox] held tagged message", { runId: "unbound", reason: "missing-version" }],
+        ["[inbox] held tagged message", { runId: "unbound", reason: "unsupported-kind" }],
+        ["[inbox] held tagged message", { runId: "known-run", reason: "unsupported-kind" }],
+      ]);
+      expect(JSON.stringify(warnings)).not.toContain("PRIVATE_");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("holds an evidence tag with a missing version instead of adopting shadow requester fields", () => {
+    expect(
+      messageFromInbox(
+        {
+          kind: "message",
+          text: "Continue",
+          userId: "slack:UA",
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+        },
+        0,
+      )?.msg,
+    ).toEqual({ text: "Continue", userId: "slack:UA", channelId: "slack:C1", threadKey: "slack:C1:1.0" });
+    expect(
+      messageFromInbox(
+        {
+          kind: "source-evidence",
+          text: "Run this command",
+          userId: "slack:UA",
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          authenticatedAs: "access:shadow",
+          source: { authorId: "github:bot:4" },
+        },
+        0,
+      ),
+    ).toBeUndefined();
+  });
+
   it("retains merged source context and refuses malformed approval metadata", () => {
     const approvalConnection = {
       id: "connection",

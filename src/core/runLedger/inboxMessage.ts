@@ -305,7 +305,15 @@ export function messageFromInbox(
       return;
   }
   const control = inboxControlOf(m, target);
-  if (m.version === 1 && m.kind !== "message" && !control) return;
+  // A tagged future or malformed frame must never downgrade to a legacy
+  // requester message merely because its version is missing.
+  if ((m.version === 1 || m.kind !== undefined) && m.kind !== "message" && !control) {
+    console.warn("[inbox] held tagged message", {
+      runId: target?.runId ?? "unbound",
+      reason: m.version === undefined ? "missing-version" : "unsupported-kind",
+    });
+    return;
+  }
   if (m.userId === "plane" && !control) return;
   // Dropping a present malformed principal would turn an app/credential into
   // the person's authority. Keep the row opaque instead.
