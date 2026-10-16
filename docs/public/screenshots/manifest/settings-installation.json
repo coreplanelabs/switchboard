@@ -63,7 +63,7 @@
     "scripts/screenshots.mts": "f62f9806ba5d836ff6a5f789dc2b348ed5526763dbba3f95333b66a0eda34044",
     "scripts/web-green-fixtures.ts": "9d21cc4d7a8a3874c428e142b6d2a2a443bae04ac6ea390ea2e59bae0348d7c6",
     "scripts/web-preview-reading-diff.ts": "24dea75cb4b61c011fa75878b138dde75e8a260d3c5b06c05c1e6fe2f2a58649",
-    "scripts/web-preview.ts": "75c53f544d16325ade169da0dbb1e7b4b31138b1586db9fcea04effd7aa1ce40",
+    "scripts/web-preview.ts": "b16e15c92b6b1a56b1df70bcb924ec5974c080305610745bb047cd1f47bb3be9",
     "scripts/web-review-fixture.ts": "ca73c51b9c8d8345fc0304e1d550026bc7e7f5df52df669e7cb9f689e643bf37",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
     "src/agents/registry.ts": "dbf74ae200eaf6903728f9536c144b04eb4c779abb1131d147cada8f85cb34fa",
@@ -182,7 +182,7 @@
     "src/core/reviewsReport.ts": "3287728bad1fffd698d86bdb486d7fdcec9500c7ae4c0cff21e2b90e4af0b59d",
     "src/core/routingTelemetry.ts": "3cd464f370100f463d74841eaf499ec891fcd434d4f93fec13a660efa3c51c80",
     "src/core/runDuration.ts": "dca2a672930febee9fae33e917c5129d6271fd1f9781a7dbcb4cb2217dbe2dae",
-    "src/core/runEvents.ts": "85c1668f54801c302db6925eee63d77d7fb4eb0e0d551b437f00984902baf29e",
+    "src/core/runEvents.ts": "1d6b06475dd8948fb8d0ae010c68c7a7fc01255e228d8ef6db921f9558f1f2fc",
     "src/core/runFriction.ts": "382355c5da03ad9556aceeed0eb92bfb6b946afc7d98497c947fafb52b0ae321",
     "src/core/runIdentity.ts": "de4ec56068e42c38d84ba40b63c373426d4ebd6aad20f55b6d15bcd2e372e95a",
     "src/core/runLedger/cancellation.ts": "479739ab16421d4c9f32795e15f80801f645c3cdaa7fce4b779578987f7085bc",
@@ -464,8 +464,8 @@
       "response:*/*:/assets/fa9648c65d44afab.js": "be6f136511acc845b8a7f081a78cebb32a09124b4cbe63c5d516994c6566528e",
       "response:*/*:/assets/green.css": "910b7d4303c281ffc4a9abd83e0d5af751a49010657bf5fb94f94c3be4333bc7",
       "response:*/*:/settings/installation": "4b6afb361dc68497bf2e9caa85f541250b63f84e19def86867a85c27f0282332",
-      "response:application/json:/home/session": "5dcd3377e9b0795839c5f0fae6faaa939c480742690fc29500e8c1a3d3298438",
-      "response:text/event-stream:/home/events": "6297d1eca242d8fdcc941b154f16457754892e3728f7b5f1932adb06fa52e0ac"
+      "response:application/json:/home/session": "959b0d1a73d56e22e8812d8bbe9a92c1f5f2e9d4642d4773149498646326a6bd",
+      "response:text/event-stream:/home/events": "9572bbff93467961b3ceac0c676095d0af0d395062efc98791cc6c4ec64314a4"
     }
   }
 }

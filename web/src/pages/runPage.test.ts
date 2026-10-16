@@ -358,6 +358,71 @@ describe("RunPage — the timeline (item 25)", () => {
   });
 });
 
+describe("RunPage — recovery notices", () => {
+  it.each(["history", "live"])("uses info for routine recovery and warning for failures in %s mode", async (mode) => {
+    const events: LiveFrame[] = [
+      {
+        type: "run_note",
+        kind: "resumed",
+        summary: "resumed after a restart: pi still runs in the container",
+        at: 2000,
+      },
+      { type: "run_note", kind: "model_retry", summary: "the current model turn will retry", at: 3000 },
+      {
+        type: "run_note",
+        kind: "harness_error",
+        summary: "pi's model stream ended early; the turn is held and retry 1 waits 5s inside this run's lease",
+        at: 4000,
+      },
+      {
+        type: "run_note",
+        kind: "harness_error",
+        summary:
+          "pi cancelled the follow-up model call locally; the turn is held and retry 2 waits 10s inside this run's lease",
+        at: 5000,
+      },
+      {
+        type: "run_note",
+        kind: "harness_error",
+        summary: "the model retry prompt was refused; the transport failure remains held",
+        at: 6000,
+      },
+      { type: "run_note", kind: "storage_failure", summary: "Storage request failed: /runs/heartbeat", at: 7000 },
+      { type: "run_note", kind: "run_failed", summary: "resident /exec: internal error", at: 8000 },
+    ];
+    const live = mode === "live" ? mountLive() : undefined;
+    const w = live?.wrapper ?? mountApp(RunPage, { seed: historySeed(events) });
+    if (live) {
+      live.es().emitOpen();
+      for (const event of events) live.es().emitMessage(event);
+      await flushPromises();
+    }
+    expect(
+      w.findAll("#log .note").map((row) => ({
+        text: row.find("span").text(),
+        info: row.classes().includes("text-info"),
+        warning: row.classes().includes("text-warn"),
+      })),
+    ).toEqual([
+      { text: "⏱ resumed after a restart: pi still runs in the container", info: true, warning: false },
+      { text: "⏱ the current model turn will retry", info: true, warning: false },
+      {
+        text: "⏱ pi's model stream ended early; the turn is held and retry 1 waits 5s inside this run's lease",
+        info: true,
+        warning: false,
+      },
+      {
+        text: "⏱ pi cancelled the follow-up model call locally; the turn is held and retry 2 waits 10s inside this run's lease",
+        info: true,
+        warning: false,
+      },
+      { text: "⏱ the model retry prompt was refused; the transport failure remains held", info: false, warning: true },
+      { text: "⏱ Storage request failed: /runs/heartbeat", info: false, warning: true },
+      { text: "⏱ resident /exec: internal error", info: false, warning: true },
+    ]);
+  });
+});
+
 describe("RunPage — history mode", () => {
   // costs.md item 4c: the run's dollars beside the duration, the per-model figures on hover.
   it("heads with the run's cost beside the duration (item 22): dollars, unpriced for a model without a price, nothing without usage; the per-model figures on hover", () => {

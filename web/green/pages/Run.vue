@@ -37,6 +37,7 @@ import {
   ArtifactLinksKey,
   ReplyLandedKey,
   quotedLines,
+  type NoteVm,
 } from "../../src/lib/runPageModel";
 import { createPrReviewCollector } from "../../src/lib/prReviewCollector";
 import { createReviewAbridge } from "../../src/lib/reviewAbridge";
@@ -368,6 +369,19 @@ const newestNotepadKey = computed(() => {
   }
   return undefined;
 });
+
+function noteClass(note: NoteVm): string {
+  if (note.replay) return "text-dimmed";
+  // Older records used harness_error for these same bounded local retries.
+  const legacyRetry =
+    note.noteKind === "harness_error" &&
+    /^pi(?:'s (?:follow-up )?model stream ended early| cancelled the (?:follow-up )?model call locally); the turn is held and retry \d+ waits \d+(?:\.\d+)?s inside this run's lease$/.test(
+      note.text,
+    );
+  return note.noteKind === "resumed" || note.noteKind === "model_retry" || legacyRetry
+    ? "bg-info/10 text-info"
+    : "bg-warn/10 text-warn";
+}
 
 // ---- follow the stream only when the viewer is already at the tail -------------
 const logEnd = ref<HTMLElement | null>(null);
@@ -1026,7 +1040,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           <li
             v-else
             class="note mt-4 flex items-baseline gap-3 rounded-md pl-3 pr-(--sb-gutter) py-1.5"
-            :class="item.replay ? 'text-dimmed' : 'bg-warn/10 text-warn'"
+            :class="noteClass(item)"
           >
             <span>{{ (item.replay ? "… " : "⏱ ") + item.text }}</span>
             <span

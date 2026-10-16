@@ -259,6 +259,8 @@ export type RunNoteKind =
    *  is a superset of the model's context. The summary names the token counts
    *  before and after. Published by the pi bridge. */
   | "compacted"
+  /** A recoverable local model call is waiting for its bounded retry. */
+  | "model_retry"
   /** The pi harness itself failed in a way the run must show (harness-pi.md
    *  item 6): the extension threw, pi asked a dialog no one answers (answered
    *  cancelled), or pi emitted an event kind this build's bridge does not
@@ -388,6 +390,7 @@ export const RUN_NOTE_KINDS = [
   "pr_head_unverified",
   "review_not_posted",
   "compacted",
+  "model_retry",
   "harness_error",
   "policy_refusal",
   "tool_refused",
