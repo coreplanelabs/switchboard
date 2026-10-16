@@ -8,6 +8,8 @@
 // the stage (the dashboard's included). Every other caller may ignore it.
 
 export interface DispatchOutcome {
+  /** An original claim may have committed. This grants no settled refusal or replacement. */
+  unknownClaim?: { runId: string };
   /** The original run owns this queued input; completion here does not prove consumption. */
   inputQueued?: { runId?: string };
   status: "completed" | "refused" | "failed" | "stopped";

@@ -44,6 +44,7 @@ import {
   decideFollowUp,
   refusalReply,
   steerAck,
+  heldFollowUpReply,
   ThreadAdmission,
   type FollowUpInput,
   type LiveThread,
@@ -359,6 +360,7 @@ export interface AdmissionContext {
  *  means the thread has been answered and the dispatch is over — no card, no
  *  run, no workspace. */
 export type AdmissionOutcome =
+  | { kind: "held"; runId: string }
   /** The thread is this dispatch's: `admitted` is the slot it holds until its outer finally releases it. */
   | { kind: "proceed"; admitted: LiveThread<DispatchFollowUp> }
   /** The run this message was steered into ended during the round trip: the message runs fresh, as its own dispatch. */
@@ -560,6 +562,7 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
     return { kind: "superseded", of: "resume" };
   }
   if (claim.kind === "live" && ctx.coordinator) {
+    if (claim.live.unknownClaim !== undefined) return { kind: "held", runId: claim.live.unknownClaim.runId };
     // A coordinator's spawn is the bot's own request, never a person's reply
     // (item 8): a run in flight on the unit's thread means the step's child is
     // already running (its row carries the same key) or another step's is
@@ -585,6 +588,11 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
         ),
       );
       return { kind: "refused", reason: "live_agent_allowlist" };
+    }
+    if (claim.live.unknownClaim !== undefined) {
+      const { runId } = claim.live.unknownClaim;
+      await replyOutcome(io, heldFollowUpReply(runId));
+      return { kind: "held", runId };
     }
     const decision = decideFollowUp(claim.live, { agent: directives.agent });
     if (decision.kind === "refuse") {

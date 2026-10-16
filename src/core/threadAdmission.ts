@@ -197,6 +197,8 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
 
 /** The run a thread is currently occupied by, as admission sees it. */
 export interface LiveThread<T extends FollowUpInput = FollowUpInput> {
+  /** Setup ended without confirming this original claim; no producer consumes the inbox. */
+  unknownClaim?: { runId: string };
   agent: string;
   inbox: FollowUpInbox<T>;
   startedAt: number;
@@ -284,6 +286,10 @@ const linkSuffix = (live: LiveThread) => (live.runLink ? ` · ${live.runLink}` :
 /** The one-line reply a steered follow-up gets: where it went. */
 export function steerAck(live: LiveThread, now: number): string {
   return `↪ Added your message to the *${live.agent}* work in this thread (${elapsed(live, now)} elapsed). It will read it at its next step.${linkSuffix(live)}`;
+}
+
+export function heldFollowUpReply(runId: string): string {
+  return `The original task remains on hold because its start could not be confirmed. This message was not saved or queued. No replacement work started. Original run: ${runId}.`;
 }
 
 /** The reply a refused follow-up gets: what is live, why it was not run, what to do. */
