@@ -42,6 +42,63 @@ function organizationContract(
   _name: string,
 ) {
   describe("organization store contract", () => {
+    it("retains protected MCP form-connection metadata and refuses an unknown consent mode atomically", async () => {
+      const store = factory(() => 1);
+      const value: OrganizationEnvelope = {
+        ...envelope("form-connection"),
+        source: "mcp",
+        actor: {
+          identity: { issuer: "token:test", tenant: null, subject: "device" },
+          kind: "service",
+          principal: "mcp:device",
+          stream: null,
+          bindingRevision: 0,
+          onBehalfOf: null,
+        },
+        sourceReference: {
+          actorId: "mcp:device",
+          userId: "mcp:device",
+          channelId: "mcp:default",
+          threadKey: "mcp:default:command",
+          approvalConnection: {
+            id: "a".repeat(64),
+            credentialId: "mcp:device",
+            requestHash: "b".repeat(64),
+            mode: "form",
+          },
+        },
+      };
+      expect(await store.execute({ action: "admit", envelope: value, limits })).toMatchObject({
+        status: "receipt",
+        receipt: { status: "pending" },
+      });
+      expect(
+        await store.execute({
+          action: "submission",
+          organization: value.organization,
+          actor: value.actor,
+          source: value.source,
+          key: value.key,
+        }),
+      ).toMatchObject({
+        status: "submission",
+        envelope: { sourceReference: { approvalConnection: { mode: "form" } } },
+      });
+      expect(
+        await store.execute({
+          action: "admit",
+          envelope: {
+            ...value,
+            key: "invalid-mode",
+            sourceReference: {
+              ...value.sourceReference!,
+              approvalConnection: { ...value.sourceReference!.approvalConnection!, mode: "browser" as "form" },
+            },
+          },
+          limits,
+        }),
+      ).toEqual({ status: "invalid" });
+    });
     it("admits an unlinked delegated service into only its own source stream and fences its old revision after unlink", async () => {
       const store = factory(() => 1);
       const serviceIdentity = { issuer: "token:test", tenant: null, subject: "device-one" };

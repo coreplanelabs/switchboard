@@ -1,0 +1,2253 @@
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  CLIENT_INFO_META_KEY,
+  PROTOCOL_VERSION_META_KEY,
+} from "@modelcontextprotocol/server";
+import { buildCoreCommands } from "../core/commandCatalogue.js";
+import { secretsFrom } from "../secrets.js";
+// Feature: docs/reference/specs/browser-home.md — production composition preserves original execution owners.
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Readable } from "node:stream";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { afterEach, describe, expect, it } from "vitest";
+import { handleIngressRequest } from "./http.js";
+import { InMemoryPersonalTokenStore, digestBearer } from "../mcp/personalTokens.js";
+import type { Provider } from "../core/provider.js";
+import { InMemoryGithubApi } from "../execution/githubApi.js";
+import { createOriginalUnitRecipient } from "./originalUnitRecipient.js";
+import { createHomeRepositories } from "./homeRepositories.js";
+import { createMainTaskStarter } from "../core/coordinator/mainStart.js";
+import { createHomeService } from "../core/home/service.js";
+import { createHomeConditionReader } from "../core/home/conditions.js";
+import { resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
+import { InMemoryPrivateWorkerLog, privateWorkerThreadKey } from "../core/privateWorkerLog.js";
+import { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { GitBindings } from "../core/modelProxy/gitBindings.js";
+import { HarnessRegistry } from "../core/harness/pi/relay.js";
+import { OpenCodeHarness } from "../core/harness/opencode/harness.js";
+import { PiHarness } from "../core/harness/pi/piHarness.js";
+import { FakeHarnessContainer } from "../core/harness/testing/fakeContainer.js";
+import { scriptPiFromProvider } from "../core/harness/pi/testing/providerPi.js";
+import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
+import { createMcpApprovalView } from "./mcpApprovalView.js";
+import { handleMcpRequest } from "./mcp.js";
+import { ConfigStore } from "../config.js";
+import { NullMcpToolSource } from "../mcp/source.js";
+import { ALL_CAPABILITIES } from "../core/capabilities.js";
+import { ThreadsElsewhere } from "../core/runLedger/threadsElsewhere.js";
+import type { Grants } from "../core/authz/types.js";
+import { ALL_GRANTS } from "../core/authz/grants.js";
+import { DAY_MS } from "../core/budgets.js";
+import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
+import { InMemoryConfirmationStore } from "../core/confirmations.js";
+import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import type { CoordinatorInstance, CoordinatorUnit } from "../core/coordinator/contract.js";
+import { seedCoordinatorInstance, seedCoordinatorUnit } from "../core/testing/coordinatorInstance.js";
+import { dispatch, dispatchClick, type CoreDeps } from "../core/dispatcher.js";
+import { withOriginalOrganizationDispatch } from "../core/dispatch/privateDestination.js";
+import { NullMemoryStore } from "../core/memory/stores.js";
+import { NO_FLEET } from "../core/residentFleet.js";
+import { InMemoryOrganizationStore } from "../core/organization/memory.js";
+import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import { NullLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
+import { RunRegistry } from "../core/runRegistry.js";
+import { InMemoryRunStore } from "../core/runStore.js";
+import { NullRunHistoryWriter } from "../core/runHistoryWriter.js";
+import { createRunsService } from "../core/runsService.js";
+import type { RunRecord } from "../core/runRecord.js";
+import { analyzeRunFriction } from "../core/runFriction.js";
+import type { HomeSession } from "./homeSeed.js";
+import type { HomeRuntimeContext } from "./homeRuntime.js";
+import { createOrganizationAuthentication } from "./organizationAuthentication.js";
+import { createBrowserHomeInstallation } from "./browserHomeInstallation.js";
+// The SDK's legacy latest-version export differs from its modern form handler.
+const FORM_PROTOCOL_VERSION = ["2026", "07", "28"].join("-");
+const cleanups: (() => void)[] = [];
+afterEach(() => {
+  for (const cleanup of cleanups.splice(0)) cleanup();
+});
+const identity = { issuer: "https://access.fixture.test", tenant: null, subject: "alice" };
+const thread = "web:alice:unit";
+const instance: CoordinatorInstance = {
+  id: "fixture",
+  kind: "ship",
+  userId: "access:alice",
+  channelId: "web:alice",
+  threadKey: thread,
+  repo: "sample/api",
+  branch: "codex/original",
+  createdAt: 1000,
+};
+const unit: CoordinatorUnit = {
+  instanceId: "fixture",
+  unit: "original",
+  slug: "original",
+  title: "Original unit",
+  branch: "codex/original",
+  dependsOn: [],
+  rounds: [],
+  threadKey: thread,
+  idle: {
+    why: "human_gated",
+    at: 1000,
+    renewalsLeft: 1,
+    wakes: 0,
+    spendUsd: null,
+    humanGate: {
+      assignedTo: "access:alice",
+      pr: { number: 42, url: "https://github.com/sample/api/pull/42" },
+      round: 1,
+      verdict: "approve",
+      findings: [],
+      askedAt: 1000,
+    },
+  },
+};
+async function fixture(
+  linkedSlack = false,
+  privateSlack = false,
+  provider?: Provider,
+  productionRetention = false,
+  metadataRecipient = false,
+  personalApproved = false,
+) {
+  let now = 1000,
+    policy = "config";
+  const targetThread = linkedSlack ? "slack:D1:1" : thread;
+  const path = mkdtempSync(join(tmpdir(), "browser-installation-"));
+  cleanups.push(() => rmSync(path, { recursive: true, force: true }));
+  writeFileSync(
+    join(path, "config.yaml"),
+    `organization: fixture\nproviders:\n  anthropic: { type: anthropic, apiKeyEnv: UNSET_FIXTURE_PROVIDER }\ndefaults:\n  agent: general\n  verbosity: debug\n  models: { general: anthropic/general-model, coding: anthropic/coding-model }\ngrants:\n  "access:alice": { actions: all, channels: all, repos: all, organizations: all }\n  "http:bot": { actions: all, channels: all, repos: all, organizations: all }\n  "mcp:bot": { actions: all, channels: all, repos: all, organizations: all }\n  "mcp:personal:alice": { actions: all, channels: all, repos: all, organizations: all }\n  "slack:UALICE": { actions: all, channels: all, repos: all, organizations: all }\nrouting: { operator: off }\nworkspaceDir: ${path}/workspaces\n`,
+  );
+  const config = new ConfigStore(join(path, "config.yaml"), join(path, "overrides.json"));
+  const store = new InMemoryOrganizationStore(() => now),
+    ledger = new InMemoryRunLedger(() => now);
+  const registry = new RunRegistry({ now: () => now });
+  const runStore = new InMemoryRunStore({ now: () => now });
+  const coordinator = new InMemoryCoordinatorInstanceStore(ledger);
+  const github = new InMemoryGithubApi({
+    "sample/api": { private: false },
+    "sample/web": { private: false },
+    "sample/private": { private: true },
+  });
+  const repoChoices = createHomeRepositories({ config, github });
+  const confirmations = new InMemoryConfirmationStore({ clock: () => now });
+  const personalTokens = new InMemoryPersonalTokenStore();
+  await personalTokens.put({
+    digest: digestBearer("c".repeat(64)),
+    subject: "personal:alice",
+    email: "alice@example.test",
+    userId: "access:alice",
+    createdAt: now,
+    ...(personalApproved
+      ? {
+          approval: {
+            version: 1 as const,
+            issuer: identity.issuer,
+            audience: "access-app",
+            organization: "fixture",
+            subject: identity.subject,
+          },
+        }
+      : {}),
+  });
+  const effects: string[] = [];
+  const nativeReplies: string[] = [];
+  const tokens = { "native-token": { subject: "bot", channel: "ops", email: "alice@example.test" } };
+  const commands = new CommandRegistry<null>({ audit: () => {} });
+  commands.register({
+    id: "memory.forget",
+    action: "memory:read",
+    effect: "read",
+    describe: "Read-only fixture command",
+    handler: async ({ caller }) => {
+      effects.push(caller.actor.id);
+      return { text: "Read-only command completed." };
+    },
+    render: (result) => String((result as { text: string }).text),
+  });
+  const bound = bindCommands(commands, null);
+  const runs = createRunsService({ registry, store: runStore, units: coordinator });
+  const nudges: { id: string; type: string }[] = [];
+  const core: CoreDeps = {
+    config,
+    capabilities: ALL_CAPABILITIES,
+    threadsElsewhere: new ThreadsElsewhere(),
+    completions: {
+      get: () => {
+        if (provider) return provider;
+        throw new Error("No model may run for an owned answer or saved command.");
+      },
+    },
+    mcp: new NullMcpToolSource(),
+    memory: new NullMemoryStore(),
+    residentFleet: NO_FLEET,
+    runRegistry: registry,
+    runStore,
+    runHistoryWriter: new NullRunHistoryWriter(),
+    runLedger: new NullLedgerWriteThrough("fixture", runStore),
+    commands: bound,
+    confirmations,
+    coordinatorInstances: coordinator,
+    clock: () => now,
+    ...(privateSlack
+      ? {
+          slackContextForRun: () => ({
+            originAudience: async () => "dm" as const,
+            canReadSource: async () => true,
+            readSource: async () => {
+              throw new Error("Unexpected raw Slack text read");
+            },
+            revalidateSource: async () => false,
+            verifyDirectOrigin: async () => true,
+          }),
+        }
+      : {}),
+    workflow: {
+      get: async (id: string) => ({
+        sendEvent: async (event: { type: string }) => {
+          nudges.push({ id, type: event.type });
+        },
+      }),
+    } as CoreDeps["workflow"],
+  };
+  const created: string[] = [];
+  const privateWorkerLog = new InMemoryPrivateWorkerLog();
+  if (provider) {
+    const harnesses = new HarnessRegistry();
+    const bearers = new RunBearerStore({ clock: () => now });
+    core.runBearers = bearers;
+    core.githubDoor = { baseUrl: "https://git.fixture.test" };
+    core.githubBindings = new GitBindings();
+    core.harness = {
+      harnesses: { pi: new PiHarness(), opencode: new OpenCodeHarness() },
+      registry: harnesses,
+      harnessUrl: "https://bot.fixture.test",
+      loopbackUrl: "http://127.0.0.1:8080",
+      containerFor: () => {
+        const container = new FakeHarnessContainer();
+        scriptPiFromProvider(container, { provider, registry: harnesses, bearers });
+        return container;
+      },
+      pollMs: 1,
+      tickMs: 5,
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    };
+    core.githubApi = github;
+    core.runLedger = createLedgerWriteThrough({ ledger, gen: "fixture-main", fallback: runStore, warn: () => {} });
+    core.mainTaskStart = createMainTaskStarter({
+      instances: coordinator,
+      privateWorkerLog,
+      readFile: async () => ({ content: "" }),
+      create: async (id) => {
+        created.push(id);
+        return { kind: "created", id };
+      },
+      status: async () => ({ kind: "status", status: "running" }),
+      repoInfo: async () => ({ defaultBranch: "main" }),
+      canUseRepo: (actor, repo) => config.canUseRepo(actor, repo),
+      canRunAgent: (actor, name) => config.canRunAgent(actor, name),
+      adminsHint: () => "An administrator",
+      privateWorkerAvailable: true,
+      caps: { maxRounds: 3, maxMinutes: 45 },
+      clock: () => now,
+    });
+  }
+  const slackIdentity = { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" };
+  const mappings = [
+    { source: "http" as const, issuer: "installation:fixture:http", tenant: null, organization: "fixture" },
+    { source: "mcp" as const, issuer: "installation:fixture:mcp", tenant: null, organization: "fixture" },
+    { source: "browser" as const, issuer: identity.issuer, tenant: null, organization: "fixture" },
+    { source: "slack" as const, issuer: slackIdentity.issuer, tenant: slackIdentity.tenant, organization: "fixture" },
+  ];
+  if (linkedSlack) {
+    const person = await store.directory.createPerson();
+    if (person.status !== "created") throw new Error("No fixture person");
+    for (const linked of [identity, slackIdentity]) {
+      const result = await store.directory.change({
+        action: "link",
+        identity: linked,
+        personId: person.person.id,
+        expectedRevision: 0,
+        actor: identity,
+        proof: { method: "dual-authentication", version: 1 },
+      });
+      expect(result.status).toBe("changed");
+    }
+  }
+  let installation!: ReturnType<typeof createBrowserHomeInstallation>;
+  let available = true,
+    writable = true;
+  let browserGrants: Grants = ALL_GRANTS;
+  const authentication = createOrganizationAuthentication({
+    organization: "fixture",
+    mappings,
+    grantsFor: (id) => (id === "access:alice" ? browserGrants : ALL_GRANTS),
+    auth: () => ({ tokens }),
+    personalTokens,
+    ...(personalApproved ? { personalApproval: { issuer: identity.issuer, audience: "access-app" } } : {}),
+    directory: store.directory,
+    store,
+    ledger,
+    currentBrowser: async () =>
+      available
+        ? {
+            status: "verified",
+            identity,
+            actorId: "access:alice",
+            kind: "human",
+            organizationMember: true,
+            privateSource: true,
+            epoch: "native-session",
+          }
+        : { status: "unavailable" },
+    currentSlack: async (_identity, _attestation, ref) =>
+      available && linkedSlack
+        ? {
+            status: "verified",
+            identity: slackIdentity,
+            actorId: "slack:UALICE",
+            kind: "human",
+            organizationMember: true,
+            privateSource: privateSlack,
+            ...(privateSlack && ref
+              ? {
+                  directAudience: {
+                    kind: "slack-unshared-im" as const,
+                    channelId: ref.channelId,
+                    userId: ref.userId,
+                    threadKey: ref.threadKey,
+                  },
+                }
+              : {}),
+            epoch: "native-slack",
+          }
+        : { status: "unavailable" },
+    questionOwner: (key) => installation.questionOwner(key),
+  });
+  installation = createBrowserHomeInstallation({
+    organizationId: "fixture",
+    store,
+    ledger,
+    authentication,
+    core,
+    runs,
+    coordinator,
+    privateWorkerLog,
+    commands: bound,
+    mappings,
+    limits: {
+      pendingPerActor: 10,
+      pendingPerSource: 20,
+      pendingPerOrganization: 30,
+      reservedReconciliation: 1,
+      contentTtlMs: (productionRetention ? 90 : 1) * DAY_MS,
+      receiptTtlMs: (productionRetention ? 365 : 1) * DAY_MS,
+    },
+    retention: { retentionDays: 30 },
+    owner: "fixture-process",
+    leaseMs: DAY_MS,
+    batchSize: 10,
+    contentTtlMs: (productionRetention ? 90 : 1) * DAY_MS,
+    ...(productionRetention ? { sourceSnapshotTtlMs: 30 * DAY_MS } : {}),
+    now: () => now,
+    policyEpoch: () => policy,
+    launch: (task) => tasks.push(task),
+    sourceIo: (request) => ({
+      ...(request.msg.directAudience
+        ? {
+            directAudience: () => request.msg.directAudience,
+            verifyDirectAudience: async () => ({ ok: true as const }),
+          }
+        : {}),
+      reply: async (text) => {
+        if (request.envelope.source === "browser")
+          throw new Error("Browser outputs must use the durable private stream.");
+        nativeReplies.push(text);
+      },
+      history: async () => [{ role: "user", text: "Untrusted raw source history" }],
+      status: async () => ({ update() {}, done: async () => {} }),
+    }),
+    canReadContext: async (ctx, ref) => ref.kind === "repository" && (await repoChoices.authorize(ctx.actor, ref.key)),
+    repositories: (ctx) => repoChoices.read(ctx.actor),
+    sourceRepository: (ctx, input) => {
+      if (ctx.authentication.source !== "browser") return Promise.resolve("sample/api");
+      const selected = input.context.filter((ref) => ref.kind === "repository");
+      if (new Set(selected.map((ref) => ref.key.toLowerCase())).size > 1) return Promise.resolve(undefined);
+      return repoChoices.sourceChoice(ctx.actor, {
+        selected: selected[0]?.key,
+      });
+    },
+    ...(metadataRecipient
+      ? {
+          originalUnitRecipient: (key: import("../core/coordinator/instanceStore.js").UnitEventKey) =>
+            createOriginalUnitRecipient({
+              organizationId: "fixture",
+              ledger,
+              store,
+              organization: installation.organization,
+              coordinator,
+              authentication,
+              now: () => now,
+            }).read(key),
+        }
+      : {}),
+    canWriteThread: async () => writable,
+    provedActorIds: async () => ["access:alice", ...(linkedSlack ? ["slack:UALICE"] : [])],
+  });
+  core.guardOrganizationConfirmation = (row, chooser) => installation.guardOrganizationConfirmation(row, chooser);
+  const tasks: (() => Promise<void>)[] = [];
+  const resolved = await authentication.resolveBrowser(identity, {
+    channelId: "web:alice",
+    userId: "access:alice",
+    threadKey: "web:alice:organization",
+    text: "",
+  });
+  if (resolved.status !== "resolved") throw new Error("No fixture source proof");
+  const context: HomeRuntimeContext = { actor: resolved.actor, authentication: resolved.authentication };
+  async function request(method: string, url: string, input?: unknown, viewer: HomeRuntimeContext = context) {
+    const req = Readable.from(input === undefined ? [] : [JSON.stringify(input)]) as IncomingMessage;
+    Object.assign(req, {
+      method,
+      url,
+      headers: { host: "fixture.test", origin: "http://fixture.test", "content-type": "application/json" },
+    });
+    let status = 0,
+      text = "";
+    const res = {
+      writeHead(value: number) {
+        status = value;
+      },
+      end(value?: string) {
+        text = value ?? "";
+      },
+      setHeader() {},
+    } as unknown as ServerResponse;
+    expect(installation.handler(req, res, viewer)).toBe(true);
+    for (let i = 0; i < 100 && !text; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    if (!text) throw new Error("No handler response");
+    return {
+      status,
+      body: JSON.parse(text) as HomeSession & {
+        status: string;
+        duplicate?: boolean;
+        receipt: { id: string; ownerRunId: string; effectKey: string };
+      },
+    };
+  }
+  async function execute() {
+    for (let i = 0; i < 100 && !tasks.length; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    const task = tasks.shift();
+    if (!task) throw new Error("No original owner task");
+    await task();
+  }
+  async function seedQuestion() {
+    seedCoordinatorInstance(
+      coordinator,
+      linkedSlack ? { ...instance, userId: "slack:UALICE", channelId: "slack:D1", threadKey: targetThread } : instance,
+    );
+    seedCoordinatorUnit(
+      coordinator,
+      linkedSlack
+        ? {
+            ...unit,
+            threadKey: targetThread,
+            idle: { ...unit.idle!, humanGate: { ...unit.idle!.humanGate!, assignedTo: "slack:UALICE" } },
+          }
+        : unit,
+    );
+    const record: RunRecord = {
+      id: "original-child",
+      channelId: linkedSlack ? "slack:D1" : "web:alice",
+      channelVisibility: "dm",
+      userId: linkedSlack ? "slack:UALICE" : "access:alice",
+      threadKey: targetThread,
+      parentInstanceId: "fixture",
+      idempotencyKey: "fixture:original-child",
+      agent: "coding",
+      startedAt: 1000,
+      finishedAt: 1000,
+      status: "completed",
+      eventCount: 1,
+      storedEventCount: 1,
+      truncated: false,
+      diagnosis: analyzeRunFriction([]),
+      events: [{ type: "input", text: "Original task", messageId: "original", seq: 1 }],
+    };
+    expect((await runStore.put(record)).stored).toBe(true);
+  }
+  cleanups.push(() => installation.handler.dispose());
+  return {
+    installation,
+    authentication,
+    core,
+    path,
+    created,
+    nudges,
+    privateWorkerLog,
+    github,
+    runStore,
+    setPolicy: () => {
+      policy = "changed";
+    },
+    expire: () => {
+      now = DAY_MS + 1001;
+    },
+    tokens,
+    personalTokens,
+    nativeReplies,
+    request,
+    execute,
+    seedQuestion,
+    store,
+    ledger,
+    registry,
+    coordinator,
+    effects,
+    confirmations,
+    context,
+    targetThread,
+    tasks,
+    denyWrites: () => {
+      writable = false;
+    },
+    allowWrites: () => {
+      writable = true;
+    },
+    denyNativeReads: () => {
+      browserGrants = {
+        actions: new Set([
+          "organization:read",
+          "organization:send",
+          "runs:read",
+          "steer:write",
+          "repo:use",
+          "agent:run:coding",
+        ]),
+        channels: new Set(["web:alice"]),
+        repos: new Set(["sample/api"]),
+        organizations: new Set(["fixture"]),
+      };
+    },
+    revoke: () => {
+      available = false;
+    },
+    restoreSource: () => {
+      available = true;
+    },
+  };
+}
+describe("browser installation", () => {
+  it("approves an own unmarked personal registry offer through current native proof without lending a foreign viewer consent", async () => {
+    const s = await fixture(false, false, undefined, false, false, true);
+    const live = s.registry.create("Own typed stop target", {
+      channelId: "mcp:default",
+      threadKey: "mcp:default:owned",
+      userId: "access:alice",
+      channelVisibility: "machine",
+    });
+    const commands = buildCoreCommands(s.core.config, s.runStore, {
+      registry: s.registry,
+      runs: createRunsService({ registry: s.registry, store: s.runStore, units: s.coordinator }),
+      secrets: secretsFrom({}),
+      dataDir: s.path,
+      warn: () => {},
+      audit: () => {},
+    });
+    s.core.commands = commands;
+    const pin = () => ({ issuer: identity.issuer, audience: "access-app", organization: "fixture" });
+    const options = {
+      auth: { tokens: s.tokens },
+      personalTokens: s.personalTokens,
+      personalApprovalPin: pin,
+      commands,
+      grantsFor: (id: string) => s.core.config.grantsFor(id),
+      approvalsEnabled: true,
+      publicBaseUrl: "https://fixture.test",
+    };
+    const rpc = (name: string, args: unknown, meta = {}) =>
+      handleMcpRequest(
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${"c".repeat(64)}`,
+            ...(Object.hasOwn(meta, "_meta")
+              ? { "mcp-protocol-version": FORM_PROTOCOL_VERSION, "mcp-method": "tools/call", "mcp-name": name }
+              : {}),
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name, arguments: args, ...meta },
+          }),
+        },
+        s.core,
+        options,
+      );
+    const offered = await rpc(
+      "runs_stop",
+      { id: live.id, mode: "hard" },
+      {
+        _meta: {
+          [PROTOCOL_VERSION_META_KEY]: FORM_PROTOCOL_VERSION,
+          [CLIENT_INFO_META_KEY]: { name: "fixture-client", version: "1" },
+          [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
+        },
+      },
+    );
+    expect(offered.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+    const id = (offered.body as { result: { requestState: string } }).result.requestState;
+    const row = await s.confirmations.get(id);
+    expect(row).toMatchObject({
+      kind: "run",
+      command: "runs.stop",
+      message: { userId: "access:alice", authenticatedAs: "mcp:personal:alice" },
+    });
+    expect(row?.originalOrganization).toBeUndefined();
+    const view = createMcpApprovalView(s.core, {
+      ...options,
+      resolveApprovalSource: (credential, saved) =>
+        s.installation.approvalSource(
+          saved,
+          credential.sub === "alice" ? s.context.actor : { ...s.context.actor, id: `access:${credential.sub}` },
+        ),
+    });
+    async function approve(sub: string, offerId = id) {
+      const req = Readable.from(["action=approve"]) as IncomingMessage;
+      Object.assign(req, {
+        method: "POST",
+        url: `/settings/approve?id=${offerId}`,
+        headers: {
+          host: "fixture.test",
+          origin: "https://fixture.test",
+          "content-type": "application/x-www-form-urlencoded",
+        },
+      });
+      let status = 0,
+        body = "";
+      const res = {
+        writeHead(value: number) {
+          status = value;
+        },
+        end(value: string) {
+          body = value;
+        },
+      } as unknown as ServerResponse;
+      expect(view(req, res, { sub })).toBe(true);
+      for (let i = 0; i < 100 && !body; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      return { status, body };
+    }
+    expect((await approve("other")).status).toBe(404);
+    expect((await s.confirmations.get(id))?.browserApproved).toBeUndefined();
+    expect(live.control.hardSignal.aborted).toBe(false);
+    expect(await approve("alice")).toMatchObject({
+      status: 200,
+      body: expect.stringContaining("Approved. Return to your MCP client"),
+    });
+    expect((await s.confirmations.get(id))?.approvedBy).toBe("browser");
+    expect(live.control.hardSignal.aborted).toBe(false);
+    const resumed = await rpc("approval_resume", { id });
+    expect(resumed.body).toMatchObject({
+      result: { content: [{ type: "text", text: expect.stringContaining("state: stopping") }] },
+    });
+    expect(live.control.hardSignal.aborted).toBe(true);
+    expect(await s.confirmations.get(id)).toBeUndefined();
+    const second = s.registry.create("Another own typed stop target", {
+      channelId: "mcp:default",
+      threadKey: "mcp:default:second",
+      userId: "access:alice",
+      channelVisibility: "machine",
+    });
+    const held = await rpc(
+      "runs_stop",
+      { id: second.id, mode: "hard" },
+      {
+        _meta: {
+          [PROTOCOL_VERSION_META_KEY]: FORM_PROTOCOL_VERSION,
+          [CLIENT_INFO_META_KEY]: { name: "fixture-client", version: "1" },
+          [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
+        },
+      },
+    );
+    expect(held.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+    const heldId = (held.body as { result: { requestState: string } }).result.requestState;
+    const original = await s.personalTokens.get(digestBearer("c".repeat(64)));
+    if (!original) throw new Error("No original personal token");
+    await s.personalTokens.put({ ...original, digest: digestBearer("d".repeat(64)) });
+    expect(await s.personalTokens.delete(original.digest, original.subject)).toBe(true);
+    expect((await approve("alice", heldId)).status).toBe(404);
+    expect((await s.confirmations.get(heldId))?.approvedBy).toBeUndefined();
+    expect(second.control.hardSignal.aborted).toBe(false);
+  });
+  it("holds a pending canonical answer through target-proof outage and answers once after fresh proof", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    const read = await s.installation.readThread(s.context, thread);
+    if (!read?.target) throw new Error("No saved question target");
+    const issued = await s.installation.organization.issue(s.context.authentication, DAY_MS);
+    if (issued.status !== "key") throw new Error("No submission key");
+    const key = issued.key;
+    const authentication = {
+      ...s.context.authentication,
+      sourceReference: { ...s.context.authentication.sourceReference!, messageId: `browser:${key}`, threadKey: thread },
+    };
+    const input = {
+      key,
+      sourceEvent: `browser:${key}`,
+      content: "Proceed with the saved question",
+      workload: "act" as const,
+      destination: { kind: "thread" as const, thread },
+      target: read.target,
+      context: [],
+    };
+    await s.store.execute({
+      action: "observe",
+      organization: "fixture",
+      target: read.target.key,
+      revision: read.target.revision,
+    });
+    const admitted = await s.installation.organization.admit(authentication, input);
+    if (admitted.status !== "receipt") throw new Error(`Not admitted: ${admitted.status}`);
+    const resolve = s.authentication.resolveAuthorization;
+    s.authentication.resolveAuthorization = async (input) =>
+      input.action === "read" ? { status: "unavailable" } : resolve(input);
+    await s.installation.runtime.reconcile("fixture");
+    s.authentication.resolveAuthorization = resolve;
+    expect(await s.installation.organization.admit(authentication, input)).toMatchObject({
+      status: "receipt",
+      duplicate: true,
+      receipt: { status: "pending" },
+    });
+    expect(await s.ledger.readIngress(admitted.receipt.effectKey!)).toEqual({ status: "not_found" });
+    await s.installation.runtime.reconcile("fixture");
+    await s.execute();
+    const events = await s.coordinator.listEvents({ instanceId: "fixture", unit: "original" });
+    expect(events).toMatchObject([
+      { text: "Proceed with the saved question", sender: "access:alice", id: `browser:${key}` },
+    ]);
+    expect(events).toHaveLength(1);
+    expect(await s.installation.readOriginalRun(events[0]!.organizationIngressRunId!)).toEqual({
+      status: "completed",
+      outcome: "Original answer recorded.",
+    });
+    await s.installation.runtime.reconcile("fixture");
+    expect(await s.coordinator.listEvents({ instanceId: "fixture", unit: "original" })).toHaveLength(1);
+    const denied = await fixture();
+    await denied.seedQuestion();
+    denied.denyWrites();
+    expect((await denied.installation.readThread(denied.context, thread))?.canWrite).toBe(false);
+  });
+  it("restores only the current unit recipient after source snapshot erasure without restoring input or execution", async () => {
+    const s = await fixture();
+    const home = (await s.request("GET", "/home/session")).body;
+    expect(
+      (
+        await s.request("POST", "/home/send", {
+          key: home.submissionKey,
+          revision: home.destination.revision,
+          destination: { kind: "broad" },
+          text: "memory forget",
+          context: [],
+        })
+      ).status,
+    ).toBe(200);
+    await s.execute();
+    const resolved = await s.installation.organization.resolve(s.context.authentication);
+    if (!resolved) throw new Error("No current organization");
+    const saved = await s.store.execute({
+      action: "submission",
+      ...resolved,
+      source: "browser",
+      key: home.submissionKey,
+    });
+    if (saved.status !== "submission" || !saved.receipt.ownerRunId || !saved.receipt.effectKey)
+      throw new Error("No original owner");
+    const id = saved.receipt.ownerRunId;
+    const original = await s.installation.originalBinding(id);
+    if (!original) throw new Error("No retained source before erasure");
+    expect(await s.installation.originalPrivateSourceHistory(id)).toEqual([
+      { role: "user", text: "memory forget", user: "access:alice" },
+    ]);
+    await s.ledger.clearIngressContent(saved.receipt.effectKey);
+    expect(await s.installation.originalBinding(id)).toBeUndefined();
+    expect(await s.installation.originalPrivateSourceHistory(id)).toBeUndefined();
+    const io = await s.installation.originalAudienceIO(id, {
+      threadKey: original.msg.threadKey,
+      userId: original.msg.userId,
+    });
+    const recipient = io?.organizationPrivateAudience?.();
+    expect(recipient).toEqual({
+      kind: "organization-private",
+      organization: "fixture",
+      stream: 'browser:["https://access.fixture.test",null,"alice"]',
+      actorId: "access:alice",
+      userId: "access:alice",
+      channelId: "web:alice",
+      threadKey: "web:alice:organization",
+    });
+    expect(recipient && (await io!.verifyOrganizationPrivateAudience!(recipient))).toEqual({ ok: true });
+    await expect(io!.authoritativePrivateHistory!(original.msg)).rejects.toThrow(
+      "The original private input is unavailable.",
+    );
+    expect(await io!.rehostOrganizationInput!(original.msg)).toBeUndefined();
+    expect(
+      await s.installation.originalAudienceIO(id, { threadKey: original.msg.threadKey, userId: "access:bob" }),
+    ).toBeUndefined();
+    s.setPolicy();
+    expect(
+      await s.installation.originalAudienceIO(id, { threadKey: original.msg.threadKey, userId: original.msg.userId }),
+    ).toBeUndefined();
+  });
+  it("retains owned unit facts after linking and unlinking without exposing the old private journal", async () => {
+    let turn = 0;
+    const provider: Provider = {
+      name: "fixture",
+      complete: async () =>
+        ++turn === 1
+          ? {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "start-owned-facts",
+                  name: "work_start",
+                  input: {
+                    repo: "sample/api",
+                    question: "Build selected repository",
+                    schemaVersion: 1,
+                    cause: { kind: "unknown", reason: "Not investigated" },
+                    evidence: { availability: "unavailable", reason: "Code-only change" },
+                    requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                    acceptance: "A reviewed change",
+                    findings: [],
+                    requestedChange: "Build selected repository",
+                    sourceMessage: "Build selected repository",
+                  },
+                },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "Started owned unit" }], stopReason: "end_turn" },
+    };
+    const s = await fixture(false, false, provider, false, true);
+    const home = (await s.request("GET", "/home/session")).body;
+    expect(
+      (
+        await s.request("POST", "/home/send", {
+          key: home.submissionKey,
+          revision: home.destination.revision,
+          destination: { kind: "broad" },
+          text: "Build selected repository",
+          context: [{ kind: "repository", key: "sample/api" }],
+        })
+      ).status,
+    ).toBe(200);
+    await s.execute();
+    const owner = await s.coordinator.get(s.created[0]!);
+    const [createdRow] = await s.coordinator.listUnits(s.created[0]!);
+    if (!owner || !createdRow) throw new Error("No canonical private unit");
+    const row = {
+      ...createdRow,
+      threadKey: privateWorkerThreadKey({ instanceId: createdRow.instanceId, unit: createdRow.unit }),
+    };
+    await s.coordinator.compareAndReplaceUnit(createdRow, row);
+    await s.privateWorkerLog.append(row.threadKey, {
+      kind: "reply",
+      id: "old-mixed-journal",
+      text: "OLD_MIXED_PRIVATE_OUTPUT",
+      at: 1000,
+    });
+    expect(
+      (await s.installation.readThread(s.context, row.threadKey))?.entries.map((entry) => entry.content),
+    ).toContain("OLD_MIXED_PRIVATE_OUTPUT");
+    const person = await s.store.directory.createPerson();
+    if (person.status !== "created") throw new Error("No new person");
+    expect(
+      (
+        await s.store.directory.change({
+          action: "link",
+          identity,
+          personId: person.person.id,
+          expectedRevision: 0,
+          actor: identity,
+          proof: { method: "dual-authentication", version: 1 },
+        })
+      ).status,
+    ).toBe("changed");
+    expect(await s.installation.canReadPrivateUnit(s.context, owner, row)).toBe(true);
+    expect(await s.installation.readThread(s.context, row.threadKey)).toBeUndefined();
+    expect(
+      (
+        await s.store.directory.change({
+          action: "revoke",
+          identity,
+          personId: person.person.id,
+          expectedRevision: 1,
+          actor: identity,
+          proof: { method: "dual-authentication", version: 1 },
+        })
+      ).status,
+    ).toBe("changed");
+    expect(await s.installation.canReadPrivateUnit(s.context, owner, row)).toBe(true);
+    expect(await s.installation.readThread(s.context, row.threadKey)).toBeUndefined();
+    expect(
+      await s.installation.originalAudienceIO(row.context!.handoff.source.runId, {
+        threadKey: owner.threadKey,
+        userId: owner.userId,
+      }),
+    ).toBeUndefined();
+  });
+  it("starts a verified personal MCP request as one human-owned unit and answers its question in the browser before linking", async () => {
+    let turns = 0;
+    const provider: Provider = {
+      name: "fixture",
+      complete: async () =>
+        ++turns === 1
+          ? {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "start-personal-work",
+                  name: "work_start",
+                  input: {
+                    repo: "sample/api",
+                    question: "Build selected repository",
+                    schemaVersion: 1,
+                    cause: { kind: "unknown", reason: "Not investigated" },
+                    evidence: { availability: "unavailable", reason: "Code-only change" },
+                    requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                    acceptance: "A reviewed change",
+                    findings: [],
+                    requestedChange: "Build selected repository",
+                    sourceMessage: "Build selected repository",
+                  },
+                },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "The work request is processed." }], stopReason: "end_turn" },
+    };
+    const s = await fixture(false, false, provider, false, true, true);
+    expect(await s.store.directory.resolve(identity)).toEqual({ status: "unknown" });
+    const admitted = await handleMcpRequest(
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${"c".repeat(64)}` },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "dispatch",
+            arguments: { text: "Build selected repository", idempotencyKey: "personal-work" },
+          },
+        }),
+      },
+      s.core,
+      {
+        auth: { tokens: s.tokens },
+        personalTokens: s.personalTokens,
+        admit: (msg, _io, evidence) => s.installation.admitNative(msg, evidence),
+      },
+    );
+    expect(admitted.body).toMatchObject({
+      result: { structuredContent: { admission: { status: "accepted", runId: expect.any(String) } } },
+    });
+    const sourceRunId = (admitted.body as { result: { structuredContent: { admission: { runId: string } } } }).result
+      .structuredContent.admission.runId;
+    expect(await s.ledger.readIngressByRun(sourceRunId)).toMatchObject({
+      status: "record",
+      record: {
+        origin: {
+          actor: { kind: "service", identity: { subject: "personal:alice" }, onBehalfOf: identity },
+          sourceReference: { actorId: "mcp:personal:alice", userId: "access:alice" },
+        },
+      },
+    });
+    await s.execute();
+    expect((await s.installation.originalBinding(sourceRunId))?.actor).toMatchObject({
+      kind: "service",
+      id: "mcp:personal:alice",
+      self: ["mcp:personal:alice"],
+      onBehalfOf: { id: "access:alice" },
+    });
+    expect(s.created).toHaveLength(1);
+    const owner = await s.coordinator.get(s.created[0]!);
+    const [created] = await s.coordinator.listUnits(s.created[0]!);
+    expect(owner).toMatchObject({ userId: "access:alice", authenticatedAs: "mcp:personal:alice" });
+    if (!owner || !created) throw new Error("No personal work");
+    const unitThread = privateWorkerThreadKey({ instanceId: created.instanceId, unit: created.unit });
+    const asked = {
+      ...created,
+      threadKey: unitThread,
+      idle: { ...unit.idle!, humanGate: { ...unit.idle!.humanGate!, assignedTo: owner.userId } },
+    };
+    expect((await s.coordinator.compareAndReplaceUnit(created, asked)).ok).toBe(true);
+    const focused = await s.request("POST", "/home/focus", { thread: unitThread });
+    expect(focused.status).toBe(200);
+    expect(focused.body.destination).toMatchObject({ kind: "thread", thread: unitThread, canWrite: true });
+    const answered = await s.request("POST", "/home/send", {
+      key: focused.body.submissionKey,
+      revision: focused.body.destination.revision,
+      destination: { kind: "thread", thread: unitThread },
+      text: "Proceed with this reviewed head",
+      context: [],
+    });
+    expect(answered.status).toBe(200);
+    await s.execute();
+    expect(
+      (await s.coordinator.listEvents({ instanceId: created.instanceId, unit: created.unit })).map((event) => ({
+        sender: event.sender,
+        text: event.text,
+      })),
+    ).toEqual([{ sender: "access:alice", text: "Proceed with this reviewed head" }]);
+    expect(await s.store.directory.resolve(identity)).toEqual({ status: "unknown" });
+  });
+
+  it("binds the first browser coding request to its selected public repository and starts one canonical private unit through real Core", async () => {
+    let turns = 0;
+    const provider: Provider = {
+      name: "fixture",
+      complete: async () => {
+        turns++;
+        return turns <= 2
+          ? {
+              content: [
+                {
+                  type: "tool_use",
+                  id: `start-${turns}`,
+                  name: "work_start",
+                  input: {
+                    repo: "sample/web",
+                    question: "Build selected repository",
+                    schemaVersion: 1,
+                    cause: { kind: "unknown", reason: "Not investigated" },
+                    evidence: { availability: "unavailable", reason: "Code-only change" },
+                    requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                    acceptance: "A reviewed change",
+                    findings: [],
+                    requestedChange: "Build the requested public repository change",
+                    sourceMessage: "Build selected repository",
+                  },
+                },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "The original private work is started." }], stopReason: "end_turn" };
+      },
+    };
+    const s = await fixture(false, false, provider, true);
+    const home = (await s.request("GET", "/home/session")).body;
+    expect(home.repositories).toEqual({
+      status: "complete",
+      repositories: [{ repo: "sample/api" }, { repo: "sample/web" }],
+    });
+    const conflict = await s.request("POST", "/home/send", {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" },
+      text: "Build selected repository",
+      context: [
+        { kind: "repository", key: "sample/web" },
+        { kind: "repository", key: "sample/api" },
+      ],
+    });
+    expect(conflict.status).toBe(404);
+    expect(s.created).toEqual([]);
+    const fresh = (await s.request("GET", "/home/session")).body;
+    const input = {
+      key: fresh.submissionKey,
+      revision: fresh.destination.revision,
+      destination: { kind: "broad" },
+      text: "Build selected repository",
+      context: [{ kind: "repository", key: "sample/web" }],
+    };
+    expect((await s.request("POST", "/home/send", input)).status).toBe(200);
+    await s.execute();
+    expect(s.created).toHaveLength(1);
+    const rows = await s.coordinator.listUnits(s.created[0]!);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      instanceId: s.created[0],
+      workBrief: { requesterId: "access:alice", mainThreadKey: "web:alice:organization", repo: "sample/web" },
+    });
+    expect((await s.coordinator.get(s.created[0]!))?.repo).toBe("sample/web");
+    const replay = await s.installation.organization.replay(s.context.authentication, {
+      key: input.key,
+      content: input.text,
+      context: [{ kind: "repository", key: "sample/web" }],
+      destination: { kind: "broad" },
+      revision: input.revision,
+    });
+    expect(replay).toMatchObject({ status: "receipt", duplicate: true, receipt: { status: "accepted" } });
+    if (replay?.status !== "receipt" || !replay.receipt.ownerRunId) throw new Error("No original owner receipt");
+    const original = await s.ledger.readIngressByRun(replay.receipt.ownerRunId);
+    expect(original).toMatchObject({
+      status: "record",
+      record: {
+        contentExpiresAt: 1000 + 30 * DAY_MS,
+        originExpiresAt: 1000 + 365 * DAY_MS,
+        request: { envelope: { content: "Build selected repository", contentExpiresAt: 1000 + 30 * DAY_MS } },
+        origin: { content: "", context: [], contentExpiresAt: 1000 + 90 * DAY_MS },
+      },
+    });
+    expect((await s.installation.originalBinding(replay.receipt.ownerRunId))?.msg.text).toBe(
+      "Build selected repository",
+    );
+    expect((await s.request("POST", "/home/send", input)).body.duplicate).toBe(true);
+    expect(s.created).toHaveLength(1);
+    const privateUnit = rows[0]!;
+    const question = {
+      ...unit.idle!.humanGate!,
+      pr: { number: 42, url: "https://github.com/sample/web/pull/42" },
+      findings: [
+        {
+          id: "F1",
+          severity: "minor" as const,
+          file: "app.ts",
+          title: "Choose release behavior",
+          humanGated: true as const,
+        },
+      ],
+      primaryAction: { label: "Merge", text: "Merge the reviewed pull request" },
+    };
+    expect(
+      await s.coordinator.putUnits([
+        {
+          ...privateUnit,
+          threadKey: privateWorkerThreadKey({ instanceId: privateUnit.instanceId, unit: privateUnit.unit }),
+          idle: { ...unit.idle!, humanGate: question },
+        },
+      ]),
+    ).toEqual({
+      ok: true,
+    });
+    const homeService = createHomeService({
+      organizationId: "fixture",
+      instances: s.coordinator,
+      conditions: createHomeConditionReader(s.coordinator),
+    });
+    const reader = {
+      actorId: "access:alice",
+      visibleTo: { kind: "all" as const },
+      readPrivateUnit: (instance: CoordinatorInstance, row: CoordinatorUnit) =>
+        s.installation.canReadPrivateUnit(s.context, instance, row),
+    };
+    const attention = await homeService.snapshot(reader);
+    expect(attention.needsYou).toMatchObject([
+      {
+        unit: {
+          title: "Build the requested public repository change",
+          threads: { coding: expect.stringMatching(/^worker:/) },
+        },
+        conditions: [{ owner: { kind: "person", id: "access:alice" }, summary: "F1: Choose release behavior" }],
+      },
+    ]);
+    const answers = await s.installation.answers(s.context, attention.needsYou);
+    expect(Object.values(answers)).toMatchObject([
+      {
+        primaryAction: { label: "Merge", text: "Merge the reviewed pull request" },
+        question: expect.stringContaining("Choose release behavior"),
+      },
+    ]);
+    const target = answers[privateUnit.instanceId + ":" + privateUnit.unit]!;
+    const everyoneActor = { ...s.context.actor };
+    withWorkViewScope(
+      everyoneActor,
+      resolveWorkViewScope(everyoneActor, { organization: "fixture", mode: "everyone" }),
+    );
+    const everyone = { ...s.context, actor: everyoneActor };
+    const allAttention = await homeService.snapshot({
+      ...reader,
+      readPrivateUnit: (instance: CoordinatorInstance, row: CoordinatorUnit) =>
+        s.installation.canReadPrivateUnit(everyone, instance, row),
+    });
+    expect(allAttention.needsYou).toMatchObject([
+      {
+        unit: { title: "Build the requested public repository change" },
+        conditions: [{ owner: { kind: "person", id: "access:alice" } }],
+      },
+    ]);
+    expect(await s.installation.answers(everyone, allAttention.needsYou)).toEqual(answers);
+    const allSession = await s.request("GET", "/home/session", undefined, everyone);
+    expect(allSession.status).toBe(200);
+    expect(allSession.body.entries.map((entry) => entry.content)).toContain("Build selected repository");
+    s.denyWrites();
+    expect(await s.installation.answers(s.context, attention.needsYou)).toEqual({});
+    expect((await s.installation.readThread(s.context, target.thread))?.canWrite).toBe(false);
+    s.allowWrites();
+    const focus = await s.request("POST", "/home/focus", { thread: target.thread }, everyone);
+    expect(focus.status).toBe(200);
+    const answerBody = {
+      key: focus.body.submissionKey,
+      revision: target.revision,
+      destination: { kind: "thread", thread: target.thread },
+      text: "Merge the reviewed pull request",
+      context: [],
+    };
+    expect((await s.request("POST", "/home/send", answerBody, everyone)).status).toBe(200);
+    await s.execute();
+    const admittedAnswer = await s.coordinator.listEvents(
+      { instanceId: privateUnit.instanceId, unit: privateUnit.unit },
+      true,
+    );
+    expect(admittedAnswer).toMatchObject([
+      { sender: "access:alice", text: "Merge the reviewed pull request", mode: "wake", seq: 1 },
+    ]);
+    expect(s.nudges).toEqual([{ id: s.created[0], type: `unit-nudge-${s.created[0]}-${privateUnit.unit}` }]);
+    const answered = await homeService.snapshot(reader);
+    expect(answered.needsYou).toEqual([]);
+    expect(answered.waiting).toMatchObject([{ unit: { title: "Build the requested public repository change" } }]);
+    expect(turns).toBe(3);
+    expect(s.created).toHaveLength(1);
+    expect(
+      (await s.installation.readThread(s.context, target.thread))?.entries.map((entry) => entry.content),
+    ).toContain("Merge the reviewed pull request");
+    const legacy = await homeService.snapshot({ actorId: "access:alice", visibleTo: { kind: "all" } });
+    expect(JSON.stringify(legacy)).not.toContain("Choose release behavior");
+    expect(JSON.stringify(legacy)).not.toContain("Build the requested public repository change");
+    expect((await s.installation.readThread(everyone, target.thread))?.entries.map((entry) => entry.content)).toContain(
+      "Merge the reviewed pull request",
+    );
+    expect(
+      await s.installation.readThread(
+        { ...s.context, actor: { ...s.context.actor, viewingAs: { id: "access:bob" } } },
+        target.thread,
+      ),
+    ).toBeUndefined();
+    const foreign = {
+      ...s.context,
+      actor: { ...s.context.actor, id: "access:foreign", self: ["access:foreign"] },
+      authentication: {
+        ...s.context.authentication,
+        identity: { ...identity, subject: "foreign" },
+        sourceReference: {
+          ...s.context.authentication.sourceReference!,
+          actorId: "access:foreign",
+          userId: "access:foreign",
+        },
+      },
+    };
+    const hidden = await homeService.snapshot({
+      ...reader,
+      actorId: "access:foreign",
+      readPrivateUnit: (instance: CoordinatorInstance, row: CoordinatorUnit) =>
+        s.installation.canReadPrivateUnit(foreign, instance, row),
+    });
+    expect(JSON.stringify(hidden)).not.toContain("Choose release behavior");
+    expect(JSON.stringify(hidden)).not.toContain("Build the requested public repository change");
+    expect(await s.installation.readThread(foreign, target.thread)).toBeUndefined();
+    s.revoke();
+    const revoked = await homeService.snapshot(reader);
+    expect(JSON.stringify(revoked)).not.toContain("Choose release behavior");
+    expect(JSON.stringify(revoked)).not.toContain("Build the requested public repository change");
+    await expect(s.installation.readThread(s.context, target.thread)).rejects.toThrow(
+      "Current source proof is unavailable.",
+    );
+    s.restoreSource();
+    s.github.repos.delete("sample/web");
+    const changed = (await s.request("GET", "/home/session")).body;
+    const refused = await s.request("POST", "/home/send", { ...input, key: changed.submissionKey });
+    expect(refused.status).toBe(404);
+    expect(s.created).toHaveLength(1);
+  });
+  it("shows and answers a private Slack worker question only through the current proved browser recipient", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      name: "fixture",
+      complete: async () => {
+        calls++;
+        return calls === 1
+          ? {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "private-start",
+                  name: "work_start",
+                  input: {
+                    repo: "sample/api",
+                    question: "Private native change",
+                    schemaVersion: 1,
+                    cause: { kind: "unknown", reason: "Not investigated" },
+                    evidence: { availability: "unavailable", reason: "Code-only change" },
+                    requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                    findings: [],
+                    acceptance: "A reviewed change",
+                    requestedChange: "Build the private native change",
+                    sourceMessage: "Private native change",
+                  },
+                },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "Private work started" }], stopReason: "end_turn" };
+      },
+    };
+    const s = await fixture(true, true, provider, true);
+    const native = await s.installation.admitNative(
+      {
+        userId: "slack:UALICE",
+        channelId: "slack:D1",
+        threadKey: "slack:D1:1.0",
+        messageId: "1.1",
+        text: "Private native change",
+      },
+      { source: "slack", identity: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" } },
+    );
+    expect(native).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+    await s.execute();
+    expect(s.created).toHaveLength(1);
+    const stored = (await s.coordinator.listUnits(s.created[0]!))[0]!;
+    const worker = privateWorkerThreadKey({ instanceId: stored.instanceId, unit: stored.unit });
+    const gate = {
+      ...unit.idle!.humanGate!,
+      assignedTo: "slack:UALICE",
+      primaryAction: { label: "Confirm", text: "confirm" },
+      findings: [
+        {
+          id: "F1",
+          severity: "minor" as const,
+          file: "app.ts",
+          title: "Choose private release",
+          humanGated: true as const,
+        },
+      ],
+    };
+    expect(
+      await s.coordinator.putUnits([{ ...stored, threadKey: worker, idle: { ...unit.idle!, humanGate: gate } }]),
+    ).toEqual({ ok: true });
+    const home = createHomeService({
+      organizationId: "fixture",
+      instances: s.coordinator,
+      conditions: createHomeConditionReader(s.coordinator),
+    });
+    const reader = {
+      actorId: "access:alice",
+      attentionRecipients: ["access:alice", "slack:UALICE"],
+      visibleTo: { kind: "all" as const },
+      readPrivateUnit: (instance: CoordinatorInstance, row: CoordinatorUnit) =>
+        s.installation.canReadPrivateUnit(s.context, instance, row),
+    };
+    const mine = await home.snapshot(reader);
+    expect(mine.needsYou).toMatchObject([
+      {
+        unit: { title: "Build the private native change", threads: { coding: worker } },
+        conditions: [{ owner: { kind: "person", id: "slack:UALICE" } }],
+      },
+    ]);
+    const answers = await s.installation.answers(s.context, mine.needsYou);
+    expect(Object.values(answers)).toMatchObject([
+      { thread: worker, primaryAction: { label: "Confirm", text: "confirm" } },
+    ]);
+    const focused = await s.request("POST", "/home/focus", { thread: worker });
+    expect(focused.status).toBe(200);
+    const answer = {
+      key: focused.body.submissionKey,
+      revision: Object.values(answers)[0]!.revision,
+      destination: { kind: "thread", thread: worker },
+      text: "confirm",
+      context: [],
+    };
+    expect((await s.request("POST", "/home/send", answer)).status).toBe(200);
+    await s.execute();
+    expect(await s.coordinator.listEvents({ instanceId: stored.instanceId, unit: stored.unit }, true)).toMatchObject([
+      { sender: "slack:UALICE", authenticatedAs: "access:alice", text: "confirm", mode: "wake" },
+    ]);
+    expect(s.nudges).toEqual([{ id: s.created[0], type: `unit-nudge-${s.created[0]}-${stored.unit}` }]);
+    expect(calls).toBe(2);
+    expect(s.created).toHaveLength(1);
+    s.setPolicy();
+    expect((await home.snapshot(reader)).needsYou).toEqual([]);
+    expect(await s.installation.readThread(s.context, worker)).toBeUndefined();
+  });
+  it("projects only a recorded canonical question action and keeps generic approved questions labeled Confirm", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    const generic = await s.installation.readThread(s.context, s.targetThread);
+    expect(generic?.primaryAction).toEqual({ label: "Confirm", text: "confirm" });
+    seedCoordinatorUnit(s.coordinator, {
+      ...unit,
+      idle: {
+        ...unit.idle!,
+        humanGate: { ...unit.idle!.humanGate!, primaryAction: { label: "Merge", text: "merge" } },
+      },
+    });
+    const recorded = await s.installation.readThread(s.context, s.targetThread);
+    expect(recorded?.primaryAction).toEqual({ label: "Merge", text: "merge" });
+    expect(recorded?.revision).not.toBe(generic?.revision);
+    expect(recorded?.target?.key).not.toBe(generic?.target?.key);
+    const rows = [
+      {
+        unit: {
+          unit: "fixture:original",
+          instanceId: "fixture",
+          id: "original",
+          branch: "codex/fixture",
+          threads: { coding: s.targetThread },
+          sourceUrls: {},
+          rounds: [],
+        },
+        instance: { id: "fixture", repo: "sample/api", createdAt: 1000 },
+        conditions: [],
+        nextAction: { kind: "recorded" as const, text: "Answer the recorded question" },
+      },
+    ];
+    expect(await s.installation.answers(s.context, rows)).toMatchObject({
+      "fixture:original": {
+        thread: s.targetThread,
+        revision: recorded!.revision,
+        primaryAction: { label: "Merge", text: "merge" },
+      },
+    });
+  });
+  it("admits a browser-approved native saved proposal under a distinct choice owner and replays it after the saved row is consumed", async () => {
+    const s = await fixture();
+    const admit = (
+      msg: import("../core/types.js").IncomingMessage,
+      _io: import("../core/types.js").ChannelIO,
+      evidence: import("./organizationAuthentication.js").OrganizationNativeEvidence,
+      choice?: import("../core/organization/service.js").OrganizationAdmissionInput["continuation"],
+    ) => s.installation.admitNative(msg, evidence, choice);
+    const options = {
+      auth: { tokens: s.tokens },
+      personalTokens: s.personalTokens,
+      admit,
+      replayChoice: s.installation.replayNativeChoice,
+      approvalsEnabled: true,
+      publicBaseUrl: "https://fixture.test",
+    };
+    const rpc = (name: string, args: unknown) =>
+      handleMcpRequest(
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${"c".repeat(64)}` },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+        },
+        s.core,
+        options,
+      );
+    const first = await rpc("dispatch", { text: "memory forget", idempotencyKey: "original-offer" });
+    expect(first.body).toMatchObject({
+      result: { structuredContent: { admission: { status: "accepted", runId: expect.any(String) } } },
+    });
+    await s.execute();
+    const firstId = (first.body as { result: { structuredContent: { admission: { runId: string } } } }).result
+      .structuredContent.admission.runId;
+    const original = await s.installation.originalBinding(firstId);
+    if (!original) throw new Error("No completed native offer owner");
+    const id = "00000000-0000-4000-8000-000000000011";
+    const row = await s.confirmations.put(
+      {
+        kind: "redispatch",
+        id,
+        message: { ...original.msg, text: "memory forget" },
+        line: "memory forget",
+        evidence: "Explicit saved fixture action",
+        code: "fixture",
+      },
+      DAY_MS,
+    );
+    expect(row.originalOrganization?.ingressRunId).toBe(firstId);
+    const view = createMcpApprovalView(s.core, {
+      ...options,
+      resolveApprovalSource: (_identity, row) => s.installation.approvalSource(row, s.context.actor),
+    });
+    const req = Readable.from(["action=approve"]) as IncomingMessage;
+    Object.assign(req, {
+      method: "POST",
+      url: `/settings/approve?id=${id}`,
+      headers: {
+        host: "fixture.test",
+        origin: "https://fixture.test",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+    });
+    let approvalStatus = 0,
+      approvalBody = "";
+    const res = {
+      writeHead(status: number) {
+        approvalStatus = status;
+      },
+      end(body: string) {
+        approvalBody = body;
+      },
+    } as unknown as ServerResponse;
+    expect(view(req, res, { sub: "alice", email: "changed-display@example.test" })).toBe(true);
+    for (let i = 0; i < 100 && !approvalBody; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(approvalStatus).toBe(200);
+    expect(approvalBody).toContain("Approved. Return to your MCP client");
+    expect((await s.confirmations.get(id))?.browserApproved).toBe(true);
+    const choice = await rpc("approval_resume", { id });
+    expect(choice.body).toMatchObject({
+      result: { structuredContent: { admission: { status: "accepted", runId: expect.any(String) } } },
+    });
+    const secondId = (choice.body as { result: { structuredContent: { admission: { runId: string } } } }).result
+      .structuredContent.admission.runId;
+    expect(secondId).not.toBe(firstId);
+    await s.execute();
+    expect(await s.ledger.readIngressByRun(secondId)).toMatchObject({
+      status: "record",
+      record: { status: "completed" },
+    });
+    expect(s.effects).toEqual(["mcp:personal:alice", "mcp:personal:alice"]);
+    expect(s.registry.getById(firstId)?.status).toBe("completed");
+    expect(s.registry.getById(secondId)?.status).toBe("completed");
+    const replayed = await rpc("approval_resume", { id });
+    expect(replayed.body).toMatchObject({
+      result: { structuredContent: { admission: { status: "accepted", duplicate: true, runId: secondId } } },
+    });
+    expect(s.effects).toEqual(["mcp:personal:alice", "mcp:personal:alice"]);
+    await s.personalTokens.delete(digestBearer("c".repeat(64)), "personal:alice");
+    expect((await rpc("approval_resume", { id })).status).toBe(401);
+  });
+  it("rehosts an uncertain service input with its original owner and only proved source-owned machine history", async () => {
+    const s = await fixture();
+    const admit = (
+      msg: import("../core/types.js").IncomingMessage,
+      _io: import("../core/types.js").ChannelIO,
+      evidence: import("./organizationAuthentication.js").OrganizationNativeEvidence,
+    ) => s.installation.admitNative(msg, evidence);
+    const send = (key: string) =>
+      handleIngressRequest(
+        {
+          method: "POST",
+          headers: { authorization: "Bearer native-token" },
+          body: JSON.stringify({ text: "memory forget", idempotencyKey: key }),
+        },
+        s.core,
+        { auth: { tokens: s.tokens }, admit },
+      );
+    expect((await send("first-machine")).status).toBe(202);
+    await s.execute();
+    const foreign: RunRecord = {
+      id: "foreign-human",
+      label: "Private human",
+      channelId: "http:ops",
+      threadKey: "http:ops:default",
+      userId: "access:alice",
+      channelVisibility: "unknown",
+      agent: "general",
+      startedAt: 900,
+      finishedAt: 901,
+      status: "completed",
+      eventCount: 2,
+      storedEventCount: 2,
+      truncated: false,
+      diagnosis: analyzeRunFriction([]),
+      events: [
+        { type: "input", text: "Private human history", messageId: "foreign-human", seq: 1 },
+        { type: "answer", text: "Private human answer", seq: 2 },
+      ],
+    };
+    expect((await s.runStore.put(foreign)).stored).toBe(true);
+    const second = await send("second-machine");
+    expect(second.status).toBe(202);
+    const id = (second.body as { runId: string }).runId;
+    const binding = await s.installation.originalBinding(id);
+    expect(binding).toMatchObject({
+      originalStatus: "dispatching",
+      actor: { id: "http:bot", kind: "service" },
+      envelope: { actor: { stream: null } },
+      msg: { text: "memory forget", userId: "http:bot" },
+    });
+    if (!binding) throw new Error("No original service binding");
+    expect(await binding.io.rehostOrganizationInput!(binding.msg)).toBeUndefined();
+    await s.ledger.finishIngress({
+      effectKey: binding.receipt.effectKey!,
+      digest: binding.envelope.digest,
+      runId: id,
+      status: "uncertain",
+      outcome: "The original owner returned this unread input.",
+    });
+    // The original scheduled invocation handed back the input; it cannot run in parallel.
+    s.tasks.shift();
+    const owned = await binding.io.rehostOrganizationInput!(binding.msg);
+    expect(owned?.msg).toMatchObject({ text: "memory forget", userId: "http:bot", threadKey: "http:ops:default" });
+    if (!owned) throw new Error("No original unread machine input");
+    const history = await owned.io.authoritativePrivateHistory!(owned.msg);
+    expect(history).toMatchObject([
+      { role: "user", text: "memory forget" },
+      { role: "assistant", text: "Read-only command completed." },
+    ]);
+    expect(history).toHaveLength(2);
+    await dispatch(s.core, owned.msg, owned.io, {
+      ingressRunId: id,
+      organizationSequence: binding.receipt.revision,
+      authoritativeHistory: true,
+      organizationConversation: true,
+      seed: history,
+    });
+    expect(s.effects).toEqual(["http:bot", "http:bot"]);
+    expect(s.registry.getById(id)?.status).toBe("completed");
+    const forged = withOriginalOrganizationDispatch(
+      { ...owned.msg, text: "Changed unread bytes" },
+      { ingressRunId: id, organizationSequence: binding.receipt.revision },
+    );
+    expect(await owned.io.rehostOrganizationInput!(forged)).toBeUndefined();
+    s.expire();
+    expect(await s.installation.originalBinding(id)).toBeUndefined();
+    expect(s.effects).toEqual(["http:bot", "http:bot"]);
+  });
+  it.each(["retained", "deleted", "revoked"] as const)(
+    "executes a saved private code proposal once under choice B with fresh source A (%s)",
+    async (state) => {
+      const requests: import("../core/provider.js").CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "fixture",
+        complete: async (request) => {
+          requests.push(structuredClone(request));
+          return requests.length === 1
+            ? {
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "start-saved-choice",
+                    name: "work_start",
+                    input: {
+                      repo: "sample/api",
+                      question: "Build selected repository",
+                      schemaVersion: 1,
+                      cause: { kind: "unknown", reason: "Not investigated" },
+                      evidence: { availability: "unavailable", reason: "Code-only change" },
+                      requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                      acceptance: "A reviewed change",
+                      findings: [],
+                      requestedChange: "Build the requested public repository change",
+                      sourceMessage: "Build selected repository",
+                    },
+                  },
+                ],
+                stopReason: "tool_use",
+              }
+            : { content: [{ type: "text", text: "Saved choice B work started." }], stopReason: "end_turn" };
+        },
+      };
+      const s = await fixture(false, false, provider);
+      const home = (await s.request("GET", "/home/session")).body;
+      const inputA = {
+        key: home.submissionKey,
+        revision: home.destination.revision,
+        destination: { kind: "broad" as const },
+        text: "memory forget",
+        context: [{ kind: "repository" as const, key: "sample/api" }],
+      };
+      expect((await s.request("POST", "/home/send", inputA)).status).toBe(200);
+      await s.execute();
+      const replayA = await s.installation.organization.replay(s.context.authentication, {
+        key: inputA.key,
+        revision: inputA.revision,
+        destination: inputA.destination,
+        content: inputA.text,
+        context: inputA.context,
+      });
+      if (replayA?.status !== "receipt" || !replayA.receipt.ownerRunId) throw new Error("No original source A");
+      const sourceA = await s.installation.originalBinding(replayA.receipt.ownerRunId);
+      if (!sourceA) throw new Error("No current source A");
+      expect(await sourceA.io.authoritativePrivateSourceHistory?.(sourceA.runId)).toEqual([
+        { role: "user", text: "memory forget", user: "access:alice" },
+      ]);
+      expect(await sourceA.io.authoritativePrivateSourceHistory?.("foreign-source")).toBeUndefined();
+      const id = "00000000-0000-4000-8000-000000000022";
+      await s.confirmations.put(
+        {
+          kind: "redispatch",
+          id,
+          message: { ...sourceA.msg, text: "Build selected repository" },
+          line: "Build selected repository",
+          evidence: "Explicit code proposal",
+          code: "fixture",
+        },
+        DAY_MS,
+      );
+      const next = (await s.request("GET", "/home/session")).body;
+      const inputB = {
+        key: next.submissionKey,
+        revision: next.destination.revision,
+        destination: { kind: "broad" as const },
+        confirmation: { kind: "confirm" as const, id },
+        context: [],
+      };
+      expect((await s.request("POST", "/home/send", inputB)).status).toBe(200);
+      const replayB = await s.installation.organization.replay(s.context.authentication, {
+        key: inputB.key,
+        revision: inputB.revision,
+        destination: inputB.destination,
+        continuation: inputB.confirmation,
+        content: "",
+        context: inputB.context,
+      });
+      if (replayB?.status !== "receipt" || !replayB.receipt.ownerRunId) throw new Error("No original choice B");
+      if (state === "deleted")
+        expect((await s.installation.runtime.deleteContent(s.context.authentication, replayA.receipt.id)).status).toBe(
+          "ok",
+        );
+      if (state === "revoked") s.setPolicy();
+      await s.execute();
+      if (state !== "retained") {
+        expect(s.created).toEqual([]);
+        expect(requests).toEqual([]);
+        expect((await s.confirmations.get(id))?.id).toBe(id);
+        return;
+      }
+      expect(s.created).toHaveLength(1);
+      const spawned = await s.coordinator.get(s.created[0]!);
+      const units = await s.coordinator.listUnits(s.created[0]!);
+      expect(spawned).toMatchObject({ userId: "access:alice", repo: "sample/api" });
+      expect(units[0]).toMatchObject({
+        workBrief: {
+          requesterId: "access:alice",
+        },
+        context: { handoff: { source: { runId: replayB.receipt.ownerRunId } } },
+      });
+      const linked = await s.coordinator.getMainTask({
+        mainThreadKey: units[0]!.workBrief!.mainThreadKey,
+        actId: units[0]!.workBrief!.actId,
+      });
+      expect(linked?.authority?.sourceMessageId).toBe(`browser:${replayB.receipt.revision}:browser%3A${inputB.key}`);
+      expect(JSON.stringify(requests[0].messages)).toContain("memory forget");
+      expect(JSON.stringify(requests[0].messages)).toContain("Build selected repository");
+      expect(JSON.stringify(requests)).not.toContain("Untrusted raw source history");
+      const originalB = await s.ledger.readIngressByRun(replayB.receipt.ownerRunId);
+      expect(originalB).toMatchObject({
+        status: "record",
+        record: {
+          runId: replayB.receipt.ownerRunId,
+          origin: { sourceReference: { messageId: `browser:${inputB.key}`, actorId: "access:alice" } },
+        },
+      });
+      expect(s.registry.snapshotById(replayB.receipt.ownerRunId)).toMatchObject({
+        organizationIngressRunId: replayB.receipt.ownerRunId,
+        authoritativeHistory: true,
+      });
+      expect(s.registry.getById(replayB.receipt.ownerRunId)?.userId).toBe("access:alice");
+      const stream = await s.installation.organization.streamTail(s.context.authentication, 100);
+      if (stream.status !== "stream_tail") throw new Error("No private output");
+      expect(
+        stream.entries
+          .filter((entry) => entry.content.includes("Saved choice B work started."))
+          .map((entry) => entry.receiptId),
+      ).toEqual([replayB.receipt.id]);
+      expect((await s.request("POST", "/home/send", inputB)).body.duplicate).toBe(true);
+      expect(s.created).toEqual([s.created[0]]);
+      expect(await s.confirmations.get(id)).toBeUndefined();
+    },
+  );
+  it("keeps saved source A context separate from choice B receipt and exact execution owner", async () => {
+    const s = await fixture();
+    const home = (await s.request("GET", "/home/session")).body;
+    const inputA = {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" as const },
+      text: "memory forget",
+      context: [],
+    };
+    expect((await s.request("POST", "/home/send", inputA)).status).toBe(200);
+    await s.execute();
+    const replayA = await s.installation.organization.replay(s.context.authentication, {
+      ...inputA,
+      content: inputA.text,
+    });
+    if (replayA?.status !== "receipt" || !replayA.receipt.ownerRunId) throw new Error("No offer source owner");
+    const sourceA = await s.installation.originalBinding(replayA.receipt.ownerRunId);
+    if (!sourceA) throw new Error("No source A");
+    const id = "00000000-0000-4000-8000-000000000021";
+    await s.confirmations.put(
+      {
+        kind: "run",
+        id,
+        message: sourceA.msg,
+        command: "memory.forget",
+        input: { args: [], options: {} },
+        receipt: "Run saved source action",
+        risk: "No external effect",
+        model: "fixture/unused",
+      },
+      DAY_MS,
+    );
+    const next = (await s.request("GET", "/home/session")).body;
+    const inputB = {
+      key: next.submissionKey,
+      revision: next.destination.revision,
+      destination: { kind: "broad" as const },
+      confirmation: { kind: "confirm" as const, id },
+      context: [],
+    };
+    expect((await s.request("POST", "/home/send", inputB)).status).toBe(200);
+    const replayB = await s.installation.organization.replay(s.context.authentication, {
+      key: inputB.key,
+      revision: inputB.revision,
+      destination: inputB.destination,
+      continuation: inputB.confirmation,
+      content: "",
+      context: [],
+    });
+    if (replayB?.status !== "receipt" || !replayB.receipt.ownerRunId) throw new Error("No choice B owner");
+    await s.execute();
+    const stream = await s.installation.organization.streamTail(s.context.authentication, 100);
+    if (stream.status !== "stream_tail") throw new Error("No current private stream");
+    expect(
+      stream.entries
+        .filter((entry) => entry.role === "assistant" && entry.content.includes("Read-only command completed."))
+        .map((entry) => entry.receiptId),
+    ).toEqual([replayA.receipt.id, replayB.receipt.id]);
+    expect(s.registry.getById(replayB.receipt.ownerRunId)?.status).toBe("completed");
+    expect(await s.ledger.readIngressByRun(replayB.receipt.ownerRunId)).toMatchObject({
+      status: "record",
+      record: { status: "completed", origin: { continuation: { kind: "confirm", id } } },
+    });
+    expect((await s.request("POST", "/home/send", inputB)).body.duplicate).toBe(true);
+    expect(s.effects).toEqual(["access:alice", "access:alice"]);
+  });
+  it("restores a completed offer source without restarting it and fences its exact saved choice before consume when source policy changes", async () => {
+    const s = await fixture();
+    const home = (await s.request("GET", "/home/session")).body;
+    const text = {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" as const },
+      text: "memory forget",
+      context: [],
+    };
+    await s.request("POST", "/home/send", text);
+    await s.execute();
+    const receipt = await s.installation.organization.replay(s.context.authentication, {
+      key: text.key,
+      revision: text.revision,
+      destination: text.destination,
+      content: text.text,
+      context: [],
+    });
+    if (receipt?.status !== "receipt") throw new Error("No original completed owner");
+    const binding = await s.installation.originalBinding(receipt.receipt.ownerRunId!);
+    expect(binding).toMatchObject({
+      originalStatus: "completed",
+      msg: { text: "memory forget", userId: "access:alice" },
+      runId: receipt.receipt.ownerRunId,
+    });
+    if (!binding) throw new Error("No completed source binding");
+    const put = (id: string) =>
+      s.confirmations.put(
+        {
+          kind: "run",
+          id,
+          message: { ...binding.msg, text: "Saved proposal differs from the original phrase" },
+          command: "memory.forget",
+          input: { args: [], options: {} },
+          receipt: "Run the exact saved fixture action",
+          risk: "No external effect",
+          model: "fixture/unused",
+          derivation: {
+            kind: "operator",
+            context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+          },
+        },
+        DAY_MS,
+      );
+    const id = "00000000-0000-4000-8000-000000000009";
+    const saved = await put(id);
+    expect((await s.request("GET", "/home/session")).body.offer?.id).toBe(id);
+    expect((await s.installation.readThread(s.context, binding.msg.threadKey))?.offer?.id).toBe(id);
+    expect(saved.originalOrganization).toMatchObject({
+      ingressRunId: binding.runId,
+      organizationSequence: binding.receipt.revision,
+    });
+    const foreign = { ...binding.actor, id: "access:other" };
+    expect(await s.installation.guardOrganizationConfirmation(saved, foreign)).toBeUndefined();
+    const proof = await s.installation.guardOrganizationConfirmation(saved, binding.actor);
+    expect(proof?.actor.id).toBe("access:alice");
+    expect(await proof!.io.authoritativePrivateHistory!()).toEqual([]);
+    const visible: string[] = [];
+    const io = {
+      reply: async (text: string) => {
+        visible.push(text);
+      },
+      history: async () => [],
+      status: async () => ({ update() {}, done: async () => {} }),
+    };
+    await dispatchClick(s.core, { kind: "confirm", id, actor: binding.actor, io });
+    expect(s.effects).toEqual(["access:alice", "access:alice"]);
+    await dispatchClick(s.core, { kind: "confirm", id, actor: binding.actor, io });
+    expect(s.effects).toEqual(["access:alice", "access:alice"]);
+    const staleId = "00000000-0000-4000-8000-000000000010";
+    await put(staleId);
+    s.setPolicy();
+    expect((await s.request("GET", "/home/session")).body.offer).toBeUndefined();
+    expect((await s.installation.readThread(s.context, binding.msg.threadKey))?.offer).toBeUndefined();
+    await dispatchClick(s.core, { kind: "confirm", id: staleId, actor: binding.actor, io });
+    expect(s.effects).toEqual(["access:alice", "access:alice"]);
+    expect((await s.confirmations.get(staleId))?.id).toBe(staleId);
+    expect(await s.installation.originalBinding(binding.runId)).toBeUndefined();
+    expect(s.registry.getById(binding.runId)?.status).toBe("completed");
+  });
+  it("joins only proved private Slack input to the linked broad stream and retains its native reply address", async () => {
+    const s = await fixture(true, true);
+    const msg = {
+      channelId: "slack:D1",
+      userId: "slack:UALICE",
+      threadKey: "slack:D1:1",
+      messageId: "1000.1",
+      text: "memory forget",
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:D1",
+        userId: "slack:UALICE",
+        threadKey: "slack:D1:1",
+      },
+    };
+    const evidence = {
+      source: "slack" as const,
+      identity: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" },
+    };
+    const missingPayload = await s.installation.admitNative(
+      { ...msg, images: [{ data: "fixture", mediaType: "image/png" }] },
+      evidence,
+    );
+    expect(missingPayload).toEqual({ status: "unavailable" });
+    const admitted = await s.installation.admitNative(msg, evidence);
+    expect(admitted).toMatchObject({
+      status: "receipt",
+      duplicate: false,
+      receipt: { status: "accepted", source: "slack", actor: { bindingRevision: 1 }, ownerRunId: expect.any(String) },
+    });
+    await s.execute();
+    expect(s.effects).toEqual(["slack:UALICE"]);
+    expect(s.nativeReplies).toEqual(["Read-only command completed."]);
+    const home = (await s.request("GET", "/home/session")).body;
+    expect(home.entries.filter((entry) => entry.role !== "receipt").map((entry) => entry.content)).toEqual([
+      "memory forget",
+      "Read-only command completed.",
+    ]);
+    const again = await s.installation.admitNative(msg, evidence);
+    expect(again).toMatchObject({
+      status: "receipt",
+      duplicate: true,
+      receipt: { ownerRunId: admitted.status === "receipt" ? admitted.receipt.ownerRunId : "unavailable" },
+    });
+    expect(s.effects).toEqual(["slack:UALICE"]);
+    s.revoke();
+    expect(await s.installation.admitNative({ ...msg, messageId: "1000.2" }, evidence)).toEqual({
+      status: "unavailable",
+    });
+  });
+  it("admits authenticated HTTP and MCP calls under their own durable owners without email stream joins", async () => {
+    const s = await fixture();
+    const admit = (
+      msg: import("../core/types.js").IncomingMessage,
+      _io: import("../core/types.js").ChannelIO,
+      evidence: import("./organizationAuthentication.js").OrganizationNativeEvidence,
+    ) => s.installation.admitNative(msg, evidence);
+    const http = await handleIngressRequest(
+      {
+        method: "POST",
+        headers: { authorization: "Bearer native-token" },
+        body: JSON.stringify({ text: "memory forget", idempotencyKey: "same-call" }),
+      },
+      s.core,
+      { auth: { tokens: s.tokens }, admit },
+    );
+    expect(http.status).toBe(202);
+    expect(http.body).toMatchObject({
+      runId: expect.any(String),
+      runUrl: expect.stringMatching(/^\/runs\//),
+      threadKey: "http:ops:default",
+    });
+    expect(http.body).toMatchObject({ admission: { status: "accepted", duplicate: false, runId: expect.any(String) } });
+    await s.execute();
+    expect(s.effects).toEqual(["http:bot"]);
+    expect(s.nativeReplies).toEqual(["Read-only command completed."]);
+    const retried = await handleIngressRequest(
+      {
+        method: "POST",
+        headers: { authorization: "Bearer native-token" },
+        body: JSON.stringify({ text: "memory forget", idempotencyKey: "same-call" }),
+      },
+      s.core,
+      { auth: { tokens: s.tokens }, admit },
+    );
+    expect(retried.body).toMatchObject({ admission: { status: "accepted", duplicate: true } });
+    expect(s.effects).toEqual(["http:bot"]);
+    const conflict = await handleIngressRequest(
+      {
+        method: "POST",
+        headers: { authorization: "Bearer native-token" },
+        body: JSON.stringify({ text: "different body", idempotencyKey: "same-call" }),
+      },
+      s.core,
+      { auth: { tokens: s.tokens }, admit },
+    );
+    expect(conflict).toEqual({ status: 409, body: { admission: { status: "conflict" } } });
+    const mcp = await handleMcpRequest(
+      {
+        method: "POST",
+        headers: { authorization: "Bearer native-token" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "dispatch", arguments: { text: "memory forget", idempotencyKey: "mcp-call" } },
+        }),
+      },
+      s.core,
+      { auth: { tokens: s.tokens }, admit },
+    );
+    expect(mcp.body).toMatchObject({
+      result: { structuredContent: { admission: { status: "accepted", duplicate: false, runId: expect.any(String) } } },
+    });
+    await s.execute();
+    expect(s.effects).toEqual(["http:bot", "mcp:bot"]);
+    const state = await s.store.execute({ action: "get", organization: "fixture" });
+    expect(state.status).toBe("state");
+    const native = await s.installation.organization.resolve({
+      source: "http",
+      identity: { issuer: "installation:fixture:http", tenant: null, subject: "bot" },
+      kind: "service",
+      organizations: ["fixture"],
+    });
+    expect(native?.actor.stream).toBeNull();
+  });
+  it("dispatches a private browser command through the real Core exactly once under its original ingress run", async () => {
+    const s = await fixture();
+    const home = (await s.request("GET", "/home/session")).body;
+    const input = {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" },
+      text: "memory forget",
+      context: [],
+    };
+    const sent = await s.request("POST", "/home/send", input);
+    expect(sent.status).toBe(200);
+    expect(sent.body.status).toBe("pending");
+    await s.execute();
+    const history = (await s.request("GET", "/home/session")).body;
+    expect(history.entries.map((entry) => entry.content)).toContain("Read-only command completed.");
+    const receipt = await s.installation.organization.replay(s.context.authentication, {
+      key: input.key,
+      revision: input.revision,
+      destination: { kind: "broad" },
+      content: "memory forget",
+      context: [],
+    });
+    expect(receipt).toMatchObject({ status: "receipt", duplicate: true, receipt: { status: "accepted" } });
+    if (receipt?.status !== "receipt") throw new Error("No retained receipt");
+    expect(s.registry.getById(receipt.receipt.ownerRunId!)?.status).toBe("completed");
+    expect(s.effects).toEqual(["access:alice"]);
+    await s.request("POST", "/home/send", input);
+    await s.installation.runtime.reconcile("fixture");
+    expect(s.effects).toEqual(["access:alice"]);
+  });
+  it("answers the full saved question as one original-unit event and restores that exact event after restart", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    const home = (await s.request("POST", "/home/focus", { thread })).body;
+    expect(home.destination.canWrite).toBe(true);
+    const sent = await s.request("POST", "/home/send", {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "thread", thread },
+      text: "Proceed with this reviewed head",
+      context: [],
+    });
+    expect(sent.status).toBe(200);
+    expect(sent.body.status).toBe("pending");
+    await s.execute();
+    const events = await s.coordinator.listEvents({ instanceId: "fixture", unit: "original" });
+    expect(events.map((event) => ({ text: event.text, sender: event.sender, id: event.id }))).toEqual([
+      { text: "Proceed with this reviewed head", sender: "access:alice", id: `browser:${home.submissionKey}` },
+    ]);
+    const runId = events[0]!.organizationIngressRunId!;
+    expect(await s.installation.readOriginalRun(runId)).toEqual({
+      status: "completed",
+      outcome: "Original answer recorded.",
+    });
+    expect(await s.installation.readOriginalRun("unknown-run")).toEqual({ status: "unknown" });
+  });
+  it("does not turn a readable assigned question into write permission when target policy denies replies", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    s.denyWrites();
+    const read = await s.installation.readThread(s.context, thread);
+    expect(read?.entries.map((entry) => entry.content).join("\n")).toContain(
+      "Review requested for https://github.com/sample/api/pull/42.",
+    );
+    expect(read?.canWrite).toBe(false);
+    expect((await s.request("POST", "/home/focus", { thread })).status).toBe(404);
+  });
+  it("keeps a consumed original run uncertain while native proof is missing and never launches it again", async () => {
+    const s = await fixture();
+    const home = (await s.request("GET", "/home/session")).body;
+    await s.request("POST", "/home/send", {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" },
+      text: "memory forget",
+      context: [],
+    });
+    s.revoke();
+    await s.execute();
+    s.restoreSource();
+    const prior = await s.installation.organization.replay(s.context.authentication, {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" },
+      content: "memory forget",
+      context: [],
+    });
+    expect(prior).toMatchObject({ status: "receipt", duplicate: true, receipt: { status: "accepted" } });
+    if (prior?.status !== "receipt") throw new Error("No retained original owner");
+    expect(await s.ledger.readIngress(prior.receipt.effectKey!)).toMatchObject({
+      status: "record",
+      record: {
+        runId: prior.receipt.ownerRunId,
+        status: "uncertain",
+        outcome: "The original actor's current proof is unavailable.",
+      },
+    });
+    await s.installation.runtime.reconcile("fixture");
+    expect(await s.installation.readOriginalRun(prior.receipt.ownerRunId!)).toEqual({ status: "unknown" });
+    expect(s.tasks).toEqual([]);
+    expect(s.effects).toEqual([]);
+  });
+  it("refuses a changed complete question before its effect and preserves exact observed-revision replay", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    const home = (await s.request("POST", "/home/focus", { thread })).body;
+    await s.request("POST", "/home/send", {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "thread", thread },
+      text: "Answer original question",
+      context: [],
+    });
+    seedCoordinatorUnit(s.coordinator, {
+      ...unit,
+      idle: { ...unit.idle!, humanGate: { ...unit.idle!.humanGate!, askedAt: 2000, headSha: "b".repeat(40) } },
+    });
+    await s.execute();
+    const original = {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "thread" as const, thread },
+      content: "Answer original question",
+      context: [],
+    };
+    expect(await s.installation.organization.replay(s.context.authentication, original)).toMatchObject({
+      status: "receipt",
+      duplicate: true,
+      receipt: { status: "rejected" },
+    });
+    expect(
+      await s.installation.organization.replay(s.context.authentication, {
+        ...original,
+        revision: original.revision + 1,
+      }),
+    ).toEqual({ status: "conflict" });
+    expect(await s.coordinator.listEvents({ instanceId: "fixture", unit: "original" })).toEqual([]);
+    expect(s.effects).toEqual([]);
+  });
+  it("consumes only the exact saved confirmation through the real Core and original ingress identity", async () => {
+    const s = await fixture();
+    const id = "00000000-0000-4000-8000-000000000001";
+    await s.confirmations.put(
+      {
+        kind: "run",
+        id,
+        message: {
+          channelId: "web:alice",
+          userId: "access:alice",
+          threadKey: "web:alice:organization",
+          text: "memory forget",
+        },
+        command: "memory.forget",
+        input: { args: [], options: {} },
+        receipt: "Run the saved fixture command",
+        risk: "No external effect",
+        model: "fixture/unused",
+      },
+      DAY_MS,
+    );
+    const home = (await s.request("GET", "/home/session")).body;
+    expect(home.offer?.id).toBe(id);
+    const input = {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" },
+      confirmation: { kind: "confirm", id },
+      context: [],
+    };
+    expect((await s.request("POST", "/home/send", input)).status).toBe(200);
+    await s.execute();
+    const original = await s.installation.organization.replay(s.context.authentication, {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" },
+      continuation: { kind: "confirm", id },
+      content: "",
+      context: [],
+    });
+    expect(original).toMatchObject({ status: "receipt", duplicate: true, receipt: { status: "accepted" } });
+    if (original?.status !== "receipt") throw new Error("No original choice owner");
+    expect(s.registry.getById(original.receipt.ownerRunId!)?.status).toBe("completed");
+    expect(await s.confirmations.get(id)).toBeUndefined();
+    expect(s.effects).toEqual(["access:alice"]);
+    expect((await s.request("POST", "/home/send", input)).body.duplicate).toBe(true);
+    expect(s.effects).toEqual(["access:alice"]);
+  });
+  it("uses a current two-source question proof without replacing the real browser credential or source", async () => {
+    const s = await fixture(true);
+    await s.seedQuestion();
+    const home = (await s.request("POST", "/home/focus", { thread: s.targetThread })).body;
+    expect(home.destination.canWrite).toBe(true);
+    await s.request("POST", "/home/send", {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "thread", thread: s.targetThread },
+      text: "Answer as the proved requester",
+      context: [],
+    });
+    await s.execute();
+    const events = await s.coordinator.listEvents({ instanceId: "fixture", unit: "original" });
+    expect(
+      events.map((event) => ({ sender: event.sender, authenticatedAs: event.authenticatedAs, text: event.text })),
+    ).toEqual([{ sender: "slack:UALICE", authenticatedAs: "access:alice", text: "Answer as the proved requester" }]);
+    const prior = await s.ledger.readIngressByRun(events[0]!.organizationIngressRunId!);
+    expect(prior).toMatchObject({
+      status: "record",
+      record: {
+        origin: {
+          source: "browser",
+          actor: { identity },
+          sourceReference: {
+            actorId: "access:alice",
+            userId: "slack:UALICE",
+            authenticatedAs: "access:alice",
+            channelId: "web:alice",
+            threadKey: s.targetThread,
+            messageId: `browser:${home.submissionKey}`,
+            browserRevision: home.destination.revision,
+            questionOwnership: {
+              unitKey: "fixture:original",
+              requester: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" },
+            },
+          },
+        },
+      },
+    });
+    expect(s.context.actor.self).toEqual(["access:alice"]);
+  });
+  it("keeps proved source aliases inside the current raw permission predicate when native thread access is withdrawn", async () => {
+    const s = await fixture(true);
+    await s.seedQuestion();
+    const visible = await s.request("POST", "/home/focus", { thread: s.targetThread });
+    expect(visible.status).toBe(200);
+    expect(visible.body.entries.map((entry) => entry.content).join("\n")).toContain("Original task");
+    s.denyNativeReads();
+    expect((await s.request("POST", "/home/focus", { thread: s.targetThread })).status).toBe(404);
+    expect(s.context.actor.self).toEqual(["access:alice"]);
+    expect(await s.coordinator.listEvents({ instanceId: "fixture", unit: "original" })).toEqual([]);
+  });
+});
