@@ -132,7 +132,7 @@
     "src/core/delivery.ts": "15e060f3165aa3b3a2d902e9cddffb9c470771b3b41fa59792a43e3ed678ab05",
     "src/core/dispatch/handoff.ts": "2c1416f5a3cac2547f0f0e19a45a72aad33c3f6c7871eadf8d86edabeaf218e3",
     "src/core/dispatch/handoffBrief.ts": "41a97afc78d2bf3547dc1d8663b0ef581b9214f22d6ed88357d6a87050c7f0d8",
-    "src/core/dispatch/orchestratorDecisions.ts": "ccda8800cece942189efd8a04b38d2e21a3258cbe9b2ff16a20e755622d4e10d",
+    "src/core/dispatch/orchestratorDecisions.ts": "28e399d93a419f41dc8bd5983b73b59a0ec2f1ded270d5263019e7cfadd585cb",
     "src/core/dispatch/originalOrganizationInput.ts": "055dde7837d46d8b942c1bf0d10f157d3e75515489c8c91a67206320a8a14feb",
     "src/core/dispatch/privateDestination.ts": "73f91064aadc13aff7bfcd718fa8244d7006a001d5f70f879b67c19d0fc6b266",
     "src/core/dispatch/record.ts": "255725cbcdfff5611b01e4857d7f558c4a9fb16d9f5c0311b7aff5712a7d3ba8",
@@ -190,6 +190,7 @@
     "src/core/runLedger/inboxMessage.ts": "e106aed8682ea9c75899670e0d64f3ce6970c7caa67532ad60f20c7040e17b7f",
     "src/core/runLedger/pausedStop.ts": "7655d5215036ec7db6c22a82fa012ee274ee5b6239c62a98196a4fe4b110cdf0",
     "src/core/runLedger/sessionLog.ts": "d814005b118f87d064676f0fb46703c04a5d5fc7417d8c6ad6b371407be18916",
+    "src/core/runLedger/sourceEvents.ts": "cbc033a128681b07d11cf68cda9925fae23a4c8b2c9a2d467e119c689e833b85",
     "src/core/runLedger/transcript.ts": "1207a5191702b4eeb2c795aa4cef54d4882fc983f07bda59eae6fe400ea3c8dc",
     "src/core/runLedger/types.ts": "e01cfbc0cbe516b398ea62b16ea788b059646d2efc45733e16c2c3f47f979dc8",
     "src/core/runMetrics.ts": "90ba2ff8a339e9e183a3bd1b86a40fedb1579c6b28790528164e6c82440a11d2",
@@ -314,6 +315,10 @@
         "accept": "*/*"
       },
       {
+        "path": "/assets/0353ed8fa034eaca.woff2",
+        "accept": "*/*"
+      },
+      {
         "path": "/assets/1002e0a361181ac0.js",
         "accept": "*/*"
       },
@@ -338,14 +343,6 @@
         "accept": "*/*"
       },
       {
-        "path": "/assets/343325d9652f9215.woff2",
-        "accept": "*/*"
-      },
-      {
-        "path": "/assets/3ee6d121c7230456.woff2",
-        "accept": "*/*"
-      },
-      {
         "path": "/assets/4238f641a614553a.js",
         "accept": "*/*"
       },
@@ -366,10 +363,6 @@
         "accept": "*/*"
       },
       {
-        "path": "/assets/7539a2ef0d7cc66b.js",
-        "accept": "*/*"
-      },
-      {
         "path": "/assets/7704038c40f6cb06.js",
         "accept": "*/*"
       },
@@ -382,7 +375,15 @@
         "accept": "*/*"
       },
       {
+        "path": "/assets/8ebca7d8a97580d8.js",
+        "accept": "*/*"
+      },
+      {
         "path": "/assets/92945a3a5a7d8c72.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/9825f6c791051da3.woff2",
         "accept": "*/*"
       },
       {
@@ -411,10 +412,6 @@
       },
       {
         "path": "/assets/f08257fe1b44dd1d.js",
-        "accept": "*/*"
-      },
-      {
-        "path": "/assets/f5ccb0e5b3f17c3e.js",
         "accept": "*/*"
       },
       {
@@ -451,37 +448,36 @@
       "src/docs/screenshotOutputPinned.ts": "be4be6869229593070c35867166a8fd60928504178f0c0f028a64759f82b0992",
       "src/docs/screenshotRenderedInputs.ts": "afdfe75d771fec6d32008dcd0d619dd6cb611ed06b74d82840a7a7e59e79cc8b",
       "response:*/*:/assets/01afa7a9d0fae109.js": "fce2a13f196c39a3d9e6cd910ee1cc08543533ee459e8a35622ad16c16cc89a1",
+      "response:*/*:/assets/0353ed8fa034eaca.woff2": "7ae9820d1812c63d6b417ba4cd21a21be6eb6663c537604dc0afc7c2773fdfa1",
       "response:*/*:/assets/1002e0a361181ac0.js": "cd9f39554e32f9b71d4f644ca21412d063fb5a7705ad9b699633c38ad4d2153d",
       "response:*/*:/assets/180f145d0379c8dc.js": "37d8668a319c3288780a86e61e8a5e8033a8259f7e4f0fe443d88ab56c74315d",
       "response:*/*:/assets/185aa3500ac77e55.js": "bd974607edd30f7e63df9a25df36afa8ee2eeda13d69df8c848f7fdfd27920c4",
       "response:*/*:/assets/234d05a8be46e9e1.js": "dce4a5569bc1346613701d8c9442bb5b286e8687cd3cd03596b9f6bd9c01a014",
       "response:*/*:/assets/2478eda3843dd5ae.js": "9fda86eefd9d3f07d7e85132bd08e51b62faa12b1590d295676b1ebf24d5919c",
       "response:*/*:/assets/30519f187e29203c.js": "82cb1251b939f81024da980a9b593542457c7cbad94d6e42950e61f89672baaa",
-      "response:*/*:/assets/343325d9652f9215.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
-      "response:*/*:/assets/3ee6d121c7230456.woff2": "7ae9820d1812c63d6b417ba4cd21a21be6eb6663c537604dc0afc7c2773fdfa1",
       "response:*/*:/assets/4238f641a614553a.js": "46860536a5b4f63fafc92db37290b75b5182ff0db123254e18eb672ff9497d22",
-      "response:*/*:/assets/426422a72deaeac3.js": "0ddf34aea62aab3b921957a0d3992126efef7945990a304357cad7696e10c41c",
+      "response:*/*:/assets/426422a72deaeac3.js": "3500407c3f22f71de2709b048fd26d70ece48dae37e1cb5fae0ef79e6072b9d5",
       "response:*/*:/assets/444409e028e282d3.js": "765003fe0939b3b0322e844cbabda0ddf0f07f711e8f24838368a869cf7c3199",
-      "response:*/*:/assets/5f60d2df1754da99.js": "68f14820a9d614f40bb80b6a8298cda7a631ba544e5c6e46403581b81bd8428d",
+      "response:*/*:/assets/5f60d2df1754da99.js": "eb1aca1562df993ae3c7bc56ccd2056583b54706ef75fb36cec1ff6da22c0cfa",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
-      "response:*/*:/assets/7539a2ef0d7cc66b.js": "20431dd0b558a4ce265330b96c92b8b16637eeaffff50fc7b979982b9fe98d2c",
-      "response:*/*:/assets/7704038c40f6cb06.js": "820d501352063946b7dfad997b9e9da8c7ce337bf7bdf5bd8e0944443e21fabe",
+      "response:*/*:/assets/7704038c40f6cb06.js": "e61e7b9ddf30576fb2c6c1cd77d8ce8f62abcb5ce499a5a6b8e49a64775563b9",
       "response:*/*:/assets/801c8f91d5264208.js": "838778f8bffbced50ec9141ef5243c50b42e81bf7b75b6a7ba90de6ce2fc203a",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
-      "response:*/*:/assets/92945a3a5a7d8c72.js": "8579c1f60981d72bbce03a4eb39285c64e2f06b4bbbdc0d1068dd36026fae0fc",
+      "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
+      "response:*/*:/assets/92945a3a5a7d8c72.js": "ffb27fbaa147a46ec18a6e7948fd7ed2ffbb982b524e3463fa4d874898dd6925",
+      "response:*/*:/assets/9825f6c791051da3.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
       "response:*/*:/assets/ae5af04fe564482b.js": "62918e3490e8e1a9ec98915cf10463cf50cd8d94f30f9855031bc307349ff44c",
       "response:*/*:/assets/d89759a31e26ce19.js": "334476b4946a33da1cc6e34be9e3f1c4f6f7b0a7a9055a579ef322e7a4eb3b70",
-      "response:*/*:/assets/dc65e09154ff2612.js": "648a3b7b99dd8e6844f7527b39fe78a4334f0fc091fd5cd1a534a066831a4308",
+      "response:*/*:/assets/dc65e09154ff2612.js": "5ca0eaf97296524c7996dba417a15ae4d566fc016040129eaecb24b5f4dea2ce",
       "response:*/*:/assets/e2d5b96b99e916ef.js": "12a21290b18c32e8acad52f209ba85cce7b954ae5dc97ea5ac12a1d230690352",
       "response:*/*:/assets/e84c77bd8d4c7e31.js": "bdc4ce806ebb7f3147856e84b2a18c90467a90aecdc98b89b0c1ecaa98052473",
-      "response:*/*:/assets/e87d52e570baa2d6.js": "259ef1df2063a33c2d25c38118637bdf4344b4714c4684e052601850679e3e45",
+      "response:*/*:/assets/e87d52e570baa2d6.js": "c992d0f16c428968b47345cf8308221f0d7be9f725270797ff38241468bf4ba8",
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
-      "response:*/*:/assets/f5ccb0e5b3f17c3e.js": "916ad1ce675aa55ce5a7d70384b6506be62f8e2cafc74f3543ab1f6d276b2d5b",
-      "response:*/*:/assets/fa9648c65d44afab.js": "f620f92b9be08222f6725470b6fa7281579541f6a63da5ad8022a3c2a97b944c",
-      "response:*/*:/assets/green.css": "722ba8d619ce7c75e9fd185928fe05893e5738b2bed9f32d204d31896267a92d",
+      "response:*/*:/assets/fa9648c65d44afab.js": "be6f136511acc845b8a7f081a78cebb32a09124b4cbe63c5d516994c6566528e",
+      "response:*/*:/assets/green.css": "910b7d4303c281ffc4a9abd83e0d5af751a49010657bf5fb94f94c3be4333bc7",
       "response:*/*:/runs?all=1": "5d3332771973ebbc959053d428effdd772ecbd3d162fbe50040204688935b172",
-      "response:application/json:/home/session": "6c9350e10773b86847a49d18a2e7ba1b8956f3846f76b5911489bd4f0606e18a",
-      "response:text/event-stream:/home/events": "4ac677179b6842410a7e9c3a4b068348b8ba47401c6d0882ac78da6efadc5afe",
+      "response:application/json:/home/session": "c82d12a8969c4fa702b61673f65fce22eb80d190152b121f3da897acf37bd71e",
+      "response:text/event-stream:/home/events": "75480b36f2eb6dcc8b35f487aa33e505f982045b695b734215c8506d4c514554",
       "response:text/event-stream:/runs?stream=1&all=1": "9f2308ba970c4abb63e1c386283877742b4a4feec64ade544d6d3a6d32968540"
     }
   }

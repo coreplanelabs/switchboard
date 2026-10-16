@@ -201,6 +201,10 @@ The next cut retains a relevance result inside the existing source job, bound to
 
 This adds storage support, not a processor. No source producer, model caller, worker delivery or completion path is enabled. Canonical context/access checks, recorded route/fold decisions, internal delivery, exact consumption and retention still remain. Step 2 is in progress.
 
+### Recorded source folds, 2026-10-16
+
+The next independent cut extends the existing orchestrator decision history with a version 2 fold for source evidence or source facts. Source receipts and run/unit target hashes retain one owner and identity space beside requester decisions. Recovery, failed-save holds and storage limits stay shared. The record is data only; no source caller or delivery path is enabled. Canonical source/decision validation, current context/access checks, runtime delivery and native consumption remain pending. Compatible readers must precede a future writer. Step 2 remains in progress.
+
 ## Step 3: preserve evidence through internal handoffs
 
 **Current source:** [intake](../../src/core/intake.ts), [inbox schema](../../src/core/runLedger/inboxMessage.ts), [thread admission](../../src/core/threadAdmission.ts), [unit events](../../src/core/coordinator/instanceStore.ts), and both runtime implementations.
