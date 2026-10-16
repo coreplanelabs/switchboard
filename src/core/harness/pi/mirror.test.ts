@@ -287,6 +287,207 @@ describe("PiMirror — step records as the runner writes them", () => {
   });
 });
 
+describe("PiMirror — explicit tool-result checkpoints", () => {
+  it("acknowledges one observed result only after its canonical step is saved", async () => {
+    const reports: StepReport[] = [];
+    let release!: () => void;
+    const saved = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const m = new PiMirror({
+      seedLength: 1,
+      remainingMs: () => 600_000,
+      onStep: async (report) => {
+        if (report.turns[0]?.role === "user") await saved;
+        reports.push(report);
+      },
+    });
+    await m.onMessage(bashCall, 1);
+    await m.onMessage(bashResult, 1);
+    let acknowledged = false;
+    const checkpoint = m.checkpointToolResults(1).then((held) => {
+      acknowledged = held;
+      return held;
+    });
+    await Promise.resolve();
+    expect(acknowledged).toBe(false);
+    expect(m.written.messages).toEqual([chatMessageOf(bashCall)]);
+    release();
+    expect(await checkpoint).toBe(true);
+    expect(reports[1]).toMatchObject({
+      firstIdx: 2,
+      turns: [{ role: "user", content: [{ type: "tool_result", toolUseId: "call_0", content: " M README.md" }] }],
+      inFlight: [],
+      turn: 1,
+      iteration: 0,
+    });
+    await m.onMessage(final, 2);
+    expect(reports[2]).toMatchObject({
+      firstIdx: 3,
+      turns: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+      inFlight: [],
+      iteration: 1,
+    });
+    expect(m.rowOfCalls).toBe(3);
+    expect(m.rowOfResults).toBe(4);
+  });
+
+  it("defers a parallel result batch until every declared call has an observed result", async () => {
+    const reports: StepReport[] = [];
+    const m = new PiMirror({
+      seedLength: 1,
+      remainingMs: () => 600_000,
+      onStep: async (report) => void reports.push(report),
+    });
+    await m.onMessage(
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call_0", name: "bash", arguments: { command: "git status" } },
+          { type: "toolCall", id: "call_1", name: "bash", arguments: { command: "git diff", timeout: 3 } },
+        ],
+      },
+      1,
+    );
+    expect(reports[0].inFlight).toEqual([
+      { callId: "call_0", tool: "bash" },
+      { callId: "call_1", tool: "bash", boundMs: 3000 },
+    ]);
+    await m.onMessage(bashResult, 1);
+    expect(await m.checkpointToolResults(1)).toBe(false);
+    expect(reports).toHaveLength(1);
+    expect(m.rowOfCalls).toBe(1);
+    expect(m.rowOfResults).toBe(2);
+    await m.onMessage({ ...bashResult, toolCallId: "call_1" }, 1);
+    expect(await m.checkpointToolResults(1)).toBe(true);
+    expect(reports[1]).toMatchObject({
+      firstIdx: 2,
+      turns: [
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", toolUseId: "call_0", content: " M README.md" },
+            { type: "tool_result", toolUseId: "call_1", content: " M README.md" },
+          ],
+        },
+      ],
+      inFlight: [],
+    });
+    expect(reports).toHaveLength(2);
+    expect(m.rowOfCalls).toBe(1);
+    expect(m.rowOfResults).toBe(3);
+  });
+
+  it("recognizes a saved result tail on reattach without duplicating it or losing a parallel call", async () => {
+    const declared: ChatMessage = {
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: "call_0", name: "bash", input: { command: "git status" } },
+        { type: "tool_use", id: "call_1", name: "bash", input: { command: "git diff" } },
+        { type: "tool_use", id: "call_2", name: "bash", input: { command: "git log", timeout: 3 } },
+      ],
+    };
+    const tail: ChatMessage = { ...chatMessageOf(bashResult)!, sourceResults: [] };
+    const reports: StepReport[] = [];
+    const m = new PiMirror({
+      seedLength: 3,
+      seedMessages: [{ role: "user", content: [{ type: "text", text: "go" }] }, declared, tail],
+      mirroredTail: { turn: tail },
+      remainingMs: () => 600_000,
+      onStep: async (report) => void reports.push(report),
+    });
+    expect(await m.onMessage(bashResult, 1)).toBe(true);
+    expect(await m.checkpointToolResults(1)).toBe(false);
+    await m.onMessage({ role: "user", content: "also check the tree" }, 1);
+    await m.onMessage({ ...bashResult, toolCallId: "call_1" }, 1);
+    expect(await m.checkpointToolResults(1)).toBe(false);
+    expect(m.rowOfResults).toBe(3);
+    await m.onMessage({ ...bashResult, toolCallId: "call_2" }, 1);
+    expect(await m.checkpointToolResults(1)).toBe(true);
+    expect(reports).toEqual([
+      {
+        firstIdx: 3,
+        turns: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "also check the tree" },
+              { type: "tool_result", toolUseId: "call_1", content: " M README.md" },
+              { type: "tool_result", toolUseId: "call_2", content: " M README.md" },
+            ],
+          },
+        ],
+        inFlight: [],
+        turn: 1,
+        iteration: 0,
+        remainingMs: 600_000,
+        inboxConsumedSeq: 0,
+      },
+    ]);
+  });
+
+  it("deduplicates a saved user tail assembled from a steer and a tool result", async () => {
+    const tail: ChatMessage = {
+      role: "user",
+      content: [
+        { type: "text", text: "also check the tree" },
+        { type: "tool_result", toolUseId: "call_0", content: " M README.md" },
+      ],
+    };
+    const reports: StepReport[] = [];
+    const m = new PiMirror({
+      seedLength: 3,
+      seedMessages: [chatMessageOf(bashCall)!, tail],
+      mirroredTail: { turn: tail },
+      remainingMs: () => 1,
+      onStep: async (report) => void reports.push(report),
+    });
+    expect(await m.onMessage({ role: "user", content: "also check the tree" }, 1)).toBe(false);
+    expect(await m.onMessage(bashResult, 1)).toBe(true);
+    expect(await m.checkpointToolResults(1)).toBe(false);
+    await m.onMessage(final, 2);
+    expect(reports[0]).toMatchObject({
+      firstIdx: 3,
+      turns: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+      inFlight: [],
+    });
+    expect(m.written.messages).toEqual([chatMessageOf(final)]);
+  });
+
+  it("does not acknowledge or retain a checkpoint whose write failed", async () => {
+    const m = new PiMirror({
+      seedLength: 1,
+      remainingMs: () => 1,
+      onStep: async (report) => {
+        if (report.turns[0]?.role === "user") throw new Error("checkpoint refused");
+      },
+    });
+    await m.onMessage(bashCall, 1);
+    await m.onMessage(bashResult, 1);
+    await expect(m.checkpointToolResults(1)).rejects.toThrow("checkpoint refused");
+    expect(m.written.messages).toEqual([chatMessageOf(bashCall)]);
+    expect(m.rowOfResults).toBe(2);
+  });
+
+  it("refuses an unwired checkpoint and leaves ordinary result grouping unchanged", async () => {
+    const m = new PiMirror({ seedLength: 1, remainingMs: () => 1 });
+    await m.onMessage(bashCall, 1);
+    await m.onMessage(bashResult, 1);
+    expect(await m.checkpointToolResults(1)).toBe(false);
+    await m.onMessage(final, 2);
+    expect(m.written.messages).toEqual([chatMessageOf(bashCall), chatMessageOf(bashResult), chatMessageOf(final)]);
+    const reports: StepReport[] = [];
+    const wired = new PiMirror({ seedLength: 1, remainingMs: () => 1, onStep: async (r) => void reports.push(r) });
+    await wired.onMessage({ role: "user", content: "only a steer" }, 1);
+    expect(await wired.checkpointToolResults(1)).toBe(false);
+    await wired.onMessage(final, 2);
+    expect(reports[0].turns).toEqual([
+      { role: "user", content: [{ type: "text", text: "only a steer" }] },
+      { role: "assistant", content: [{ type: "text", text: "Done." }] },
+    ]);
+  });
+});
+
 describe("piSessionFile — a compaction entry where pi wrote it", () => {
   const messages: ChatMessage[] = [
     { role: "user", content: [{ type: "text", text: "go" }] },

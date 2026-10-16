@@ -705,6 +705,8 @@ export interface HarnessRun {
   /** Exact original source proof for already-built current media, before import and prompt. */
   nativeMediaDigest?: string;
   sourceContextRequired?: true | (() => boolean);
+  /** Controller-recorded reads whose observed native result must be saved before another model call. */
+  sourceResultCallIds?: () => readonly string[];
   prepareSourceMedia?: () => Promise<boolean>;
   /** Called only when the harness confirms a steer reached the model's conversation. */
   confirmedFollowUps?: (inputs: readonly FollowUpInput[]) => void;

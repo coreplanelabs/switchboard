@@ -335,8 +335,8 @@ export function relaySettlementOf(answer: RelayedToolAnswer): RelaySettlement {
 
 /** The last row the ledger's transcript holds, as `planResume` assembled it
  *  (item 8): the compaction that closed the span when one did (its `before`
- *  is the message count), else the last message when an assistant's; nothing
- *  for a transcript ending on a user turn, or none at all. The mirror knows
+ *  is the message count), else the last assistant or source-result
+ *  checkpoint. The mirror knows
  *  this row by sight, so reading it again writes it no second time. */
 export function ledgerTailOf(
   resume: Pick<HarnessResume, "messages" | "compactions"> | undefined,
@@ -345,7 +345,9 @@ export function ledgerTailOf(
   const closing = resume.compactions?.filter((c) => c.before === resume.messages.length).at(-1);
   if (closing) return { compaction: closing.entry };
   const last = resume.messages.at(-1);
-  return last?.role === "assistant" ? { turn: last } : undefined;
+  return last && (last.role === "assistant" || last.content.some((part) => part.type === "tool_result"))
+    ? { turn: last }
+    : undefined;
 }
 
 /** The same note as the relay's answer (item 8): what a re-attached pi's extension reads when it asks again for the call. */
@@ -672,6 +674,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     onStep: run.onStep ? (report) => (stepSaved = run.onStep!(report)) : undefined,
     seedLength: run.resume ? run.resume.messages.length + (run.resume.compactions?.length ?? 0) : run.messages.length,
     remainingMs: () => deadline - now(),
+    seedMessages: run.resume?.messages ?? run.messages,
     ...(tail ? { mirroredTail: tail } : {}),
     // The rows pi has not read yet: the cursor can pass one when a later row
     // is consumed first (the plane's provider-up beside an ordinary steer).
@@ -923,13 +926,37 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   /** How many follow-up turns were prompted on the session, for their command ids. */
   let followUps = 0;
   let sessionEnded = false;
+  const savedSourceResults = new Set(
+    (run.resume?.messages ?? run.messages).flatMap((message) =>
+      message.content.flatMap((part) => (part.type === "tool_result" ? [part.toolUseId] : [])),
+    ),
+  );
+  const sourceResultsPending = () => run.sourceResultCallIds?.().some((id) => !savedSourceResults.has(id)) === true;
   run.toolContext.recovery?.bindNativeDrain(async () => {
-    while (bridge.hasPendingTools()) {
+    for (;;) {
+      const save = stepSaved;
+      if (!bridge.hasPendingTools() && !sourceResultsPending()) {
+        await save;
+        if (save === stepSaved && !bridge.hasPendingTools() && !sourceResultsPending()) return;
+      }
       if (sessionEnded || now() >= deadline || run.control?.hardSignal.aborted)
         throw new Error("native tool outcome unavailable");
       await deps.sleep(deps.pollMs ?? seenTick);
     }
   });
+  const observedSourceResults = new Set<string>();
+  const checkpointSourceResult = async (message: Record<string, unknown>, alreadySaved: boolean) => {
+    if (message.role !== "toolResult" || typeof message.toolCallId !== "string") return;
+    if (run.sourceResultCallIds?.().includes(message.toolCallId)) observedSourceResults.add(message.toolCallId);
+    if (!sourceResultsPending()) return;
+    // Wait for all parallel native results, then save their real user row.
+    // A relay return or tool_execution_end alone cannot qualify those bytes.
+    if (alreadySaved || (await mirror.checkpointToolResults(bridge.turns))) {
+      held();
+      for (const id of observedSourceResults) savedSourceResults.add(id);
+      observedSourceResults.clear();
+    }
+  };
   /** The end of the session (item 14): the transport closed, the spans a
    *  stopped pi left open ended, the facts saved, the run forgotten on the
    *  relay, pi killed and its directory removed — pi has ended, and nothing
@@ -2242,7 +2269,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         }
       }
       if (obs.message?.role === "user") steerEchoed(obs.message);
-      if (obs.message && (await mirror.onMessage(obs.message, bridge.turns))) held();
+      if (obs.message) {
+        const saved = await mirror.onMessage(obs.message, bridge.turns);
+        if (saved) held();
+        await checkpointSourceResult(obs.message, saved);
+      }
       // A compaction that failed for good arms the bot's pointer summary for
       // the next one (item 7): pi tries again at every turn boundary while
       // the window stays over the threshold, and the same words are refused
@@ -2774,7 +2805,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           }
           reattaches = 0; // a record read: a re-attach made progress
           const obs = bridge.observe(event);
-          if (obs.message && (await mirror.onMessage(obs.message, bridge.turns))) held();
+          if (obs.message) {
+            const saved = await mirror.onMessage(obs.message, bridge.turns);
+            if (saved) held();
+            await checkpointSourceResult(obs.message, saved);
+          }
           if (obs.compaction && (await mirror.onCompaction(obs.compaction, bridge.turns))) held();
           if (obs.message?.role === "assistant" && obs.terminalFailure === undefined) {
             turnOverflow = undefined;

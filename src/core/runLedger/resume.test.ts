@@ -114,6 +114,39 @@ describe("settlementFor — D4", () => {
 });
 
 describe("planResume", () => {
+  it("keeps a complete native source-result checkpoint resumable without replaying calls", () => {
+    const messages = [
+      user("Review the source"),
+      assistantCalling(
+        call("source", "github_file", { repo: "acme/api", path: "README.md" }),
+        call("status", "update_status"),
+      ),
+      results("source", "status"),
+    ];
+    expect(
+      planResume({ transcript: complete(messages), lastStep: step({ turnIndex: 3, inFlight: [] }), tools: TOOLS }),
+    ).toMatchObject({ kind: "resume", messages, settlements: [], stepRecorded: true, turn: 1, iteration: 0 });
+    expect(
+      planResume({
+        transcript: complete(messages.slice(0, 2)),
+        lastStep: step({
+          turnIndex: 2,
+          inFlight: [
+            { callId: "source", tool: "github_file" },
+            { callId: "status", tool: "update_status" },
+          ],
+        }),
+        tools: TOOLS,
+      }),
+    ).toMatchObject({
+      kind: "resume",
+      settlements: [
+        { toolUse: call("source", "github_file", { repo: "acme/api", path: "README.md" }), action: "rerun" },
+        { toolUse: call("status", "update_status"), action: "rerun" },
+      ],
+    });
+  });
+
   it.each([
     ["description", "Description resubmitted.", "Completed coding report."],
     ["verdict", "Verdict recorded.", "Substantive review reasoning."],

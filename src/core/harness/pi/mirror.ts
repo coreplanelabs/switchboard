@@ -79,7 +79,7 @@ export function chatMessageOf(message: Record<string, unknown>): ChatMessage | u
   }
 }
 
-/** One row of the ledger's transcript as the mirror writes it: an assistant turn, or pi's compaction entry. */
+/** One row of the ledger's transcript: a message or pi's compaction entry. */
 export type LedgerTail = { turn: ChatMessage } | { compaction: CompactionEntry };
 
 export interface MirrorDeps {
@@ -89,9 +89,11 @@ export interface MirrorDeps {
    *  takes; a resumed transcript's compaction rows count. The seed's own echo
    *  (`expectSeedEcho`) is on the ledger already and is not written again. */
   seedLength: number;
+  /** Retained messages identify declared calls whose results are still owed. */
+  seedMessages?: readonly ChatMessage[];
   remainingMs: () => number;
-  /** The last row the ledger holds — an assistant turn, or the compaction
-   *  that closed the transcript — on a re-attach (harness-pi item 8): the
+  /** The last row the ledger holds, including a result checkpoint, on a
+   *  re-attach (harness-pi item 8): the
    *  row's offset is saved after the ledger's write, so a bot that died
    *  between the two left it one row behind, and that row is read again. The
    *  first row the mirror is about to write that equals it is that row, and
@@ -104,12 +106,13 @@ export interface MirrorDeps {
   owedInboxSeqs?: () => readonly number[];
 }
 
-/** Feeds pi's finished messages to the ledger as the runner would: every
+/** Feeds pi's finished messages to the ledger as the runner would: by default every
  *  message since the last assistant turn — tool results, a steer's text — is
  *  the one user turn the next step record carries with the assistant turn. */
 export class PiMirror {
   private idx: number;
   private pendingUser: ContentPart[] = [];
+  private inFlight: StepReport["inFlight"] = [];
   /** The row of the last assistant turn the ledger holds — written here, or
    *  met again on a re-attach (`alreadyHeld`); undefined until one is. */
   private lastAssistantIdx: number | undefined;
@@ -152,6 +155,17 @@ export class PiMirror {
   constructor(private readonly deps: MirrorDeps) {
     this.idx = deps.seedLength;
     this.mirroredTail = deps.mirroredTail;
+    for (const message of deps.seedMessages ?? []) this.observeCalls(message);
+  }
+
+  private observeCalls(message: ChatMessage): void {
+    if (message.role === "assistant")
+      this.inFlight = message.content
+        .filter((part): part is Extract<ContentPart, { type: "tool_use" }> => part.type === "tool_use")
+        .map((part) => ({ callId: part.id, tool: part.name, ...boundOf(part.input) }));
+    else
+      for (const part of message.content)
+        if (part.type === "tool_result") this.inFlight = this.inFlight.filter((call) => call.callId !== part.toolUseId);
   }
 
   /** Whether a report is owed: the mirror is wired and something happened. */
@@ -204,6 +218,7 @@ export class PiMirror {
    *  model saw. Never on a re-attach, where pi's own log carries the results. */
   prime(parts: readonly ContentPart[]): void {
     this.pendingUser.push(...parts);
+    this.observeCalls({ role: "user", content: [...parts] });
   }
 
   /** The row about to be written, against the transcript's tail — compared
@@ -214,18 +229,23 @@ export class PiMirror {
     const tail = this.mirroredTail;
     if (tail === undefined) return false;
     this.mirroredTail = undefined;
-    if (!isDeepStrictEqual(row, tail)) return false;
+    const same =
+      "turn" in row && row.turn.role === "user" && "turn" in tail && tail.turn.role === "user"
+        ? // The ledger adds source receipts; the native echo carries the same content.
+          isDeepStrictEqual(row.turn.content, tail.turn.content)
+        : isDeepStrictEqual(row, tail);
+    if (!same) return false;
     this.pendingUser = [];
     // The tail is the transcript's last row, so the turn met again sits right
     // before the index this mirror starts at.
-    if ("turn" in row) this.lastAssistantIdx = this.idx - 1;
+    if ("turn" in row && row.turn.role === "assistant") this.lastAssistantIdx = this.idx - 1;
     return true;
   }
 
   /** Feeds one finished message; answers whether the ledger now holds
    *  everything up to it — a step written, or an assistant turn found already
    *  there — so the harness can move the row's offset past it. A result or a
-   *  steer's text waits in memory for the next step, and the answer is no. */
+   *  steer's text waits for the next step or an explicit checkpoint. */
   async onMessage(message: Record<string, unknown>, turn: number): Promise<boolean> {
     const chat = chatMessageOf(message);
     if (!chat) return false;
@@ -239,17 +259,25 @@ export class PiMirror {
         this.seedEchoPending = false;
         return false;
       }
+      this.observeCalls(chat);
       this.pendingUser.push(...chat.content);
+      // A saved user row can contain several native messages read again.
+      const tail = this.mirroredTail;
+      if (tail && "turn" in tail && tail.turn.role === "user") {
+        if (isDeepStrictEqual(this.pendingUser, tail.turn.content))
+          return this.alreadyHeld({ turn: { role: "user", content: this.pendingUser } }) && this.wired;
+        if (!isDeepStrictEqual(this.pendingUser, tail.turn.content.slice(0, this.pendingUser.length)))
+          this.mirroredTail = undefined;
+      }
       return false;
     }
+    this.observeCalls(chat);
     if (this.alreadyHeld({ turn: chat })) return this.wired;
     const turns: ChatMessage[] = [];
     if (this.pendingUser.length > 0) turns.push({ role: "user", content: this.pendingUser });
     this.pendingUser = [];
     turns.push(chat);
-    const inFlight = chat.content
-      .filter((p): p is Extract<ContentPart, { type: "tool_use" }> => p.type === "tool_use")
-      .map((p) => ({ callId: p.id, tool: p.name, ...boundOf(p.input) }));
+    const inFlight = this.inFlight.map((call) => ({ ...call }));
     const report: StepReport = {
       turns,
       firstIdx: this.idx,
@@ -269,6 +297,37 @@ export class PiMirror {
     // Unwired, the rows are kept and nothing is held on the ledger.
     if (!this.deps.onStep) return false;
     await this.deps.onStep(report);
+    return true;
+  }
+
+  /** Save a complete observed result batch before another model call needs its proof.
+   * A standalone user row cannot retain unsettled calls on resume. Ordinary
+   * results retain their grouping unless the controller opts in. */
+  async checkpointToolResults(turn: number): Promise<boolean> {
+    if (
+      !this.deps.onStep ||
+      !this.pendingUser.some((part) => part.type === "tool_result") ||
+      this.inFlight.length > 0 ||
+      (this.mirroredTail && "turn" in this.mirroredTail && this.mirroredTail.turn.role === "user")
+    )
+      return false;
+    const message: ChatMessage = { role: "user", content: [...this.pendingUser] };
+    const report: StepReport = {
+      turns: [message],
+      firstIdx: this.idx,
+      inFlight: [],
+      turn,
+      iteration: this.lastIteration,
+      remainingMs: Math.max(0, this.deps.remainingMs()),
+      inboxConsumedSeq: this.inboxConsumedSeq,
+      ...(this.publicationAnswer !== undefined ? { publicationAnswer: this.publicationAnswer } : {}),
+      ...this.inboxDeferred(),
+    };
+    await this.deps.onStep(report);
+    this.pendingUser.splice(0, message.content.length);
+    this.idx++;
+    this.rows.push(message);
+    this.lastTurn = turn;
     return true;
   }
 
