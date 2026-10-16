@@ -470,6 +470,184 @@ const statusPayload = () => ({
   target_url: "https://ci.example/build/92",
 });
 
+describe("GitHub repository activity normalization", () => {
+  const repository = {
+    id: 3,
+    full_name: "acme/api",
+    private: true,
+    archived: false,
+    visibility: "private",
+    default_branch: "main",
+  };
+  const native = {
+    action: "edited",
+    installation: { id: 2 },
+    repository,
+    sender: user,
+    changes: { default_branch: { from: "old-main" } },
+  };
+
+  it.each([
+    "created",
+    "edited",
+    "deleted",
+    "renamed",
+    "transferred",
+    "archived",
+    "unarchived",
+    "privatized",
+    "publicized",
+  ])("retains %s as a repository fact without a PR or access grant", async (action) => {
+    const payload = {
+      ...native,
+      action,
+      repository: {
+        ...repository,
+        archived: action === "archived",
+        private: action !== "publicized",
+        visibility: action === "publicized" ? "public" : "private",
+      },
+    };
+    const result = await normalizeGithubActivity(source, { event: "repository", delivery: action }, payload);
+    expect(result).toMatchObject({
+      kind: "normalized",
+      event: {
+        kind: "source-fact",
+        objectId: "github:github.com:repository:3",
+        authorId: "github:github.com:user:4",
+        payload: {
+          repository: { id: 3, fullName: "acme/api" },
+          activity: {
+            surface: "repository",
+            id: 3,
+            action,
+            private: action !== "publicized",
+            archived: action === "archived",
+            visibility: action === "publicized" ? "public" : "private",
+            defaultBranch: "main",
+            changes: native.changes,
+            actor: user,
+          },
+          native: payload,
+        },
+      },
+    });
+    if (result.kind !== "normalized") throw new Error("expected repository fact");
+    expect(Object.keys(result.event.payload as object).sort()).toEqual(["activity", "native", "repository", "version"]);
+  });
+
+  it("keeps native identity through rename and transfer and rejects a name reused by another repository", async () => {
+    const first = await normalizeGithubActivity(source, { event: "repository", delivery: "one" }, native);
+    const renamed = await normalizeGithubActivity(
+      source,
+      { event: "repository", delivery: "two" },
+      {
+        ...native,
+        action: "renamed",
+        repository: { ...repository, full_name: "acme/new-api" },
+        changes: { repository: { name: { from: "api" } } },
+      },
+    );
+    const moved = await normalizeGithubActivity(
+      source,
+      { event: "repository", delivery: "three" },
+      {
+        ...native,
+        action: "transferred",
+        repository: { ...repository, full_name: "new-owner/new-api" },
+        changes: { owner: { from: { user: { id: 9, login: "acme" } } } },
+      },
+    );
+    if (first.kind !== "normalized" || renamed.kind !== "normalized" || moved.kind !== "normalized")
+      throw new Error("expected repository facts");
+    expect(first.event.objectId).toBe("github:github.com:repository:3");
+    expect(renamed.event.objectId).toBe(first.event.objectId);
+    expect(moved.event.objectId).toBe(first.event.objectId);
+    expect(moved.event.payload).toMatchObject({ repository: { id: 3, fullName: "new-owner/new-api" } });
+    expect(
+      await normalizeGithubActivity(
+        source,
+        { event: "repository", delivery: "reuse" },
+        { ...native, repository: { ...repository, id: 99 } },
+      ),
+    ).toEqual({ kind: "refused", reason: "source-mismatch" });
+  });
+
+  it("freezes native snapshots and separates metadata changes from delivery identity", async () => {
+    const payload = structuredClone(native);
+    const pending = normalizeGithubActivity(source, { event: "repository", delivery: "one" }, payload);
+    payload.repository.full_name = "later/change";
+    const first = await pending;
+    const again = await normalizeGithubActivity(source, { event: "repository", delivery: "two" }, native);
+    const changed = await normalizeGithubActivity(
+      source,
+      { event: "repository", delivery: "three" },
+      { ...native, repository: { ...repository, default_branch: "next-main" } },
+    );
+    if (first.kind !== "normalized" || again.kind !== "normalized" || changed.kind !== "normalized")
+      throw new Error("expected repository facts");
+    expect(first.event).toMatchObject({
+      deliveryId: "one",
+      payload: { repository: { fullName: "acme/api" }, activity: { defaultBranch: "main" } },
+    });
+    expect(first.event.changeId).toMatch(/^[a-f0-9]{64}$/);
+    expect(again.event.changeId).toBe(first.event.changeId);
+    expect(changed.event.changeId).not.toBe(first.event.changeId);
+  });
+
+  it("keeps unknown metadata and actor identity as source data", async () => {
+    const payload = {
+      ...native,
+      sender: null,
+      repository: { id: 3, full_name: "acme/api", private: true, archived: false },
+    };
+    expect(await normalizeGithubActivity(source, { event: "repository", delivery: "unknown" }, payload)).toMatchObject({
+      kind: "normalized",
+      event: { payload: { activity: { defaultBranch: null, visibility: null, actor: null } } },
+    });
+    expect(
+      await normalizeGithubActivity(
+        source,
+        { event: "repository", delivery: "bot" },
+        { ...native, sender: { ...user, type: "Bot" } },
+      ),
+    ).toMatchObject({
+      kind: "normalized",
+      event: {
+        kind: "source-fact",
+        authorId: "github:github.com:user:4",
+        payload: { activity: { actor: { type: "Bot" } } },
+      },
+    });
+  });
+
+  it("holds malformed or contradictory state and ignores unsupported actions", async () => {
+    expect(await normalizeGithubActivity(source, { event: "repository", delivery: "valid" }, native)).toMatchObject({
+      kind: "normalized",
+    });
+    for (const payload of [
+      { ...native, action: "archived" },
+      { ...native, action: "publicized" },
+      { ...native, repository: { ...repository, private: "true" } },
+      { ...native, repository: { ...repository, archived: null } },
+      { ...native, repository: { ...repository, default_branch: {} } },
+      { ...native, repository: { ...repository, visibility: [] } },
+      { ...native, installation: { id: 99 } },
+    ]) {
+      expect(await normalizeGithubActivity(source, { event: "repository", delivery: "bad" }, payload)).toMatchObject({
+        kind: "refused",
+      });
+    }
+    expect(
+      await normalizeGithubActivity(
+        source,
+        { event: "repository", delivery: "future" },
+        { ...native, action: "future" },
+      ),
+    ).toEqual({ kind: "ignored", reason: "action" });
+  });
+});
+
 describe("GitHub check and status normalization", () => {
   it.each(["check_run", "check_suite"] as const)(
     "keeps %s commit facts separate from stale PR associations",

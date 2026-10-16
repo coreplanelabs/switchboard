@@ -146,6 +146,18 @@ This module does not change the webhook receiver, acknowledge a delivery, start 
 | Unsafe accessors, malformed identity, a foreign repository/installation or link host, and oversized records are held; ordinary issue comments stay outside PR conversion | `[unit]` `src/channels/githubActivity.test.ts::GitHub comment normalization::holds…`; `::ignores ordinary issue comments…` |
 
 
+### Repository lifecycle facts
+
+The inactive converter also accepts repository `created`, `deleted`, `edited`, `renamed`, `transferred`, `archived`, `unarchived`, `privatized` and `publicized` actions. Native repository ID defines object identity. Rename and transfer keep that identity; a different repository that reuses an old name cannot match the configured source. The record retains the new name, action, privacy/archive state, optional visibility/default branch, actor and complete native changes. Missing optional metadata stays null.
+
+Archive and visibility action flags must agree with their supplied boolean state. These are source facts, not current access, PR membership, checkout changes or an instruction to start work. Canonical access and task-context checks remain required before later handling. This extends the existing converter without a receiver, producer, access-cache change or direct delivery call. The supported fields follow the [GitHub webhook reference](https://docs.github.com/en/webhooks/webhook-events-and-payloads) and [Octokit types](https://github.com/octokit/webhooks/blob/main/payload-types/schema.d.ts).
+
+| Criterion | Proof |
+| --- | --- |
+| Each supported lifecycle action retains one repository fact without requester or PR authority | `[unit]` `src/channels/githubActivity.test.ts::GitHub repository activity normalization::retains …as a repository fact…` |
+| Rename/transfer preserve native identity; reused names cannot match a foreign repository ID. Snapshots and revisions remain separate from delivery identity. | `[unit]` `src/channels/githubActivity.test.ts::GitHub repository activity normalization::keeps native identity through rename and transfer and rejects a name reused by another repository`; `::freezes native snapshots and separates metadata changes from delivery identity` |
+| Unknown optional metadata and bot/unknown authors remain source data; malformed or contradictory state is held and unknown actions stay unsupported | `[unit]` `src/channels/githubActivity.test.ts::GitHub repository activity normalization::keeps unknown metadata and actor identity as source data`; `::holds malformed or contradictory state and ignores unsupported actions` |
+
 ### PR state, review threads and commit comments
 
 The same inactive converter also accepts PR `opened`, `edited`, `reopened`, `closed`, `synchronize`, `converted_to_draft` and `ready_for_review` actions, review-thread `resolved` and `unresolved` actions, and commit-comment creation. PR and thread updates use `source-fact`; comment bodies remain `source-evidence`. These kinds describe source data, not requester authority or a command to a worker. The supported actions follow the [GitHub webhook reference](https://docs.github.com/en/webhooks/webhook-events-and-payloads) and the [native thread schema](https://github.com/octokit/webhooks/blob/main/payload-schemas/api.github.com/pull_request_review_thread/resolved.schema.json).

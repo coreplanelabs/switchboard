@@ -68,6 +68,7 @@ export async function normalizeGithubActivity(
   if (!sourceHost(host) || !id(appId) || !id(installationId) || !id(repositoryId)) return refused("invalid-source");
   if (
     ![
+      "repository",
       "issue_comment",
       "pull_request_review_comment",
       "pull_request_review",
@@ -104,7 +105,21 @@ export async function normalizeGithubActivity(
   // Commit status has no action field in GitHub's webhook contract.
   if (event !== "status") {
     if (typeof payload.action !== "string") return refused("invalid-payload");
-    if (!actions.includes(payload.action)) return { kind: "ignored", reason: "action" };
+    const allowedActions =
+      event === "repository"
+        ? [
+            "created",
+            "deleted",
+            "edited",
+            "renamed",
+            "transferred",
+            "archived",
+            "unarchived",
+            "privatized",
+            "publicized",
+          ]
+        : actions;
+    if (!allowedActions.includes(payload.action)) return { kind: "ignored", reason: "action" };
   }
   if (!object(payload.installation) || !object(payload.repository)) return refused("invalid-payload");
   if (payload.installation.id !== installationId || payload.repository.id !== repositoryId)
@@ -126,7 +141,10 @@ export async function normalizeGithubActivity(
         version: 1,
         sourceId: `github:${host}:app:${appId}:installation:${installationId}`,
         deliveryId: delivery,
-        objectId: `github:${host}:repository:${repositoryId}:${surface}:${objectId}`,
+        objectId:
+          surface === "repository"
+            ? `github:${host}:repository:${repositoryId}`
+            : `github:${host}:repository:${repositoryId}:${surface}:${objectId}`,
         changeId: await sourceHash(revision),
         kind,
         ...(author ? { authorId: `github:${host}:user:${author.id}` } : {}),
@@ -216,6 +234,45 @@ export async function normalizeGithubActivity(
         actor,
       },
       { action: payload.action, check, requestedAction: payload.requested_action ?? null },
+    );
+  }
+  if (event === "repository") {
+    const repository = native.repository;
+    const actor = authorOf(native.sender ?? null);
+    if (
+      !object(repository) ||
+      actor === undefined ||
+      typeof repository.private !== "boolean" ||
+      typeof repository.archived !== "boolean" ||
+      (repository.visibility !== undefined &&
+        repository.visibility !== null &&
+        typeof repository.visibility !== "string") ||
+      (repository.default_branch !== undefined &&
+        repository.default_branch !== null &&
+        typeof repository.default_branch !== "string") ||
+      (payload.action === "archived" && !repository.archived) ||
+      (payload.action === "unarchived" && repository.archived) ||
+      (payload.action === "privatized" && !repository.private) ||
+      (payload.action === "publicized" && repository.private)
+    )
+      return refused("invalid-payload");
+    return finish(
+      "repository",
+      repositoryId,
+      "source-fact",
+      actor,
+      {
+        surface: "repository",
+        id: repositoryId,
+        action: payload.action,
+        private: repository.private,
+        archived: repository.archived,
+        visibility: repository.visibility ?? null,
+        defaultBranch: repository.default_branch ?? null,
+        changes: payload.changes ?? null,
+        actor,
+      },
+      { surface: "repository", action: payload.action, repository, changes: payload.changes ?? null },
     );
   }
   const pull = event === "issue_comment" ? payload.issue : payload.pull_request;
