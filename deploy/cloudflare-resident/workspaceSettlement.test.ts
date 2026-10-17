@@ -24,6 +24,7 @@ import {
 } from "../../src/core/workspaceSettlement";
 import { rememberOwnBranches } from "../../src/execution/residentRebind";
 import { decideWorkspaceRemoval, hasRunOwnerField } from "./workspacePreservation";
+import { preservedWorkspaceCode } from "./threadErr";
 import { readSource } from "./testing/sourceScan";
 import { residentPublicationCommand } from "../../src/execution/residentPublication";
 import {
@@ -90,6 +91,7 @@ const names = [
   "allocateThreadUser",
   "putThreadBinding",
   "workspaceRemovalDecision",
+  "guardWorkspaceReplacement",
   "registerRun",
   "retainWorkspacePredecessor",
   "reconcileWorkspaceSettlements",
@@ -187,6 +189,7 @@ function harness(
   ]);
   const events: string[] = [];
   const warnings: string[] = [];
+  const logs: string[] = [];
   let ackLost = options.lostAck;
   let acknowledged = 0;
   const fetch = vi.fn(async (url: URL, init: RequestInit) => {
@@ -353,6 +356,7 @@ function harness(
     workspaceOwnerKey,
     workspaceBindingOf,
     workspaceSettlementOf,
+    preservedWorkspaceCode,
     hasRunOwnerField,
     decideWorkspaceRemoval,
     errMsg: (error: unknown) => String(error),
@@ -377,7 +381,7 @@ function harness(
     threadBindingKey: (s: string) => "thread:" + s,
     runRegKey: (s: string) => "runReg:" + s,
     runFenceKey: (s: string) => "runFence:" + s,
-    console: { warn: (message: string) => warnings.push(message), log: () => {} },
+    console: { warn: (message: string) => warnings.push(message), log: (message: string) => logs.push(message) },
   });
   const instance = new C();
   const kernelScopes = new Map<string, boolean>();
@@ -475,6 +479,8 @@ function harness(
       untrackedNonIgnored: 0,
       unpushedCommits: 0,
     }),
+    isRuntimeActive: async () => true,
+    reportBlockedWorkspace: async () => {},
     run: vi.fn(() => {
       throw new Error("metadata reconciliation must not wake a VM");
     }),
@@ -489,7 +495,7 @@ function harness(
     }
     return beginNative(kind);
   };
-  return { instance, rows, events, warnings, fetch, ackedRevision: () => acknowledged };
+  return { instance, rows, events, warnings, logs, fetch, ackedRevision: () => acknowledged };
 }
 
 describe("resident cancellation inspection", () => {
@@ -2108,6 +2114,58 @@ describe("resident force detach shutdown", () => {
 });
 
 describe("resident terminal metadata reconciliation", () => {
+  it.each([false, true])("reconciles a terminal predecessor before replacement with prior ACK: %s", async (acked) => {
+    const h = harness();
+    if (acked) await h.instance.watchdogCheck();
+    await h.instance.retainWorkspacePredecessor(threadKey, { runId: "run-next", ownerGen: "gen-next", ownerFence: 8 });
+    expect(await h.instance.guardWorkspaceReplacement(h.rows.get("thread:" + threadKey))).toBeNull();
+    expect(h.rows.get("thread:" + threadKey).workspacePredecessors).toEqual([]);
+    expect(h.rows.get("thread:" + threadKey).workspaceSettlement).toMatchObject({ owner, revision: 1 });
+    expect(h.logs.map((line) => JSON.parse(line))).toEqual([
+      { event: "resident.workspace-predecessors.reconciled", threadKey: "slack:C1:123", reconciled: 1, remaining: 0 },
+    ]);
+  });
+  it("keeps changed private files after the pending terminal metadata is reconciled", async () => {
+    const h = harness();
+    h.instance.observePrivateTree = async () => ({
+      present: true,
+      branch: "main",
+      head: "a".repeat(40),
+      uncommittedChanges: 1,
+      untrackedNonIgnored: 0,
+      unpushedCommits: 0,
+    });
+    await h.instance.retainWorkspacePredecessor(threadKey, { runId: "run-next", ownerGen: "gen-next", ownerFence: 8 });
+    expect(await h.instance.guardWorkspaceReplacement(h.rows.get("thread:" + threadKey))).toEqual({
+      error: "workspace-preserved: private-tree-changed",
+      status: 409,
+      reason: "workspace-preserved",
+      code: "workspace_preserved",
+    });
+    expect(h.rows.get("thread:" + threadKey).workspacePredecessors).toEqual([]);
+    expect(h.logs.map((line) => JSON.parse(line))).toEqual([
+      { event: "resident.workspace-predecessors.reconciled", threadKey: "slack:C1:123", reconciled: 1, remaining: 0 },
+    ]);
+  });
+  it.each([{ live: true }, { mismatch: true }, { incomplete: true }, { refusedAck: true }, { corruptLive: true }])(
+    "keeps the pending predecessor when replacement cannot reconcile exact evidence: %j",
+    async (options) => {
+      const h = harness(options);
+      await h.instance.retainWorkspacePredecessor(threadKey, {
+        runId: "run-next",
+        ownerGen: "gen-next",
+        ownerFence: 8,
+      });
+      expect(await h.instance.guardWorkspaceReplacement(h.rows.get("thread:" + threadKey))).toEqual({
+        error: "workspace-preserved: workspace-settlement-pending",
+        status: 409,
+        reason: "workspace-preserved",
+        code: "settlement_pending",
+      });
+      expect(h.rows.get("thread:" + threadKey).workspacePredecessors).toHaveLength(1);
+      expect(h.logs).toEqual([]);
+    },
+  );
   it("advances a durable bounded watchdog cursor so later bindings are not starved", async () => {
     const h = harness();
     for (let i = 0; i < 20; i++) {
