@@ -284,6 +284,8 @@ export function activityLine(e: RunEvent): string {
   switch (e.type) {
     case "tool_call":
       return `→ ${e.summary}`;
+    case "tool_input":
+      return "tool arguments recorded";
     case "tool_result":
       return `${e.ok ? "✓" : "✗"} ${e.tool}: ${e.summary}`;
     case "run_note":

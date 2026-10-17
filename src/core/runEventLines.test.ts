@@ -7,6 +7,14 @@ import { parseRunEventLines } from "./runEventLines.js";
 // > run.sse` is directly analyzable.
 
 describe("parseRunEventLines", () => {
+  it("keeps call-linked argument updates and rejects incomplete update frames", () => {
+    const event = { type: "tool_input", callId: "c1", input: '{"path":"src/file.ts"}', at: 1 };
+    expect(
+      parseRunEventLines(
+        [event, { ...event, callId: "" }, { ...event, input: 3 }].map((value) => JSON.stringify(value)).join("\n"),
+      ),
+    ).toEqual({ events: [event], skipped: 2 });
+  });
   it("keeps non-decision routing receipts and their phase telemetry", () => {
     const event = {
       type: "operator",

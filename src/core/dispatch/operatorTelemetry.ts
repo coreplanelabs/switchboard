@@ -1,17 +1,19 @@
-import type { RouteModelObservation, RouteToolCall } from "./route.js";
+import { MultiToolCallError, type RouteModelObservation, type RouteToolCall } from "./route.js";
 import { typedProviderFailureOf } from "../provider.js";
 import { oneLine, redactAndCap } from "../redact.js";
+import { prepareToolInput, prepareToolOutput } from "../runEvents.js";
 import { newTraceId } from "../trace/ids.js";
 
-import type { RoutingPhase, RoutingStep, RoutingTelemetry } from "../routingTelemetry.js";
+import type { RoutingPhase, RoutingStep, RoutingTelemetry, RoutingToolCall } from "../routingTelemetry.js";
 export type { RoutingTelemetry } from "../routingTelemetry.js";
 
 const safe = (value: string, cap = 300) => redactAndCap(oneLine(value), cap);
 const MAX_STEPS = 32;
+const MAX_CALLS = 16;
 const MAX_TELEMETRY_BYTES = 24 * 1024;
 
-/** Evidence for the shared routing deadline. No prompts, registry arguments,
- * provider bodies or reasoning enter this record. A finished snapshot cannot
+/** Evidence for the shared routing deadline and redacted tool exchanges.
+ * No prompts, provider bodies or reasoning enter this record. A finished snapshot cannot
  * acquire a late provider callback after cancellation. */
 export class RoutingRecorder {
   private id = newTraceId();
@@ -55,6 +57,7 @@ export class RoutingRecorder {
         proposal: undefined,
         question: undefined,
         validation: undefined,
+        calls: undefined,
       });
     } catch {
       /* Diagnostics cannot change routing. */
@@ -65,6 +68,7 @@ export class RoutingRecorder {
     phase: RoutingPhase,
     fn: (observe: (value: RouteModelObservation) => void) => Promise<T>,
     tool?: string,
+    input?: unknown,
   ): Promise<T> {
     const start = this.now();
     const step: RoutingStep = {
@@ -86,6 +90,7 @@ export class RoutingRecorder {
       this.droppedSteps++;
     }
     this.steps.push(step);
+    if (tool) this.recordCalls(step, [{ tool, input }]);
     this.active = step;
     let open = true;
     const observe = (value: RouteModelObservation) => {
@@ -94,6 +99,7 @@ export class RoutingRecorder {
         this.logStep(step, this.sealed ? "sealed" : "phase_ended");
         return;
       }
+      if (value.toolCalls) this.recordCalls(step, value.toolCalls);
       for (const key of ["provider", "model", "effort", "effortWord", "requestId", "stopReason"] as const) {
         if (value[key] !== undefined) step[key] = safe(value[key], 128);
       }
@@ -118,8 +124,30 @@ export class RoutingRecorder {
         step.priceSource = value.priceSource;
     };
     try {
-      return await fn(observe);
+      const result = await fn(observe);
+      if (phase === "model" || phase === "command_fulfillment") {
+        if (
+          result &&
+          typeof result === "object" &&
+          "tool" in result &&
+          "input" in result &&
+          typeof result.tool === "string"
+        ) {
+          if (!step.calls) this.recordCalls(step, [{ tool: result.tool, input: result.input }]);
+          if (phase === "command_fulfillment") this.finishCalls(step, "completed", result.input);
+        }
+      } else if (tool) this.finishCalls(step, "completed", result);
+      return result;
     } catch (error) {
+      if (error instanceof MultiToolCallError) {
+        if (!step.calls) this.recordCalls(step, error.calls);
+        this.finishCalls(
+          step,
+          "rejected",
+          `the answer carried ${error.calls.length} tool calls; one tool call per turn`,
+        );
+      } else if (step.calls)
+        this.finishCalls(step, "error", error instanceof Error ? error.message : "tool call failed");
       step.errorClass = error instanceof Error ? safe(error.name) : "unknown";
       const failure = typedProviderFailureOf(error);
       if (failure) {
@@ -136,6 +164,7 @@ export class RoutingRecorder {
       if (this.signal.aborted || step.finishedAt >= this.deadlineAt) {
         step.outcome = "timeout";
         this.timeout ??= { phase, step: step.index, at: step.finishedAt };
+        if (step.calls) this.finishCalls(step, "timeout", "routing deadline expired; no action admitted");
       }
       this.active = undefined;
       if (phase === "model" || phase === "command_fulfillment") {
@@ -170,6 +199,34 @@ export class RoutingRecorder {
     return [...this.steps].reverse().find((step) => step.phase === "model" || step.phase === "command_fulfillment");
   }
 
+  private recordCalls(step: RoutingStep, calls: readonly (RouteToolCall & { id?: string })[]): void {
+    step.calls = calls.slice(0, MAX_CALLS).map((call) => ({
+      ...(call.id ? { id: safe(call.id, 128) } : {}),
+      tool: safe(call.tool),
+      input: prepareToolInput(call.input),
+      outcome: "proposed",
+    }));
+    if (calls.length > MAX_CALLS) step.omittedCalls = calls.length - MAX_CALLS;
+  }
+
+  finishCalls(
+    step: RoutingStep | undefined,
+    outcome: RoutingToolCall["outcome"],
+    result: unknown,
+    answer?: RouteToolCall | string,
+  ): void {
+    if (!step || this.sealed) return;
+    const target =
+      typeof answer === "object" ? { tool: safe(answer.tool), input: prepareToolInput(answer.input) } : undefined;
+    const output = typeof result === "string" ? prepareToolOutput(result) : prepareToolInput(result);
+    for (const call of step.calls ?? []) {
+      if (answer !== undefined && (target === undefined || call.tool !== target.tool || call.input !== target.input))
+        continue;
+      call.outcome = outcome;
+      call.result = output;
+    }
+  }
+
   annotate(
     step: RoutingStep | undefined,
     answer: RouteToolCall | string,
@@ -184,8 +241,7 @@ export class RoutingRecorder {
     }
     if (typeof answer !== "string") {
       step.tool = safe(answer.tool);
-      // Only a question's public suggestion is useful here; command arguments
-      // can contain credentials that do not have a recognizable token prefix.
+      if (!step.calls) this.recordCalls(step, [answer]);
       if (answer.tool === "ask" && typeof answer.input === "object" && answer.input !== null) {
         const fields = answer.input as Record<string, unknown>;
         if (typeof fields.text === "string") step.question = safe(fields.text);
@@ -193,6 +249,7 @@ export class RoutingRecorder {
       }
     }
     if (validation !== undefined) step.validation = safe(validation);
+    if (validation !== undefined) this.finishCalls(step, "rejected", validation, answer);
     if (validationCode !== undefined) step.validationCode = safe(validationCode);
     if (validation !== undefined) {
       this.logStep(step);
@@ -219,6 +276,9 @@ export class RoutingRecorder {
       ...(this.droppedSteps ? { droppedSteps: this.droppedSteps } : {}),
       ...(this.ignoredObservations ? { ignoredObservations: this.ignoredObservations } : {}),
     });
+    for (const step of snapshot.steps) {
+      for (const call of step.calls ?? []) call.result ??= "No tool execution or selection result was recorded.";
+    }
     // Keep the first decision and terminal call when wide Unicode diagnostics
     // consume the record budget. Missing middle steps remain explicit.
     while (
@@ -231,6 +291,27 @@ export class RoutingRecorder {
         to: Math.max(snapshot.lostInterval?.to ?? removed.finishedAt, removed.finishedAt),
       };
       snapshot.droppedSteps = (snapshot.droppedSteps ?? 0) + 1;
+    }
+    // A single parallel answer can exceed the receipt cap. Keep its call
+    // identities and mark any additional payload loss before omitting calls.
+    while (new TextEncoder().encode(JSON.stringify(snapshot)).byteLength > MAX_TELEMETRY_BYTES) {
+      const fields = snapshot.steps
+        .flatMap((step) =>
+          (step.calls ?? []).flatMap((call) =>
+            (["input", "result"] as const).map((key) => ({ call, key, length: call[key]?.length ?? 0 })),
+          ),
+        )
+        .sort((a, b) => b.length - a.length);
+      const largest = fields[0];
+      if (largest && largest.length > 100) {
+        largest.call[largest.key] =
+          `${largest.call[largest.key]!.slice(0, Math.floor(largest.length / 2))}…[evidence truncated]`;
+        continue;
+      }
+      const widest = [...snapshot.steps].sort((a, b) => (b.calls?.length ?? 0) - (a.calls?.length ?? 0))[0];
+      if (!widest?.calls?.length) break;
+      widest.calls.pop();
+      widest.omittedCalls = (widest.omittedCalls ?? 0) + 1;
     }
     return snapshot;
   }

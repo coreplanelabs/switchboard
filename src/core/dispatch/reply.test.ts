@@ -305,6 +305,12 @@ describe("replyCommandOutput", () => {
 // bash call with its command is a `command` part the Slack card draws as a code
 // block; everything else is the one-line trace as before.
 describe("cardActivity", () => {
+  it("shows an input update without exposing its retained arguments", () => {
+    expect(cardActivity({ type: "tool_input", callId: "c1", input: '{"content":"private source"}' })).toEqual({
+      kind: "line",
+      text: "tool arguments recorded",
+    });
+  });
   it("a bash tool_call carrying its command becomes a command part with the full command, not the capped summary", () => {
     const command = "python3 - <<'EOF'\nprint(1)\nEOF";
     expect(

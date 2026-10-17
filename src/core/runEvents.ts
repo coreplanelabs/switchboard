@@ -633,6 +633,8 @@ export type RunEvent =
       tool: string;
       summary: string;
       command?: string;
+      /** Redacted JSON arguments; a visible marker identifies capped or unavailable input. */
+      input?: string;
       callId?: string;
       spanId?: string;
       logIndex?: number;
@@ -641,6 +643,14 @@ export type RunEvent =
        *  The stall signal (docs/reference/specs/live-view.md item 32) marks a
        *  call past it; absent when the call declared none. */
       boundMs?: number;
+      seq?: number;
+      at?: number;
+    }
+  /** Later argument evidence for an announced call, not another execution. */
+  | {
+      type: "tool_input";
+      callId: string;
+      input: string;
       seq?: number;
       at?: number;
     }
@@ -1305,7 +1315,7 @@ export type RunEvent =
 // Redaction helpers live in ./redact.ts and are re-exported here so every
 // existing import site keeps working.
 export { redactAndCap, redactSecrets, stripAnsi } from "./redact.js";
-import { redactSecrets, stripAnsi } from "./redact.js";
+import { isSecretField, redactSecrets, stripAnsi } from "./redact.js";
 
 const SUMMARY_CAP = 200;
 
@@ -1368,6 +1378,36 @@ export const TOOL_OUTPUT_CAP = 8_000;
  *  is a few hundred chars; a heredoc-fed script can be a few thousand — and
  *  still a small fraction of `MAX_EVENT_BYTES`. */
 export const COMMAND_CAP = 4_000;
+
+/** Record the argument shape before display truncation, including nested secret fields. */
+export function prepareToolInput(input: unknown): string {
+  try {
+    const text = (value: string) => redactSecrets(stripAnsi(value));
+    // Reuse each sanitized object so JSON's existing cycle check still applies.
+    const objects = new WeakMap<object, object>();
+    const json = JSON.stringify(input, (key, value: unknown) => {
+      if (isSecretField(key)) return "«redacted»";
+      if (typeof value === "string") return text(value);
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const prior = objects.get(value);
+        if (prior) return prior;
+        const copy = Object.fromEntries(
+          Object.entries(value).map(([name, entry]) => [text(name), isSecretField(name) ? "«redacted»" : entry]),
+        );
+        objects.set(value, copy);
+        objects.set(copy, copy);
+        return copy;
+      }
+      return value;
+    });
+    if (json === undefined) return "[input unavailable: undefined]";
+    return json.length <= COMMAND_CAP
+      ? json
+      : `${json.slice(0, COMMAND_CAP)}…[${json.length - COMMAND_CAP} more chars]`;
+  } catch {
+    return "[input unavailable: not JSON serializable]";
+  }
+}
 
 /** The full tool output as it may leave the process: control-stripped, then
  *  redacted, then capped (that order — see redactAndCap). Empty output → "". */

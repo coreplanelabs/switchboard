@@ -3306,6 +3306,124 @@ restrict:
 });
 
 describe("runOperator — the loop over a scripted model", () => {
+  it.each(["single", "multi", "capped"] as const)(
+    "redacts original provider strings in %s routing evidence",
+    async (mode) => {
+      const provider: Provider = {
+        name: "fake",
+        complete: async () => ({
+          stopReason: mode === "capped" ? "max_tokens" : "tool_use",
+          content: [
+            {
+              type: "tool_use" as const,
+              id: "ask-1",
+              name: "ask",
+              input: { text: "PORT=3000\nPASSWORD=fixture-sensitive-value", reason: "clarify" },
+            },
+            ...(mode === "multi" ? [{ type: "tool_use" as const, id: "read-1", name: "thread_state", input: {} }] : []),
+          ],
+        }),
+      };
+      const answer = await runOperator(input(), providerStructuredModel(provider, "router"));
+      const calls =
+        answer.telemetry?.steps.flatMap((step) => step.calls ?? []).filter((call) => call.tool === "ask") ?? [];
+      expect(answer.decision.kind).toBe(mode === "capped" ? "non_decision" : "question");
+      expect(calls.map((call) => call.input)).toEqual(
+        Array(mode === "single" ? 1 : mode === "multi" ? 3 : 2).fill(
+          '{"text":"PORT=3000\\nPASSWORD=«redacted»","reason":"clarify"}',
+        ),
+      );
+      expect(calls.map((call) => call.outcome)).toEqual(
+        mode === "single" ? ["selected"] : mode === "multi" ? ["rejected", "rejected", "selected"] : ["error", "error"],
+      );
+    },
+  );
+  it("retains every rejected routing call with its input and validation result", async () => {
+    const bind = {
+      tool: OPERATOR_BIND_TOOL,
+      input: { preset: "general", settingsEvidence: operatorSettingsEvidence(), reason: "answer" },
+    };
+    let attempt = 0;
+    const answer = await runOperator(
+      input({ text: "agent:general model:openai/example Explain the failure" }),
+      async () => {
+        if (attempt++ === 0) throw new MultiToolCallError([bind, { tool: OPERATOR_READ_TOOLS.threadState, input: {} }]);
+        return bind;
+      },
+    );
+    const saved = JSON.parse(JSON.stringify(operatorEventOf("on", answer)));
+    expect(saved).toMatchObject({ outcome: "non_decision" });
+    expect(saved.telemetry.steps.map((step: { calls: unknown }) => step.calls)).toEqual([
+      [
+        {
+          tool: "bind_preset",
+          input: JSON.stringify(bind.input),
+          outcome: "rejected",
+          result: "the answer carried 2 tool calls; one tool call per turn",
+        },
+        {
+          tool: "thread_state",
+          input: "{}",
+          outcome: "rejected",
+          result: "the answer carried 2 tool calls; one tool call per turn",
+        },
+      ],
+      [
+        {
+          tool: "bind_preset",
+          input: JSON.stringify(bind.input),
+          outcome: "rejected",
+          result: "the accepted model must preserve the authored formal value",
+        },
+      ],
+      [
+        {
+          tool: "bind_preset",
+          input: JSON.stringify(bind.input),
+          outcome: "rejected",
+          result: "the accepted model must preserve the authored formal value",
+        },
+      ],
+    ]);
+  });
+
+  it("retains helper arguments and results beside the selected action", async () => {
+    let attempt = 0;
+    const answer = await runOperator(
+      input({ providerModels: { read: async () => "Available: example/model" } }),
+      async () =>
+        attempt++ === 0
+          ? { tool: OPERATOR_READ_TOOLS.providerModels, input: { filter: "example" } }
+          : { tool: OPERATOR_ASK_TOOL, input: { text: "Which run?", reason: "missing target" } },
+    );
+    const saved = JSON.parse(JSON.stringify(operatorEventOf("on", answer)));
+    expect(saved).toMatchObject({ outcome: "question" });
+    expect(saved.telemetry.steps[0].calls).toEqual([
+      {
+        tool: "provider_models",
+        input: '{"filter":"example"}',
+        outcome: "completed",
+        result: "Available: example/model",
+      },
+    ]);
+    expect(saved.telemetry.steps.find((step: { phase: string }) => step.phase === "helper").calls).toEqual([
+      {
+        tool: "provider_models",
+        input: '{"filter":"example"}',
+        outcome: "completed",
+        result: "Available: example/model",
+      },
+    ]);
+    expect(saved.telemetry.steps.at(-2).calls).toEqual([
+      {
+        tool: "ask",
+        input: '{"text":"Which run?","reason":"missing target"}',
+        outcome: "selected",
+        result: "question",
+      },
+    ]);
+  });
+
   it("refuses a valid action returned after the shared deadline", async () => {
     let clock = 1_000;
     const answer = await runOperator(
@@ -3322,7 +3440,7 @@ describe("runOperator — the loop over a scripted model", () => {
       telemetry: { timeout: { phase: "model", step: 1, at: 61_000 } },
     });
   });
-  it("records a stalled context read at cancellation and excludes registry arguments", async () => {
+  it("records a stalled context read at cancellation and redacts registry credentials", async () => {
     let clock = 1_000;
     const controller = new AbortController();
     const answer = await runOperator(

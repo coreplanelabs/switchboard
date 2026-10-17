@@ -37,6 +37,7 @@ import { loopClock, MINUTE_MS } from "../../budgets.js";
 import {
   COMMAND_CAP,
   prepareToolResult,
+  prepareToolInput,
   redactAndCap,
   redactSecrets,
   toolTextFailed,
@@ -517,6 +518,8 @@ export class OpenCodeBridge {
    *  settled since: what a later ask cannot amend. A call the stream only named
    *  (`toolNames`, from `session.tool.input.started`) has no line yet. */
   private readonly announced = new Set<string>();
+  /** Calls whose complete arguments have already entered this run's stream. */
+  private readonly inputRecorded = new Set<string>();
   /** callId → the bot's decision; `lifecycle` is a known ending refusal, not
    *  a task failure. A settled
    *  call not among these ran with no decision; a success for a call the bot
@@ -1282,13 +1285,18 @@ export class OpenCodeBridge {
     // A call the record already opened — from a held ask the refill named, or
     // an ask the refill carried ahead of this event — is not opened twice: one
     // `tool_call`, one span, one count, the settle landing once.
-    if (this.openTools.has(callId)) return;
+    const actualInput = data.input;
+    if (this.announced.has(callId)) {
+      this.recordInput(callId, actualInput);
+      return;
+    }
     // The asks held for the call before this — a directory it reaches, asked
     // ahead of its part — ride the line it opens with, beside its own input.
     this.openCall(
       callId,
       this.toolNames.get(callId) ?? "tool",
-      foldInputs(this.takeHeldAsks(callId), isRecord(data.input) ? data.input : undefined),
+      foldInputs(this.takeHeldAsks(callId), isRecord(actualInput) ? actualInput : undefined),
+      actualInput,
     );
   }
 
@@ -1297,11 +1305,17 @@ export class OpenCodeBridge {
    *  ask the store's permissions refill carried after the stream dropped the
    *  step's events (the ask names the tool and its resources), so the settle
    *  that follows lands on a call the record announced, never an orphan. */
-  private openCall(callId: string, name: string, input: Record<string, unknown> | undefined): void {
+  private openCall(
+    callId: string,
+    name: string,
+    input: Record<string, unknown> | undefined,
+    actualInput?: unknown,
+  ): void {
     const tool = openCodeToolNameWord(name);
     const span = this.deps.agentSpan?.start(`tool.${tool}`);
     this.openTools.set(callId, { span, tool, input, cancel: new AbortController() });
     this.announced.add(callId);
+    if (actualInput !== undefined) this.inputRecorded.add(callId);
     this.toolCalls++;
     if (this.pendingNarration) {
       this.emit({ type: "assistant", text: redactSecrets(this.pendingNarration) });
@@ -1315,10 +1329,17 @@ export class OpenCodeBridge {
       type: "tool_call",
       tool,
       summary: redactAndCap(describeOpenCodeToolCall(tool, input)),
+      input: actualInput === undefined ? "[input unavailable: arguments not observed]" : prepareToolInput(actualInput),
       callId,
       ...command,
       ...(span ? { spanId: span.id } : {}),
     });
+  }
+
+  private recordInput(callId: string, input: unknown): void {
+    if (input === undefined || !this.announced.has(callId) || this.inputRecorded.has(callId)) return;
+    this.inputRecorded.add(callId);
+    this.emit({ type: "tool_input", callId, input: prepareToolInput(input) });
   }
 
   private onToolSettled(data: Record<string, unknown>, ok: boolean, out: OpenCodeBridgeObservation): void {
@@ -1524,13 +1545,14 @@ export class OpenCodeBridge {
     const held = this.takeHeldAsks(callId);
     if (ask !== undefined) held.push(ask);
     if (this.announced.has(callId)) {
+      this.recordInput(callId, part.actualInput);
       this.noteDirectoryReached(callId, held);
       return;
     }
     // The raw tool name, as every other writer of `toolNames` records it (the
     // stream's `shell`, `glob`); `openCall` says it in the record's word.
     this.toolNames.set(callId, part.name);
-    this.openCall(callId, part.name, foldInputs(held, part.input));
+    this.openCall(callId, part.name, foldInputs(held, part.input), part.actualInput);
   }
 
   private bypass(out: OpenCodeBridgeObservation, detail: string): void {
@@ -1753,6 +1775,7 @@ export class OpenCodeBridge {
       for (const part of toolPartsOf(message)) {
         this.partTools.set(part.id, part);
         if (this.unnamedAsks.has(part.id)) this.openNamedCall(part.id, part);
+        else this.recordInput(part.id, part.actualInput);
       }
     this.mirrorChain = this.mirrorChain.then(() => this.syncMirror(messages));
     return { replies: [], settled: false };
@@ -1882,6 +1905,7 @@ interface ToolPart {
   id: string;
   name: string;
   input?: Record<string, unknown>;
+  actualInput?: unknown;
 }
 
 /** The tool parts of a store message — none for a message that is not an assistant's. */
@@ -1892,7 +1916,13 @@ function toolPartsOf(message: OpenCodeMessage): ToolPart[] {
   for (const part of Array.isArray(content) ? content : []) {
     if (!isRecord(part) || part.type !== "tool") continue;
     const input = isRecord(part.state) && isRecord(part.state.input) ? part.state.input : undefined;
-    parts.push({ id: str(part.id), name: str(part.name), ...(input ? { input } : {}) });
+    const complete = isRecord(part.state) && ["running", "completed", "error"].includes(String(part.state.status));
+    parts.push({
+      id: str(part.id),
+      name: str(part.name),
+      ...(input ? { input } : {}),
+      ...(complete ? { actualInput: isRecord(part.state) ? part.state.input : undefined } : {}),
+    });
   }
   return parts;
 }

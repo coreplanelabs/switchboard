@@ -90,10 +90,18 @@ describe("closed candidate smoke loop diagnostic", () => {
     const answer = await runOperator(input, async () => replies.shift()!, {
       smokeDiagnosticScope: "candidate-smoke-v1",
     });
-    expect(answer.smokeDiagnostic?.reads).toHaveLength(1);
+    expect(answer.smokeDiagnostic?.reads).toEqual([
+      { helper: "repository_brief", argument: { kind: "group", ordinal: 1 }, result: "reader_unavailable" },
+    ]);
     const event = operatorEventOf("on", answer);
     expect(event).not.toHaveProperty("smokeDiagnostic");
-    expect(JSON.stringify(event)).not.toMatch(/candidate-smoke|reader_unavailable|private\/fixture/);
+    expect(JSON.stringify(event)).not.toMatch(/candidate-smoke|reader_unavailable/);
+    expect(
+      event.telemetry?.steps
+        .flatMap((step) => step.calls ?? [])
+        .filter((call) => call.tool === "repository_brief")
+        .map((call) => call.input),
+    ).toEqual(['{"repo":"private/fixture"}', '{"repo":"private/fixture"}']);
   });
 
   it.each([undefined, true, false, {}, "production", "candidate-smoke"])(

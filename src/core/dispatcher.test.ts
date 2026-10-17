@@ -32324,9 +32324,25 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       expect(replies.join(" ")).not.toContain(`ghp_${"a".repeat(40)}`);
       expect(replies.join(" ")).not.toContain("FINISH");
       const events = registry.listActive().flatMap((active) => registry.snapshotById(active.id)?.events ?? []);
-      const publicEvents = JSON.stringify(events.filter((event) => event.type === "operator"));
+      const operatorEvents = events.filter((event) => event.type === "operator");
+      const publicEvents = JSON.stringify(operatorEvents);
       expect(publicEvents).not.toContain(`ghp_${"a".repeat(40)}`);
-      expect(publicEvents).not.toContain("FINISH");
+      expect(
+        operatorEvents
+          .flatMap((event) => event.binds ?? [])
+          .map((bind) => bind.line)
+          .join(" "),
+      ).not.toContain("FINISH");
+      const recordedSteer = operatorEvents
+        .flatMap((event) => event.telemetry?.steps.flatMap((step) => step.calls ?? []) ?? [])
+        .find((call) => call.tool === "steer_run");
+      expect(recordedSteer).toMatchObject({ outcome: "selected", result: "binds" });
+      expect(JSON.parse(recordedSteer!.input)).toEqual({
+        id: run.id,
+        words: words.replace(`ghp_${"a".repeat(40)}`, "«redacted-github-token»"),
+        intent: "write",
+        reason: "send all the words",
+      });
       expect(publicEvents).not.toContain('"invocation"');
       expect(publicEvents).toContain("«redacted-github-token»");
     },

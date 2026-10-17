@@ -6,6 +6,143 @@ import { analyzeRunFriction } from "../runFriction.js";
 import { normalizeSpans, spansFromEvents } from "../normalizeSpans.js";
 
 describe("routing telemetry retention", () => {
+  it.each(["proposed", "selected", "rejected"] as const)(
+    "redacts original strings on a %s scripted proposal",
+    async (outcome) => {
+      const recorder = new RoutingRecorder(() => 1_000, 1_000, 61_000, new AbortController().signal);
+      const answer = { tool: "ask", input: { text: "PORT=3000\nPASSWORD=fixture-sensitive-value" } };
+      await recorder.during("model", async () => answer);
+      if (outcome !== "proposed") recorder.finishCalls(recorder.latestModel(), outcome, "decision", answer);
+      expect(recorder.snapshot().steps[0].calls).toMatchObject([
+        {
+          tool: "ask",
+          input: '{"text":"PORT=3000\\nPASSWORD=«redacted»"}',
+          outcome,
+        },
+      ]);
+    },
+  );
+
+  it.each(["completed", "error", "timeout"] as const)("redacts original helper arguments on %s", async (outcome) => {
+    let clock = 1_000;
+    const controller = new AbortController();
+    const recorder = new RoutingRecorder(() => clock, clock, 61_000, controller.signal);
+    await recorder
+      .during(
+        "helper",
+        async () => {
+          if (outcome === "error") throw new Error("lookup failed");
+          if (outcome === "timeout") {
+            clock = 61_000;
+            controller.abort();
+          }
+          return "done";
+        },
+        "lookup",
+        { text: "PORT=3000\nPASSWORD=fixture-sensitive-value" },
+      )
+      .catch(() => {});
+    expect(recorder.snapshot().steps[0].calls).toMatchObject([
+      {
+        tool: "lookup",
+        input: '{"text":"PORT=3000\\nPASSWORD=«redacted»"}',
+        outcome,
+      },
+    ]);
+  });
+
+  it("redacts structured helper results and preserves their quoted JSON shape", async () => {
+    const recorder = new RoutingRecorder(() => 1_000, 1_000, 61_000, new AbortController().signal);
+    await recorder.during(
+      "helper",
+      async () => ({
+        command: 'export API_TOKEN="opaque secret value"',
+        content: "PORT=3000\nPASSWORD=fixture-sensitive-value",
+      }),
+      "lookup",
+      {},
+    );
+    expect(recorder.snapshot().steps[0].calls).toEqual([
+      {
+        tool: "lookup",
+        input: "{}",
+        outcome: "completed",
+        result: '{"command":"export API_TOKEN=\\"«redacted»\\"","content":"PORT=3000\\nPASSWORD=«redacted»"}',
+      },
+    ]);
+  });
+
+  it("redacts verifier arguments and the serialized fulfillment result", async () => {
+    const recorder = new RoutingRecorder(() => 1_000, 1_000, 61_000, new AbortController().signal);
+    await recorder.during("command_fulfillment", async () => ({
+      tool: "verify",
+      input: { agrees: true, reason: "PORT=3000\nPASSWORD=fixture-sensitive-value" },
+    }));
+    expect(recorder.snapshot().steps[0].calls).toEqual([
+      {
+        tool: "verify",
+        input: '{"agrees":true,"reason":"PORT=3000\\nPASSWORD=«redacted»"}',
+        outcome: "completed",
+        result: '{"agrees":true,"reason":"PORT=3000\\nPASSWORD=«redacted»"}',
+      },
+    ]);
+  });
+  it("records helper failures with redacted arguments without copying payloads into service logs", async () => {
+    const logs: unknown[] = [];
+    const recorder = new RoutingRecorder(
+      () => 1_000,
+      1_000,
+      61_000,
+      new AbortController().signal,
+      (step) => logs.push(step),
+    );
+    await recorder
+      .during(
+        "helper",
+        async () => {
+          throw new Error("lookup failed");
+        },
+        "lookup",
+        { path: "src/file.ts", apiKey: "opaque-value" },
+      )
+      .catch(() => {});
+    expect(recorder.snapshot().steps[0].calls).toEqual([
+      {
+        tool: "lookup",
+        input: '{"path":"src/file.ts","apiKey":"«redacted»"}',
+        outcome: "error",
+        result: "lookup failed",
+      },
+    ]);
+    expect(logs).toMatchObject([{ phase: "helper", tool: "lookup", outcome: "error", errorClass: "Error" }]);
+    expect(JSON.stringify(logs)).not.toContain("src/file.ts");
+    expect(JSON.stringify(logs)).not.toContain("opaque-value");
+  });
+
+  it("bounds a single parallel answer with explicit payload and call loss", async () => {
+    const recorder = new RoutingRecorder(() => 1_000, 1_000, 61_000, new AbortController().signal);
+    await recorder.during("model", async (observe) => {
+      observe({
+        toolCalls: Array.from({ length: 20 }, (_, index) => ({
+          id: `c${index}`,
+          tool: "lookup",
+          input: { query: "例".repeat(5000), password: "hidden" },
+        })),
+      });
+      return "no action";
+    });
+    const saved = recorder.snapshot();
+    expect(saved.steps[0].omittedCalls).toBe(4);
+    expect(saved.steps[0].calls?.map((call) => call.id)).toEqual(Array.from({ length: 16 }, (_, index) => `c${index}`));
+    expect(saved.steps[0].calls?.[0]).toMatchObject({
+      outcome: "proposed",
+      result: "No tool execution or selection result was recorded.",
+    });
+    expect(JSON.stringify(saved)).toContain("evidence truncated");
+    expect(JSON.stringify(saved)).not.toContain("hidden");
+    expect(new TextEncoder().encode(JSON.stringify(saved)).byteLength).toBeLessThanOrEqual(24 * 1024);
+  });
+
   it("retains distinct same-millisecond requests through timing reconstruction", async () => {
     let clock = 1_000;
     const recorders = Array.from(

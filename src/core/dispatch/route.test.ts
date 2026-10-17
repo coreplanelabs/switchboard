@@ -40,6 +40,32 @@ describe("the readers' router is retired", () => {
     expect(thrown).toBeInstanceOf(MultiToolCallError);
     expect((thrown as MultiToolCallError).calls.map((call) => call.tool)).toEqual(["bind_preset", "thread_state"]);
   });
+
+  it("observes every tool argument before an output-cap rejection", async () => {
+    const observations: unknown[] = [];
+    const provider: Provider = {
+      name: "fake",
+      complete: async () => ({
+        content: [
+          { type: "tool_use", id: "t1", name: "bind_preset", input: { model: "openai/example", preset: "review" } },
+        ],
+        stopReason: "max_tokens",
+      }),
+    };
+    await expect(
+      providerStructuredModel(provider, "model")(
+        {
+          system: "system",
+          user: "review",
+          tool: { name: "bind_preset", description: "review", inputSchema: { type: "object" } },
+        },
+        { maxTokens: 50, signal: new AbortController().signal, observe: (value) => observations.push(value) },
+      ),
+    ).rejects.toThrow();
+    expect(observations.at(-1)).toEqual({
+      toolCalls: [{ id: "t1", tool: "bind_preset", input: { model: "openai/example", preset: "review" } }],
+    });
+  });
 });
 
 describe("mintConfirmationOffer — risk projection", () => {
