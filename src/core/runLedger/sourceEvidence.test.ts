@@ -232,6 +232,172 @@ describe("source notice and fold messages", () => {
     ).toEqual(message);
   });
 
+  it.each([
+    { agent: "review" },
+    { agent: "coding" },
+    { agent: "orchestrator", parentRunId: "older-root" },
+    { agent: "orchestrator", parentInstanceId: "unit-owner", idempotencyKey: "unit-owner:U11/coding" },
+  ])("refuses a common notice outside an original orchestrator: %j", async (changed) => {
+    const { ledger, message } = await common();
+    await ledger.claim({
+      runId: owner.runId,
+      threadKey: owner.threadKey,
+      gen: "g1",
+      startedAt: 1000,
+      leaseMs: LEASE_MS,
+      system: "Agent",
+      tools: [],
+      meta: { userId: owner.requesterId, channelId: owner.channelId, threadKey: owner.threadKey, ...changed },
+    });
+    expect(await ledger.deliverInbox(owner.runId, { version: 1, key: "wrong-owner", message })).toEqual({
+      kind: "refused",
+      reason: "invalid-delivery",
+    });
+    expect(await ledger.pushInbox(owner.runId, message)).toEqual({ ok: false, reason: "invalid-message" });
+    expect(await ledger.readInbox(owner.runId, 0)).toEqual([]);
+    const row = ledger.live.get(owner.runId)!;
+    row.meta = {
+      agent: "orchestrator",
+      userId: owner.requesterId,
+      channelId: owner.channelId,
+      threadKey: owner.threadKey,
+    };
+    expect(await ledger.deliverInbox(owner.runId, { version: 1, key: "wrong-owner", message })).toMatchObject({
+      kind: "delivered",
+      receipt: { seq: 1 },
+    });
+  });
+
+  it("checks the current notice owner after asynchronous delivery preparation", async () => {
+    const { ledger, message } = await common();
+    await ledger.claim({
+      runId: owner.runId,
+      threadKey: owner.threadKey,
+      gen: "g1",
+      startedAt: 1000,
+      leaseMs: LEASE_MS,
+      system: "Orchestrator",
+      tools: [],
+      meta: {
+        agent: "orchestrator",
+        userId: owner.requesterId,
+        channelId: owner.channelId,
+        threadKey: owner.threadKey,
+      },
+    });
+    const pending = ledger.deliverInbox(owner.runId, { version: 1, key: "raced-owner", message });
+    ledger.live.get(owner.runId)!.meta.agent = "review";
+    expect(await pending).toEqual({ kind: "refused", reason: "invalid-delivery" });
+    ledger.live.get(owner.runId)!.meta.agent = "orchestrator";
+    expect(await ledger.deliverInbox(owner.runId, { version: 1, key: "raced-owner", message })).toMatchObject({
+      kind: "delivered",
+      receipt: { seq: 1 },
+    });
+    ledger.live.get(owner.runId)!.meta.agent = "review";
+    expect(await ledger.deliverInbox(owner.runId, { version: 1, key: "raced-owner", message })).toMatchObject({
+      kind: "duplicate",
+      receipt: { seq: 1 },
+    });
+  });
+
+  it("requires the actual root and its saved source-fold decision for a direct child", async () => {
+    const { ledger, message } = await common();
+    const rootSession = `${owner.threadKey}:orchestrator`;
+    await ledger.claim({
+      runId: owner.runId,
+      threadKey: owner.threadKey,
+      gen: "g1",
+      startedAt: 1000,
+      leaseMs: LEASE_MS,
+      system: "Orchestrator",
+      tools: [],
+      meta: {
+        agent: "orchestrator",
+        userId: owner.requesterId,
+        channelId: owner.channelId,
+        threadKey: owner.threadKey,
+        session: { key: rootSession, seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+      },
+    });
+    const childThread = "slack:C1:child";
+    const decision = {
+      version: 2 as const,
+      kind: "source-fold" as const,
+      id: JSON.stringify([owner.runId, "fold-owner"]),
+      owner,
+      source: { kind: "source-evidence" as const, receipt: message.receipt },
+      target: { kind: "run" as const, hash: "a".repeat(64) },
+      inputHash: "b".repeat(64),
+      contextHash: "c".repeat(64),
+    };
+    const childHandoff = {
+      version: 1 as const,
+      source: {
+        runId: owner.runId,
+        requester: owner.requesterId,
+        channelId: owner.channelId,
+        threadKey: owner.threadKey,
+      },
+      session: { key: rootSession, from: 0, to: -1 },
+      assets: [],
+      orchestratorOwner: owner,
+      consumer: {
+        runId: "child",
+        requester: owner.requesterId,
+        channelId: owner.channelId,
+        threadKey: childThread,
+        attempt: "first",
+      },
+    };
+    await ledger.claim({
+      runId: "child",
+      threadKey: childThread,
+      gen: "g1",
+      startedAt: 1000,
+      leaseMs: LEASE_MS,
+      system: "Child",
+      tools: [],
+      meta: {
+        agent: "coding",
+        userId: owner.requesterId,
+        channelId: owner.channelId,
+        threadKey: childThread,
+        parentRunId: owner.runId,
+        childHandoff,
+      },
+    });
+    const folded = { ...message, routing: { kind: "fold", owner, decision: { runId: owner.runId, id: decision.id } } };
+    const deliver = () => ledger.deliverInbox("child", { version: 1, key: "fold-owner", message: folded });
+    expect(await deliver()).toEqual({ kind: "refused", reason: "invalid-delivery" });
+    expect(await ledger.setState(owner.runId, "g1", { orchestratorDecisions: [decision] })).toEqual({ ok: true });
+    ledger.live.get(owner.runId)!.meta.agent = "review";
+    expect(await deliver()).toEqual({ kind: "refused", reason: "invalid-delivery" });
+    ledger.live.get(owner.runId)!.meta.agent = "orchestrator";
+    expect(await deliver()).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+    expect((await ledger.readInbox("child", 0))[0].message.routing).toEqual(folded.routing);
+    const child = ledger.live.get("child")!;
+    child.meta.parentRunId = "another-parent";
+    expect(await ledger.deliverInbox("child", { version: 1, key: "parent-changed", message: folded })).toEqual({
+      kind: "refused",
+      reason: "invalid-delivery",
+    });
+    child.meta.parentRunId = owner.runId;
+    ledger.live.get(owner.runId)!.phase = "finishing";
+    expect(await ledger.deliverInbox("child", { version: 1, key: "root-ending", message: folded })).toEqual({
+      kind: "refused",
+      reason: "invalid-delivery",
+    });
+    ledger.live.get(owner.runId)!.phase = "live";
+    expect((await ledger.readInbox("child", 0)).map((row) => row.seq)).toEqual([1]);
+    expect(
+      await ledger.deliverInbox("child", {
+        version: 1,
+        key: "changed-source",
+        message: { ...folded, receipt: { ...folded.receipt, sequence: 99 } },
+      }),
+    ).toEqual({ kind: "refused", reason: "invalid-delivery" });
+  });
+
   it("preserves first notices through keyed delivery and reclaim only under their root custody", async () => {
     const { ledger, message } = await common({ kind: "text", state: "deleted", text: null });
     const root = {

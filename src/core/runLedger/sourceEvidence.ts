@@ -1,5 +1,12 @@
 import { sourceHash } from "../references/receipts.js";
-import { isOrchestratorOwner, type OrchestratorOwner } from "../dispatch/orchestratorDecisions.js";
+import {
+  isOrchestratorOwner,
+  orchestratorDecisionsOf,
+  sameOrchestratorOwner,
+  type OrchestratorOwner,
+} from "../dispatch/orchestratorDecisions.js";
+import { isChildHandoff, orchestratorOwnerForHandoff } from "../dispatch/handoff.js";
+import type { LiveRunRow } from "./types.js";
 import { DURABLE_INBOX_MAX_BYTES, inboxCustodyOf, type InboxTarget } from "./inboxMessage.js";
 import {
   sourceContentOf,
@@ -54,6 +61,68 @@ function sourceRoutingOf(value: unknown): SourceInputRouting | undefined {
   if (value.kind === "fold" && closed(value, ["kind", "owner", "decision"])) {
     const decision = decisionReferenceOf(value.decision);
     if (decision?.runId === value.owner.runId) return { kind: "fold", owner: value.owner, decision };
+  }
+}
+
+/** Necessary owner checks at the existing append boundary. These do not prove
+ * the canonical event, task, destination hash, current access or native input.
+ * Consumers still hold source rows until that complete path is qualified. */
+export function sourceEvidenceOwnerMatches(
+  value: Record<string, unknown>,
+  destination: LiveRunRow,
+  loadRoot: (runId: string) => LiveRunRow | undefined,
+): boolean {
+  if (value.kind !== "source-evidence" || value.version !== 2) return true;
+  try {
+    const captured = sourceSnapshot(value);
+    if (!object(captured)) return false;
+    const routing = sourceRoutingOf(captured.routing);
+    if (!routing) return false;
+    const root = loadRoot(routing.owner.runId);
+    if (!root || root.phase === "finishing" || root.meta.childHandoff !== undefined) return false;
+    const owner = orchestratorOwnerForHandoff({
+      runId: root.runId,
+      requester: root.meta.userId,
+      channelId: root.meta.channelId,
+      threadKey: root.meta.threadKey,
+      agent: root.meta.agent,
+      parentRunId: root.meta.parentRunId,
+      parentInstanceId: root.meta.parentInstanceId,
+    });
+    if (!owner || !sameOrchestratorOwner(owner, routing.owner)) return false;
+    if (routing.kind === "notice") return destination.runId === owner.runId;
+    const handoff = destination.meta.childHandoff;
+    if (
+      destination.runId === owner.runId ||
+      destination.meta.parentRunId !== owner.runId ||
+      destination.meta.parentInstanceId !== undefined ||
+      destination.meta.userId !== owner.requesterId ||
+      !isChildHandoff(handoff) ||
+      handoff.source.runId !== owner.runId ||
+      handoff.source.requester !== owner.requesterId ||
+      handoff.source.channelId !== owner.channelId ||
+      handoff.source.threadKey !== owner.threadKey ||
+      !sameOrchestratorOwner(handoff.orchestratorOwner, owner) ||
+      handoff.consumer?.runId !== destination.runId ||
+      handoff.consumer.requester !== destination.meta.userId ||
+      handoff.consumer.channelId !== destination.meta.channelId ||
+      handoff.consumer.threadKey !== destination.meta.threadKey
+    )
+      return false;
+    const decision = orchestratorDecisionsOf(root.state.orchestratorDecisions, owner)?.find(
+      (entry) => entry.id === routing.decision.id,
+    );
+    const receipt = sourceEventReceiptOf(captured.receipt);
+    return (
+      decision?.version === 2 &&
+      decision.target.kind === "run" &&
+      receipt !== undefined &&
+      object(captured.source) &&
+      decision.source.kind === captured.source.kind &&
+      JSON.stringify(sourceEventReceiptOf(decision.source.receipt)) === JSON.stringify(receipt)
+    );
+  } catch {
+    return false;
   }
 }
 
