@@ -182,46 +182,47 @@ export function createOrchestratorDecisions(input: {
   let held = restored === undefined;
   let entries = restored ?? [];
   let tail: Promise<unknown> = Promise.resolve();
+  const record = (decision: OrchestratorDecision): Promise<boolean> => {
+    try {
+      decision = structuredClone(decision);
+    } catch {
+      try {
+        console.warn(JSON.stringify({ event: "orchestrator.decision.refused", cause: "uncloneable-proposal" }));
+      } catch {
+        // Diagnostic failure must not change admission or block the queue.
+      }
+      return Promise.resolve(false);
+    }
+    const next = tail.then(async () => {
+      if (held || !isOrchestratorDecision(decision, owner)) return false;
+      const existing = entries.find((entry) => entry.id === decision.id);
+      if (existing) return JSON.stringify(existing) === JSON.stringify(decision);
+      const saved = [...entries, structuredClone(decision)];
+      if (
+        saved.length > ORCHESTRATOR_DECISIONS_MAX ||
+        new TextEncoder().encode(JSON.stringify(saved)).byteLength > ORCHESTRATOR_DECISION_BYTES_MAX
+      )
+        return false;
+      try {
+        if (!(await save(structuredClone(saved)))) {
+          held = true;
+          return false;
+        }
+      } catch {
+        held = true;
+        return false;
+      }
+      entries = saved;
+      return true;
+    });
+    tail = next;
+    return next;
+  };
   return {
     snapshot: () => {
       if (restored === undefined) throw new Error("The retained orchestrator decisions could not be verified.");
       return structuredClone(entries);
     },
-    record(decision: OrchestratorDecision): Promise<boolean> {
-      try {
-        decision = structuredClone(decision);
-      } catch {
-        try {
-          console.warn(JSON.stringify({ event: "orchestrator.decision.refused", cause: "uncloneable-proposal" }));
-        } catch {
-          // Diagnostic failure must not change admission or block the queue.
-        }
-        return Promise.resolve(false);
-      }
-      const next = tail.then(async () => {
-        if (held || !isOrchestratorDecision(decision, owner)) return false;
-        const existing = entries.find((entry) => entry.id === decision.id);
-        if (existing) return JSON.stringify(existing) === JSON.stringify(decision);
-        const saved = [...entries, structuredClone(decision)];
-        if (
-          saved.length > ORCHESTRATOR_DECISIONS_MAX ||
-          new TextEncoder().encode(JSON.stringify(saved)).byteLength > ORCHESTRATOR_DECISION_BYTES_MAX
-        )
-          return false;
-        try {
-          if (!(await save(structuredClone(saved)))) {
-            held = true;
-            return false;
-          }
-        } catch {
-          held = true;
-          return false;
-        }
-        entries = saved;
-        return true;
-      });
-      tail = next;
-      return next;
-    },
+    record,
   };
 }
