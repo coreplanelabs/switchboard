@@ -1,6 +1,12 @@
 import { normalizeGithubInstallationActivity } from "./githubInstallationActivity.js";
-import { prepareSourceEvent, sourceSnapshot, type SourceEvent } from "../core/runLedger/sourceEvents.js";
+import {
+  prepareSourceEvent,
+  sourceEventRecordOf,
+  sourceSnapshot,
+  type SourceEvent,
+} from "../core/runLedger/sourceEvents.js";
 import { sourceHash } from "../core/references/receipts.js";
+import { githubPullSourceContextOf } from "../execution/githubReadSource.js";
 
 /** Configuration already selected by the authenticated receiver. */
 export interface GithubActivitySource {
@@ -52,6 +58,80 @@ function sourceUrl(value: unknown, host: string): value is string {
   } catch {
     return false;
   }
+}
+
+export type GithubActivityTaskMatch =
+  | { kind: "candidate"; relation: "pull-request" }
+  | { kind: "unrelated" }
+  | { kind: "held"; reason: "invalid-record" | "invalid-task" | "unsupported-relationship" | "identity-conflict" };
+
+/** Match data from this adapter only. The caller must load canonical records
+ * and check the original owner, audience, current access and relevance. This
+ * neither authenticates a supplied receipt nor selects a delivery target. */
+export async function githubActivityTaskMatch(value: unknown, taskValue: unknown): Promise<GithubActivityTaskMatch> {
+  const held = (reason: Extract<GithubActivityTaskMatch, { kind: "held" }>["reason"]): GithubActivityTaskMatch => ({
+    kind: "held",
+    reason,
+  });
+  let captured: unknown;
+  try {
+    captured = sourceSnapshot({ record: value, task: taskValue ?? null });
+  } catch {
+    return held("invalid-record");
+  }
+  if (!object(captured)) return held("invalid-record");
+  const task = githubPullSourceContextOf(captured.task);
+  if (!task) return held("invalid-task");
+  const record = await sourceEventRecordOf(captured.record);
+  if (!record) return held("invalid-record");
+  const event = record.event;
+  if (event.version !== 2 || event.kind === "request") return held("unsupported-relationship");
+  const { host, appId, installationId } = task.source;
+  if (event.sourceId !== `github:${host}:app:${appId}:installation:${installationId}`) return { kind: "unrelated" };
+  const prefix = `github:${host}:repository:`;
+  if (!event.objectId.startsWith(prefix)) return held("unsupported-relationship");
+  const [repository, surface, ...parts] = event.objectId.slice(prefix.length).split(":");
+  const repositoryId = Number(repository);
+  if (!id(repositoryId) || String(repositoryId) !== repository) return held("invalid-record");
+  if (repositoryId !== task.repositoryId) return { kind: "unrelated" };
+  if (!["conversation", "inline", "review", "pull-request", "thread"].includes(surface ?? ""))
+    return held("unsupported-relationship");
+  const data = event.payload;
+  if (!object(data) || data.version !== 1 || !object(data.repository) || !object(data.native) || !id(data.pullNumber))
+    return held("invalid-record");
+  const native = data.native;
+  const pull = surface === "conversation" ? native.issue : native.pull_request;
+  if (
+    data.repository.id !== repositoryId ||
+    !object(native.repository) ||
+    native.repository.id !== repositoryId ||
+    !object(native.installation) ||
+    native.installation.id !== installationId ||
+    !object(pull) ||
+    pull.number !== data.pullNumber ||
+    (surface === "conversation" && !object(pull.pull_request))
+  )
+    return held("identity-conflict");
+  if (
+    surface !== "conversation" &&
+    pull.id !== undefined &&
+    (!id(pull.id) || (pull.id === task.pullRequestId) !== (data.pullNumber === task.number))
+  )
+    return held("identity-conflict");
+  if (data.pullNumber !== task.number) return { kind: "unrelated" };
+  const item =
+    surface === "pull-request"
+      ? pull
+      : surface === "thread"
+        ? native.thread
+        : surface === "review"
+          ? native.review
+          : native.comment;
+  if (!object(item)) return held("identity-conflict");
+  const nativeId = surface === "thread" ? item.node_id : item.id;
+  if ((surface === "thread" ? !text(nativeId) : !id(nativeId)) || parts.join(":") !== String(nativeId))
+    return held("identity-conflict");
+  return { kind: "candidate", relation: "pull-request" };
 }
 
 /** Pure conversion after signature and configured-source checks. This does

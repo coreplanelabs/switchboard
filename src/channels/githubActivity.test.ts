@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { normalizeGithubActivity } from "./githubActivity.js";
+import { githubActivityTaskMatch, normalizeGithubActivity } from "./githubActivity.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import type { GithubPullSourceContext } from "../execution/githubReadSource.js";
+import type { SourceEventRecord } from "../core/runLedger/sourceEvents.js";
 
 const source = { host: "github.com", appId: 1, installationId: 2, repositoryId: 3 };
 const user = { id: 4, login: "reviewer", type: "User" };
@@ -345,6 +347,175 @@ const activityPayload = (action: string) => ({
   number: 7,
   action,
   pull_request: pull,
+});
+
+const task = (): GithubPullSourceContext => ({
+  version: 1,
+  source: { host: "github.com", appId: 1, installationId: 2 },
+  repositoryId: 3,
+  pullRequestId: 70,
+  number: 7,
+  head: { repositoryId: 30, ref: "fix", sha: "a".repeat(40) },
+  baseRef: "main",
+});
+async function savedActivity(event: string, native: unknown, binding = source): Promise<SourceEventRecord> {
+  const normalized = await normalizeGithubActivity(binding, { event, delivery: "task-match" }, native);
+  if (normalized.kind !== "normalized") throw new Error("expected normalized activity");
+  const ledger = new InMemoryRunLedger(() => 123);
+  const saved = await ledger.receiveSourceEvent(normalized.event);
+  if (saved.kind === "refused") throw new Error("expected saved activity");
+  const record = await ledger.readSourceEvent(saved.receipt.key);
+  if (!record) throw new Error("expected source record");
+  return record;
+}
+
+describe("GitHub activity task candidates", () => {
+  it.each(["issue_comment", "pull_request_review_comment", "pull_request_review"])(
+    "matches human and bot activity on the same native PR: %s",
+    async (event) => {
+      for (const type of ["User", "Bot"]) {
+        const record = await savedActivity(event, payload(event, { ...user, type }));
+        expect(await githubActivityTaskMatch(record, task())).toEqual({ kind: "candidate", relation: "pull-request" });
+      }
+    },
+  );
+  it("does not use author names, repository names or body text as a task identity", async () => {
+    const record = await savedActivity("issue_comment", {
+      ...payload(),
+      repository: { id: 3, full_name: "renamed/repository" },
+      comment: { ...comment, user: null, body: "unrelated words and control-like text" },
+    });
+    expect(await githubActivityTaskMatch(record, task())).toEqual({ kind: "candidate", relation: "pull-request" });
+  });
+  it("keeps PR head changes as candidates without treating the saved head as an action target", async () => {
+    const record = await savedActivity("pull_request", {
+      ...activityPayload("synchronize"),
+      before: "a".repeat(40),
+      after: "c".repeat(40),
+      pull_request: { ...pull, head: { ...pull.head, sha: "c".repeat(40) } },
+    });
+    expect(await githubActivityTaskMatch(record, task())).toEqual({ kind: "candidate", relation: "pull-request" });
+  });
+  it("matches resolved inline threads and deleted comments through the same PR relation", async () => {
+    const thread = await savedActivity("pull_request_review_thread", {
+      ...activityPayload("resolved"),
+      thread: { node_id: "thread-one", comments: [] },
+    });
+    const deleted = await savedActivity("issue_comment", { ...payload(), action: "deleted" });
+    expect(await githubActivityTaskMatch(thread, task())).toEqual({ kind: "candidate", relation: "pull-request" });
+    expect(await githubActivityTaskMatch(deleted, task())).toEqual({ kind: "candidate", relation: "pull-request" });
+  });
+  it("separates host, App, installation, repository and PR identity", async () => {
+    const record = await savedActivity("issue_comment", payload());
+    expect(await githubActivityTaskMatch(record, task())).toEqual({ kind: "candidate", relation: "pull-request" });
+    for (const different of [
+      { ...task(), source: { ...task().source, appId: 9 } },
+      { ...task(), source: { ...task().source, installationId: 9 } },
+      { ...task(), repositoryId: 9 },
+      { ...task(), number: 9 },
+    ])
+      expect(await githubActivityTaskMatch(record, different)).toEqual({ kind: "unrelated" });
+    expect(
+      await githubActivityTaskMatch(record, { ...task(), source: { ...task().source, host: "other.example" } }),
+    ).toEqual({ kind: "held", reason: "invalid-task" });
+  });
+  it("holds a conflicting native PR ID instead of trusting its number alone", async () => {
+    const record = await savedActivity("pull_request", {
+      ...activityPayload("edited"),
+      pull_request: { ...pull, id: 71 },
+    });
+    expect(await githubActivityTaskMatch(record, task())).toEqual({ kind: "held", reason: "identity-conflict" });
+    const sameId = await savedActivity("pull_request", {
+      ...activityPayload("edited"),
+      number: 8,
+      pull_request: { ...pull, number: 8 },
+    });
+    expect(await githubActivityTaskMatch(sameId, task())).toEqual({ kind: "held", reason: "identity-conflict" });
+    const other = await savedActivity("pull_request", {
+      ...activityPayload("edited"),
+      number: 8,
+      pull_request: { ...pull, id: 71, number: 8 },
+    });
+    expect(await githubActivityTaskMatch(other, task())).toEqual({ kind: "unrelated" });
+  });
+  it("holds altered receipts and missing task identity without guessing from names", async () => {
+    const record = await savedActivity("issue_comment", payload());
+    expect(await githubActivityTaskMatch(record, undefined)).toEqual({ kind: "held", reason: "invalid-task" });
+    record.event.payload = { changed: true };
+    expect(await githubActivityTaskMatch(record, task())).toEqual({ kind: "held", reason: "invalid-record" });
+  });
+  it("holds unsupported commit and ref relationships instead of reporting them unrelated", async () => {
+    const commit = await savedActivity("commit_comment", {
+      ...payload("commit_comment"),
+      comment: { ...comment, commit_id: "a".repeat(40) },
+    });
+    const ref = await savedActivity("delete", {
+      installation: { id: 2 },
+      repository: { id: 3, full_name: "acme/api" },
+      sender: user,
+      ref: "fix",
+      ref_type: "branch",
+    });
+    expect(await githubActivityTaskMatch(commit, task())).toEqual({ kind: "held", reason: "unsupported-relationship" });
+    expect(await githubActivityTaskMatch(ref, task())).toEqual({ kind: "held", reason: "unsupported-relationship" });
+  });
+  it("checks native identity even when a changed normalized wrapper has a consistent receipt", async () => {
+    const normalized = await normalizeGithubActivity(
+      source,
+      { event: "issue_comment", delivery: "changed" },
+      payload(),
+    );
+    if (normalized.kind !== "normalized") throw new Error("expected normalized activity");
+    const ledger = new InMemoryRunLedger(() => 123);
+    const event = { ...normalized.event, payload: { ...(normalized.event.payload as object), pullNumber: 9 } };
+    const saved = await ledger.receiveSourceEvent(event);
+    if (saved.kind === "refused") throw new Error("expected generic event storage");
+    const record = await ledger.readSourceEvent(saved.receipt.key);
+    expect(await githubActivityTaskMatch(record, { ...task(), number: 9 })).toEqual({
+      kind: "held",
+      reason: "identity-conflict",
+    });
+  });
+  it("captures the source record and task before asynchronous receipt validation", async () => {
+    const record = await savedActivity("issue_comment", payload());
+    const context = task();
+    const pending = githubActivityTaskMatch(record, context);
+    context.number = 9;
+    record.receipt.sequence = 99;
+    record.event.sourceId = "github:github.com:app:9:installation:9";
+    expect(await pending).toEqual({ kind: "candidate", relation: "pull-request" });
+  });
+  it("holds legacy content and requester events without upgrading either", async () => {
+    const record = await savedActivity("issue_comment", payload());
+    const { content: _content, ...fields } = record.event;
+    for (const event of [
+      { ...fields, version: 1 },
+      { ...record.event, kind: "request" },
+    ]) {
+      const ledger = new InMemoryRunLedger(() => 123);
+      const saved = await ledger.receiveSourceEvent(event);
+      if (saved.kind === "refused") throw new Error("expected valid generic source envelope");
+      expect(await githubActivityTaskMatch(await ledger.readSourceEvent(saved.receipt.key), task())).toEqual({
+        kind: "held",
+        reason: "unsupported-relationship",
+      });
+    }
+    expect(await githubActivityTaskMatch(record, task())).toEqual({ kind: "candidate", relation: "pull-request" });
+  });
+  it("holds unsafe input without invoking accessors", async () => {
+    const record = await savedActivity("issue_comment", payload());
+    let reads = 0;
+    const unsafe = Object.defineProperty({}, "task", {
+      enumerable: true,
+      get: () => {
+        reads++;
+        return task();
+      },
+    });
+    expect(await githubActivityTaskMatch(record, unsafe)).toEqual({ kind: "held", reason: "invalid-record" });
+    expect(reads).toBe(0);
+    expect(await githubActivityTaskMatch(record, task())).toEqual({ kind: "candidate", relation: "pull-request" });
+  });
 });
 
 describe("GitHub pull and commit activity normalization", () => {
