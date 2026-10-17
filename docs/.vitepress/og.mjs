@@ -5,8 +5,9 @@
 // file). Plain JS with a .d.mts twin, so the bot's test can import it without
 // the docs theme entering its program.
 //
-// One card per page, the home page's for the not-found route too. Every card is
-// the same composition: the canvas is the site's dark ground, a hairline frame
+// One card per page, the home page's for the not-found route too. The renderer
+// uses the supplied home artwork. Other cards use the site's dark ground,
+// a hairline frame
 // inset from the edge, the mark and the product's name in the mono face along
 // the top with the page's section as an uppercase eyebrow opposite, the page's
 // title in the text face set large with the letters tightened, one muted line

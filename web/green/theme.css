@@ -144,15 +144,17 @@
   padding: 0 10px 27px;
 }
 .green-brand-mark {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  background: var(--green-accent);
-  color: var(--green-accent-text);
-  font-size: 17px;
-  font-weight: 800;
+  display: block;
+  flex: none;
+  width: 40px;
+  height: 40px;
+}
+.green-brand-dark,
+.dark .green-brand-light {
+  display: none;
+}
+.dark .green-brand-dark {
+  display: block;
 }
 .green-nav-caption,
 .green-eyebrow {

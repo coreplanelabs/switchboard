@@ -12,8 +12,8 @@
 // once ahead of time, since the layout engine takes bitmaps, not SVG.
 //
 // Build-time only: config.ts calls `writeOgCards` from `buildEnd`, after every
-// page's head has named its card, and writes into the build output — nothing
-// under docs/public/ is generated or committed.
+// page's head has named its card, and writes into the build output. The home
+// card copies the supplied PNG so its type stays the same on every build.
 import { Buffer } from "node:buffer";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -65,7 +65,10 @@ export async function writeOgCards(subjects, outDir, site) {
   const written = [];
   for (const subject of subjects) {
     const route = subject.file === "index" ? "/" : `/${subject.file.replace(/\/index$/, "/")}`;
-    const png = await renderOgCard(ogCard({ subject, mark, wordmark: site.displayName, host, route }), fonts);
+    const png =
+      subject.file === "index"
+        ? readFileSync(site.homePngPath)
+        : await renderOgCard(ogCard({ subject, mark, wordmark: site.displayName, host, route }), fonts);
     const target = join(outDir, `${subject.file}.png`);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, png);

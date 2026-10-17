@@ -3,6 +3,8 @@ defineOptions({ name: "GreenShell" });
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { useMediaQuery } from "@vueuse/core";
+import logoLight from "../../src/assets/logo-light.svg";
+import logoDark from "../../src/assets/logo-dark.svg";
 import ThemeToggle from "../../src/components/ThemeToggle.vue";
 import { SeedKey } from "../../src/lib/seed";
 import { useHomeSession } from "../lib/homeSession";
@@ -91,7 +93,11 @@ watch(
       aria-label="Main navigation"
     >
       <RouterLink to="/home" class="green-brand"
-        ><span class="green-brand-mark" aria-hidden="true">S</span> Switchboard</RouterLink
+        ><span class="green-brand-mark" aria-hidden="true">
+          <img class="green-brand-light" :src="logoLight" alt="" width="40" height="40" />
+          <img class="green-brand-dark" :src="logoDark" alt="" width="40" height="40" />
+        </span>
+        Switchboard</RouterLink
       >
       <button
         class="green-mobile-close green-icon-button"
