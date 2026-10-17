@@ -10,6 +10,14 @@ import {
   type FenceAcquisition,
 } from "./fenceAcquisition.js";
 import {
+  abandonOperatorAdmission,
+  handleOperatorAbandonment,
+  handleOperatorAbandonmentRead,
+  operatorSha256,
+  quoteOperatorAdmission,
+  readOperatorAbandonment,
+} from "./operatorCancel.js";
+import {
   nativeRetirementTargetSchema,
   nativeRetirementPermitSchema,
   nativeRetirementTargetKey,
@@ -2755,6 +2763,46 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     const record = await this.ctx.storage.get(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`);
     const recordSha256 = await admissionRecordHash(record);
     return recordSha256 === null ? null : recoveryQuote((record as { startedAt: number }).startedAt, recordSha256);
+  }
+
+  async getOperatorAbandonmentQuote(id: string) {
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await this.getStagingMaintenance(txn))?.state === "held") return null;
+      return quoteOperatorAdmission(
+        txn,
+        id,
+        { build: BUILD_ID, workerVersion: workerVersionId(this.env) },
+        systemClock(),
+      );
+    });
+  }
+
+  async operatorAbandonDeployAdmission(input: unknown, authoritySha256: string) {
+    const committed = await this.ctx.storage.transaction(async (txn) => {
+      if ((await this.getStagingMaintenance(txn))?.state === "held") return null;
+      return abandonOperatorAdmission(
+        txn,
+        input,
+        { build: BUILD_ID, workerVersion: workerVersionId(this.env) },
+        authoritySha256,
+        systemClock,
+      );
+    });
+    if (committed)
+      emitDeployAdmission({
+        phase: "operator-abandonment-commit",
+        id: committed.request.id,
+        operationId: committed.request.operationId,
+        decidedAt: committed.decidedAt,
+        requestEnd: "unobserved",
+        nativeOutcome: "unverified",
+        commit: "acknowledged",
+      });
+    return committed;
+  }
+
+  async readOperatorAbandonment(id: string, operationId: string, requestSha256?: string) {
+    return this.ctx.storage.transaction((txn) => readOperatorAbandonment(txn, id, operationId, requestSha256));
   }
 
   /** Legacy callers have no observed-record contract. Keep their RPC closed
@@ -15404,6 +15452,8 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/deploy-fence-recovery": { scope: "admin", method: "GET" },
   "/release-deploy-fence": { scope: "admin", method: "POST" },
   "/deploy-admissions": { scope: "admin", method: "GET" }, // targeted recovery inventory, never a drain-bearer route
+  "/abandon-deploy-admission": { scope: "admin", method: "POST" },
+  "/deploy-admission-abandonment": { scope: "admin", method: "GET" },
   "/replica-recover-native-operation": { scope: "admin", method: "POST" },
   "/retire-native-operation": { scope: "admin", method: "POST" },
   "/recover-native-operation": { scope: "admin", method: "POST" }, // exact journal plus original native receipt
@@ -15610,6 +15660,10 @@ export default {
             return await handleReleaseDeployFence(env, body);
           case "/deploy-admissions":
             return await handleDeployAdmissions(env, url);
+          case "/abandon-deploy-admission":
+            return await handleOperatorAbandonment(registryStub(env), body, await operatorSha256(bearer!));
+          case "/deploy-admission-abandonment":
+            return await handleOperatorAbandonmentRead(registryStub(env), url);
           case "/retire-native-operation":
             return await handleRetireNativeOperation(env, body);
           case "/replica-recover-native-operation":
