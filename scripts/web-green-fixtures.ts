@@ -1,4 +1,4 @@
-import { reviewReportFixture } from "./web-review-fixture.js";
+import { reviewReportFixture, reviewComparisonFixture } from "./web-review-fixture.js";
 import { DAY_MS } from "../src/core/budgets.js";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -20,6 +20,7 @@ type PreviewPage = {
 };
 export function createGreenPreview(options: { now: number; unit: UnitSeed["view"]; thread: HomeSeed }) {
   const reviewReport = reviewReportFixture(options.now - (options.now % DAY_MS) - 6 * DAY_MS);
+  const reviewComparison = reviewComparisonFixture(options.now - (options.now % DAY_MS) - 6 * DAY_MS);
   let revision = 1;
   let sequence = 0;
   const transcripts = new Map<string, HomeConversationEntry[]>();
@@ -278,12 +279,17 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
           seed: { ...options.thread, conversation: thread, elsewhere: { surface: "slack" } },
         });
     }
-    if (url.pathname === "/metrics" || url.pathname === "/metrics/health")
+    if (url.pathname === "/metrics" || url.pathname === "/metrics/health" || url.pathname === "/metrics/week")
       return marked({
-        title: url.pathname === "/metrics" ? "Review usage preview" : "System health preview",
+        title: {
+          "/metrics": "Review usage preview",
+          "/metrics/health": "System health preview",
+          "/metrics/week": "Week over week preview",
+        }[url.pathname],
         seed: {
           page: "reviewsMetrics",
           report: reviewReport,
+          ...(url.pathname === "/metrics/week" ? { comparison: reviewComparison } : {}),
           requesterNames: { [ACTOR]: "Your account" },
         },
       });
@@ -328,6 +334,11 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
     if (url.pathname === "/metrics.json") {
       if ((request.method ?? "GET").toUpperCase() !== "GET") json(response, 405, { status: "invalid", preview: true });
       else json(response, 200, reviewReport);
+      return true;
+    }
+    if (url.pathname === "/metrics/week.json") {
+      if ((request.method ?? "GET").toUpperCase() !== "GET") json(response, 405, { status: "invalid", preview: true });
+      else json(response, 200, { ...reviewReport, comparison: reviewComparison });
       return true;
     }
     if (url.pathname === "/home/session") {

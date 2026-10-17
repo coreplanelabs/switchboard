@@ -16,6 +16,7 @@ export const routes: RouteRecordRaw[] = [
   { path: "/costs/:group?", component: () => import("./pages/Costs.vue") },
   { path: "/metrics", component: () => import("./pages/Metrics.vue") },
   { path: "/metrics/health", component: () => import("./pages/SystemHealth.vue") },
+  { path: "/metrics/week", component: () => import("./pages/WeekOverWeek.vue") },
   { path: "/settings/runtime", component: () => import("./pages/Runtime.vue") },
   { path: "/settings/runtime/:owner/:name", component: () => import("./pages/RuntimeDetail.vue") },
   { path: "/residents", redirect: "/settings/runtime" },

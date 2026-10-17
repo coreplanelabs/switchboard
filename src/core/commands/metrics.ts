@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   CommandError,
   commandDefiner,
+  flag,
   type CommandDef,
   type CommandRegistry,
   type JsonObject,
@@ -11,6 +12,7 @@ import { METRICS_AGENT_NAME, METRICS_MAX_DAYS } from "../metrics.js";
 import { METRICS_OFF_MESSAGE, type MetricsService } from "../metricsService.js";
 import { DAY_MS, MINUTE_MS } from "../budgets.js";
 import type { ReviewsService } from "../reviewsService.js";
+import { reviewsComparisonOf } from "../reviewsComparison.js";
 import { systemClock } from "../trace/clock.js";
 import { FeedbackQueryInputError, type ReviewFeedbackReport } from "../reviewFeedbackReport.js";
 import { isPublicationRepo } from "../branchPublication.js";
@@ -184,8 +186,36 @@ function renderReviews(output: JsonValue): string {
           (r) =>
             `• ${String(r.requester)} — ${num(r.runs)} runs · ${num(r.succeeded)} succeeded · ${minutes(r.wallMs)} running`,
         )),
+    ...comparisonLines(o.comparison),
     `bucketed by ${String(range.bucket)} · counted ${String(range.completeness)}`,
   ].join("\n");
+}
+
+/** `now` against `before` as a signed whole percent; no earlier runs is said, not divided. */
+const changeText = (now: number, before: number): string =>
+  before > 0 ? `${now >= before ? "+" : ""}${Math.round(((now - before) / before) * 100)}%` : "no earlier runs";
+
+/** `--compare`'s line: the same range whole weeks earlier, cut at the same point. */
+function comparisonLines(comparison: JsonValue | undefined): string[] {
+  if (!comparison || typeof comparison !== "object" || Array.isArray(comparison)) return [];
+  const c = comparison as JsonObject;
+  const shift = `${String(c.shiftDays)}d earlier`;
+  if (!c.previous) return [`• week over week · ${shift} is before the ${METRICS_MAX_DAYS} days the dataset keeps`];
+  const runsOf = (r: JsonValue | undefined) => num(((r as JsonObject).usage as JsonObject | undefined)?.runs);
+  const tilesOf = (r: JsonValue | undefined) =>
+    (((r as JsonObject).system as JsonObject | undefined)?.tiles ?? {}) as JsonObject;
+  const [now, before] = [runsOf(c.current), runsOf(c.previous)];
+  const [tn, tb] = [tilesOf(c.current), tilesOf(c.previous)];
+  // A tile with no eligible runs has no rate: 0 over none is "no data", never a measured 0%.
+  const rate = (t: JsonValue | undefined): string => {
+    const o = (t ?? {}) as JsonObject;
+    return num(o.total) > 0 ? pct(o.ratio) : "no data";
+  };
+  return [
+    `• week over week · vs ${shift} · ${now} vs ${before} review runs (${changeText(now, before)})` +
+      ` · run success ${rate(tn.runSuccessRate)} vs ${rate(tb.runSuccessRate)}` +
+      ` · warm start ${rate(tn.warmStartShare)} vs ${rate(tb.warmStartShare)}`,
+  ];
 }
 
 /** `--from`/`--to` as a half-open millisecond range: whole UTC days, both included. */
@@ -216,18 +246,27 @@ export const metricsReviews = defineCommand({
       .optional()
       .describe("the first UTC day, YYYY-MM-DD (default: seven days ending today)"),
     to: z.string().regex(UTC_DAY).optional().describe("the last UTC day, YYYY-MM-DD, included (default: today)"),
+    compare: flag
+      .optional()
+      .describe("also the same range whole weeks earlier, cut at the same point while today is still filling"),
   }),
   action: "metrics:read",
   effect: "read",
   enabledWhen: (caps) => caps.metrics,
   describe:
-    "The review dashboard's report from the metrics dataset: review runs by requester and surface, time spent, reviews per pull request, verdicts and findings, and the system tiles (run success, warm starts, setup losses), weighted for sampling; nothing written.",
+    "The review dashboard's report from the metrics dataset: review runs by requester and surface, time spent, reviews per pull request, verdicts and findings, and the system tiles (run success, warm starts, setup losses), weighted for sampling; with --compare, the same range whole weeks earlier; nothing written.",
   render: renderReviews,
   handler: async ({ options, deps }) => {
-    const range = reviewsRangeOf(options, systemClock());
+    const now = systemClock();
+    const range = reviewsRangeOf(options, now);
     const service = await deps.metrics.reviews();
     try {
-      return (await service.reviews(range)) as unknown as JsonValue;
+      if (!options.compare) return (await service.reviews(range)) as unknown as JsonValue;
+      const [report, comparison] = await Promise.all([
+        service.reviews(range),
+        reviewsComparisonOf(service, range, now),
+      ]);
+      return { ...report, comparison } as unknown as JsonValue;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message === METRICS_OFF_MESSAGE) throw new CommandError("unavailable", message);

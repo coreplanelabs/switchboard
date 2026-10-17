@@ -7,6 +7,7 @@ import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import type { PlaneTable } from "../core/plane/table.js";
 import type { MetricsReport } from "../core/metrics.js";
 import type { ReviewsReportWithDataset } from "../core/reviewsService.js";
+import type { ReviewsComparison } from "../core/reviewsComparison.js";
 import type { CostsView } from "./costsView.js";
 import type { RunCost } from "../core/modelPricing.js";
 import type { DeliveryReport } from "../core/delivery.js";
@@ -437,6 +438,8 @@ export interface MetricsSeed {
 export interface ReviewsMetricsSeed {
   page: "reviewsMetrics";
   report: ReviewsReportWithDataset;
+  /** The Week over week tab only: the range beside the same range whole weeks earlier. */
+  comparison?: ReviewsComparison;
   /** Display names supplied by the current protected directory, never identity joins. */
   requesterNames?: Record<string, string>;
 }

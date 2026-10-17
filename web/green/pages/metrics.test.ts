@@ -4,10 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildReviewFeedbackReport } from "@core/core/reviewFeedbackReport.js";
 import { buildReviewsReport } from "@core/core/reviewsReport.js";
 import { DAY_MS } from "@core/core/budgets.js";
-import { reviewReportFixture } from "../../../scripts/web-review-fixture";
+import { reviewComparisonFixture, reviewReportFixture } from "../../../scripts/web-review-fixture";
 import { mountApp } from "../../src/testing/mount";
 import MetricsPage from "./Metrics.vue";
 import HealthPage from "./SystemHealth.vue";
+import WeekPage from "./WeekOverWeek.vue";
 enableAutoUnmount(afterEach);
 describe("Green review metrics", () => {
   it("shows current human feedback, empty ratings and unavailable feedback beside review usage", () => {
@@ -222,5 +223,55 @@ describe("Green review metrics", () => {
     expect(page.findAll("select")).toHaveLength(0);
     expect(page.find('input[name="owner"]').exists()).toBe(false);
     expect(page.findAll("button").map((button) => button.text())).toEqual(["Apply range"]);
+  });
+
+  it("compares the range with a week earlier: tiles, side by side, days and requesters, all from the seed", () => {
+    const comparison = reviewComparisonFixture();
+    const page = mountApp(WeekPage, {
+      seed: { page: "reviewsMetrics", report: reviewReportFixture(7 * DAY_MS), comparison },
+    });
+    expect(page.find('[aria-label="Metrics sections"] [aria-current="page"]').text()).toBe("Week over week");
+    expect(page.find("[data-windows]").text()).toContain("1970-01-08 00:00 – 1970-01-15 00:00 UTC");
+    expect(page.find("[data-windows]").text()).toContain("1970-01-01 00:00 – 1970-01-08 00:00 UTC, one week earlier");
+    const tiles = page.findAll(".green-stat").map((tile) => tile.text());
+    expect(tiles).toEqual([
+      "Review runs2112 one week earlier · +75%",
+      "Run success rate90%75% one week earlier · +15 pts",
+      "Warm start share100%44% one week earlier · +56 pts",
+      "Lost at setup10%25% one week earlier · -15 pts",
+      "p50 duration1.0s1.5s one week earlier · -0.5s",
+      "Observed pull requests11 one week earlier · 0%",
+    ]);
+    const rows = Object.fromEntries(
+      page.findAll('[data-table="comparison"] tbody tr').map((row) => {
+        const cells = row.findAll("td").map((cell) => cell.text());
+        return [cells[0], cells.slice(1)];
+      }),
+    );
+    expect(rows["Succeeded"]).toEqual(["18", "9", "+100%"]);
+    expect(rows["p50 duration"]).toEqual(["1.0s", "1.5s", "-0.5s"]);
+    expect(rows["Findings"]).toEqual(["4", "2", "+100%"]);
+    const days = page.findAll('[data-table="days"] tbody tr').map((row) => row.findAll("td").map((c) => c.text()));
+    expect(days).toHaveLength(7);
+    expect(days[0]).toEqual(["1970-01-08", "21", "1970-01-01", "12", "+75%"]);
+    expect(days[1]).toEqual(["1970-01-09", "0", "1970-01-02", "0", "No change"]);
+    expect(page.find('a[href="/metrics/week.json?from=1970-01-08&to=1970-01-14"]').exists()).toBe(true);
+    expect(page.text()).not.toContain("$");
+  });
+
+  it("says the earlier range is out of retention instead of comparing with zero, and links the third tab", () => {
+    const report = reviewReportFixture(7 * DAY_MS);
+    const { dataset: _dataset, ...current } = report;
+    const page = mountApp(WeekPage, {
+      seed: { page: "reviewsMetrics", report, comparison: { shiftDays: 91, current, unavailable: "before_retention" } },
+    });
+    expect(page.text()).toContain("The range 13 weeks earlier starts before the 90 days the metrics dataset keeps.");
+    expect(page.find('[data-table="comparison"]').exists()).toBe(false);
+    const missing = mountApp(WeekPage, { seed: { page: "reviewsMetrics", report } });
+    expect(missing.text()).toContain("The review comparison is unavailable.");
+    const usage = mountApp(MetricsPage, { seed: { page: "reviewsMetrics", report } });
+    expect(
+      usage.find('[aria-label="Metrics sections"] a[href="/metrics/week?from=1970-01-08&to=1970-01-14"]').text(),
+    ).toBe("Week over week");
   });
 });
