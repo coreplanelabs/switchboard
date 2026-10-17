@@ -1262,7 +1262,9 @@ describe("review submission rejection and correction", () => {
       }
       expect(
         await submitVerdictTool.run({ ...first, summary: "Finding serialization is unavailable", findings: [] }, ctx),
-      ).toBe("error: invalid findings; findings: changes requested requires validated findings; no verdict recorded");
+      ).toBe(
+        "error: request_changes requires validated findings. If the review is incomplete, stop without a verdict and explain the missing evidence in your final message; no verdict recorded",
+      );
       expect(latest).toMatchObject({
         summary: "One Major remains",
         findings: [{ id: "F1", severity: "major", title: "Rejected findings disappear" }],
@@ -1396,7 +1398,7 @@ describe("three reported Minor findings remain incomplete after serialization re
     };
     expect(await submitVerdictTool.run(proposal, ctx)).toContain("unknown prior finding");
     expect(await submitVerdictTool.run({ ...proposal, findings: [] }, ctx)).toContain(
-      "changes requested requires validated findings",
+      "request_changes requires validated findings",
     );
     const partial = parseVerdictInput({ ...proposal, findings: [] })!;
     const body = buildReviewPostBody(report, partial);

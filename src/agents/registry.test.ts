@@ -847,7 +847,7 @@ describe("review prompts: structured findings through submit_verdict (agent-ship
 
   it("all review prompts exempt a first-command head mismatch from the mandatory verdict call because it is preflight infrastructure, never a finding or GitHub post", () => {
     for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!, REVIEW_SYSTEM_SEEDED]) {
-      expect(sys).toMatch(/only exception.*REVIEW TARGET.*first-command HEAD check/i);
+      expect(sys).toMatch(/exception.*REVIEW TARGET.*first-command HEAD check/i);
       expect(sys).toMatch(/infrastructure failure/i);
       expect(sys).toMatch(/submit no finding or verdict/i);
     }

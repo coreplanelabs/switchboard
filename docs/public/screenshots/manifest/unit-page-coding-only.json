@@ -66,7 +66,7 @@
     "scripts/web-preview.ts": "10648c20d64f5f2a1c9c7d5dc1771c216764c321772e2f663cf285e303b803df",
     "scripts/web-review-fixture.ts": "79f92a9a98a0424f85eccb6d88753547ca364e84dfd126550a5bfe7c8330b785",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
-    "src/agents/registry.ts": "92115158db2d47c57988e0f8525fb1f40f7adc72acf0d2ae662e978405cd8cd7",
+    "src/agents/registry.ts": "7aae539c33a688722b7d4c9801d9609cbad2b8c2032c8b4acd4c562e37f99829",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
@@ -483,7 +483,7 @@
       "response:*/*:/assets/584f41c14968e449.js": "f86a486cc9cca6dedb3dd3f2b985660eace4b54d306d631ad73507f99bcc6d5e",
       "response:*/*:/assets/6cc5f6bbe4a3ebcc.js": "9c85a9b329073ed96fc3f06f0bf4352ee8013d4b37dcd6b4c225c080fb3b0643",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
-      "response:*/*:/assets/7704038c40f6cb06.js": "e4151c05a6618f0cf29d76f9f5977ba75bb12eee58ae778c93fdffaae1d0d584",
+      "response:*/*:/assets/7704038c40f6cb06.js": "f9dc4684effc4f93b2765cf794e0895621fbb751aa23c0c9f7bba4ae5aca6151",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
       "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
       "response:*/*:/assets/92945a3a5a7d8c72.js": "42caffec235cd70c2a88070f92c0cab6061901a928bf27ecc0f1f9e69323d37d",
@@ -496,9 +496,9 @@
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
       "response:*/*:/assets/green.css": "cf168e62c30a12bc39311bd4df28d489e84dff5f3e382401e00a6d2d09a3fbf1",
       "response:*/*:/runs/unit/plan-acme-3:U14": "14305a86651a7ce819ed7a0046b336c29b515f99bf8e2e5d74f1773159dc3765",
-      "response:application/json:/home/session": "ef6a5a8c36f88716adc7e646b8a1f410f14375755adb43efe3599621740b8d05",
+      "response:application/json:/home/session": "171c3c3133da7e374877e69fa54855a17385c0d92d4ace007a0d0265194431ee",
       "response:application/json:/home/session?thread=slack%3AC1%3A1700000400.000100": "d26d811804c3d615917e8c9fcdddd9b5386be6301b14b7008532c68cd5ede075",
-      "response:text/event-stream:/home/events": "f3931b926a9a8e59dd03bdfbfa3fe73971bc1a103ec6e94ce72b08852889ca9d",
+      "response:text/event-stream:/home/events": "38af280ccbf46eb3eb98bb5725a8ce05d8f943cd83cff50e366000c870fd8a06",
       "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000400.000100&observe=1": "d26d811804c3d615917e8c9fcdddd9b5386be6301b14b7008532c68cd5ede075"
     }
   }

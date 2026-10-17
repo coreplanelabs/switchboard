@@ -50,8 +50,9 @@ export interface VerdictTurnTarget {
 export function verdictFollowUp(t: VerdictTurnTarget): string {
   return [
     `Your review of ${t.repo}#${t.number} ended without an accepted complete submit_verdict. Switchboard writes the verdict as the first line of the posted review from that accepted call alone — without it the review posts as "Review incomplete — findings not validated", whatever your write-up concluded.`,
-    "Call submit_verdict now, exactly once, with the verdict your write-up already states: `approve` when you found no blocking issue (nits alone are not blocking), otherwise `request_changes`; a one-line summary; `head` = the output of `git rev-parse HEAD` in the checkout you reviewed; and `findings` — one structured entry per issue your write-up reports, with the ids you used (F1, F2, …), a severity of exactly blocking|major|minor|nit, the file (plus line when it points at one) and a one-line title.",
-    "Do not re-read the diff and do not rewrite the review — your write-up stands as the review's text; only the verdict is missing. Then reply in one line.",
+    "Only if your review is complete, call submit_verdict now, exactly once, with the verdict your write-up already states: `approve` when you found no blocking issue (nits alone are not blocking), otherwise `request_changes`; a one-line summary; `head` = the output of `git rev-parse HEAD` in the checkout you reviewed; and `findings` — one structured entry per issue your write-up reports, with the ids you used (F1, F2, …), a severity of exactly blocking|major|minor|nit, the file (plus line when it points at one) and a one-line title.",
+    "If required evidence is unavailable or the review is incomplete, do not submit a verdict. Explain the missing evidence in one line. Do not invent a code finding or submit request_changes with empty findings. An incomplete review is not an approval.",
+    "Do not re-read the diff and do not rewrite the review — your write-up stands as the review's text. Then reply in one line.",
   ].join("\n");
 }
 

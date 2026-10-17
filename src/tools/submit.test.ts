@@ -25,6 +25,33 @@ describe("submit_verdict tool", () => {
   const ctxWith = (onVerdict?: ToolContext["onVerdict"]): ToolContext =>
     ({ executor: {} as ToolContext["executor"], onVerdict }) as ToolContext;
 
+  it("explains how to stop an incomplete review without inventing a finding or recording a verdict", async () => {
+    const recorded: ReviewVerdict[] = [];
+    const ctx = ctxWith((v) => recorded.push(v));
+    expect(
+      await submitVerdictTool.run(
+        {
+          verdict: "request_changes",
+          summary: "CI evidence unavailable",
+          head: "a".repeat(40),
+          findings: [],
+          humanFindings: [],
+        },
+        ctx,
+      ),
+    ).toBe(
+      "error: request_changes requires validated findings. If the review is incomplete, stop without a verdict and explain the missing evidence in your final message; no verdict recorded",
+    );
+    expect(recorded).toEqual([]);
+    await submitVerdictTool.run(
+      { verdict: "approve", summary: "Complete review", head: "a".repeat(40), findings: [], humanFindings: [] },
+      ctx,
+    );
+    expect(recorded).toEqual([
+      { verdict: "approve", summary: "Complete review", head: "a".repeat(40), findings: [], humanFindings: [] },
+    ]);
+  });
+
   const caseReview = (kind: "single" | "pattern" = "pattern", humanGated = false) => {
     const head = "a".repeat(40);
     const prior = outstandingReviewFindings([

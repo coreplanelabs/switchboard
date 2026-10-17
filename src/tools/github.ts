@@ -358,12 +358,17 @@ export const githubPullGetTool: RunnableTool = {
   sideEffectFree: true,
   name: "github_pull_get",
   description:
-    "Read one pull request's current title, body, state, head and base through Switchboard's read-scoped GitHub App credential. This is context, not publication authority.",
+    "Read one pull request's current title, body, state, head and base through Switchboard's read-scoped GitHub App credential. Set includeChecks: true to discover CI check results and links at that exact head without a run ID, including external CI. These are reported check runs, not proof of all required checks or publication authority.",
   inputSchema: {
     type: "object",
     properties: {
       repo: { type: "string", description: "owner/name" },
       number: { type: "number", description: "Pull request number" },
+      includeChecks: {
+        type: "boolean",
+        description:
+          "Read all latest check runs at this PR head (up to 300), on the first history page only; failed or partial reads return an error, never green CI. Legacy commit statuses are not included.",
+      },
       includeReviewHistory: {
         type: "boolean",
         description:
@@ -408,6 +413,12 @@ base: ${pull.base.repo}:${pull.base.ref}
 ${clip(pull.body.trim() || "(no body)", MAX_PULL_BODY_SHOWN)}
 
 PR metadata is context; publication authority is supplied separately.`;
+      if (input.includeChecks === true && (input.historyPage ?? 1) === 1) {
+        const checks = await ctx.github.api.getCommitChecks(repo, pull.head.sha);
+        body += `\n\nChecks for ${repo} @ ${pull.head.sha} (${checks.length} reported check runs; legacy commit statuses and required-check rules are not included):\n${checks.length ? JSON.stringify(checks) : "No check runs reported. CI is not established."}`;
+        if (body.length > MAX_TOOL_RESULT_CHARS - 2000)
+          return "error: github_pull_get: check evidence exceeds the complete result budget";
+      }
       if (input.includeReviewHistory === true) {
         const feedback = await ctx.github.api.getPullRequestFeedback(repo, number);
         // Validate native authority before sanitizing; redaction must not turn
