@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import StatusDot from "../StatusDot.vue";
-import ResidentUidGauge from "./ResidentUidGauge.vue";
 import { formatRelative, splitRunLabel } from "../../lib/format";
 import {
   AGENT_HUE,
@@ -40,7 +39,7 @@ import type { RunIndexRowSeed } from "@core/channels/webSeed.js";
 // folded open, the trees on it, one row each. A row reads left to right as the
 // run · the tree it holds · the clock: the run side is words (agent chip, the
 // request, who and where under it), the tree side a fixed-width monospace
-// block (branch @ sha over user · deps · size) so rows align without column
+// block (branch @ sha over deps · size) so rows align without column
 // labels; an idle tree is a dimmed row with its last use in the run's place,
 // and a run whose attach has not completed has no tree yet. Every value the
 // resident reports lands as text; only a well-formed slug, a hex sha and an
@@ -221,7 +220,6 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
           class="running shrink-0 rounded border border-ok/25 bg-ok/8 px-1.5 font-mono text-[0.68rem] font-medium tabular-nums text-ok"
           >{{ runs.length }} running</span
         >
-        <ResidentUidGauge v-if="!cold" :record="record" />
         <!-- The facts wrap to their own indented line on a phone instead of
              breaking mid-token at the left edge. -->
         <span
@@ -244,7 +242,7 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
           <!-- Each row reads left to right: the run · the tree it holds · the
                clock. The run side is words (chip, request, who and where under
                it); the tree side is a fixed-width monospace block (branch @ sha
-               over user · deps · size) so rows align without column labels. -->
+               over deps · size) so rows align without column labels. -->
           <li
             v-for="row in rows"
             :key="row.key"
@@ -292,7 +290,7 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
               >
             </span>
 
-            <!-- the tree: branch @ sha, then user · deps · size -->
+            <!-- the tree: branch @ sha, then deps · size -->
             <span class="min-w-0 font-mono text-xs max-sm:col-span-2 max-sm:col-start-2 max-sm:row-start-2">
               <span
                 class="tree block truncate text-toned"
@@ -314,8 +312,7 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
                 <span v-else class="font-sans text-dimmed">no worktree bound yet</span>
               </span>
               <span v-if="row.binding" class="facts-tree block truncate text-dimmed">
-                <span class="user">{{ row.binding.user || "—" }}</span>
-                {{ " · " }}<span class="deps">{{ row.binding.deps || "—" }}</span> {{ " · "
+                <span class="deps">{{ row.binding.deps || "—" }}</span> {{ " · "
                 }}<span
                   class="size"
                   :class="row.treeKiB !== null ? 'text-muted' : ''"

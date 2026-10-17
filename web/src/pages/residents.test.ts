@@ -230,7 +230,6 @@ describe("ResidentsIndexPage", () => {
     const seed = Object.assign(indexSeed([WARM]), { repositories: [cold] });
     const { wrapper: w, es } = mountIndex(seed);
     expect(w.find('[data-slug="acme/infra"]').text()).toContain("cold");
-    expect(w.find('[data-slug="acme/infra"] .uid-count').exists()).toBe(false);
     expect(w.find('[data-slug="acme/infra"] .disk').exists()).toBe(false);
     expect(w.find('[data-slug="jshttp/vary"]').classes()).toContain("bg-ok/5");
     expect(w.text()).toContain("Cold repositories1");
@@ -248,48 +247,26 @@ describe("ResidentsIndexPage", () => {
     expect(w.text()).toContain("acme/infra");
     expect(w.text()).not.toContain("No repositories onboarded");
   });
-  it("reports dynamic identities without a budget or exhaustion warning", async () => {
-    const { wrapper: w, es } = mountIndex(
-      indexSeed([
-        { ...WARM, live: { ...WARM.live, uidAllocation: "dynamic", poolUsersSpent: 251, poolUsersTotal: null } },
-      ]),
-    );
-    expect(w.find(".uid-count").text()).toBe("UIDs 251 issued");
-    expect(w.find(".uid-count").classes()).toContain("text-muted");
-    expect(w.find(".uid-count").attributes("aria-label")).toContain("does not limit active work");
+  it("shows current run and disk status without historical UID counters or worker IDs", async () => {
+    const record = {
+      ...MEASURED,
+      live: { ...MEASURED.live, uidAllocation: "dynamic", poolUsersSpent: 500, poolUsersTotal: null },
+    };
+    const { wrapper: w, es } = mountIndex(indexSeed([record], 5, 1, [run("r1")]));
+    const summary = () => w.find('li.resident[data-slug="jshttp/vary"] summary');
+    expect(summary().text()).toContain("1 running");
+    expect(summary().text()).toContain("disk 4.06 GiB/14.4 GiB (28%)");
+    expect(w.text()).not.toMatch(/\bUIDs?\b|worker\d+/);
     es().emitMessage({
       type: "residents",
-      cap: 6,
+      cap: 5,
       count: 1,
-      residents: [
-        { ...WARM, live: { ...WARM.live, uidAllocation: "dynamic", poolUsersSpent: 252, poolUsersTotal: null } },
-      ],
+      residents: [{ ...record, live: { ...record.live, state: "degraded", poolUsersSpent: 501 } }],
     });
     await nextTick();
-    expect(w.find(".uid-count").text()).toBe("UIDs 252 issued");
-  });
-
-  it("shows spent UID slots, highlights exhaustion, and updates from the resident feed", async () => {
-    const { wrapper: w, es } = mountIndex(
-      indexSeed([{ ...WARM, live: { ...WARM.live, poolUsersSpent: 16, poolUsersTotal: 16 } }]),
-    );
-    expect(w.find(".uid-count").text()).toBe("UIDs 16/16 spent");
-    expect(w.find(".uid-count").classes()).toContain("text-error");
-    expect(w.find(".uid-count").attributes("aria-label")).toContain("Linux user IDs");
-    es().emitMessage({
-      type: "residents",
-      cap: 6,
-      count: 1,
-      residents: [{ ...WARM, live: { ...WARM.live, poolUsersSpent: 3, poolUsersTotal: 32 } }],
-    });
-    await nextTick();
-    expect(w.find(".uid-count").text()).toBe("UIDs 3/32 spent");
-    expect(w.find(".uid-count").classes()).toContain("text-muted");
-  });
-
-  it("shows unknown UID values without claiming unused slots on older or unreachable residents", () => {
-    const { wrapper: w } = mountIndex(indexSeed([WARM, { ...DOWN, live: { ...DOWN.live, poolUsersSpent: 9 } }]));
-    expect(w.findAll(".uid-count").map((c) => c.text())).toEqual(["UIDs —/? spent", "UIDs 9/? spent"]);
+    expect(summary().text()).toContain("degraded");
+    expect(summary().text()).toContain("1 running");
+    expect(w.text()).not.toMatch(/\bUIDs?\b|worker\d+/);
   });
 
   it("shows a deploy drain even when the resident listing is empty", () => {
@@ -384,7 +361,7 @@ describe("ResidentsIndexPage", () => {
 describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", () => {
   const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 
-  it("counts the runs on each resident in its row and in the toolbar, and lists them in the fold as one grid — agent, request, who and thread, worktree, user, deps, size, stopwatch, run link — joined to the worktree by thread key", () => {
+  it("counts the runs on each resident in its row and in the toolbar, and lists them in the fold as one grid — agent, request, who and thread, worktree, deps, size, stopwatch, run link — joined to the worktree by thread key", () => {
     const { wrapper: w } = mountIndex(
       indexSeed([MEASURED, DOWN], 5, 2, [run("r1"), run("other", { repo: "acme/web", threadKey: "slack:C9:1" })]),
     );
@@ -409,7 +386,6 @@ describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", 
         .find(".tree a[href='https://github.com/jshttp/vary/commit/abcdef1234567890abcdef1234567890abcdef12']")
         .exists(),
     ).toBe(true);
-    expect(line.find(".user").text()).toBe("worker3");
     expect(line.find(".deps").text()).toBe("hardlink");
     expect(line.find(".size").text()).toBe("0.52 GiB");
     expect(line.find(".elapsed").text()).toBe("4m 12s");
@@ -448,7 +424,6 @@ describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", 
     expect(idle[0].find(".text").text()).toBe("idle");
     expect(idle[0].find(".who").text()).toBe("last used Aug 28");
     expect(norm(idle[0].find(".tree").text())).toBe("feat/residents-dash @ abcdef12");
-    expect(idle[0].find(".user").text()).toBe("worker3");
     expect(idle[0].find(".deps").text()).toBe("hardlink");
     expect(idle[0].find(".size").text()).toBe("0.52 GiB");
     expect(idle[0].find(".elapsed").exists()).toBe(false);
@@ -578,12 +553,16 @@ describe("ResidentsIndexPage — live over the feed", () => {
 });
 
 describe("ResidentDetailPage", () => {
-  it("shows the same UID pool count and warning on the detail page", () => {
+  it("shows lifecycle and disk details without historical UID counters or worker IDs", () => {
     const w = mountApp(ResidentDetailPage, {
-      seed: detailSeed({ ...WARM, live: { ...WARM.live, poolUsersSpent: 12, poolUsersTotal: 16 } }),
+      seed: detailSeed({
+        ...MEASURED,
+        live: { ...MEASURED.live, uidAllocation: "dynamic", poolUsersSpent: 500, poolUsersTotal: null },
+      }),
     });
-    expect(w.find(".uid-count").text()).toBe("UIDs 12/16 spent");
-    expect(w.find(".uid-count").classes()).toContain("text-warn");
+    expect(w.find(".green-section-heading .green-badge").text()).toBe("warm");
+    expect(w.text()).toMatch(/home directories\s*2\.00 GiB/);
+    expect(w.text()).not.toMatch(/\bUIDs?\b|worker\d+/);
   });
   it("shows the container image report separately from lifecycle", () => {
     const record = { ...WARM, live: { ...WARM.live, imageReport: "pending" } };
@@ -657,7 +636,6 @@ describe("ResidentDetailPage", () => {
       "https://github.com/jshttp/vary/commit/abcdef1234567890abcdef1234567890abcdef12",
     );
     expect(t).toContain("hardlink");
-    expect(t).toContain("worker3");
     expect(t).toContain("2026-08-28T21:45:00.000Z");
     expect(t).toContain("evicted 2026-08-27T10:00:00.000Z · branch merged <b>");
     expect(t).toContain("1 retained · 1 evicted");
@@ -708,7 +686,7 @@ describe("ResidentDetailPage", () => {
     expect(t).toMatch(/checkout deps \(node_modules\)\s*2\.14 GiB/);
     expect(t).toMatch(/checkout \(history \+ tree \+ build\)\s*0\.44 GiB/);
     expect(t).toMatch(/thread slack:CACME0001:1787954209\.398379\s*0\.52 GiB/);
-    expect(t).toMatch(/home worker3\s*2\.00 GiB/);
+    expect(t).toMatch(/home directories\s*2\.00 GiB/);
     expect(t).not.toContain("home worker1"); // 4 KiB of dotfiles is noise
     expect(t).toMatch(/other \(image, \/tmp, …\)\s*0\.61 GiB/);
   });

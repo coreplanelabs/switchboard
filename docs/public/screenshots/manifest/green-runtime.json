@@ -332,8 +332,7 @@
     "web/src/components/ThemeToggle.vue": "a64659054936e4a61ea4d7c7aed2a96e9306b5697c3cab9b587e4aa95dc63ed0",
     "web/src/components/home/AssistantTurn.vue": "fc392202ba5232c2168261f80da4c4210ffc377d508e898e3c0b24910854445a",
     "web/src/components/home/ReceiptChip.vue": "f6b20af2b104a6e3bf8532a13d4381f9a79c940f2b1a019c11b8835ba4eecd57",
-    "web/src/components/residents/ResidentRow.vue": "8e367a1a3e7c6eead9eb8d45a8dca3b00dfb12e935dd92b0f2f3ff64faf7ad94",
-    "web/src/components/residents/ResidentUidGauge.vue": "052abdfb8a1ca18316c9e7debf376ada4d8333e1789d46ea26f2e05be17ea4db",
+    "web/src/components/residents/ResidentRow.vue": "1afc4fe3036a9177611ad4c897b2967fa67a7660f28961c0387db84820d416e6",
     "web/src/components/run/CallCard.vue": "908739a4052d576576ce7537a643a9be139bc1072fb0bd81f71bc272040f8ec8",
     "web/src/components/run/MessageFiles.vue": "7cece928a02b6c80f7484db1a3fbf9754c5f0ec15ff233dd9e56f2d1bc3402ac",
     "web/src/components/run/PendingTurnRow.vue": "c439f5e0778167707dca9c2f20b20162528633d6fb0c00280519bfa40c3942a6",
@@ -439,10 +438,6 @@
         "accept": "*/*"
       },
       {
-        "path": "/assets/b084e82daa8708a1.js",
-        "accept": "*/*"
-      },
-      {
         "path": "/assets/d89759a31e26ce19.js",
         "accept": "*/*"
       },
@@ -502,24 +497,23 @@
       "response:*/*:/assets/4238f641a614553a.js": "46860536a5b4f63fafc92db37290b75b5182ff0db123254e18eb672ff9497d22",
       "response:*/*:/assets/426422a72deaeac3.js": "3500407c3f22f71de2709b048fd26d70ece48dae37e1cb5fae0ef79e6072b9d5",
       "response:*/*:/assets/444409e028e282d3.js": "765003fe0939b3b0322e844cbabda0ddf0f07f711e8f24838368a869cf7c3199",
-      "response:*/*:/assets/5b659dc603bf0235.js": "33cac37788186fbaa87b736e58ac432ae66a96aa1506bd738a04edc54889c561",
+      "response:*/*:/assets/5b659dc603bf0235.js": "7de30adb451a5772284e63746c80e311796b78e937d8bd307834ecc71eb07772",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
       "response:*/*:/assets/7704038c40f6cb06.js": "e4151c05a6618f0cf29d76f9f5977ba75bb12eee58ae778c93fdffaae1d0d584",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
       "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
-      "response:*/*:/assets/92945a3a5a7d8c72.js": "0e036ae43c120cd323c488d97c4ae9bdf9fe080e5fac6dd46bc74e7ec01d6491",
+      "response:*/*:/assets/92945a3a5a7d8c72.js": "42caffec235cd70c2a88070f92c0cab6061901a928bf27ecc0f1f9e69323d37d",
       "response:*/*:/assets/9825f6c791051da3.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
       "response:*/*:/assets/ae5af04fe564482b.js": "41b4c2796eb0ce7b316e51a1f546e3c3a826bd39b2ae3e1b145ac15c6f4de99f",
-      "response:*/*:/assets/b084e82daa8708a1.js": "75a054a768a682a97953fec992e12abe763f05e57e4ccbf4407b572342e7c2fe",
       "response:*/*:/assets/d89759a31e26ce19.js": "7c479a89ec876f3dfe2e923b5895df96f8a0a5e181ed03f489180dbd50bb269d",
       "response:*/*:/assets/e2d5b96b99e916ef.js": "12a21290b18c32e8acad52f209ba85cce7b954ae5dc97ea5ac12a1d230690352",
       "response:*/*:/assets/e84c77bd8d4c7e31.js": "bdc4ce806ebb7f3147856e84b2a18c90467a90aecdc98b89b0c1ecaa98052473",
       "response:*/*:/assets/e87d52e570baa2d6.js": "c992d0f16c428968b47345cf8308221f0d7be9f725270797ff38241468bf4ba8",
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
-      "response:*/*:/assets/green.css": "8f6663fec4f5945d4f3b2029b33027267e49a58e705961f50c2cc0d075977535",
+      "response:*/*:/assets/green.css": "cf168e62c30a12bc39311bd4df28d489e84dff5f3e382401e00a6d2d09a3fbf1",
       "response:*/*:/settings/runtime": "0181577b21e4d5444a06d0b50245572959c39256df9e6d118b4743a8a7eec348",
-      "response:application/json:/home/session": "3f4e8ab5a63ab0a4008137a7f128a2ccdca84ae909d7846a532b21f3b067fc93",
-      "response:text/event-stream:/home/events": "e2865d827b34ecf8b560e5950f439142501699987449045fabda7097595f0aa7",
+      "response:application/json:/home/session": "6e632219992f0cad8c78a59fe746ea7f3a0406c475000ff16510664657e2e536",
+      "response:text/event-stream:/home/events": "8a3afaf0ba0e13d0e338c474c46f46caaf7e9bd02ab130580b4fedf767283b75",
       "response:text/event-stream:/residents?stream=1": "9f2308ba970c4abb63e1c386283877742b4a4feec64ade544d6d3a6d32968540"
     }
   }
