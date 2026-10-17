@@ -361,6 +361,9 @@ describe("sessionSeedFor — the seed read from the ledger, with the notepad", (
     expect(seed?.notepad).toBe("Decision: retain the public API. Push outcome unknown.");
     expect(seed?.actors?.[0]).toBe("slack:UALICE");
     expect(seed?.log).toEqual({ from: 34, turns: 0 });
+    expect(seed?.notes).toContain(
+      "conversation context: loaded the previous request and recent history with a saved summary",
+    );
   });
 
   it("recovers legacy context without a summary and preserves refused-request substitution", async () => {
@@ -392,8 +395,91 @@ describe("sessionSeedFor — the seed read from the ledger, with the notepad", (
     expect(seed?.notepad).toBe("Operation outcome unknown.");
     expect(seed?.summary).toContain("conversation log turns 1 through 30 are not retained verbatim here");
     expect(notes).toContain(
-      "conversation context: continued from the saved request and recent exchanges without a compaction summary",
+      "conversation context: loaded the previous request and recent history; no saved summary was available",
     );
+    expect(notes).toContain(
+      "conversation context: earlier log turns 1 through 30 are not loaded; the agent can check omitted details with recall",
+    );
+  });
+
+  it("reports only the prior context actually loaded when no saved summary is available", async () => {
+    const key = "slack:C1:1.0:coding";
+    const original = user("Check the pending operation before repeating it.");
+    const thread: RunView[] = [
+      {
+        id: "previous",
+        agent: "coding",
+        startedAt: 1,
+        finished: true,
+        finishedAt: 5_000,
+        eventCount: 1,
+        session: { key, seedFrom: 0, request: 10, range: { from: 0, to: 30 } },
+      },
+    ];
+    const ledger = {
+      readSessionTail: async () => complete([result("cut-call", "orphaned result")], 30),
+      readSession: async () => complete([original], 0).transcript,
+      readNotepad: async () => null,
+    };
+    const onlyRequest = await sessionSeedFor({ ...input, history: [], thread, ledger });
+    expect(onlyRequest.seed?.messages).toEqual([original, user("and bump the version")]);
+    expect(onlyRequest.notes).toContain(
+      "conversation context: loaded the previous request; no saved summary was available",
+    );
+    expect(onlyRequest.seed?.summary).toContain(
+      "conversation log turns 0 through 9, 11 through 30 are not retained verbatim here",
+    );
+    expect(onlyRequest.notes).toContain(
+      "conversation context: earlier log turns 0 through 9, 11 through 30 are not loaded; the agent can check omitted details with recall",
+    );
+    ledger.readSessionTail = async () => complete([assistant("Operation outcome remains unknown.")], 30);
+    const withHistory = await sessionSeedFor({ ...input, history: [], thread, ledger });
+    expect(withHistory.seed?.messages).toEqual([
+      original,
+      assistant("Operation outcome remains unknown."),
+      user("and bump the version"),
+    ]);
+    expect(withHistory.notes).toContain(
+      "conversation context: loaded the previous request and recent history; no saved summary was available",
+    );
+    expect(withHistory.seed?.summary).toContain(
+      "conversation log turns 0 through 9, 11 through 29 are not retained verbatim here",
+    );
+    expect(withHistory.notes).toContain(
+      "conversation context: earlier log turns 0 through 9, 11 through 29 are not loaded; the agent can check omitted details with recall",
+    );
+  });
+
+  it("logs omitted ranges by source session without source text and emits no omission event for a complete view", async () => {
+    const logs: unknown[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(JSON.parse(String(line))));
+    const messages = [user("private request text"), assistant("private answer text")];
+    const ledger = {
+      readSessionTail: async (key: string) => (key === "canonical:coding" ? complete([], 0) : complete(messages, 10)),
+      readNotepad: async () => ({ text: "private working notes", updatedAt: 5 }),
+    };
+    try {
+      const omitted = await sessionSeedFor({
+        ...input,
+        history: [],
+        ledger,
+        sessionKey: "canonical:coding",
+        legacySessionKey: "slack:C1:1.0:coding",
+      });
+      expect(omitted.seed?.messages).toEqual([...messages, user("and bump the version")]);
+      expect(logs).toEqual([
+        { event: "conversation_context_omitted_ranges", sessionKey: "slack:C1:1.0:coding", omittedRanges: [[0, 9]] },
+      ]);
+
+      ledger.readSessionTail = async () => complete(messages, 0);
+      const retained = await sessionSeedFor({ ...input, history: [], ledger });
+      expect(retained.seed?.messages).toEqual([...messages, user("and bump the version")]);
+      expect(logs).toEqual([
+        { event: "conversation_context_omitted_ranges", sessionKey: "slack:C1:1.0:coding", omittedRanges: [[0, 9]] },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it("refuses continuation when the canonical request cannot be recovered or protected context exceeds the budget", async () => {

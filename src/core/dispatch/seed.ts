@@ -440,9 +440,8 @@ export async function sessionSeedFor(input: {
     seed.actors = allActors.some((actor) => actor !== undefined) ? allActors : undefined;
     seed.notes = seed.notes.filter((note) => !note.includes("the run starts from the request"));
     seed.notes.push(
-      hasSummary
-        ? "conversation context: continued from the saved request, compaction summary and recent complete exchanges"
-        : "conversation context: continued from the saved request and recent exchanges without a compaction summary",
+      `conversation context: loaded the previous request${copied.length > 1 ? " and recent history" : ""}` +
+        (hasSummary ? " with a saved summary" : "; no saved summary was available"),
     );
   }
   const checkpoint = tail.checkpoint;
@@ -459,13 +458,13 @@ export async function sessionSeedFor(input: {
     })
     .filter((range) => range.from <= range.to);
   if (ranges.length) {
+    const omitted = ranges.map((range) => `${range.from} through ${range.to}`).join(", ");
     const gap =
-      "Context gap: conversation log turns " +
-      ranges.map((range) => `${range.from} through ${range.to}`).join(", ") +
+      `Context gap: conversation log turns ${omitted}` +
       " are not retained verbatim here. Summary coverage may be partial. Use recall before relying on omitted details or repeating an unresolved operation.";
     seed.summary = [seed.summary, gap].filter(Boolean).join("\n\n");
     seed.notes.push(
-      "conversation context: earlier turns are outside the continuation view; their log ranges ride the prompt",
+      `conversation context: earlier log turns ${omitted} are not loaded; the agent can check omitted details with recall`,
     );
   }
   if (contextBytes() > SEED_BUDGET_BYTES)
@@ -474,6 +473,14 @@ export async function sessionSeedFor(input: {
       "the conversation context exceeds its history byte budget",
       contextBytes(),
       SEED_BUDGET_BYTES,
+    );
+  if (ranges.length)
+    console.log(
+      JSON.stringify({
+        event: "conversation_context_omitted_ranges",
+        sessionKey: readKey,
+        omittedRanges: ranges.map((range) => [range.from, range.to]),
+      }),
     );
   // Notes and summaries can change independently of the first tail read.
   // Capture their bytes before the cumulative dependency envelope.
