@@ -88,7 +88,7 @@ const firstCallAt = computed(() => {
                run on one model says it once. -->
           <span
             v-if="step.turn.switched"
-            class="model-switch order-first rounded border border-warn/40 bg-warn/10 px-1.5 font-medium text-warn"
+            class="model-switch order-first rounded border border-info/40 bg-info/10 px-1.5 font-medium text-info"
             :title="`model changed: this turn ran on ${step.turn.model}`"
             >⇄ {{ modelName(step.turn.model) }}</span
           >

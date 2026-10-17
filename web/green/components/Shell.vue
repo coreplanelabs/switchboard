@@ -156,7 +156,7 @@ watch(
         >
         <slot name="status" /><UserMenu />
       </header>
-      <p v-if="seed?.preview" class="green-notice green-warning" role="status">Test data</p>
+      <p v-if="seed?.preview" class="green-notice green-info" role="status">Test data</p>
       <p v-if="seed?.dataView?.mode === 'everyone'" class="green-notice" role="status">
         <UIcon name="i-lucide-users" /> All people · data permitted by your access
       </p>

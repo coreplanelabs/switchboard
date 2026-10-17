@@ -106,8 +106,8 @@ function submit(event: Event, action: "begin" | "commit" | "cancel" | "interrupt
     <div class="mb-8 flex items-center gap-2 text-xs font-medium uppercase tracking-widest text-muted">
       <UIcon name="i-lucide-link" class="size-4" /> Account verification
     </div>
-    <p v-if="!live" class="mb-3 text-sm font-medium text-warn">Local preview · Live linking is disabled</p>
-    <p v-if="readonly" class="mb-3 text-sm font-medium text-warn">This view is read-only.</p>
+    <p v-if="!live" class="mb-3 text-sm font-medium text-info">Local preview · Live linking is disabled</p>
+    <p v-if="readonly" class="mb-3 text-sm font-medium text-info">This view is read-only.</p>
     <component
       :is="embedded ? 'h2' : 'h1'"
       id="link-heading"

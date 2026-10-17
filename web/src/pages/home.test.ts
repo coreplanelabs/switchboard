@@ -97,12 +97,19 @@ describe("HomePage — a finished conversation (items 4–6)", async () => {
     expect(turn.find("[data-testid=pending]").exists()).toBe(false);
   });
 
-  it("a failed run with no reply shows the record's outcome word, never a word of the chat's own", async () => {
+  it.each([
+    ["failed", "failed", "text-warn"],
+    ["interrupted", "interrupted", "text-warn"],
+    ["stopped_soft", "stopped by user", "text-info"],
+    ["stopped_hard", "stopped by user", "text-info"],
+  ] as const)("shows the %s outcome with its status treatment when no reply exists", async (status, label, tone) => {
     const wrapper = await mountThread({
-      seed: seed({ turns: [finished({ answer: undefined, status: "failed", route: undefined, agent: "coding" })] }),
+      seed: seed({ turns: [finished({ answer: undefined, status, route: undefined, agent: "coding" })] }),
     });
     const turn = wrapper.find(".turn.assistant");
-    expect(turn.find("[data-testid=outcome]").text()).toBe("failed");
+    const outcome = turn.get("[data-testid=outcome]");
+    expect(outcome.text()).toBe(label);
+    expect(outcome.classes()).toContain(tone);
     expect(turn.find(".agent").text()).toBe("coding");
   });
 

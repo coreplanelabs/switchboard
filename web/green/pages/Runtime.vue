@@ -46,7 +46,7 @@ const state = reactive<ResidentsIndexState>({
 });
 
 const now = useWallClock(seed?.now);
-const conn = ref<{ tone: "green" | "amber" | "red"; text: string }>({ tone: "amber", text: "connecting…" });
+const conn = ref<{ tone: "green" | "blue" | "red"; text: string }>({ tone: "blue", text: "connecting…" });
 
 // `?open=<slug>` opens that resident's fold on first paint.
 const openSlug = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("open") : null;
@@ -140,7 +140,7 @@ onMounted(() => {
   };
   es.onerror = () => {
     if (es && es.readyState === EVENT_SOURCE_CLOSED) conn.value = { tone: "red", text: "disconnected" };
-    else conn.value = { tone: "amber", text: "connecting…" };
+    else conn.value = { tone: "blue", text: "connecting…" };
   };
 });
 

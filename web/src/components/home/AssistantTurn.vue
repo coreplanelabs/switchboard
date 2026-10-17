@@ -293,7 +293,14 @@ const workSummary = computed(() => {
       <div v-if="answer" class="reply" data-testid="reply">
         <MarkdownText :text="answer" />
       </div>
-      <p v-else-if="outcome" class="outcome font-mono text-xs text-warn" data-testid="outcome">{{ outcome }}</p>
+      <p
+        v-else-if="outcome"
+        class="outcome font-mono text-xs"
+        :class="turn.status === 'stopped_soft' || turn.status === 'stopped_hard' ? 'text-info' : 'text-warn'"
+        data-testid="outcome"
+      >
+        {{ outcome }}
+      </p>
     </Transition>
 
     <!-- One line of facts once over: duration on the heat scale, the run's page. -->
