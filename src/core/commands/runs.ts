@@ -149,13 +149,15 @@ async function getVisibleRun(
 
 function wrapProviderFailure<T extends ProviderFailureDetails>(details: T): T {
   if (!details.diagnostic) return details;
-  const { message, response } = details.diagnostic;
+  const { message, response, title, detail } = details.diagnostic;
   return {
     ...details,
     diagnostic: {
       ...details.diagnostic,
       ...(message === undefined ? {} : { message: wrapUntrusted(message) }),
       ...(response === undefined ? {} : { response: wrapUntrusted(response) }),
+      ...(title === undefined ? {} : { title: wrapUntrusted(title) }),
+      ...(detail === undefined ? {} : { detail: wrapUntrusted(detail) }),
     },
   };
 }
@@ -254,6 +256,33 @@ export function wrapEvent(e: RunEvent): RunEvent {
         summary: wrapUntrusted(e.summary),
         ...(e.providerFailure ? { providerFailure: wrapProviderFailure(e.providerFailure) } : {}),
         ...(e.storageFailure ? { storageFailure: wrapStorageFailure(e.storageFailure) } : {}),
+        ...(e.modelFailure
+          ? {
+              modelFailure: {
+                ...e.modelFailure,
+                stops: {
+                  pi: wrapUntrusted(e.modelFailure.stops.pi),
+                  provider: wrapUntrusted(e.modelFailure.stops.provider),
+                },
+                diagnostic: {
+                  ...e.modelFailure.diagnostic,
+                  ...(e.modelFailure.diagnostic.responseId === undefined
+                    ? {}
+                    : { responseId: wrapUntrusted(e.modelFailure.diagnostic.responseId) }),
+                  ...(e.modelFailure.diagnostic.error
+                    ? {
+                        error: Object.fromEntries(
+                          Object.entries(e.modelFailure.diagnostic.error).map(([key, value]) => [
+                            key,
+                            typeof value === "string" ? wrapUntrusted(value) : value,
+                          ]),
+                        ),
+                      }
+                    : {}),
+                },
+              },
+            }
+          : {}),
       };
     case "operator":
       return wrapOperator(e);

@@ -576,6 +576,21 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     run.onProgress?.(summary);
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
   };
+  const noteUnknownTerminal = (terminal: Extract<PiTerminalFailure, { kind: "unknown" }>, followUp = false) => {
+    const summary = unknownTerminalNote(terminal, followUp);
+    run.onProgress?.(terminalFailureText(terminal));
+    emit({
+      type: "run_note",
+      kind: "harness_error",
+      summary,
+      modelFailure: {
+        kind: "unknown",
+        phase: followUp ? "follow_up" : "run",
+        stops: terminal.stops,
+        diagnostic: terminal.diagnostic,
+      },
+    });
+  };
   /** The failure by name for a call the provider refused under its usage
    * policy (item 6): the run page and thread receive the permanent cause's one
    * sentence; the provider's explanation reaches neither renderer. */
@@ -2496,7 +2511,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           note("harness_error", windDownFailureNote(writeUpFailed));
         } else {
           terminalFailure = terminal;
-          if (terminal.kind === "unknown") note("harness_error", unknownTerminalNote(terminal));
+          if (terminal.kind === "unknown") noteUnknownTerminal(terminal);
         }
       }
       if (obs.settled && !catchingUp) {
@@ -3036,7 +3051,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               else run.onProgress?.(progress);
             } else {
               turnFailure = terminal;
-              if (terminal.kind === "unknown") note("harness_error", unknownTerminalNote(terminal, true));
+              if (terminal.kind === "unknown") noteUnknownTerminal(terminal, true);
             }
           }
           if (obs.settled) {

@@ -56,7 +56,7 @@ import {
 // settle's re-review, the review's verdict turn and the description turn
 // (harness-pi item 14) and is ended here after them. The stage's claim and
 // the tools' capabilities are run.ts.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { originalOrganizationDispatchOf } from "./originalOrganizationInput.js";
 import { requiresNativeMedia } from "../harness/nativeMedia.js";
 import { nativeMediaDigest } from "../nativeMedia.js";
@@ -1050,6 +1050,47 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   };
   const publishEvent = (e: RunEvent, startsRunBudget: boolean) => {
     registry.publish(run.id, e); // feed the external live-view stream
+    if (e.type === "run_note" && e.modelFailure) {
+      // Error prose can quote private request text. Broad logs carry only
+      // closed observations and a fingerprint; the protected run keeps details.
+      try {
+        const { kind, phase, stops, diagnostic } = e.modelFailure;
+        const { requestId, ...error } = diagnostic.error ?? {};
+        console.warn(
+          JSON.stringify({
+            event: "model_failure",
+            runId: run.id,
+            traceId: root.traceId,
+            agent: agent.name,
+            model: resolved.modelRef,
+            kind,
+            phase,
+            source: diagnostic.source,
+            reason: diagnostic.reason,
+            rejection: diagnostic.rejection,
+            errorMessage: diagnostic.errorMessage,
+            contentParts: diagnostic.contentParts,
+            piStop: ["error", "aborted", "missing"].includes(stops.pi) ? stops.pi : "other",
+            providerStop: stops.provider === "missing" ? "missing" : "present",
+            errorStatus: error.status,
+            errorFingerprint: Object.keys(error).length
+              ? createHash("sha256").update(JSON.stringify(error)).digest("hex")
+              : undefined,
+            hasRequestId: requestId !== undefined,
+            hasResponseId: diagnostic.responseId !== undefined,
+          }),
+        );
+      } catch {
+        // The log sink itself may have failed. Keep a closed observation in
+        // the existing event lane without calling that sink again.
+        events.publish({
+          type: "run_note",
+          kind: "harness_error",
+          summary: "Model failure telemetry could not be written.",
+          at: clock(),
+        });
+      }
+    }
     if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
     if (startsRunBudget) return; // budget metadata, not activity
     if (e.type === "tool_call") toolCalls++;
@@ -1067,9 +1108,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     paceEventAts.push(lastActivityAt);
     if (e.type === "tool_call") lastToolCallAt = lastActivityAt;
     const bookkeeping = (e.type === "tool_call" || e.type === "tool_result") && e.tool === "update_status";
-    // The operator log keeps every event; only the card's activity is gated.
-    console.log(`[tool] ${msg.threadKey} ${activityText(cardActivity(privateMain ? privateMainEvent(e) : e))}`);
-    lastActivity = privateMain || (bookkeeping && !showBookkeeping) ? undefined : cardActivity(e);
+    const activityEvent =
+      e.type === "run_note" && e.modelFailure
+        ? { ...e, summary: "Model call failed. Error evidence is saved in the run details." }
+        : e;
+    console.log(
+      `[tool] ${msg.threadKey} ${activityText(cardActivity(privateMain ? privateMainEvent(activityEvent) : activityEvent))}`,
+    );
+    lastActivity = privateMain || (bookkeeping && !showBookkeeping) ? undefined : cardActivity(activityEvent);
     card.update(currentFrame());
   };
   const updateResidentRunDeadline = (remainingMs: number) => {

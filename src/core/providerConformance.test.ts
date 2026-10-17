@@ -286,6 +286,9 @@ describe("ProviderFailure — the closed failure matrix", () => {
           code: "invalid_value",
           param: "temperature",
           message: "Unsupported temperature",
+          title: "Invalid input",
+          detail: "The temperature value is not supported.",
+          status: 429,
           details: { allowed: [1] },
         },
         request_id: "req_original",
@@ -296,11 +299,15 @@ describe("ProviderFailure — the closed failure matrix", () => {
       code: "invalid_value",
       param: "temperature",
       message: "Unsupported temperature",
+      title: "Invalid input",
+      detail: "The temperature value is not supported.",
+      status: 429,
       requestId: "req_original",
       response:
-        '{"error":{"type":"invalid_request_error","code":"invalid_value","param":"temperature","message":"Unsupported temperature","details":{"allowed":[1]}},"request_id":"req_original"}',
+        '{"error":{"type":"invalid_request_error","code":"invalid_value","param":"temperature","message":"Unsupported temperature","title":"Invalid input","detail":"The temperature value is not supported.","status":429,"details":{"allowed":[1]}},"request_id":"req_original"}',
     };
     expect(failure).toMatchObject({ status: 400, provider: "openai", model: "example-model", diagnostic });
+    expect(failure.cause).toBe("request-rejected");
     const envelope = authenticateProxyProviderFailure({
       type: "provider_failure",
       cause: failure.cause,
