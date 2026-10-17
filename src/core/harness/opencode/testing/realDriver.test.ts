@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentDef } from "../../../../agents/registry.js";
 import type { Executor } from "../../../../execution/executor.js";
 import { updateStatusTool } from "../../../../tools/status.js";
@@ -19,6 +19,7 @@ import { RunControl } from "../../../runRegistry/runControl.js";
 import { createTracer } from "../../../trace/tracer.js";
 import { FollowUpInbox } from "../../../threadAdmission.js";
 import type { StepReport } from "../../../runLedger/stepReport.js";
+import type { HarnessStart } from "../../container.js";
 import { BotHostHarnessContainer } from "../../botHostContainer.js";
 import { HarnessRegistry } from "../../pi/relay.js";
 import {
@@ -389,6 +390,115 @@ const toolResultsOf = (events: RunEvent[]) =>
   events.filter((e): e is Extract<RunEvent, { type: "tool_result" }> => e.type === "tool_result");
 
 describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode/cli binary", () => {
+  it.each(["memory", "file"] as const)(
+    "checks queued source state after native exit with %s storage",
+    async (store) => {
+      const start = BotHostHarnessContainer.prototype.start;
+      const starts: HarnessStart[] = [];
+      const launch = vi.spyOn(BotHostHarnessContainer.prototype, "start").mockImplementation(async function (
+        this: BotHostHarnessContainer,
+        request: HarnessStart,
+      ) {
+        const effective =
+          request.command === "opencode" && store === "file"
+            ? { ...request, env: { ...request.env, OPENCODE_DB: join(request.paths.dir, "source-proof.sqlite") } }
+            : request;
+        starts.push(effective);
+        return start.call(this, effective);
+      });
+      let run: RealRun | undefined, replacementPid: number | undefined;
+      try {
+        run = await driveRealRun(`run-source-restart-${store}`, (_results, chunks) => chunks.text("seed complete"));
+        const current = run.facts.at(-1)!;
+        if (current.harness !== "opencode" || !current.bearerHash) throw new Error("OpenCode facts are missing");
+        roots.push(current.root);
+        const paths = openCodeRunPathsAt(current.root);
+        const secretHeaders = { Authorization: openCodeAuthHeader(current.bearerHash) };
+        const request = (port: number, method: "GET" | "POST", path: string, body?: unknown) =>
+          run!.container.request(paths, {
+            method,
+            path,
+            port,
+            secretHeaders,
+            ...(body === undefined
+              ? {}
+              : { body: JSON.stringify(body), headers: { "content-type": "application/json" } }),
+          });
+        for (const [id, seq] of [
+          ["msg_source_first", 8],
+          ["msg_source_second", 9],
+        ] as const) {
+          const added = await request(current.port, "POST", `/api/session/${current.sessionID}/synthetic`, {
+            id,
+            text: "same displayed text",
+            metadata: { inputId: id, inboxSeq: seq },
+            delivery: "queue",
+            resume: false,
+          });
+          expect(added.status).toBe(200);
+          expect(JSON.parse(added.body).data.id).toBe(id);
+        }
+        const original = starts.find((entry) => entry.command === "opencode");
+        if (!original) throw new Error("Original native launch is missing");
+        await run.container.kill(current.pid);
+        if (current.tailerPid !== undefined) await run.container.kill(current.tailerPid);
+        expect(await run.container.alive(current.pid)).toBe(false);
+        const replacement = await run.container.start({
+          ...original,
+          paths: { ...original.paths, pidFile: join(original.paths.dir, "restart.pid") },
+          keepLog: true,
+          port: "free",
+        });
+        replacementPid = replacement.pid;
+        if (replacement.port === undefined) throw new Error("Replacement native port is missing");
+        const port = replacement.port;
+        await vi.waitFor(
+          async () => {
+            const info = await request(port, "GET", OPENCODE_ROUTES["server.info"].path);
+            expect(info.status).toBe(200);
+            expect(parseServerInfo(info.body)).toMatchObject({ version: OPENCODE_VERSION });
+          },
+          { timeout: 30_000, interval: 100 },
+        );
+        expect(await run.container.alive(replacement.pid)).toBe(true);
+        const saved = await request(port, "GET", `/api/session/${current.sessionID}/inbox`);
+        if (store === "memory") {
+          expect(saved.status, saved.body).toBe(404);
+        } else {
+          expect(saved.status).toBe(200);
+          expect(
+            JSON.parse(saved.body).data.map((item: { id: string; type: string; payload: unknown }) => ({
+              id: item.id,
+              type: item.type,
+              payload: item.payload,
+            })),
+          ).toEqual([
+            {
+              id: "msg_source_first",
+              type: "synthetic",
+              payload: { text: "same displayed text", metadata: { inputId: "msg_source_first", inboxSeq: 8 } },
+            },
+            {
+              id: "msg_source_second",
+              type: "synthetic",
+              payload: { text: "same displayed text", metadata: { inputId: "msg_source_second", inboxSeq: 9 } },
+            },
+          ]);
+        }
+        expect(run.modelSeen.bodies).toHaveLength(1);
+        expect(run.session.answer).toBe("seed complete");
+      } finally {
+        try {
+          if (run && replacementPid !== undefined) await run.container.kill(replacementPid);
+          if (run) await run.session.end();
+        } finally {
+          launch.mockRestore();
+        }
+      }
+    },
+    120_000,
+  );
+
   it("keeps distinct synthetic input identities when their text is identical", async () => {
     const run = await driveRealRun("run-source-identities", (_results, chunks) => chunks.text("seed complete"));
     try {
