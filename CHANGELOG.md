@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.305.0](https://github.com/coreplanelabs/switchboard/compare/v1.304.1...v1.305.0) (2026-10-17)
+
+
+### Features
+
+* **core:** match direct GitHub PR activity to stored tasks ([#3268](https://github.com/coreplanelabs/switchboard/issues/3268)) ([408a096](https://github.com/coreplanelabs/switchboard/commit/408a096e7c151244025ab90f3d6833766028e667))
+* **core:** prepare private GitHub task identity readers ([e33f939](https://github.com/coreplanelabs/switchboard/commit/e33f9391a57a4ae370d53466a9c11ffd7c34cf7e))
+* **core:** preserve source notices and internal folds ([bb46cb1](https://github.com/coreplanelabs/switchboard/commit/bb46cb1a2be3345117efa9b5bc1cbb7cbb73b0a9))
+* **resident:** abandon one quoted deployment permit ([#3259](https://github.com/coreplanelabs/switchboard/issues/3259)) ([085c5e4](https://github.com/coreplanelabs/switchboard/commit/085c5e47347a67c34ae70464a349b42143decd60))
+
+
+### Bug fixes
+
+* **core:** capture work decisions before validation ([b5e1aad](https://github.com/coreplanelabs/switchboard/commit/b5e1aada7311e121f47ec3624a892cd5fe937cdf))
+* **core:** confirm MCP actions from the original Access account ([#3270](https://github.com/coreplanelabs/switchboard/issues/3270)) ([9e5d1e4](https://github.com/coreplanelabs/switchboard/commit/9e5d1e4ee3c482969229436f0d7b9588985365da))
+* **core:** distinguish interrupted tools from failed commands ([#3254](https://github.com/coreplanelabs/switchboard/issues/3254)) ([44e0dd5](https://github.com/coreplanelabs/switchboard/commit/44e0dd53b0de4e295ac1294a67e63cc6c6c01e9f))
+* **core:** explain refused thread session writes ([#3258](https://github.com/coreplanelabs/switchboard/issues/3258)) ([8016084](https://github.com/coreplanelabs/switchboard/commit/8016084f234ad703e8bc7e3cd42506255f73a606))
+* **core:** explain which context a follow-up loads ([#3251](https://github.com/coreplanelabs/switchboard/issues/3251)) ([6629ebc](https://github.com/coreplanelabs/switchboard/commit/6629ebc779cd2f0ac0880d70714c5e6d3d929447))
+* **core:** freeze decisions before queued writes ([55ca09e](https://github.com/coreplanelabs/switchboard/commit/55ca09e479652d9772a03c9098bb60608009dff4))
+* **core:** preserve Pi error details for investigation ([#3249](https://github.com/coreplanelabs/switchboard/issues/3249)) ([e1aa0cf](https://github.com/coreplanelabs/switchboard/commit/e1aa0cf5c1502a3b3c3215b55b5ec731c265216b))
+* **core:** recheck access before source relevance calls ([af67d5a](https://github.com/coreplanelabs/switchboard/commit/af67d5a835a89050dc00bf0701d7b733402f6b0c))
+* **memory:** keep checkpoint refusals from resetting run storage ([#3271](https://github.com/coreplanelabs/switchboard/issues/3271)) ([9fd3fc8](https://github.com/coreplanelabs/switchboard/commit/9fd3fc81a55cc1731a750215263b0b40b754092a))
+* **resident:** keep check results when permit cleanup fails ([#3257](https://github.com/coreplanelabs/switchboard/issues/3257)) ([dcc98b9](https://github.com/coreplanelabs/switchboard/commit/dcc98b97c8bcd48bc4f6f4ad555d22a346a90569))
+* **resident:** reconcile settled work before checkout replacement ([#3250](https://github.com/coreplanelabs/switchboard/issues/3250)) ([6c3cb51](https://github.com/coreplanelabs/switchboard/commit/6c3cb51f0f1e35065449314b7e00323db910426b))
+* **resident:** remove UID counters from runtime views ([#3247](https://github.com/coreplanelabs/switchboard/issues/3247)) ([bada2df](https://github.com/coreplanelabs/switchboard/commit/bada2dfbc322c0845d0eac4074cfff53c9453889))
+* **review:** explain findings in plain language ([#3252](https://github.com/coreplanelabs/switchboard/issues/3252)) ([ea10429](https://github.com/coreplanelabs/switchboard/commit/ea10429d7b7f4b81addf74a7692cc001b8e75de7))
+* **tools:** read cold review sources from the prepared workspace ([#3253](https://github.com/coreplanelabs/switchboard/issues/3253)) ([64a9215](https://github.com/coreplanelabs/switchboard/commit/64a921550c5340728f1e6ab859c999ea9881c5ce))
+
+
+### Documentation
+
+* **core:** define source input delivery guarantees ([9152be1](https://github.com/coreplanelabs/switchboard/commit/9152be1a7b60026184db8a7266364725acaea05c))
+
 ## [1.304.1](https://github.com/coreplanelabs/switchboard/compare/v1.304.0...v1.304.1) (2026-10-17)
 
 
