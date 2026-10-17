@@ -225,8 +225,13 @@ A canonical child uses the absolute bound committed at its original admission. S
 
 ## Native source input capability
 
-The pinned OpenCode API accepts caller-assigned IDs and metadata on synthetic input. `resume: false` keeps that input in its native inbox. This capability alone does not enable Switchboard source delivery, authorize delivery to an ended run, prove a model read the input, or acknowledge a Switchboard checkpoint. Native process restart and the common runtime path still need integration proof.
+The pinned OpenCode API accepts caller-assigned IDs and metadata on synthetic input. `resume: false` keeps that input in its native inbox. This capability alone does not enable Switchboard source delivery, authorize delivery to an ended run, prove a model read the input, or acknowledge a Switchboard checkpoint.
+
+The current Switchboard launch sets `OPENCODE_DB=:memory:`. A confirmed server exit loses that native session; this configuration is not qualified for source identity recovery after process replacement. A controlled fixture on the same pin uses a file database inside its owned run root and reads the original queued input IDs and metadata after a new native process starts. The fixture changes no production setting and resubmits no source input.
+
+This measures controlled process exit and restart. Abrupt failure, container replacement, production store policy, trusted source admission, native mirrors and canonical checkpoint acknowledgment remain integration gates. File-store API capability alone does not qualify a delivery caller.
 
 | Criterion | Proof |
 | --- | --- |
 | Two synthetic inputs with identical text retain distinct IDs and metadata in the native inbox. Reusing an ID with changed content returns the original input and preserves both original inputs. Enqueue without resume makes no extra model call. A consumer must check saved content, not only HTTP success and input ID. | `[integration]` `src/core/harness/opencode/testing/realDriver.test.ts::OpenCode against the real @opencode/cli binary::keeps distinct synthetic input identities when their text is identical` |
+| Current memory-store launch returns 404 for the original native inbox after confirmed server exit. An isolated file-store fixture retains both original equal-text input IDs and metadata in the same session. Both old and new processes answer the pinned version, and the fixture sends no source input after restart or additional model request. | `[integration]` `src/core/harness/opencode/testing/realDriver.test.ts::OpenCode against the real @opencode/cli binary::checks queued source state after native exit with %s storage` |
