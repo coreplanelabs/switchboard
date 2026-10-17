@@ -1,3 +1,4 @@
+import { PROJECT_DOCS_URL } from "../core/docsLink.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { escapeHtml } from "./liveView/html.js";
 import { pageFavicon } from "./pageFavicon.js";
@@ -80,6 +81,7 @@ export function renderShell(seed: WebSeed, assets: ShellAssets): string {
 <meta name="robots" content="noindex" />
 <title>${escapeHtml(seed.title)}</title>
 <link rel="icon" id="favicon" href="${favicon}" />
+<link rel="apple-touch-icon" sizes="180x180" href="${PROJECT_DOCS_URL}/apple-touch-icon.png" />
 ${css}
 </head>
 <body>

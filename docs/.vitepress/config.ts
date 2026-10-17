@@ -65,6 +65,7 @@ const SPECS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "reference
 // so the set drawn is exactly the set the pages point at. Keyed by file: the
 // not-found page shares the home card and must not draw it twice.
 const ogSubjects = new Map<string, OgSubject>();
+const BRAND_DIR = fileURLToPath(new URL("../public/", import.meta.url));
 const MARK_SVG = fileURLToPath(new URL("../public/logo-dark.svg", import.meta.url));
 
 const specItems = readdirSync(SPECS_DIR)
@@ -144,13 +145,14 @@ export default defineConfig({
   head: [
     ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
     ["link", { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" }],
+    ["link", { rel: "apple-touch-icon", href: "/apple-touch-icon.png", sizes: "180x180" }],
   ],
   // The font preloads, then the page's social card: Open Graph and Twitter
   // tags pointing at `<docs>/og/<route>.png`, absolute under project.json's
   // `docs` — an unfurler fetches the picture from wherever the tags say. The
   // card's title is the page's own (its H1), its line the page's description
-  // — the site's sentence unless the page's frontmatter has one; the home
-  // card carries the product's name and its one-sentence description.
+  // — the site's sentence unless the page's frontmatter has one. The home
+  // card uses the supplied brand artwork.
   transformHead({ assets, pageData, description }) {
     const subject = ogSubject(
       { relativePath: pageData.relativePath, title: pageData.title, description },
@@ -174,6 +176,7 @@ export default defineConfig({
       displayName: project.displayName,
       docsUrl: project.docs,
       markSvgPath: MARK_SVG,
+      homePngPath: join(BRAND_DIR, "og-image.png"),
     });
     siteConfig.logger.info(`social cards: ${written.length} drawn into ${join(siteConfig.outDir, "og")}`);
   },
@@ -189,9 +192,7 @@ export default defineConfig({
     return { title: project.displayName };
   },
   themeConfig: {
-    // The mark beside the site name: three planes, one message routed to two
-    // lanes — the same drawing as docs/public/favicon.svg and the dashboard's
-    // BrandMark. One file per scheme, since an <img> cannot inherit currentColor.
+    // The supplied patch-cable mark has a separate palette for each theme.
     logo: { light: "/logo-light.svg", dark: "/logo-dark.svg", alt: "" },
     // "Get started" is the first-time reader's path: Home → Get started → a
     // running `ask`, three clicks. The other four entries are the Diataxis

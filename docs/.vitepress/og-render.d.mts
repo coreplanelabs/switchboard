@@ -12,5 +12,5 @@ export function renderOgCard(card: OgElement, fonts: OgFont[]): Promise<Uint8Arr
 export function writeOgCards(
   subjects: Iterable<OgSubject>,
   outDir: string,
-  site: { displayName: string; docsUrl: string; markSvgPath: string },
+  site: { displayName: string; docsUrl: string; markSvgPath: string; homePngPath: string },
 ): Promise<string[]>;
