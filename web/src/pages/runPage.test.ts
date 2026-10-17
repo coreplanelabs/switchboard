@@ -363,6 +363,12 @@ describe("RunPage — recovery notices", () => {
     const events: LiveFrame[] = [
       {
         type: "run_note",
+        kind: "compacted",
+        summary: "pi compacted the context (manual): 406514 → about 19824 tokens; the transcript keeps the originals",
+        at: 1500,
+      },
+      {
+        type: "run_note",
         kind: "resumed",
         summary: "resumed after a restart: pi still runs in the container",
         at: 2000,
@@ -404,6 +410,11 @@ describe("RunPage — recovery notices", () => {
         warning: row.classes().includes("text-warn"),
       })),
     ).toEqual([
+      {
+        text: "⏱ pi compacted the context (manual): 406514 → about 19824 tokens; the transcript keeps the originals",
+        info: true,
+        warning: false,
+      },
       { text: "⏱ resumed after a restart: pi still runs in the container", info: true, warning: false },
       { text: "⏱ the current model turn will retry", info: true, warning: false },
       {
@@ -420,6 +431,38 @@ describe("RunPage — recovery notices", () => {
       { text: "⏱ Storage request failed: /runs/heartbeat", info: false, warning: true },
       { text: "⏱ resident /exec: internal error", info: false, warning: true },
     ]);
+  });
+
+  it.each([
+    "drain_wait",
+    "stop_requested",
+    "stopped",
+    "stop_landed",
+    "head_moved",
+    "redispatch",
+    "ask_withdrawn",
+    "settle_set_aside",
+    "tool_unnamed",
+    "directory_reached",
+    "decline_cascade",
+  ] as const)("uses info for the routine %s notice", (kind) => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([{ type: "run_note", kind, summary: "Routine lifecycle update", at: 2000 }]),
+    });
+    const note = w.get("#log .note");
+    expect(note.get("span").text()).toBe("⏱ Routine lifecycle update");
+    expect(note.classes()).toContain("text-info");
+    expect(note.classes()).not.toContain("text-warn");
+  });
+
+  it("keeps an unknown streamed notice at warning severity", async () => {
+    const { wrapper, es } = mountLive();
+    es().emitOpen();
+    es().emitMessage({ type: "run_note", kind: "future_notice", summary: "Unclassified runtime notice", at: 2000 });
+    await flushPromises();
+    const note = wrapper.get("#log .note");
+    expect(note.get("span").text()).toBe("⏱ Unclassified runtime notice");
+    expect(note.classes()).toContain("text-warn");
   });
 });
 
@@ -1588,6 +1631,7 @@ describe("RunPage — live mode", () => {
       expect(heads[heads.length - 1].text()).toBe("thought 1m 03s");
       const lastStep = wrapper.findAll("#log .step").at(-1)!;
       expect(lastStep.find(".model-switch").text()).toBe("⇄ claude-opus-5");
+      expect(lastStep.find(".model-switch").classes()).toContain("text-info");
       expect(lastStep.find(".model-switch").attributes("title")).toContain("anthropic/claude-opus-5");
       expect(wrapper.find("#thinking .badge").text()).toBe("claude-opus-5");
       expect(wrapper.find("#thinking .since").text()).toBe("0s");
@@ -1660,6 +1704,7 @@ describe("RunPage — live mode", () => {
     expect(heads[1].text()).toContain("thought"); // the cost facts stay
     const turnRow = w.find("#log .turn .meta"); // the reply's own turn, flushed as its own row
     expect(turnRow.find(".model-switch").text()).toBe("⇄ claude-opus-5");
+    expect(turnRow.find(".model-switch").classes()).toContain("text-info");
     expect(turnRow.find(".model-badge").exists()).toBe(false);
 
     const bare = mountApp(RunPage, {

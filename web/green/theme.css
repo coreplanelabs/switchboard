@@ -438,6 +438,10 @@
   background: color-mix(in srgb, var(--ui-warning) 8%, var(--ui-bg));
   border-color: color-mix(in srgb, var(--ui-warning) 40%, var(--ui-border));
 }
+.green-info {
+  background: color-mix(in srgb, var(--ui-info) 8%, var(--ui-bg));
+  border-color: color-mix(in srgb, var(--ui-info) 40%, var(--ui-border));
+}
 .green-error {
   color: var(--ui-error);
 }

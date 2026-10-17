@@ -254,15 +254,19 @@ describe("RunsIndexPage — the live feed", () => {
   it("connection indicator: connecting → connected on open, disconnected when the stream closes, connecting on a soft error", async () => {
     const { wrapper, es } = mountIndex(seed([]));
     expect(wrapper.find(".green-heading-actions .green-badge").text()).toBe("connecting…");
+    expect(wrapper.get('[aria-label="connecting…"]').classes()).toContain("bg-info");
     es().emitOpen();
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".green-heading-actions .green-badge").text()).toBe("connected");
+    expect(wrapper.get('[aria-label="connected"]').classes()).toContain("bg-ok");
     es().emitError(false);
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".green-heading-actions .green-badge").text()).toBe("connecting…");
+    expect(wrapper.get('[aria-label="connecting…"]').classes()).toContain("bg-info");
     es().emitError(true);
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".green-heading-actions .green-badge").text()).toBe("disconnected");
+    expect(wrapper.get('[aria-label="disconnected"]').classes()).toContain("bg-bad");
   });
 
   it("a RE-connect reloads for a fresh snapshot (the backend may have restarted and rows would drift)", async () => {

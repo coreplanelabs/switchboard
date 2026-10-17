@@ -44,7 +44,7 @@ const rows = reactive(new Map<string, IndexRow>());
 for (const r of seed?.rows ?? []) rows.set(r.id, r);
 
 const now = useWallClock(seed?.now);
-const conn = ref<{ tone: "green" | "amber" | "red"; text: string }>({ tone: "amber", text: "connecting…" });
+const conn = ref<{ tone: "green" | "blue" | "red"; text: string }>({ tone: "blue", text: "connecting…" });
 
 // The index's order (live-view items 32 and 33): a pipeline's runs nest under
 // their parent's row (`groupRuns`); stalled groups first — a run with no tool
@@ -139,7 +139,7 @@ onMounted(() => {
   };
   es.onerror = () => {
     if (es && es.readyState === EVENT_SOURCE_CLOSED) conn.value = { tone: "red", text: "disconnected" };
-    else conn.value = { tone: "amber", text: "connecting…" };
+    else conn.value = { tone: "blue", text: "connecting…" };
   };
 });
 

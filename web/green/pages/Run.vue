@@ -188,7 +188,7 @@ const pulseCls = computed(() =>
       ? "text-ok motion-safe:animate-pulse"
       : phase.value === "finished"
         ? "text-ok" // connected, nothing running: the pulse stops
-        : "text-warn motion-safe:animate-pulse",
+        : "text-info motion-safe:animate-pulse",
 );
 
 // ---- the timeline (live-view item 25) --------------------------------------------
@@ -377,9 +377,23 @@ function noteClass(note: NoteVm): string {
     /^pi(?:'s (?:follow-up )?model stream ended early| cancelled the (?:follow-up )?model call locally); the turn is held and retry \d+ waits \d+(?:\.\d+)?s inside this run's lease$/.test(
       note.text,
     );
-  return note.noteKind === "resumed" || note.noteKind === "model_retry" || legacyRetry
-    ? "bg-info/10 text-info"
-    : "bg-warn/10 text-warn";
+  const routine = [
+    "compacted",
+    "resumed",
+    "model_retry",
+    "drain_wait",
+    "stop_requested",
+    "stopped",
+    "stop_landed",
+    "head_moved",
+    "redispatch",
+    "ask_withdrawn",
+    "settle_set_aside",
+    "tool_unnamed",
+    "directory_reached",
+    "decline_cascade",
+  ].includes(note.noteKind ?? "");
+  return routine || legacyRetry ? "bg-info/10 text-info" : "bg-warn/10 text-warn";
 }
 
 // ---- follow the stream only when the viewer is already at the tail -------------
@@ -910,7 +924,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
               >
               <span
                 v-if="item.turn.switched"
-                class="model-switch order-first rounded border border-warn/40 bg-warn/10 px-1.5 font-medium text-warn"
+                class="model-switch order-first rounded border border-info/40 bg-info/10 px-1.5 font-medium text-info"
                 :title="`model changed: this turn ran on ${item.turn.model}`"
                 >⇄ {{ modelName(item.turn.model) }}</span
               >

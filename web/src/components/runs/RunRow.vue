@@ -287,7 +287,7 @@ function onRowClick(ev: MouseEvent): void {
       <span
         v-if="stopBadge"
         class="stopbadge shrink-0 rounded border px-1.5 font-mono text-[0.7rem] max-sm:order-10"
-        :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-warn/30 text-warn'"
+        :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-info/30 text-info'"
         >{{ stopBadge }}</span
       >
       <!-- The stall badge (live-view item 32): a live run with no tool call for

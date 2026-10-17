@@ -295,6 +295,12 @@ const HIST_EVENTS = [
     at: NOW - 2_399_250,
   },
   {
+    type: "run_note",
+    kind: "compacted",
+    summary: "pi compacted the context (manual): 406514 → about 19824 tokens; the transcript keeps the originals",
+    at: NOW - 2_399_000,
+  },
+  {
     type: "run_meta",
     agent: "coding",
     model: "anthropic/claude-fable-5",
