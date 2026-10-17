@@ -60,7 +60,7 @@ import type { RunEvent } from "../runEvents.js";
 import type { RunRecord, RunSession } from "../runRecord.js";
 import type { RecordSink } from "../runHistoryWriter.js";
 import type { AssembledTranscript } from "./transcript.js";
-import type { FenceResult, Notepad, SessionHit } from "./types.js";
+import type { FenceResult, Notepad, SessionHit, SessionCheckpoint } from "./types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import {
   UncertainStoreError,
@@ -583,7 +583,13 @@ export interface LedgerWriteThrough {
   readSessionTail(
     key: string,
     maxBytes: number,
-  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }>;
+  ): Promise<{
+    from: number;
+    transcript: AssembledTranscript;
+    checkpoint?: SessionCheckpoint;
+    sources?: SessionSources;
+    requiresFreshSources?: true;
+  }>;
   /** The rows `[from, to]` of a session log as a conversation counted from `from` (item 3) — one turn when `to` is `from`. */
   readSession(key: string, from: number, to?: number): Promise<AssembledTranscript>;
   readSessionEntry(key: string, rowId: string): Promise<readonly TranscriptRow[] | undefined>;
@@ -691,7 +697,13 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   async readSessionTail(
     _key: string,
     _maxBytes: number,
-  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }> {
+  ): Promise<{
+    from: number;
+    transcript: AssembledTranscript;
+    checkpoint?: SessionCheckpoint;
+    sources?: SessionSources;
+    requiresFreshSources?: true;
+  }> {
     return { from: 0, transcript: { complete: true, turns: 0, messages: [], compactions: [] } };
   }
   async readSession(_key: string, _from: number, _to?: number): Promise<AssembledTranscript> {

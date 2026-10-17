@@ -80,7 +80,7 @@ export interface PlaneObservePost {
   refusal: string;
 }
 import type { AssembledTranscript } from "./transcript.js";
-import type { Notepad, SessionHit } from "./types.js";
+import type { Notepad, SessionHit, SessionCheckpoint } from "./types.js";
 import type {
   InboxItem,
   AppendableEvent,
@@ -265,7 +265,13 @@ export interface RunLedger {
   readSessionTail(
     key: string,
     maxBytes: number,
-  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }>;
+  ): Promise<{
+    from: number;
+    transcript: AssembledTranscript;
+    checkpoint?: SessionCheckpoint;
+    sources?: SessionSources;
+    requiresFreshSources?: true;
+  }>;
   /** The rows whose text matches `query`, in relevance order, at most `limit`,
    *  and the gap markers that lie between the oldest and the newest hit — what
    *  `recall` answers (item 10). */

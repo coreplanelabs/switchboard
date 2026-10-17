@@ -259,6 +259,9 @@ export function resolveControlResetWrite(
   const type = typeof command.type === "string" ? command.type : "unknown";
   const id = typeof command.id === "string" ? command.id : undefined;
   if (id !== undefined && echoed(id)) return { kind: "none" };
+  // A checkpoint is optional. Keep waiting for its original outcome or
+  // cancellation; an uncertain delivery must never repeat the summary call.
+  if (type === "compact" && id !== undefined) return { kind: "none" };
   if (type === "prompt") {
     if (id === undefined)
       return {

@@ -1,4 +1,4 @@
-import { RequiredTranscriptError } from "../runLedger/transcript.js";
+import { RequiredTranscriptError, historyContextBytes } from "../runLedger/transcript.js";
 import type { SessionSources } from "../references/receipts.js";
 // The session seed (docs/reference/specs/session-log.md item 9; records 0034
 // and 0035): what a follow-up starts from when its thread and agent have a
@@ -21,7 +21,9 @@ import type { SessionSources } from "../references/receipts.js";
 // the newest one, and that entry's summary is handed back for the system
 // prompt, where the record keeps it a pointer to the log and never a loss.
 import type { ChatMessage, ContentPart } from "../chatMessage.js";
-import { GAP_MARKER, sessionKey, projectSessionMessages } from "../runLedger/sessionLog.js";
+import { GAP_MARKER, sessionKey, projectSessionMessages, SEED_BUDGET_BYTES } from "../runLedger/sessionLog.js";
+import { utf8ByteLength } from "../runRecord.js";
+import type { SessionCheckpoint } from "../runLedger/types.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
 import type { RunView } from "../runsService.js";
@@ -31,8 +33,7 @@ import { previousRunOf, refusedRequestsOf } from "./thread.js";
 
 /** The seed budget (record 0035, "The seed"): the tail a follow-up starts
  *  from, in tokens, at the four characters a token the memory block assumes. */
-export const SEED_BUDGET_TOKENS = 60_000;
-export const SEED_BUDGET_BYTES = SEED_BUDGET_TOKENS * 4;
+export { SEED_BUDGET_TOKENS, SEED_BUDGET_BYTES } from "../runLedger/sessionLog.js";
 
 export { REFUSED_REQUEST_STAND_IN } from "../runLedger/sessionLog.js";
 
@@ -43,6 +44,7 @@ export interface SessionTail {
   requiresFreshSources?: true;
   from: number;
   transcript: AssembledTranscript;
+  checkpoint?: SessionCheckpoint;
 }
 
 /** The thread's previous finished run of this agent, as the seed needs it:
@@ -131,7 +133,7 @@ export function sessionSeed(input: {
       break;
     }
   }
-  const summary = compactions.length ? compactions[compactions.length - 1].entry.summary : undefined;
+  const summary = tail.checkpoint?.entry.summary ?? compactions.at(-1)?.entry.summary;
   // Every message before `start` is a row, and so is every compaction entry —
   // all of which sit before `start` by construction.
   const logFrom = start < 0 ? from + transcript.turns : from + start + compactions.length;
@@ -261,7 +263,8 @@ export function sessionSeed(input: {
  * session: the run seeds from the channel, and the note says why.
  */
 export async function sessionSeedFor(input: {
-  ledger: Pick<LedgerWriteThrough, "readSessionTail" | "readNotepad">;
+  ledger: Pick<LedgerWriteThrough, "readSessionTail" | "readNotepad"> &
+    Partial<Pick<LedgerWriteThrough, "readSession">>;
   threadKey: string;
   agent: string;
   /** The canonical unit lane, when this run belongs to a persisted unit. */
@@ -298,14 +301,23 @@ export async function sessionSeedFor(input: {
     return { notes: [`session seed: the log ${key} could not be read (${why}) — the run seeds from the channel`] };
   }
   const thread = input.thread.filter((run) => run.session?.key === readKey);
-  const seed = sessionSeed({
+  const seedInput = {
     tail,
     previous: previousRunOf(thread, input.agent),
     history: input.history,
     request: input.request,
     refusedRequests: refusedRequestsOf(thread, input.agent),
-  });
+  };
+  const seed = sessionSeed(seedInput);
   if (!seed) return { notes: [] };
+  let selectedFrom = seed.log.from;
+  let recoveredRequestRow: number | undefined;
+  const tailEnd = tail.from + tail.transcript.turns;
+  const following = sessionSeed({
+    ...seedInput,
+    tail: { ...tail, from: tailEnd, transcript: { complete: true, turns: 0, messages: [], compactions: [] } },
+  })!;
+  let contextCount = seed.messages.length - following.messages.length;
   if (readKey !== key) {
     seed.log = { from: 0, turns: 0 };
     seed.notes.push(`working context: copied legacy log ${readKey} into ${key}`);
@@ -319,6 +331,150 @@ export async function sessionSeedFor(input: {
     const why = err instanceof Error ? err.message : String(err);
     seed.notes.push(`session seed: the notepad of ${key} could not be read (${why}) — the run starts without it`);
   }
+  // Reserve a bounded notice before selecting either reused or copied history.
+  const historyBudget = SEED_BUDGET_BYTES - 512;
+  const contextBytes = () =>
+    historyContextBytes(seed.messages.slice(0, contextCount)) +
+    utf8ByteLength(seed.summary ?? "") +
+    utf8ByteLength(seed.notepad ?? "");
+  const previous = thread.find((run) => run.finished && run.agent === input.agent && run.session);
+  function refuse(
+    reason: string,
+    message: string,
+    measuredContextBytes = contextBytes(),
+    budgetBytes = historyBudget,
+  ): never {
+    console.warn(
+      JSON.stringify({
+        event: "conversation_context_refused",
+        reason,
+        previousRunId: previous?.id ?? null,
+        requestIndex: previous?.session?.request ?? null,
+        measuredContextBytes,
+        budgetBytes,
+      }),
+    );
+    throw new RequiredTranscriptError(message);
+  }
+  if (
+    contextCount === 0 ||
+    contextBytes() > historyBudget ||
+    (previous?.session !== undefined && previous.session.request < selectedFrom)
+  ) {
+    const hasSummary = seed.summary !== undefined;
+    if (!previous?.session || !input.ledger.readSession)
+      refuse("previous_request_unavailable", "the previous request is unavailable for conversation continuation");
+    const requestRow = previous.session.request;
+    recoveredRequestRow = requestRow;
+    let original: AssembledTranscript;
+    try {
+      original = await input.ledger.readSession(readKey, requestRow, requestRow);
+    } catch {
+      refuse("previous_request_unreadable", "the previous request could not be read for conversation continuation");
+    }
+    if (!original.complete || original.turns !== 1 || original.messages[0]?.role !== "user")
+      refuse("previous_request_incomplete", "the previous request is incomplete for conversation continuation");
+    const refused = refusedRequestsOf(thread, input.agent);
+    const anchor = projectSessionMessages(original.messages, requestRow, refused)[0];
+    const protectedBytes =
+      historyContextBytes([anchor]) + utf8ByteLength(seed.summary ?? "") + utf8ByteLength(seed.notepad ?? "");
+    if (protectedBytes > historyBudget)
+      refuse(
+        "protected_context_over_budget",
+        "the previous request and saved context exceed the history byte budget",
+        protectedBytes,
+      );
+
+    // The request is outside this contiguous tail. Copy the bounded projection
+    // as new rows, with its original authors, instead of claiming false reuse.
+    let budget = historyBudget - protectedBytes;
+    let start = tail.transcript.messages.length;
+    const refusedInTail = tail.transcript.messages.flatMap((_, i) => {
+      const row = tail.from + i + tail.transcript.compactions.filter((c) => c.before <= i).length;
+      return refused.includes(row) ? [i] : [];
+    });
+    const projected = projectSessionMessages(tail.transcript.messages, 0, refusedInTail);
+    const rowAt = (i: number) => tail.from + i + tail.transcript.compactions.filter((c) => c.before <= i).length;
+    while (start > 0) {
+      const bytes = historyContextBytes([projected[start - 1]]);
+      if (bytes > budget) break;
+      budget -= bytes;
+      start--;
+    }
+    const copied: ChatMessage[] = [anchor];
+    const actors: (string | undefined)[] = [original.actors?.[0]];
+    const calls = new Set<string>();
+    selectedFrom = tailEnd;
+    for (let i = start; i < projected.length; i++) {
+      if (
+        rowAt(i) <= requestRow ||
+        (tail.checkpoint?.entry.scope === "continuation" && rowAt(i) <= tail.checkpoint.index)
+      )
+        continue;
+      const message = projected[i];
+      for (const part of message.content) if (part.type === "tool_use") calls.add(part.id);
+      const content = message.content.filter((part) => part.type !== "tool_result" || calls.has(part.toolUseId));
+      if (!content.length) continue;
+      selectedFrom = Math.min(selectedFrom, rowAt(i));
+      copied.push({ ...message, content });
+      actors.push(tail.transcript.actors?.[i]);
+    }
+    const last = copied.at(-1);
+    const pending = last?.role === "assistant" ? last.content.filter((part) => part.type === "tool_use") : [];
+    if (pending.length) {
+      copied.push({
+        role: "user",
+        content: pending.map((part) => ({
+          type: "tool_result",
+          toolUseId: part.id,
+          content: settledResult(part.name),
+          isError: true,
+        })),
+      });
+      actors.push(undefined);
+    }
+    seed.log = { from: readKey === key ? tailEnd : 0, turns: 0 };
+    seed.messages = [...copied, ...following.messages];
+    contextCount = copied.length;
+    const allActors = [...actors, ...following.messages.map((_, i) => following.actors?.[i])];
+    seed.actors = allActors.some((actor) => actor !== undefined) ? allActors : undefined;
+    seed.notes = seed.notes.filter((note) => !note.includes("the run starts from the request"));
+    seed.notes.push(
+      hasSummary
+        ? "conversation context: continued from the saved request, compaction summary and recent complete exchanges"
+        : "conversation context: continued from the saved request and recent exchanges without a compaction summary",
+    );
+  }
+  const checkpoint = tail.checkpoint;
+  const coveredThrough =
+    checkpoint?.entry.scope === "continuation" ? checkpoint.index : (checkpoint?.entry.keptFrom ?? 0) - 1;
+  const ranges = [{ from: coveredThrough + 1, to: selectedFrom - 1 }]
+    .flatMap((range) => {
+      if (recoveredRequestRow === undefined || recoveredRequestRow < range.from || recoveredRequestRow > range.to)
+        return [range];
+      return [
+        { from: range.from, to: recoveredRequestRow - 1 },
+        { from: recoveredRequestRow + 1, to: range.to },
+      ];
+    })
+    .filter((range) => range.from <= range.to);
+  if (ranges.length) {
+    const gap =
+      "Context gap: conversation log turns " +
+      ranges.map((range) => `${range.from} through ${range.to}`).join(", ") +
+      " are not retained verbatim here. Summary coverage may be partial. Use recall before relying on omitted details or repeating an unresolved operation.";
+    seed.summary = [seed.summary, gap].filter(Boolean).join("\n\n");
+    seed.notes.push(
+      "conversation context: earlier turns are outside the continuation view; their log ranges ride the prompt",
+    );
+  }
+  if (contextBytes() > SEED_BUDGET_BYTES)
+    refuse(
+      "continuation_context_over_budget",
+      "the conversation context exceeds its history byte budget",
+      contextBytes(),
+      SEED_BUDGET_BYTES,
+    );
   // Notes and summaries can change independently of the first tail read.
   // Capture their bytes before the cumulative dependency envelope.
   try {

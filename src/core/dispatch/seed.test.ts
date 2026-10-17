@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../chatMessage.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import { RequiredTranscriptError } from "../runLedger/transcript.js";
@@ -318,6 +318,257 @@ describe("sessionSeedFor — the seed read from the ledger, with the notepad", (
     },
   });
   const input = { threadKey: "slack:C1:1.0", agent: "coding", thread: [], history, request };
+
+  it("continues a long run from its exact request, independent checkpoint, notes and complete recent exchange", async () => {
+    const key = "slack:C1:1.0:coding";
+    const original = user("Fix the retry bug. Keep the public API. Do not repeat the pending push.");
+    const recent = [
+      result("old", "orphan"),
+      call("c1", "git status"),
+      result("c1", "clean"),
+      assistant("Push is still unconfirmed."),
+    ];
+    const ledger = {
+      readSessionTail: async () => ({
+        ...complete(recent, 30),
+        checkpoint: {
+          index: 29,
+          entry: {
+            summary: "Retry fixed; verify the pending push before any retry.",
+            keptFrom: 30,
+            scope: "continuation" as const,
+          },
+        },
+      }),
+      readSession: async () => ({ ...complete([original], 0).transcript, actors: ["slack:UALICE"] }),
+      readNotepad: async () => ({ text: "Decision: retain the public API. Push outcome unknown.", updatedAt: 5 }),
+    };
+    const thread: RunView[] = [
+      {
+        id: "previous",
+        agent: "coding",
+        startedAt: 1,
+        finished: true,
+        finishedAt: 5_000,
+        eventCount: 1,
+        session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 33 } },
+      },
+    ];
+    const { seed } = await sessionSeedFor({ ...input, history: [], thread, ledger });
+    expect(seed?.messages).toEqual([original, ...recent.slice(1), user("and bump the version")]);
+    expect(seed?.summary).toContain("Retry fixed; verify the pending push before any retry.");
+    expect(seed?.summary).toContain("conversation log turns 30 through 30 are not retained verbatim here");
+    expect(seed?.notepad).toBe("Decision: retain the public API. Push outcome unknown.");
+    expect(seed?.actors?.[0]).toBe("slack:UALICE");
+    expect(seed?.log).toEqual({ from: 34, turns: 0 });
+  });
+
+  it("recovers legacy context without a summary and preserves refused-request substitution", async () => {
+    const key = "slack:C1:1.0:coding";
+    const ledger = {
+      readSessionTail: async () =>
+        complete([result("old", "orphan"), assistant("Check the existing operation before retrying.")], 30),
+      readSession: async () => complete([user("refused wording")], 0).transcript,
+      readNotepad: async () => ({ text: "Operation outcome unknown.", updatedAt: 5 }),
+    };
+    const thread: RunView[] = [
+      {
+        id: "previous",
+        agent: "coding",
+        startedAt: 1,
+        finished: true,
+        finishedAt: 5_000,
+        eventCount: 1,
+        failure: { kind: "policy_refusal" },
+        session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 31 } },
+      },
+    ];
+    const { seed, notes } = await sessionSeedFor({ ...input, history: [], thread, ledger });
+    expect(seed?.messages).toEqual([
+      user(REFUSED_REQUEST_STAND_IN),
+      assistant("Check the existing operation before retrying."),
+      user("and bump the version"),
+    ]);
+    expect(seed?.notepad).toBe("Operation outcome unknown.");
+    expect(seed?.summary).toContain("conversation log turns 1 through 30 are not retained verbatim here");
+    expect(notes).toContain(
+      "conversation context: continued from the saved request and recent exchanges without a compaction summary",
+    );
+  });
+
+  it("refuses continuation when the canonical request cannot be recovered or protected context exceeds the budget", async () => {
+    const key = "slack:C1:1.0:coding";
+    const thread: RunView[] = [
+      {
+        id: "previous",
+        agent: "coding",
+        startedAt: 1,
+        finished: true,
+        finishedAt: 5_000,
+        eventCount: 1,
+        session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 30 } },
+      },
+    ];
+    const ledger = {
+      readSessionTail: async () => complete([assistant("Operation pending.")], 30),
+      readSession: async () => complete([user("Original task")], 0).transcript,
+      readNotepad: async () => null,
+    };
+    const recovered = await sessionSeedFor({ ...input, history: [], thread, ledger });
+    expect(recovered.seed?.messages[0]).toEqual(user("Original task"));
+    const warnings: string[] = [];
+    const warning = vi.spyOn(console, "warn").mockImplementation((line) => {
+      warnings.push(String(line));
+    });
+    try {
+      await expect(
+        sessionSeedFor({
+          ...input,
+          thread,
+          ledger: {
+            ...ledger,
+            readSession: async () => {
+              throw new Error("unavailable");
+            },
+          },
+        }),
+      ).rejects.toThrow("previous request could not be read");
+      await expect(
+        sessionSeedFor({
+          ...input,
+          thread,
+          ledger: { ...ledger, readSession: async () => complete([user("x".repeat(240_001))], 0).transcript },
+        }),
+      ).rejects.toThrow("exceed the history byte budget");
+      expect(warnings.map((line) => JSON.parse(line))).toMatchObject([
+        {
+          event: "conversation_context_refused",
+          reason: "previous_request_unreadable",
+          previousRunId: "previous",
+          requestIndex: 0,
+          budgetBytes: 239_488,
+        },
+        {
+          event: "conversation_context_refused",
+          reason: "protected_context_over_budget",
+          previousRunId: "previous",
+          requestIndex: 0,
+          budgetBytes: 239_488,
+        },
+      ]);
+      expect(JSON.parse(warnings[1]).measuredContextBytes).toBeGreaterThan(239_488);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("shares the history budget with summary and notes even when the tail has user text, and names the actual cut", async () => {
+    const key = "slack:C1:1.0:coding";
+    const original = user("Keep the API. Do not repeat the pending operation.");
+    const ledger = {
+      readSessionTail: async () => ({
+        ...complete([user("x".repeat(210_000)), assistant("Operation outcome unknown.")], 10),
+        checkpoint: { index: 5, entry: { summary: "s".repeat(50_000), scope: "continuation" as const } },
+      }),
+      readSession: async () => complete([original], 0).transcript,
+      readNotepad: async () => ({ text: "Keep the existing authority limits.", updatedAt: 5 }),
+    };
+    const thread: RunView[] = [
+      {
+        id: "previous",
+        agent: "coding",
+        startedAt: 1,
+        finished: true,
+        finishedAt: 5_000,
+        eventCount: 1,
+        session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 11 } },
+      },
+    ];
+    const { seed } = await sessionSeedFor({ ...input, thread, history: [], ledger });
+    expect(seed?.messages).toEqual([original, assistant("Operation outcome unknown."), user("and bump the version")]);
+    expect(seed?.summary).toContain("conversation log turns 6 through 10 are not retained verbatim here");
+    const bytes = new TextEncoder().encode(
+      JSON.stringify(seed!.messages.slice(0, -1)) + seed!.summary + seed!.notepad,
+    ).byteLength;
+    expect(bytes).toBeLessThanOrEqual(240_000);
+  });
+
+  it("names missing kept rows for an ordinary compaction even when the tail is reused", async () => {
+    const ledger = {
+      readSessionTail: async () => ({
+        ...complete([user("Keep the API."), assistant("Operation pending.")], 10),
+        checkpoint: { index: 5, entry: { summary: "Earlier task summary.", keptFrom: 3 } },
+      }),
+      readNotepad: async () => null,
+    };
+    const { seed } = await sessionSeedFor({ ...input, history: [], ledger });
+    expect(seed?.messages).toEqual([
+      user("Keep the API."),
+      assistant("Operation pending."),
+      user("and bump the version"),
+    ]);
+    expect(seed?.log).toEqual({ from: 10, turns: 2 });
+    expect(seed?.summary).toContain("conversation log turns 3 through 9 are not retained verbatim here");
+  });
+
+  it("retains original and tool-result image payloads under their attachment limits instead of the text-history cap", async () => {
+    const data = "a".repeat(3 * 1024 * 1024);
+    const image = { type: "image" as const, mediaType: "image/png", data };
+    const messages: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "Inspect the image." }, image] },
+      { role: "assistant", content: [{ type: "tool_use", id: "shot", name: "screenshot", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "shot", content: [image] }] },
+      assistant("Image inspected."),
+    ];
+    const ledger = { readSessionTail: async () => complete(messages, 0), readNotepad: async () => null };
+    const { seed } = await sessionSeedFor({ ...input, ledger, history: [] });
+    expect(seed?.messages[0].content[1]).toEqual({ type: "image", mediaType: "image/png", data });
+    expect(seed?.messages[2]).toEqual({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "shot", content: [{ type: "image", mediaType: "image/png", data }] }],
+    });
+    expect(seed?.messages.at(-1)).toEqual(user("and bump the version"));
+    expect(seed?.log).toEqual({ from: 0, turns: 4 });
+  });
+
+  it("never moves an older correction after the recovered newest request when the byte cut forces copying", async () => {
+    const key = "slack:C1:1.0:coding";
+    const ledger = {
+      readSessionTail: async () => ({
+        ...complete(
+          [
+            user("x".repeat(210_000)),
+            user("Production changes are allowed."),
+            assistant("Old answer."),
+            user("Staging only."),
+            assistant("No production change made."),
+          ],
+          10,
+        ),
+        checkpoint: { index: 5, entry: { summary: "s".repeat(50_000), scope: "continuation" as const } },
+      }),
+      readSession: async () => complete([user("Staging only.")], 13).transcript,
+      readNotepad: async () => null,
+    };
+    const thread: RunView[] = [
+      {
+        id: "previous",
+        agent: "coding",
+        startedAt: 1,
+        finished: true,
+        finishedAt: 5_000,
+        eventCount: 1,
+        session: { key, seedFrom: 0, request: 13, range: { from: 0, to: 14 } },
+      },
+    ];
+    const { seed } = await sessionSeedFor({ ...input, thread, history: [], ledger });
+    expect(seed?.messages).toEqual([
+      user("Staging only."),
+      assistant("No production change made."),
+      user("and bump the version"),
+    ]);
+    expect(seed?.summary).toContain("conversation log turns 6 through 12 are not retained verbatim here");
+  });
 
   it("captures the cumulative dependency envelope after reading mutable notes", async () => {
     let sources: SessionSources = {

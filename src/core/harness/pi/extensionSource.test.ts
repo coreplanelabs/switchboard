@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import {
   linkSync,
   mkdirSync,
@@ -8,16 +9,29 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createBashToolDefinition, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import {
+  createBashToolDefinition,
+  ExtensionRunner,
+  createExtensionRuntime,
+  SessionManager,
+  ModelRegistry,
+  type ExtensionToolContext,
+} from "@earendil-works/pi-coding-agent";
 import { normalizeContext, validateToolArguments, type Model, type Tool, type ToolCall } from "@earendil-works/pi-ai";
-import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
+import {
+  stream as anthropicStream,
+  streamSimple as anthropicStreamSimple,
+} from "@earendil-works/pi-ai/api/anthropic-messages";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { judgeToolCall } from "./toolRules.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { piExtensionSource } from "./extensionSource.js";
+import { piExtensionSource, CONTINUATION_COMPACTION } from "./extensionSource.js";
 import type { ToolDef } from "../../provider.js";
+import { PiBridge } from "./bridge.js";
+import type { RunEvent } from "../../runEvents.js";
 import { runCheckTool } from "../../../tools/check.js";
 const PI_EXTENSION_SOURCE = piExtensionSource([]);
 import { HARNESS_URL_ENV, RUN_BEARER_ENV } from "./process.js";
@@ -110,6 +124,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.useRealTimers();
   delete process.env[HARNESS_URL_ENV];
@@ -135,6 +151,288 @@ const TOOLS = {
 };
 
 describe("the harness extension", () => {
+  it("sends the selected high effort through the pinned provider adapter during a continuation summary", async () => {
+    const pi = fakePi();
+    await (
+      await load()
+    )(pi.api);
+    const model: Model<"anthropic-messages"> = {
+      id: "claude-sonnet-4-6",
+      name: "fixture",
+      api: "anthropic-messages",
+      provider: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200_000,
+      maxTokens: 64_000,
+      compat: { forceAdaptiveThinking: true },
+    };
+    const bodies: unknown[] = [];
+    const fetchSummary: typeof fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(
+        [
+          'event: message_start\ndata: {"type":"message_start","message":{"id":"fixture","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}',
+          'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Summary complete."}}',
+          'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}',
+          'event: message_stop\ndata: {"type":"message_stop"}',
+        ].join("\n\n") + "\n\n",
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    };
+    const send =
+      (simple: boolean) =>
+      (_model: unknown, context: Parameters<typeof anthropicStream>[1], options: Record<string, unknown>) =>
+        (simple ? anthropicStreamSimple : anthropicStream)(model, context, {
+          ...options,
+          apiKey: "fixture-key",
+          fetch: fetchSummary,
+        });
+    const result = await pi.handlers.get("session_before_compact")!(
+      {
+        customInstructions: CONTINUATION_COMPACTION,
+        signal: new AbortController().signal,
+        preparation: { tokensBefore: 70_000 },
+      },
+      {
+        model,
+        thinkingLevel: "high",
+        sessionManager: {
+          buildSessionContext: () => ({
+            messages: [{ role: "user", content: "Keep the current scope.", timestamp: 1 }],
+          }),
+        },
+        modelRegistry: { stream: send(false), streamSimple: send(true) },
+      },
+    );
+    expect(result).toMatchObject({ compaction: { summary: "Summary complete." } });
+    expect(bodies[0]).toMatchObject({ thinking: { type: "adaptive" }, output_config: { effort: "high" } });
+  });
+
+  it("retains a cancelled checkpoint receipt through the pinned RPC mode and bridge", async () => {
+    const fixture = join(dir, "rpc-fixture.mjs");
+    writeFileSync(
+      fixture,
+      `
+      import { runRpcMode } from "@earendil-works/pi-coding-agent";
+      import extension from "./extension.mjs";
+      const handlers = new Map();
+      await extension({ registerTool() {}, on: (name, handler) => handlers.set(name, handler) });
+      let ui;
+      const session = {
+        agent: { subscribe: () => () => {} },
+        bindExtensions: async (options) => { ui = options.uiContext; },
+        subscribe: () => () => {},
+        compact: async (customInstructions) => {
+          const result = await handlers.get("session_before_compact")({ customInstructions,
+            signal: AbortSignal.abort(), preparation: { tokensBefore: 70000 } }, { ui });
+          if (result?.cancel !== true) throw new Error("checkpoint did not cancel");
+          return { cancelled: true };
+        },
+      };
+      await runRpcMode({ session, setRebindSession() {}, async dispose() {} });
+    `,
+    );
+    const child = spawn(process.execPath, [fixture], {
+      cwd: dir,
+      env: {
+        PATH: process.env.PATH,
+        TMPDIR: dir,
+        PI_CODING_AGENT_DIR: join(dir, "agent"),
+        SWITCHBOARD_RUN_ID: "run-rpc-fixture",
+        SWITCHBOARD_RUN_BEARER: "fixture-bearer",
+        SWITCHBOARD_HARNESS_URL: "https://bot.example.com",
+      },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+      if (
+        stdout.split("\n").some((line) => {
+          try {
+            return JSON.parse(line).command === "compact";
+          } catch {
+            return false;
+          }
+        })
+      )
+        child.stdin.end();
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const exited = new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    const bound = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    try {
+      child.stdin.write(
+        JSON.stringify({ id: "checkpoint", type: "compact", customInstructions: CONTINUATION_COMPACTION }) + "\n",
+      );
+      expect(await exited, stderr).toBe(0);
+      const retained: RunEvent[] = [];
+      const bridge = new PiBridge({
+        emit: (event) => {
+          retained.push(event);
+        },
+        clock: () => 1,
+      });
+      for (const line of stdout.trim().split("\n")) bridge.observe(JSON.parse(line));
+      expect(retained.filter((event) => event.type === "run_note").map((event) => event.summary)).toEqual([
+        '{"event":"continuation_checkpoint_refused","runId":"run-rpc-fixture","reason":"aborted"}',
+      ]);
+      expect(stderr).not.toContain("continuation_checkpoint_refused");
+    } finally {
+      clearTimeout(bound);
+      if (child.exitCode === null) child.kill("SIGKILL");
+    }
+  }, 10_000);
+
+  it("summarizes a continuation through native compaction and rejects partial or aborted summaries", async () => {
+    const pi = fakePi();
+    await (
+      await load()
+    )(pi.api);
+    let summary = "Goal: fix retries. Keep the public API. Push outcome is unknown; inspect it before retrying.";
+    vi.stubEnv("SWITCHBOARD_RUN_ID", "run-7");
+    const receipts: { message: string; type: string }[] = [];
+    let providerFails = false;
+    let prompt = "";
+    let stopReason: "stop" | "length" = "stop";
+    const controller = new AbortController();
+    let abortDuringCall = false;
+    const context = {
+      ui: {
+        notify: (message: string, type: string) => {
+          receipts.push({ message, type });
+        },
+      },
+      model: { api: "openai-responses", provider: "switchboard", id: "selected-model", maxTokens: 32_000 },
+      thinkingLevel: "high",
+      hasPendingMessages: () => false,
+      modelRegistry: {
+        streamSimple: (_model: unknown, request: { messages: unknown[] }) => {
+          if (providerFails) throw new Error("provider detail with sbr_run-7.s3cret and private summary text");
+          prompt = JSON.stringify(request.messages);
+          if (abortDuringCall) controller.abort();
+          const stream = createAssistantMessageEventStream();
+          stream.push({
+            type: "done",
+            reason: stopReason,
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: summary }],
+              api: "openai-responses",
+              provider: "switchboard",
+              model: "selected-model",
+              stopReason,
+              timestamp: 1,
+              usage: {
+                input: 100,
+                output: 30,
+                cacheRead: 0,
+                cacheWrite: 0,
+                totalTokens: 130,
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+              },
+            },
+          });
+          return stream;
+        },
+      },
+    };
+    const messages = [
+      {
+        role: "system",
+        content: "Prior summary: the original task is retry correctness; no production changes.",
+        timestamp: 0,
+      },
+      { role: "user", content: "Fix retries. Keep the public API.", timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "x".repeat(250_000) }], timestamp: 2 },
+      { role: "user", content: "Do not repeat the pending push.", timestamp: 3 },
+    ];
+    const event = {
+      type: "session_before_compact" as const,
+      reason: "manual" as const,
+      willRetry: false,
+      branchEntries: [],
+      customInstructions: CONTINUATION_COMPACTION,
+      signal: controller.signal,
+      preparation: {
+        tokensBefore: 70_000,
+        firstKeptEntryId: "old",
+        messagesToSummarize: [],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        fileOps: { read: new Set<string>(), written: new Set<string>(), edited: new Set<string>() },
+        settings: { enabled: true, reserveTokens: 8192, keepRecentTokens: 0 },
+      },
+    };
+    const nativeContext = { ...context, sessionManager: { buildSessionContext: () => ({ messages }) } };
+    // Use the native runner: it catches a thrown hook and otherwise falls
+    // back to pi's default summarizer. A failed continuation must cancel.
+    const runner = new ExtensionRunner(
+      [
+        {
+          path: "<inline:test>",
+          resolvedPath: "<inline:test>",
+          sourceInfo: { path: "<inline:test>", source: "inline", scope: "temporary", origin: "top-level" },
+          handlers: new Map([
+            [
+              "session_before_compact",
+              [async (entry: unknown) => pi.handlers.get("session_before_compact")!(entry, nativeContext)],
+            ],
+          ]),
+          tools: new Map(),
+          commands: new Map(),
+          flags: new Map(),
+          shortcuts: new Map(),
+          messageRenderers: new Map(),
+        },
+      ],
+      createExtensionRuntime(),
+      dir,
+      SessionManager.inMemory(dir),
+      Object.create(ModelRegistry.prototype),
+    );
+    const result = await runner.emit(event);
+    expect(result).toMatchObject({
+      compaction: { summary, firstKeptEntryId: null, details: { switchboardContinuation: true } },
+    });
+    expect(prompt).toContain("Fix retries. Keep the public API.");
+    expect(prompt).toContain("Do not repeat the pending push.");
+    expect(prompt).toContain("the original task is retry correctness; no production changes.");
+    stopReason = "length";
+    expect(await runner.emit(event)).toEqual({ cancel: true });
+    stopReason = "stop";
+    summary = "";
+    expect(await runner.emit(event)).toEqual({ cancel: true });
+    summary = "s".repeat(60_001);
+    expect(await runner.emit(event)).toEqual({ cancel: true });
+    providerFails = true;
+    expect(await runner.emit(event)).toEqual({ cancel: true });
+    providerFails = false;
+    summary = "A valid summary.";
+    abortDuringCall = true;
+    expect(await runner.emit(event)).toEqual({ cancel: true });
+    expect(await runner.emit(event)).toEqual({ cancel: true });
+    expect(receipts.map((receipt) => receipt.type)).toEqual(["error", "error", "error", "error", "error", "error"]);
+    expect(receipts.map((receipt) => JSON.parse(receipt.message))).toEqual([
+      { event: "continuation_checkpoint_refused", runId: "run-7", reason: "truncated" },
+      { event: "continuation_checkpoint_refused", runId: "run-7", reason: "empty" },
+      { event: "continuation_checkpoint_refused", runId: "run-7", reason: "over_budget" },
+      { event: "continuation_checkpoint_refused", runId: "run-7", reason: "provider_error" },
+      { event: "continuation_checkpoint_refused", runId: "run-7", reason: "aborted" },
+      { event: "continuation_checkpoint_refused", runId: "run-7", reason: "aborted" },
+    ]);
+  });
+
   it("keeps the authorization gate and checkout reader on unsupported hosts without scratch access", async () => {
     const host = process;
     vi.stubGlobal(
@@ -510,7 +808,7 @@ describe("the harness extension", () => {
       'import { mkdir, mkdtemp, open, realpath, stat as fileStat } from "node:fs/promises"',
       'import { isAbsolute, relative, resolve } from "node:path"',
       'import { pathToFileURL } from "node:url"',
-      'import { createReadToolDefinition, createFindToolDefinition, createLsToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent"',
+      'import { createReadToolDefinition, createFindToolDefinition, createLsToolDefinition, getPackageDir, generateSummaryWithUsage } from "@earendil-works/pi-coding-agent"',
     ]);
     expect(PI_EXTENSION_SOURCE).not.toContain("require(");
     delete process.env[RUN_BEARER_ENV];

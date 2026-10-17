@@ -695,6 +695,9 @@ export class PiBridge {
     if (typeof result.summary === "string") {
       out.compaction = {
         summary: result.summary,
+        ...(isRecord(result.details) && result.details.switchboardContinuation === true
+          ? { scope: "continuation" as const }
+          : {}),
         ...(before !== undefined ? { tokensBefore: before } : {}),
         ...(typeof result.firstKeptEntryId === "string" ? { firstKeptEntryId: result.firstKeptEntryId } : {}),
       };
@@ -703,6 +706,10 @@ export class PiBridge {
 
   private onUiRequest(event: PiEvent, out: BridgeObservation): void {
     const method = str(event.method);
+    if (method === "notify" && event.notifyType === "error") {
+      this.note("harness_error", redactAndCap(str(event.message), 300));
+      return;
+    }
     if (!DIALOG_METHODS.has(method) || typeof event.id !== "string") return;
     // No person is watching: a dialog would block pi until its timeout.
     out.replies.push({ type: "extension_ui_response", id: event.id, cancelled: true });

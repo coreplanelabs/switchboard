@@ -48,6 +48,25 @@ const stubOf = (key: string) => env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName
 const indices = (rows: unknown) => (rows as Array<{ idx: number; part: number }>).map((r) => [r.idx, r.part]);
 
 describe("requester target checkpoint independent of session transcript", () => {
+  it("returns the newest compaction independently of a tail that cannot hold it", async () => {
+    const key = sessionKey();
+    await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    const checkpoint = { summary: "Keep the API. Push outcome unknown.", keptFrom: 2 };
+    await post("/runs/session/write", {
+      key,
+      gen: "g1",
+      rows: [
+        { idx: 0, part: 0, json: JSON.stringify({ compaction: { summary: "Older state" } }) },
+        { idx: 1, part: 0, json: JSON.stringify({ compaction: checkpoint }) },
+        text(2, 0, "Recent answer", "assistant"),
+      ],
+      attachments: [],
+    });
+    const read = await post("/runs/session/read-tail", { key, maxBytes: 100 });
+    expect(read.data).toMatchObject({ from: 2, checkpoint: { index: 1, entry: checkpoint } });
+    expect(indices(read.data.rows)).toEqual([[2, 0]]);
+  });
+
   it("retains actor provenance through a long tail, replay and conflicting issue without granting another actor", async () => {
     const key = sessionKey();
     const actor = "slack:UALICE";

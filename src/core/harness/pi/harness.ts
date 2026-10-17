@@ -1,3 +1,7 @@
+import { CONTINUATION_COMPACTION } from "./extensionSource.js";
+import { SEED_BUDGET_BYTES } from "../../runLedger/sessionLog.js";
+import { utf8ByteLength } from "../../runRecord.js";
+import { historyContextBytes } from "../../runLedger/transcript.js";
 import { beginHarnessLaunch, sessionPolicyFor, confirmSessionFacts } from "../contract.js";
 import { harnessLaunchIntentOf } from "../sessionPolicy.js";
 import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
@@ -135,7 +139,7 @@ import {
   type PiRunPaths,
 } from "./process.js";
 import { piApiFor } from "../piAi.js";
-import { parsePiLine } from "./protocol.js";
+import { parsePiLine, type PiEvent } from "./protocol.js";
 import {
   relayedToolDefinitions,
   RELAY_POLL_WINDOW_MS,
@@ -736,6 +740,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   let abortSent = false;
   /** pi settled its turn (`agent_settled`): what is still open at the session's end is a straggler, nothing running. */
   let settled = false;
+  let continuation: { id: string; state: "pending" | "cancelling" | "settled" | "unavailable" } | undefined;
+  /** Checkpoint recovery lost proof of the original producer's placement. */
+  let checkpointEndingError: { cause: unknown } | undefined;
   /** The container was replaced under the run (item 16): the loop's verdict once pi was found gone before the run settled. */
   let replaced: PiContainerReplacedError | undefined;
   const toolsBlocked = (): string | undefined => {
@@ -986,9 +993,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // pi's container was replaced (item 16): the executor reaches the
     // replacement now, where a pid is a stranger's and the run's root never
     // was, so nothing is ended or removed — whatever the container answers
-    // for its name. The run's registration stands, its relayed calls still
-    // running: the run loop's relaunch takes it over with them (item 8), and
-    // the loop forgets it when it does not relaunch (`HarnessRegistry.forget`).
+    // for its name. An actual relaunch keeps the registration and relayed
+    // calls for its successor (item 8). A completed checkpoint has no
+    // successor, so its session ending releases that registration below.
     // A stop still in flight is raced against the kill, never a timer: landed
     // before the kill completes, its callback has spoken (or had nothing to
     // say); still out when the kill completes — a write hung ahead of it —
@@ -1013,6 +1020,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // executor ends both. On a replaced container no kill runs and the run
     // loop relaunches pi, so the line says the replacement carries on.
     const teardown = (async () => {
+      if (checkpointEndingError !== undefined)
+        throw new HarnessEndingUnconfirmedError(run.runId, checkpointEndingError.cause, checkpointEndingError.cause);
       if (replaced !== undefined) {
         // A replaced container has nothing to kill, and the registration
         // stands for the run loop's relaunch to take over. The transport
@@ -1021,7 +1030,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // still alive there is ended before the relaunch starts a fresh one.
         // An unconfirmed ending retains custody; the registration still
         // stands for a confirmed relaunch.
-        if (replaced.condition !== "transport") return;
+        if (replaced.condition !== "transport") {
+          // A completed checkpoint returns its answer without a relaunch
+          // verdict. Its registration has no successor to take it over.
+          if (continuation?.state === "unavailable") forget();
+          return;
+        }
         if (pid !== undefined) await container.kill(pid);
         if (paths !== undefined) await container.remove(paths);
         return;
@@ -1464,7 +1478,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         series.owed = true;
       };
       const heard = series.live ? onLanding : undefined;
-      sends.send({ type: "abort" }, heard, heard && { outlivesDrop: true });
+      sends.send(
+        { type: "abort", ...(continuation?.state === "cancelling" ? { id: `${continuation.id}:abort` } : {}) },
+        heard,
+        heard && { outlivesDrop: true },
+      );
     };
     /** The stop the loop owes pi, asked again on the tick (`abortPi`, which
      *  counts it) — on every `check` and `turnCheck`, once the hard stop has
@@ -1798,6 +1816,74 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         maybeReissue();
       });
     };
+    const continuationUnavailable = () => continuation?.state === "unavailable";
+    const settleContinuation = (response: PiEvent): boolean => {
+      const current = continuation;
+      if (!current) return false;
+      if (response.id === current.id) {
+        current.state = "settled";
+        if (response.success !== true)
+          note("harness_error", "the continuation summary was not saved; earlier context may require recall");
+        return true;
+      }
+      if (current.state === "cancelling" && response.id === `${current.id}:abort`) {
+        current.state = response.success === true ? "settled" : "unavailable";
+        return true;
+      }
+      return false;
+    };
+    const abandonContinuation = (error: unknown, holdCustody = true): { kind: "checkpoint-unavailable" } => {
+      if (!continuation) throw error;
+      continuation.state = "unavailable";
+      if (holdCustody) checkpointEndingError = { cause: error };
+      note(
+        "harness_error",
+        "the optional checkpoint transport could not be recovered; the completed answer is retained and native idle is unconfirmed",
+      );
+      return { kind: "checkpoint-unavailable" };
+    };
+    const startContinuation = (id: string, until: number): boolean => {
+      if (
+        !run.onStep ||
+        continuation ||
+        run.control?.requested ||
+        hardStopped ||
+        writeUp ||
+        finaleAborted ||
+        now() >= until
+      )
+        return false;
+      const record = recordNow();
+      const latest = record.compactions.at(-1);
+      const start = latest?.entry.scope === "continuation" ? latest.before : 0;
+      const bytes = historyContextBytes(record.messages.slice(start)) + utf8ByteLength(latest?.entry.summary ?? "");
+      if (bytes <= SEED_BUDGET_BYTES) return false;
+      continuation = { id, state: "pending" };
+      sends.send({ id, type: "compact", customInstructions: CONTINUATION_COMPACTION });
+      return true;
+    };
+    const checkContinuation = (until: number, cancellationUntil: number): boolean => {
+      if (!continuation) return false;
+      if (continuation.state === "pending" && (run.control?.requested || now() >= until)) {
+        continuation.state = "cancelling";
+        abortPi();
+        note(
+          "harness_error",
+          "the continuation summary was stopped at the run boundary; waiting for native cancellation",
+        );
+      }
+      if (continuation.state === "cancelling") {
+        askOwedAbort();
+        if (now() >= Math.min(cancellationUntil, run.deadlineAt ?? Infinity)) {
+          continuation.state = "unavailable";
+          note(
+            "harness_error",
+            "native checkpoint cancellation did not settle within the existing deadline; the completed answer is retained",
+          );
+        }
+      }
+      return true;
+    };
     /** The budgets, the stops and the inbox — on every event and every tick. */
     const check = () => {
       const requested = run.control?.requested;
@@ -1806,6 +1892,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         return;
       }
       run.toolContext.recovery?.throwIfStopped();
+      if (checkContinuation(loopEnd, deadline)) return;
       askOwedAbort();
       if (writeUp) {
         if ((writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) || now() >= (run.deadlineAt ?? Infinity)) {
@@ -2058,6 +2145,28 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       for (const command of unsent) sends.send(command);
       return outcome;
     };
+    /** Optional summary failures retain the answer, but never erase evidence
+     *  that makes cleanup unsafe. Both task loops use this same decision. */
+    const recoverRead = async (error: unknown, until: number) => {
+      const outcome = await recoverInPlace(error, until).catch(abandonContinuation);
+      if (
+        !continuation ||
+        outcome.kind === "control-reset" ||
+        outcome.kind === "word-alive" ||
+        outcome.kind === "transport-alive" ||
+        outcome.kind === "checkpoint-unavailable"
+      )
+        return outcome;
+      if (outcome.kind === "word-gone") {
+        replaced = new PiContainerReplacedError(outcome.said.message, facts?.container, undefined, recordNow());
+      } else if (outcome.kind === "transport-replaced") {
+        replaced = new PiContainerReplacedError(undefined, outcome.was, outcome.now, recordNow(), "identity");
+      }
+      if (replaced) note("sandbox_restarted", replaced.message);
+      // A missing control file is a failure inside the original container.
+      // Other unresolved outcomes cannot authorize old-PID or old-root cleanup.
+      return abandonContinuation(error, replaced === undefined && !(error instanceof HarnessControlFileLostError));
+    };
     let terminalFailure: PiTerminalFailure | undefined;
     let pendingOverflow: ProviderFailure | undefined;
     /** Sent retry prompts, including provider-up releases. Model success resets them. */
@@ -2120,14 +2229,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // both, shared with every follow-up turn (`recoverInPlace`). The word
         // the process cannot refute is the verdict; past the bound the run
         // fails by name, whichever word it met.
-        const recovery = recoverInPlace(err, deadline);
+        const recovery = recoverRead(err, deadline);
         recoveringRead = recovery;
         const outcome = await recovery.finally(() => {
           recoveringRead = undefined;
         });
         if (outcome.kind === "control-reset" || outcome.kind === "word-alive" || outcome.kind === "transport-alive")
           continue;
-        if (outcome.kind === "run-ended") break; // the wait ended with the run's own stop: the loop ends as it
+        // A stop ends the run. An optional checkpoint failure keeps the
+        // completed answer and prevents reuse until native idle is confirmed.
+        if (outcome.kind === "run-ended" || outcome.kind === "checkpoint-unavailable") break;
 
         if (outcome.kind === "word-gone") {
           containerSaid = outcome.said;
@@ -2152,7 +2263,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       if (next === "tick") {
         quietClock();
         check();
-        if (hardStopped) break;
+        if (hardStopped || continuationUnavailable()) break;
         continue;
       }
       pending = undefined;
@@ -2164,7 +2275,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // line per poll cannot starve a stop, a held prompt or the inbox.
         quietClock();
         check();
-        if (hardStopped) break;
+        if (hardStopped || continuationUnavailable()) break;
         continue;
       }
       // A record the loop can act on: the transport made progress, so a
@@ -2193,6 +2304,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       if (obs.response) {
         const r = obs.response;
         noteEcho(r);
+        if (settleContinuation(r)) break;
         if (
           r.id === ids.state &&
           r.success === true &&
@@ -2293,7 +2405,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // Awaited, so a context that no longer fits ends the round with the
         // push already made; never on a re-attach's catch-up (the failure is
         // history, its checkpoint ran then) and never a reason to fail the run.
-        if (!catchingUp && run.onCompactionFailed) {
+        if (!continuation && !catchingUp && run.onCompactionFailed) {
           try {
             await run.onCompactionFailed(obs.compactionFailed);
           } catch (err) {
@@ -2312,7 +2424,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // down or this is history a re-attach is catching up on. pi compacts
         // after a tool batch and before its next response, so the steer lands
         // one response late; the summary and the newest turns cover that one.
-        if (!writeUp && !hardStopped && !catchingUp) {
+        if (!continuation && !writeUp && !hardStopped && !catchingUp) {
           // The steer is advisory: a notepad read that fails — a ledger blip,
           // a Worker without the route — costs the steer its notes, never the run.
           let notepad: string | undefined;
@@ -2401,10 +2513,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             });
           }
           check();
-          if (hardStopped) break;
+          if (hardStopped || continuationUnavailable()) break;
           continue;
         }
         settled = true;
+        if (terminalFailure === undefined && startContinuation(`${ids.prompt}:continuation`, loopEnd)) continue;
         break;
       }
       // The gate's clock, read on every iteration — an event's as much as a
@@ -2414,7 +2527,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // while the feed is quiet (`quietClock`), so a catch-up burst is no time.
       quietClock();
       check();
-      if (hardStopped) break;
+      if (hardStopped || continuationUnavailable()) break;
     }
 
     // The loop is over: a follow-up still staging goes back to the inbox
@@ -2559,6 +2672,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  initial loop, so a restart retains the post-turn too. Ordinary thread
      *  follow-ups wait for the run's end, as on the native loop's post-turns. */
     const followUp: FollowUpTurn = async (input) => {
+      if (continuation && continuation.state !== "settled")
+        throw new Error("The optional checkpoint did not confirm native idle; no follow-up prompt was sent.");
+      continuation = undefined;
       run.toolContext.recovery?.throwIfStopped();
       if (sessionEnded) throw new Error("the pi session has ended: no follow-up turn can run on it");
       if (run.deadlineAt !== undefined && now() >= run.deadlineAt)
@@ -2683,6 +2799,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           return;
         }
         run.toolContext.recovery?.throwIfStopped();
+        if (checkContinuation(turnDeadline, turnEnd)) return;
         askOwedAbort();
         if (writeUp) {
           if (
@@ -2760,14 +2877,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             // transport loss takes the one more command, and any other failure
             // is the turn's, as it always was — a control file lost among
             // them, noted once by the turn's own catch below.
-            const recovery = recoverInPlace(err, turnEnd);
+            const recovery = recoverRead(err, turnEnd);
             recoveringRead = recovery;
             const outcome = await recovery.finally(() => {
               recoveringRead = undefined;
             });
             if (outcome.kind === "control-reset" || outcome.kind === "word-alive" || outcome.kind === "transport-alive")
               continue;
-            if (outcome.kind === "run-ended") break; // the wait ended with the run's own stop: the turn ends as it
+            if (outcome.kind === "run-ended" || outcome.kind === "checkpoint-unavailable") break;
             if (outcome.kind === "word-gone") {
               turnContainerSaid = outcome.said;
               break;
@@ -2793,7 +2910,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (next === "tick") {
             quietClock();
             turnCheck();
-            if (hardStopped) break;
+            if (hardStopped || continuationUnavailable()) break;
             continue;
           }
           pending = undefined;
@@ -2803,11 +2920,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             // A line that parses to nothing is still an iteration (the loop's rule).
             quietClock();
             turnCheck();
-            if (hardStopped) break;
+            if (hardStopped || continuationUnavailable()) break;
             continue;
           }
           reattaches = 0; // a record read: a re-attach made progress
           const obs = bridge.observe(event);
+          if (obs.response && settleContinuation(obs.response)) break;
           if (obs.message) {
             const saved = await mirror.onMessage(obs.message, bridge.turns);
             if (saved) held();
@@ -2932,15 +3050,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
                 });
               }
               turnCheck();
-              if (hardStopped) break;
+              if (hardStopped || continuationUnavailable()) break;
               continue;
             }
             turnSettled = true;
+            if (turnFailure === undefined && startContinuation(`${id}:continuation`, turnDeadline)) continue;
             break;
           }
           quietClock(); // the clock on every quiet iteration, after the event is observed (the loop's rule)
           turnCheck();
-          if (hardStopped) break;
+          if (hardStopped || continuationUnavailable()) break;
         }
         // The turn is over: what the gate still holds is this turn's — its
         // wrap-up steer, a prompt in doubt it settled without — never the next

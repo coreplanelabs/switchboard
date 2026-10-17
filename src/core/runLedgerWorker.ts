@@ -158,7 +158,7 @@ import {
 import { RUN_LIVE_STATE_NAMES } from "./runLiveState.js";
 import { pointOf } from "./runMetrics.js";
 import type { ModelPriceTable } from "./modelPricing.js";
-import type { Notepad, SessionHit } from "./runLedger/types.js";
+import type { Notepad, SessionHit, SessionCheckpoint } from "./runLedger/types.js";
 import { retentionPolicyOf, type RunHistoryConfig } from "./runStore.js";
 import {
   DEFAULT_RUN_STORE_TOKEN_ENV,
@@ -182,6 +182,7 @@ import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./runLedg
 import type { UnreadIngressProof, IngressRequest, IngressSettlement, IngressResult } from "./runLedger/ingress.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
 import {
+  isSessionCheckpoint,
   assembleTranscript,
   chunkRows,
   turnRows,
@@ -1081,12 +1082,22 @@ export class WorkerRunLedger implements RunLedger {
   async readSessionTail(
     key: string,
     maxBytes: number,
-  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }> {
+  ): Promise<{
+    from: number;
+    transcript: AssembledTranscript;
+    checkpoint?: SessionCheckpoint;
+    sources?: SessionSources;
+    requiresFreshSources?: true;
+  }> {
     this.checkSessionKey(key);
     const r = await this.read("/runs/session/read-tail", { key, maxBytes });
     const from = typeof r.data.from === "number" ? r.data.from : 0;
+    const checkpoint = r.data.checkpoint;
+    if (checkpoint !== undefined && !isSessionCheckpoint(checkpoint))
+      throw new RequiredTranscriptError("the session checkpoint is malformed");
     return {
       from,
+      ...(checkpoint !== undefined ? { checkpoint } : {}),
       ...(isSessionSources(r.data.sources) ? { sources: r.data.sources } : {}),
       ...(r.data.requiresFreshSources === true ? { requiresFreshSources: true as const } : {}),
       transcript: assembleTranscript(

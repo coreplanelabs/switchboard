@@ -254,6 +254,7 @@ import {
   mergeContextDependencies,
 } from "../../src/core/references/contextDependencies.js";
 import {
+  sessionCheckpointOf,
   assembleTranscript,
   projectTranscriptRows,
   validTranscriptChunk,
@@ -13061,6 +13062,7 @@ export class SessionLogDO extends DurableObject<Env> {
     rows: TranscriptRow[];
     attachments: TranscriptAttachment[];
     from: number;
+    checkpoint?: import("../../src/core/runLedger/types.ts").SessionCheckpoint;
     sources?: SessionSources;
     requiresFreshSources?: true;
   }> {
@@ -13075,11 +13077,25 @@ export class SessionLogDO extends DurableObject<Env> {
       if (latest.some((row) => isInternalTranscript(row.json)))
         throw new RequiredTranscriptError("tail exceeds current seed budget");
     }
+    const checkpoint = sessionCheckpointOf(
+      this.sql
+        .exec<{ idx: number; json: string }>(
+          "SELECT idx,json FROM turns WHERE kind='compaction' ORDER BY idx DESC LIMIT 1",
+        )
+        .toArray()[0],
+    );
+    const saved = checkpoint ? { checkpoint } : {};
     const sources = this.sourceMeta("source_pending_owner") ? taintSessionSources(this.sources()) : this.sources();
     const replay = this.sourceMeta("requires_fresh_sources") === "true" ? { requiresFreshSources: true as const } : {};
     if (from === undefined)
-      return { rows: [], attachments: [], from: this.next(), ...(sources ? { sources } : {}), ...replay };
-    return assertTranscriptReadBudget({ ...(await this.read(from)), from, ...(sources ? { sources } : {}), ...replay });
+      return { ...saved, rows: [], attachments: [], from: this.next(), ...(sources ? { sources } : {}), ...replay };
+    return assertTranscriptReadBudget({
+      ...(await this.read(from)),
+      ...saved,
+      from,
+      ...(sources ? { sources } : {}),
+      ...replay,
+    });
   }
 
   /** The rows whose text matches `query`, in relevance order (FTS5's bm25 rank,

@@ -10,6 +10,7 @@ import { notesTool, recallTool, sessionCapabilityFor } from "../tools/session.js
 import type { ToolContext } from "../tools/runnableTool.js";
 import type { ContextTask } from "./contextTasks.js";
 import type { ContextTrial } from "./contextEvaluation.js";
+import type { CompactionEntry } from "../core/runLedger/types.js";
 import { sourceHash } from "../core/references/receipts.js";
 import { systemClock } from "../core/trace/clock.js";
 
@@ -46,10 +47,7 @@ export async function runContextTrial(input: {
     message.content.some((part) => part.type === "text" || part.type === "image" || part.type === "document")
       ? actor
       : undefined;
-  const append = async (
-    target: string,
-    message: ChatMessage | { compaction: { summary: string; tokensBefore: number } },
-  ) => {
+  const append = async (target: string, message: ChatMessage | { compaction: CompactionEntry }) => {
     const idx = await ledger.sessionTail(target);
     const stored = turnRows(idx, message, {}, "compaction" in message ? undefined : authorOf(message));
     const result = await ledger.appendSession(target, `row-${idx}`, stored.rows);
@@ -105,10 +103,15 @@ export async function runContextTrial(input: {
     // Appended after freezing: this row must remain outside parent recall.
     await append(key, { role: "user", content: [{ type: "text", text: "Later receipt: production-check-99." }] });
   } else {
+    // The fixture's earlier evidence keeps its original turn numbers. Append
+    // a real requesting turn so continuation reads a user request, not a tool.
+    sourceSession.request = await ledger.sessionTail(key);
+    await append(key, { role: "user", content: [{ type: "text", text: input.task.task }] });
     await append(key, {
       compaction: {
         summary: "Synthetic compaction: retain notes; recall exact source rows when needed.",
         tokensBefore: 100,
+        scope: "continuation",
       },
     });
     const seeded = await sessionSeedFor({
@@ -116,12 +119,27 @@ export async function runContextTrial(input: {
       threadKey: `cli:${runId}`,
       agent: "general",
       sessionKey: key,
-      thread: [],
+      // The isolated source owner supplies the same exact request index as a
+      // finished production record. This remains a synthetic descriptor.
+      thread: [
+        {
+          id: runId,
+          agent: "general",
+          startedAt: 0,
+          finished: true,
+          finishedAt: 0,
+          eventCount: 0,
+          session: { ...sourceSession, range: { from: 0, to: (await ledger.sessionTail(key)) - 1 } },
+        },
+      ],
       history: [],
       request: { text: input.task.task, actor },
     });
     messages = arm === "raw" ? structuredClone(input.task.source) : (seeded.seed?.messages ?? []);
-    systemNote = arm === "managed" ? seeded.seed?.notepad : undefined;
+    systemNote =
+      arm === "managed"
+        ? [seeded.seed?.notepad, seeded.seed?.summary].filter(Boolean).join("\n\n") || undefined
+        : undefined;
     // Rebuild the capability rather than retaining a tool closure. The store
     // survives this local context reload; no process replacement is claimed.
     if (input.task.boundary === "restart") {
