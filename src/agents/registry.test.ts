@@ -22,6 +22,7 @@ import {
   TOUCHED_TESTS_COMMAND,
 } from "./registry.js";
 import { TIMEOUT_ON_LONG_COMMANDS } from "../core/ship/contract.js";
+import { humanFindingsInputSchema } from "../core/reviewHumanFindings.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
 // docs/reference/specs/agent-coding.md — budgets, toolsets, and prompt guarantees are
@@ -459,15 +460,19 @@ describe("distilled-diffs prompt behavior (resident variants)", () => {
   });
 });
 
-// Feature: docs/reference/specs/agent-review.md item 5b — the verdict line and the
-// findings are rendered by code on both surfaces, so the model's final message
-// is the review's text alone: the finding explanations, nothing else.
+// The tool and every review variant must give the same public-writing contract.
+// Final-message rules need independent expectations: the tool description is
+// inserted elsewhere and cannot prove the supporting-evidence block arrived.
+// This checks delivery of the guidance, not the model's writing quality.
 describe("review final message: the write-up is the review's text alone (item 5b)", () => {
-  it("all three review prompts say Switchboard renders the verdict and the findings, ask for one paragraph per finding and forbid the padding; none asks the model to lead with a verdict", () => {
-    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!, REVIEW_SYSTEM_SEEDED]) {
-      expect(sys).toMatch(/YOUR FINAL MESSAGE IS THE REVIEW'S TEXT, NOTHING ELSE/);
-      expect(sys).toMatch(/one short paragraph per finding, keyed by its id/);
-      expect(sys).toMatch(/do not summarize what you read, do not list what you verified clean/);
+  it("all three review prompts carry the human contract and independent final-message rules", () => {
+    const review = getAgent("review");
+    for (const sys of [review.system, review.residentSystem!, review.seededSystem!]) {
+      expect(sys).toContain(humanFindingsInputSchema.description);
+      expect(sys).toMatch(/Write one short paragraph per finding, keyed by its id/);
+      expect(sys).toMatch(/Do not [^.]*recap what you read/);
+      expect(sys).toMatch(/Do not [^.]*list clean checks/);
+      expect(sys).toContain("Switchboard puts that text under For agents.");
       expect(sys).not.toMatch(/Lead with a one-line verdict/);
     }
   });

@@ -668,13 +668,13 @@ function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTar
  * Build the body posted to GitHub, rendered from the typed verdict
  * (docs/reference/specs/agent-review.md item 5b): the deterministic verdict
  * line first (the auto-approve contract — never `LGTM:` unless the verdict is
- * `approve`), one short sentence per issue with severity and a pinned link,
- * all agent evidence folded under `For agents`, and
+ * `approve`), a plain problem and explanation per issue with severity and a
+ * pinned link, supporting agent evidence folded under `For agents`, and
  * the machine-readable marker last. Only the prose may be clipped to fit the
  * platform: every fixed verdict section and the marker remain byte-for-byte.
  * If those sections leave no room for a visible bounded review, the oversized
  * body is returned so the publication boundary can refuse it instead of
- * silently dropping the write-up. The prose decides nothing above the fold.
+ * silently dropping the write-up. The final answer decides nothing above the fold.
  */
 export function buildReviewPostBody(
   answer: string,
@@ -693,7 +693,10 @@ export function buildReviewPostBody(
           const human = verdict?.humanFindings?.find((row) => row.findingId === f.id);
           const title = human ? humanText(human.problem) : findingSentence(f.title);
           const location = human ? { ...f, file: human.location.file, line: human.location.line } : f;
-          return `- ${SEVERITY_LABEL[f.severity]} · ${whereCell(location, target)}${f.humanGated ? " · Needs human verification" : ""}  \n  ${title}${human ? ` ${humanExplanation(human)}` : ""}`;
+          const verification = f.humanGated ? " · Needs human verification" : "";
+          if (human)
+            return `- ${SEVERITY_LABEL[f.severity]}: **${title}**${verification}\n  ${whereCell(location, target)}\n\n  ${humanExplanation(human)}`;
+          return `- ${SEVERITY_LABEL[f.severity]} · ${whereCell(location, target)}${verification}  \n  ${title}`;
         })
         .join("\n\n"),
     );

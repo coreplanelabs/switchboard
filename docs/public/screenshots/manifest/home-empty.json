@@ -66,7 +66,7 @@
     "scripts/web-preview.ts": "10648c20d64f5f2a1c9c7d5dc1771c216764c321772e2f663cf285e303b803df",
     "scripts/web-review-fixture.ts": "79f92a9a98a0424f85eccb6d88753547ca364e84dfd126550a5bfe7c8330b785",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
-    "src/agents/registry.ts": "8488d5544506a85d7c517f19ef4183765bc798547de39516eb86da19f5f8f5d6",
+    "src/agents/registry.ts": "92115158db2d47c57988e0f8525fb1f40f7adc72acf0d2ae662e978405cd8cd7",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
@@ -175,10 +175,10 @@
     "src/core/research/brief.ts": "aad30e37d5be5980b597cd2889979f1a5a4dade2b56ca5c707bbf158ba5136fb",
     "src/core/reviewFeedback.ts": "bc5a51842b17017e97ce7456588c049c0a45200f36b792ff12d4e35b34038f4e",
     "src/core/reviewFeedbackReport.ts": "8f30152d77e1c9ff59dc47b4398f4b6cd197ef8b70be82281426a174d0a69534",
-    "src/core/reviewHumanFindings.ts": "a42adb4a05b6aad503845f7e09baa0dda9dcff6eca00824e27a2f426c86ab77f",
+    "src/core/reviewHumanFindings.ts": "14d45653216450e513827e0360d4b5cfc2d7ea65682a80b1b28e8459d026a2af",
     "src/core/reviewPost.ts": "6ac0a2d4e2e53f840ce19d752187c9920df6e90d6a932c68cb8aa1193028462c",
     "src/core/reviewPublication.ts": "e538c45598b2dbd42608694badeb3d64fe0a49fe41589db8881df24859f3645a",
-    "src/core/reviewVerdict.ts": "224a9eaba7bceab771b65e08438c67e2ad5ee2a147913b5ca0604debaa800e63",
+    "src/core/reviewVerdict.ts": "c51cb18bdbddbf6ee8eef8dd56d247993f7f4c0957693efab5a6f5c5ee35a377",
     "src/core/reviewedHead.ts": "943f8078a2e0eff3ec98ca7330c29d7da72c2af702b003589f0c53d6c610652c",
     "src/core/reviewsReport.ts": "3287728bad1fffd698d86bdb486d7fdcec9500c7ae4c0cff21e2b90e4af0b59d",
     "src/core/routingTelemetry.ts": "f228a3997db4b4ca703948103d5579ca4a80a906a39944f7e71abe307a3d6780",
@@ -448,7 +448,7 @@
       "response:*/*:/assets/444409e028e282d3.js": "765003fe0939b3b0322e844cbabda0ddf0f07f711e8f24838368a869cf7c3199",
       "response:*/*:/assets/6cc5f6bbe4a3ebcc.js": "9c85a9b329073ed96fc3f06f0bf4352ee8013d4b37dcd6b4c225c080fb3b0643",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
-      "response:*/*:/assets/7704038c40f6cb06.js": "4488b19592f2b358e7f3671662599cafd23dcc62544cdd57972a03b43192c592",
+      "response:*/*:/assets/7704038c40f6cb06.js": "e4151c05a6618f0cf29d76f9f5977ba75bb12eee58ae778c93fdffaae1d0d584",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
       "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
       "response:*/*:/assets/92945a3a5a7d8c72.js": "0e036ae43c120cd323c488d97c4ae9bdf9fe080e5fac6dd46bc74e7ec01d6491",
@@ -460,8 +460,8 @@
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
       "response:*/*:/assets/green.css": "8f6663fec4f5945d4f3b2029b33027267e49a58e705961f50c2cc0d075977535",
       "response:*/*:/home": "a1921f2898434dbe411c71c2d21ef430adbdda4570885854c5d00874cb89f8a7",
-      "response:application/json:/home/session": "793474f2476f0c01748735b80f0958e9232d939799332a836c13e0a79d084073",
-      "response:text/event-stream:/home/events": "bb0bf9f75f553b14af0794811577ccf2468232c03b460cc7ee77f65cc9d847b9"
+      "response:application/json:/home/session": "4b995f7828b92e5a3c5773929526b67bc5bd0c460f737c27d728f16a859a67e1",
+      "response:text/event-stream:/home/events": "814fe839f0bd59e2bb09c4b8b021bc9713dee9ffbb43deeb41c6f8f63571f932"
     }
   }
 }

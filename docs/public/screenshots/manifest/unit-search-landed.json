@@ -66,7 +66,7 @@
     "scripts/web-preview.ts": "10648c20d64f5f2a1c9c7d5dc1771c216764c321772e2f663cf285e303b803df",
     "scripts/web-review-fixture.ts": "79f92a9a98a0424f85eccb6d88753547ca364e84dfd126550a5bfe7c8330b785",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
-    "src/agents/registry.ts": "8488d5544506a85d7c517f19ef4183765bc798547de39516eb86da19f5f8f5d6",
+    "src/agents/registry.ts": "92115158db2d47c57988e0f8525fb1f40f7adc72acf0d2ae662e978405cd8cd7",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
@@ -175,10 +175,10 @@
     "src/core/research/brief.ts": "aad30e37d5be5980b597cd2889979f1a5a4dade2b56ca5c707bbf158ba5136fb",
     "src/core/reviewFeedback.ts": "bc5a51842b17017e97ce7456588c049c0a45200f36b792ff12d4e35b34038f4e",
     "src/core/reviewFeedbackReport.ts": "8f30152d77e1c9ff59dc47b4398f4b6cd197ef8b70be82281426a174d0a69534",
-    "src/core/reviewHumanFindings.ts": "a42adb4a05b6aad503845f7e09baa0dda9dcff6eca00824e27a2f426c86ab77f",
+    "src/core/reviewHumanFindings.ts": "14d45653216450e513827e0360d4b5cfc2d7ea65682a80b1b28e8459d026a2af",
     "src/core/reviewPost.ts": "6ac0a2d4e2e53f840ce19d752187c9920df6e90d6a932c68cb8aa1193028462c",
     "src/core/reviewPublication.ts": "e538c45598b2dbd42608694badeb3d64fe0a49fe41589db8881df24859f3645a",
-    "src/core/reviewVerdict.ts": "224a9eaba7bceab771b65e08438c67e2ad5ee2a147913b5ca0604debaa800e63",
+    "src/core/reviewVerdict.ts": "c51cb18bdbddbf6ee8eef8dd56d247993f7f4c0957693efab5a6f5c5ee35a377",
     "src/core/reviewedHead.ts": "943f8078a2e0eff3ec98ca7330c29d7da72c2af702b003589f0c53d6c610652c",
     "src/core/reviewsReport.ts": "3287728bad1fffd698d86bdb486d7fdcec9500c7ae4c0cff21e2b90e4af0b59d",
     "src/core/routingTelemetry.ts": "f228a3997db4b4ca703948103d5579ca4a80a906a39944f7e71abe307a3d6780",
@@ -491,7 +491,7 @@
       "response:*/*:/assets/584f41c14968e449.js": "f86a486cc9cca6dedb3dd3f2b985660eace4b54d306d631ad73507f99bcc6d5e",
       "response:*/*:/assets/6cc5f6bbe4a3ebcc.js": "9c85a9b329073ed96fc3f06f0bf4352ee8013d4b37dcd6b4c225c080fb3b0643",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
-      "response:*/*:/assets/7704038c40f6cb06.js": "4488b19592f2b358e7f3671662599cafd23dcc62544cdd57972a03b43192c592",
+      "response:*/*:/assets/7704038c40f6cb06.js": "e4151c05a6618f0cf29d76f9f5977ba75bb12eee58ae778c93fdffaae1d0d584",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
       "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
       "response:*/*:/assets/92945a3a5a7d8c72.js": "0e036ae43c120cd323c488d97c4ae9bdf9fe080e5fac6dd46bc74e7ec01d6491",
@@ -505,10 +505,10 @@
       "response:*/*:/assets/green.css": "8f6663fec4f5945d4f3b2029b33027267e49a58e705961f50c2cc0d075977535",
       "response:*/*:/runs/unit-c1/events": "c7af14f456de042b0dee697ce32e86c0e4b497aa0a06120afef7330eae5ae719",
       "response:*/*:/runs/unit/plan-acme-3:U13?session=coding&q=lockfile&open=unit-c1&turn=47": "b7e4bf7d84b169e32e507ac6d4618cdafb7c8bd2f5be44fea73f5706cfca9528",
-      "response:application/json:/home/session": "d7f253c85c3ad5458cdf710ccdc6b9c7e3f8d8a22f7305c1e3f640f0d5b33aea",
-      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "549214d7db1daf60c44885d2e7cd176021205addc5397bc339e8fc0254f73d13",
-      "response:text/event-stream:/home/events": "e6b11339f0c1723554399925ca1068ff1e030fcb4bdc63d28cfaaf1313fc52d1",
-      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "2a1944467a512682513787ac2881280c11e0fa5ead6d0ec31ed99033e3f581dd"
+      "response:application/json:/home/session": "8aa979198e0f357cff92f2c814ecd6b0c230572b6f8f9d13ddea4003f2ac172f",
+      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "889898f75195a27baf7cb16c49e44195aa0389ef6b8226f2784ea885c20e83cd",
+      "response:text/event-stream:/home/events": "a4e099e212caef9c130db7afc0916cf2622fa9906be69fc9c313ce74504a4eb0",
+      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "eb95adbd12d40cc6d8682bb95265d3e78179be4ea35bd8a7a7cafd197e23e4b2"
     }
   }
 }

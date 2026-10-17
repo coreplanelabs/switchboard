@@ -15,10 +15,10 @@ const finding = {
 const human = {
   findingId: "F1",
   problem: "Users cannot continue a live connection setup.",
-  scenario: "Completing the normal connection flow saves a receipt without delivering it to the console.",
-  impact: "Connect and Continue stay hidden until timeout; reloading restores them.",
-  evidence: { basis: "code_trace", detail: "Traced the server and console path; not reproduced live." },
-  requestedChange: "Send the receipt before waiting.",
+  scenario: "Finishing connection setup saves the result but does not send it to the browser.",
+  impact: "Connect and Continue stay hidden until the request times out. Reloading restores them.",
+  evidence: { basis: "code_trace", detail: "The code waits before sending the result. This was not reproduced." },
+  requestedChange: "Send the setup result before waiting.",
   location: { file: "src/connection.ts", line: 23 },
 };
 const input = {
@@ -34,9 +34,13 @@ describe("human review explanations", () => {
     const verdict = parseVerdictInput(input)!;
     const body = buildReviewPostBody("Original agent evidence", verdict, { repo: "acme/api", head });
     const visible = body.split("<details>")[0];
-    expect(visible).toContain("**Major**");
-    for (const sentence of [human.problem, human.scenario, human.impact, human.evidence.detail, human.requestedChange])
-      expect(visible).toContain(sentence);
+    expect(visible).toContain(
+      "- 🟠 **Major**: **Users cannot continue a live connection setup.**\n" +
+        `  [\`src/connection.ts:23\`](https://github.com/acme/api/blob/${head}/src/connection.ts#L23)\n\n` +
+        "  **Why it matters:** Finishing connection setup saves the result but does not send it to the browser. Connect and Continue stay hidden until the request times out. Reloading restores them.\n\n" +
+        "  **Evidence:** From reading the code. The code waits before sending the result. This was not reproduced.\n\n" +
+        "  **Change:** Send the setup result before waiting.",
+    );
     expect(visible).toContain(`/blob/${head}/src/connection.ts#L23`);
     expect(body.slice(body.indexOf("<details>"))).toContain("Malformed calls bypass validation.");
     const marker = JSON.parse(body.match(/^<!-- switchboard:verdict (.*) -->$/m)![1]!);
@@ -44,13 +48,68 @@ describe("human review explanations", () => {
     expect(Object.keys(marker)).not.toContain("humanFindings");
   });
 
+  it("publishes a plain review-request failure through the submission and rendering path", async () => {
+    const recorded: Parameters<typeof buildReviewPostBody>[1][] = [];
+    const ctx = {
+      executor: {},
+      onVerdict: (v: Parameters<typeof buildReviewPostBody>[1]) => recorded.push(v),
+    } as unknown as ToolContext;
+    const result = await submitVerdictTool.run(
+      {
+        ...input,
+        humanFindings: [
+          {
+            findingId: "F1",
+            problem: "Valid review requests can be rejected.",
+            scenario: "A person puts the pull request link on a second line or after the first 300 characters.",
+            impact: "The review does not start.",
+            evidence: {
+              basis: "code_trace",
+              detail:
+                "The check reads only the first line and cuts it off after 300 characters. This was not reproduced.",
+            },
+            requestedChange: "Use the full request when checking which pull request to review.",
+            location: { file: "src/request.ts", line: 51 },
+          },
+        ],
+      },
+      ctx,
+    );
+    expect(result).toContain("verdict recorded: request_changes");
+    const visible = buildReviewPostBody("Detailed source trace", recorded[0], { repo: "acme/api", head }).split(
+      "<details>",
+    )[0];
+    expect(visible).toContain("**Major**: **Valid review requests can be rejected.**");
+    expect(visible).toContain(
+      "**Why it matters:** A person puts the pull request link on a second line or after the first 300 characters. The review does not start.",
+    );
+    expect(visible).toContain(
+      "**Evidence:** From reading the code. The check reads only the first line and cuts it off after 300 characters. This was not reproduced.",
+    );
+    expect(visible).toContain("**Change:** Use the full request when checking which pull request to review.");
+  });
+
+  it.each([
+    ["isolated_reproduction", "Reproduced in a separate test."],
+    ["deployed_reproduction", "Reproduced on the deployed system."],
+    ["repository_rule", "Project requirement."],
+  ])("identifies %s evidence without changing its claim", (basis, label) => {
+    const verdict = parseVerdictInput({
+      ...input,
+      humanFindings: [{ ...human, evidence: { basis, detail: "The recorded result is explained here." } }],
+    })!;
+    const visible = buildReviewPostBody("Detailed proof", verdict).split("<details>")[0];
+    expect(visible).toContain(`**Evidence:** ${label} The recorded result is explained here.`);
+    expect(visible).toContain("**Change:** Send the setup result before waiting.");
+  });
+
   it("retains and redacts the current explanation through canonical verdict parsing", () => {
     const verdict = parseVerdictInput(input)!;
     expect(verdict).toMatchObject({ humanFindings: [human] });
     expect(parseVerdictInput(JSON.parse(JSON.stringify(verdict)))).toMatchObject({ humanFindings: [human] });
-    expect(redactVerdict(verdict, (s) => s.replaceAll("receipt", "[redacted]"))).toMatchObject({
+    expect(redactVerdict(verdict, (s) => s.replaceAll("result", "[redacted]"))).toMatchObject({
       humanFindings: [
-        { scenario: "Completing the normal connection flow saves a [redacted] without delivering it to the console." },
+        { scenario: "Finishing connection setup saves the [redacted] but does not send it to the browser." },
       ],
     });
   });
