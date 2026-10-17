@@ -12,26 +12,28 @@ const ownerKey = async (state: State, owner: string) => {
 };
 const validOwner = (owner: string) => /^(thread|op):\S+$/.test(owner);
 
+function checkedState(raw: State | undefined): State {
+  if (
+    !raw ||
+    typeof raw !== "object" ||
+    typeof raw.generation !== "string" ||
+    !raw.generation ||
+    !Number.isSafeInteger(raw.next) ||
+    raw.next < 2 ||
+    raw.next > 2_147_481_648 ||
+    !Number.isSafeInteger(raw.issued) ||
+    raw.issued < 0 ||
+    raw.issued > raw.next - 2
+  )
+    throw new Error("UID generation is unverified");
+  return raw;
+}
+
 /** Called inside the existing storage transaction. Legacy ownership is
  * indexed once; absent or corrupt state never becomes an empty generation. */
 async function stateOf(tx: Store): Promise<State> {
   const raw = await tx.get<State>(STATE);
-  if (raw !== undefined) {
-    if (
-      !raw ||
-      typeof raw !== "object" ||
-      typeof raw.generation !== "string" ||
-      !raw.generation ||
-      !Number.isSafeInteger(raw.next) ||
-      raw.next < 2 ||
-      raw.next > 2_147_481_648 ||
-      !Number.isSafeInteger(raw.issued) ||
-      raw.issued < 0 ||
-      raw.issued > raw.next - 2
-    )
-      throw new Error("UID generation is unverified");
-    return raw;
-  }
+  if (raw !== undefined) return checkedState(raw);
   const legacy = parseSpentPoolUsers(await tx.get(LEGACY));
   if (!legacy) throw new Error("UID generation is unverified");
   // The legacy image precreated worker2..worker33. An unspent ledger entry
@@ -101,7 +103,14 @@ export async function claimUid(tx: Store, user: string, owner: string): Promise<
 /** Reporting and legacy classification may enumerate a generation. Shell
  * authorization uses uidOwner's one indexed read instead. */
 export async function uidLedger(tx: Store, maximum = Infinity): Promise<ReadonlyMap<string, string>> {
-  const state = await stateOf(tx);
+  return storedLedger(tx, await stateOf(tx), maximum);
+}
+
+async function storedLedger(
+  tx: Pick<Store, "list">,
+  state: State,
+  maximum: number,
+): Promise<ReadonlyMap<string, string>> {
   const prefix = `uid:${state.generation}:user:`;
   const result = new Map<string, string>();
   let startAfter: string | undefined;
@@ -122,6 +131,25 @@ export async function uidLedger(tx: Store, maximum = Infinity): Promise<Readonly
   }
   if (maximum >= state.issued && result.size !== state.issued) throw new Error("UID count is inconsistent");
   return result;
+}
+
+/** Reporting reads an existing generation; it never initializes ownership.
+ * Read one extra row to detect an understated count at the preview boundary. */
+export async function readUidReport(tx: Pick<Store, "get" | "list">): Promise<{
+  issued: number;
+  preview: { user: string; owner: string }[];
+} | null> {
+  try {
+    const state = checkedState(await tx.get<State>(STATE));
+    const ledger = await storedLedger(tx, state, 129);
+    if (ledger.size !== Math.min(state.issued, 129)) return null;
+    return {
+      issued: state.issued,
+      preview: [...ledger].slice(0, 128).map(([user, owner]) => ({ user, owner })),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function issuedUidCount(tx: Store): Promise<number> {
