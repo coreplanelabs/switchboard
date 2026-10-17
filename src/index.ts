@@ -2038,7 +2038,7 @@ export async function runBot(): Promise<void> {
           : undefined,
       resolveApprovalSource: (identity, row) => {
         const viewer = verifiedPageActors.get(identity);
-        return viewer ? browserWiring!.approvalSource(row, viewer) : Promise.resolve(undefined);
+        return viewer ? browserWiring!.approvalSource(row, viewer, identity) : Promise.resolve(undefined);
       },
       auth,
       personalTokens: personalTokenStore,
