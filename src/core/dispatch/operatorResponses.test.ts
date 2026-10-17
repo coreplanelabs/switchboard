@@ -152,6 +152,82 @@ function fullCatalogue() {
 }
 
 describe("the direct operator on the Responses wire", () => {
+  it.each([
+    {
+      evidence: { intent: "default", quote: "including nits" },
+      violation:
+        "settingsEvidence.severity.intent must be requested, incidental or unrequested; keep the requested action and controls",
+    },
+    {
+      evidence: { intent: "requested" },
+      violation:
+        "settingsEvidence.severity.quote must be nonempty text for requested or incidental intent; copy the exact request text",
+    },
+    {
+      evidence: { intent: "requested", quote: "all actionable findings including nits" },
+      violation:
+        "settingsEvidence.severity.quote is not an exact authored phrase; copy one contiguous span from the current request",
+    },
+  ])(
+    "repairs the specific severity evidence failure without changing the review: $evidence",
+    async ({ evidence, violation }) => {
+      const target = { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" };
+      const request =
+        "agent:review model:openai/gpt-5.6-sol effort:high review-head:1111111111111111111111111111111111111111\nReview https://github.com/acme/api/pull/7. Return all actionable findings, including nits.";
+      const valid = {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: target,
+        model: "openai/gpt-5.6-sol",
+        effort: "high",
+        severity: "nit",
+        reason: "Review the requested pull request with all findings.",
+        settingsEvidence: operatorSettingsEvidence({
+          effort: { intent: "requested", quote: "effort:high" },
+          severity: { intent: "requested", quote: "including nits" },
+        }),
+      };
+      const replies = [{ ...valid, settingsEvidence: { ...valid.settingsEvidence, severity: evidence } }, valid];
+      const calls: Record<string, unknown>[] = [];
+      const config = configStore();
+      const completions = new PiAiProviders(config.config.providers, {
+        secrets: secretsFrom({}),
+        fetch: async (_url, init) => {
+          calls.push(JSON.parse(String(init?.body)));
+          const reply = replies.shift();
+          if (!reply) throw new Error("Unexpected additional operator model call");
+          return new Response(bindReviewStream(reply), { headers: { "content-type": "text/event-stream" } });
+        },
+      });
+      const { commands } = fullCatalogue();
+      const result = await operatorStage(
+        { config, completions, commands },
+        {
+          msg: { channelId: "slack:CX", userId: "slack:UX", text: request, threadKey: "slack:CX:1.0" },
+          mode: "on",
+        },
+      );
+      expect(result).toMatchObject({
+        outcome: "binds",
+        binds: [
+          {
+            preset: "review",
+            repo: "acme/api",
+            prTarget: target,
+            model: "openai/gpt-5.6-sol",
+            effort: "high",
+            severity: "nit",
+          },
+        ],
+        attempts: [{ outcome: "violation", violation }, { outcome: "accepted" }],
+      });
+      expect(calls).toHaveLength(2);
+      expect(calls.map((call) => call.parallel_tool_calls)).toEqual([false, false]);
+      expect(calls.map((call) => call.tool_choice)).toEqual([undefined, undefined]);
+      expect(JSON.stringify(calls[1]!.input)).toContain(violation);
+    },
+  );
+
   it("repairs an omitted control assessment through the actual Responses wire before starting Ship review", async () => {
     const target = { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" };
     const replies = [

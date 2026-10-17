@@ -349,23 +349,27 @@ const OPERATOR_SETTINGS_EVIDENCE_SCHEMA = {
     OPERATOR_SETTING_NAMES.map((name) => [
       name,
       {
-        type: "object",
-        additionalProperties: false,
-        required: ["intent"],
-        properties: {
-          quote: {
-            type: "string",
-            minLength: 1,
-            description:
-              "an exact phrase from the current request for requested or incidental content; omit for unrequested",
+        anyOf: [
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["intent"],
+            properties: { intent: { type: "string", enum: ["unrequested"] } },
           },
-          intent: {
-            type: "string",
-            enum: ["requested", "incidental", "unrequested"],
-            description:
-              "requested asks to set this run control; incidental mentions it as task content; unrequested means the person did not mention it",
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["intent", "quote"],
+            properties: {
+              intent: {
+                type: "string",
+                enum: ["requested", "incidental"],
+                description: "requested asks to set this run control; incidental mentions it as task content",
+              },
+              quote: { type: "string", minLength: 1, description: "one exact phrase from the current request" },
+            },
           },
-        },
+        ],
       },
     ]),
   ),
@@ -1347,14 +1351,17 @@ function requestSettingsOf(
         };
       continue;
     }
-    if (
-      (entry.intent !== "requested" && entry.intent !== "incidental") ||
-      typeof entry.quote !== "string" ||
-      entry.quote.trim() === "" ||
-      !requestText.includes(entry.quote)
-    )
+    if (entry.intent !== "requested" && entry.intent !== "incidental")
       return {
-        violation: `settingsEvidence.${setting} needs an exact authored {quote, intent: requested|incidental}, or {intent: unrequested}; a matching phrase alone is not a run-setting request. Keep the requested action and every requested control`,
+        violation: `settingsEvidence.${setting}.intent must be requested, incidental or unrequested; keep the requested action and controls`,
+      };
+    if (typeof entry.quote !== "string" || entry.quote.trim() === "")
+      return {
+        violation: `settingsEvidence.${setting}.quote must be nonempty text for requested or incidental intent; copy the exact request text`,
+      };
+    if (!requestText.includes(entry.quote))
+      return {
+        violation: `settingsEvidence.${setting}.quote is not an exact authored phrase; copy one contiguous span from the current request`,
       };
     if (entry.intent === "requested") {
       if (input[setting] === undefined)

@@ -386,6 +386,27 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
     expect(calls[0].body.parallel_tool_calls).toBe(false);
   });
 
+  it("automatic tool choice disables parallel calls on Anthropic and still permits a text answer", async () => {
+    const { fetchImpl, calls } = fakeFetch(anthropicTextStream("Which pull request?"));
+    const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
+    const result = await table.get("anthropic").complete({ ...routeRequest(), toolChoice: undefined });
+    expect(calls[0].body.tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
+    expect(result).toMatchObject({ content: [{ type: "text", text: "Which pull request?" }], stopReason: "end_turn" });
+  });
+
+  it("automatic tool choice disables parallel calls on Chat Completions without forcing a call", async () => {
+    const { fetchImpl, calls } = fakeFetch(openAiToolCallStream());
+    const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
+    const result = await table
+      .get("openrouter")
+      .complete({ ...routeRequest("anthropic/claude-sonnet-4"), toolChoice: undefined });
+    expect(calls[0].body.parallel_tool_calls).toBe(false);
+    expect(calls[0].body.tool_choice).toBeUndefined();
+    expect(result.content).toEqual([
+      { type: "tool_use", id: "call1", name: "route", input: { preset: "general", reason: "a question" } },
+    ]);
+  });
+
   it("a keyless openai-compatible block (a local server) sends no authorization header at all", async () => {
     const { fetchImpl, calls } = fakeFetch(openAiToolCallStream());
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
@@ -850,7 +871,7 @@ describe("piStreamOptions — what rides beside the context, per dialect", () =>
       cacheRetention: "long",
       toolChoice: { type: "tool", name: "route" },
     });
-    expect(piStreamOptions("anthropic-messages", { ...req, toolChoice: undefined }, "k")).toEqual({
+    expect(piStreamOptions("anthropic-messages", { ...req, tools: undefined, toolChoice: undefined }, "k")).toEqual({
       apiKey: "k",
       maxTokens: 200,
       cacheRetention: "short",
