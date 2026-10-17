@@ -321,7 +321,13 @@ export function piStreamOptions(
     cacheRetention: req.cacheTtl === "1h" ? ("long" as const) : ("short" as const),
     ...effort,
   };
-  if (!req.toolChoice) return shared;
+  if (!req.toolChoice) {
+    if (!req.tools?.length) return shared;
+    // An open routing turn can answer without a call, but cannot batch calls.
+    return api === "anthropic-messages"
+      ? { ...shared, toolChoice: "auto", onPayload: anthropicParallelOff }
+      : { ...shared, onPayload: openAiParallelOff };
+  }
   if (req.toolChoice.type === "any") {
     return api === "anthropic-messages"
       ? { ...shared, toolChoice: "any", onPayload: anthropicParallelOff }

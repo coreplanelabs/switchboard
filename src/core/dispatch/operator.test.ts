@@ -245,6 +245,28 @@ describe("complete operator control assessments", () => {
     ).toMatchObject({ kind: "violation" });
   });
 
+  it("keeps repeated invalid severity evidence closed after the shared repair allowance", async () => {
+    const answer = await runOperator(input({ text, projection: projectionOf(["review"]), tail: [] }), async () => ({
+      ...rawReview,
+      input: {
+        ...rawReview.input,
+        settingsEvidence: operatorSettingsEvidence({ severity: { intent: "requested" } }),
+      },
+    }));
+    expect(answer.decision).toEqual({
+      kind: "non_decision",
+      reason:
+        "settingsEvidence.severity.quote must be nonempty text for requested or incidental intent; copy the exact request text",
+    });
+    expect(answer.attempts).toEqual(
+      Array.from({ length: 3 }, () => ({
+        outcome: "violation",
+        violation:
+          "settingsEvidence.severity.quote must be nonempty text for requested or incidental intent; copy the exact request text",
+      })),
+    );
+  });
+
   it("refuses a raw PR batch and a preset proposal without assessments", () => {
     expect(
       parseOperatorTurn(
@@ -1575,30 +1597,43 @@ channels:
     expect(turn).toMatchObject({ kind: "violation", violation: expect.stringContaining("exact authored") });
   });
 
-  it("the bind and proposal schemas require semantic settings evidence", () => {
+  it("the bind and proposal schemas reject inconsistent evidence and accept each valid intent", () => {
     const tools = operatorTools(input());
     const bind = tools.find((tool) => tool.name === OPERATOR_BIND_TOOL)!;
     const ask = tools.find((tool) => tool.name === OPERATOR_ASK_TOOL)!;
-    const evidence = {
-      required: ["effort", "budget", "severity", "renewals", "verbosity"],
-      properties: Object.fromEntries(
-        ["effort", "budget", "severity", "renewals", "verbosity"].map((name) => [
-          name,
-          {
-            type: "object",
-            required: ["intent"],
-            properties: { intent: { enum: ["requested", "incidental", "unrequested"] } },
-          },
-        ]),
-      ),
-    };
-    expect(bind.inputSchema).toMatchObject({ properties: { settingsEvidence: evidence } });
-    expect(ask.inputSchema).toMatchObject({
-      properties: { proposalSettings: { properties: { settingsEvidence: evidence } } },
-    });
-    const prompt = buildOperatorPrompt(input());
-    expect(prompt.system).toContain("'major findings' mean");
-    expect(prompt.system).toContain("one sentence does not request low effort");
+    const schemas = [
+      {
+        schema: z.fromJSONSchema(bind.inputSchema),
+        payload: (settingsEvidence: unknown) => ({ preset: "general", reason: "answer", settingsEvidence }),
+      },
+      {
+        schema: z.fromJSONSchema(ask.inputSchema),
+        payload: (settingsEvidence: unknown) => ({
+          text: "Review it?",
+          reason: "confirm",
+          proposal: "agent:review review the PR",
+          proposalSettings: { settingsEvidence },
+        }),
+      },
+    ];
+    for (const { schema, payload } of schemas) {
+      for (const severity of [
+        { intent: "requested" },
+        { intent: "incidental", quote: "" },
+        { intent: "unrequested", quote: "invented" },
+      ]) {
+        const parsed = schema.safeParse(payload(operatorSettingsEvidence({ severity })));
+        expect(parsed.success).toBe(false);
+      }
+      for (const severity of [
+        { intent: "unrequested" },
+        { intent: "requested", quote: "including nits" },
+        { intent: "incidental", quote: "major findings" },
+      ]) {
+        const value = payload(operatorSettingsEvidence({ severity }));
+        expect(schema.parse(value)).toEqual(value);
+      }
+    }
   });
 
   it("an ordinary read retains a model-resolved repository without accepting unused PR authority", () => {
