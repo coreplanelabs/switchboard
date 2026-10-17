@@ -56,7 +56,7 @@ import {
   type AudienceRefusalCode,
   type AudienceTrace,
 } from "./audienceDecision.js";
-import { sourceBinding, sourceHash, type SessionSources } from "./references/receipts.js";
+import { sourceBinding, type SessionSources } from "./references/receipts.js";
 import { configuredAgent } from "../config/agents.js";
 import { isRunProfile } from "../config/profile.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
@@ -5237,25 +5237,23 @@ export async function dispatch(
     const ran = await runLoop(deps, {
       bindReadTask: (message, request, prTarget) => bindConversationRead(deps, message, request, prTarget),
       orchestratorDecisions: orchestratorDecisions.snapshot,
-      recordWorkDecision: async (message, callId, action, input, context) => {
-        if (!message.messageId || !(await revalidateAdmitted()).ok) return false;
-        const saved = await orchestratorDecisions.record({
-          version: 1,
-          id: JSON.stringify([run.id, callId]),
-          owner: {
-            runId: run.id,
-            requesterId: message.userId,
-            channelId: message.channelId,
-            threadKey: message.threadKey,
+      recordWorkDecision: (message, callId, action, input, context) =>
+        orchestratorDecisions.recordWork(
+          {
+            source: {
+              messageId: message.messageId,
+              userId: message.userId,
+              channelId: message.channelId,
+              threadKey: message.threadKey,
+              text: message.text,
+            },
+            callId,
+            action,
+            input,
+            context: context ?? admittedContext,
           },
-          source: { kind: "request", messageId: message.messageId, textHash: await sourceHash(message.text) },
-          tool: action.tool,
-          targetHash: await sourceHash(action.target),
-          inputHash: await sourceHash(input),
-          contextHash: await sourceHash(context ?? structuredClone(admittedContext)),
-        });
-        return saved && (await revalidateAdmitted()).ok;
-      },
+          async () => (await revalidateAdmitted()).ok,
+        ),
       executeCommand: async (message, id, input, authority, callId) =>
         executeConversationCommand(
           deps,

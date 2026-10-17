@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createOrchestratorDecisions,
   type OrchestratorCommandDecision,
@@ -20,6 +20,134 @@ const decision = (call = "first"): OrchestratorCommandDecision => ({
   line: "config show",
   inputHash: "b".repeat(64),
   contextHash: "c".repeat(64),
+});
+
+const workProposal = () => ({
+  source: {
+    messageId: "original-message",
+    userId: owner.requesterId,
+    channelId: owner.channelId,
+    threadKey: owner.threadKey,
+    text: "Original request",
+  },
+  callId: "work-one",
+  action: { tool: "work_start" as const, target: { repo: "acme/api" } },
+  input: { words: "original input" },
+  context: { revision: 1, origins: ["first"] },
+});
+const expectedWork = {
+  version: 1,
+  id: '["main-run","work-one"]',
+  owner,
+  source: {
+    kind: "request",
+    messageId: "original-message",
+    textHash: "4f318d080bff7a037e6456a9c358e2cf675f0d4ce5b215b63baed68536eb6a67",
+  },
+  tool: "work_start",
+  targetHash: "8dd1a390ef1282d683f233877c83288e159521806b8bc72bd59ddb14f9a95908",
+  inputHash: "52f0b7748bf5ce9fcfbec7c6198b08f4e35d784b8a9051ddb223df087a59cf92",
+  contextHash: "815520ced84e57311cbc7519cb2d23be8358d47aff36476204d9843268e156a6",
+};
+
+describe("work decision construction", () => {
+  it("keeps validation before and after the owner-fenced save", async () => {
+    let allowed = false;
+    const writer = createOrchestratorDecisions({
+      owner,
+      save: async () => {
+        allowed = false;
+        return true;
+      },
+    });
+    expect(await writer.recordWork(workProposal(), async () => allowed)).toBe(false);
+    expect(writer.snapshot()).toEqual([]);
+    allowed = true;
+    expect(await writer.recordWork(workProposal(), async () => allowed)).toBe(false);
+    expect(writer.snapshot()).toEqual([expectedWork]);
+  });
+
+  it("refuses an uncloneable work proposal without blocking a later valid decision", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {
+      throw new Error("private log error");
+    });
+    try {
+      const writer = createOrchestratorDecisions({ owner, save: async () => true });
+      expect(await writer.recordWork(new Proxy(workProposal(), {}), async () => true)).toBe(false);
+      expect(await writer.recordWork(workProposal(), async () => true)).toBe(true);
+      expect(writer.snapshot()).toEqual([expectedWork]);
+      expect(warning.mock.calls.map(([value]) => JSON.parse(value as string))).toEqual([
+        { event: "orchestrator.decision.refused", cause: "uncloneable-proposal" },
+      ]);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("captures the complete proposal before asynchronous context validation", async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let first = true;
+    const writer = createOrchestratorDecisions({ owner, save: async () => true });
+    const proposal = workProposal();
+    const pending = writer.recordWork(proposal, async () => {
+      if (first) {
+        first = false;
+        entered();
+        await held;
+      }
+      return true;
+    });
+    await started;
+    proposal.source.userId = "slack:FOREIGN";
+    proposal.source.messageId = "later-message";
+    proposal.source.text = "Later request";
+    proposal.callId = "later-call";
+    proposal.action.target.repo = "acme/other";
+    proposal.input.words = "later input";
+    proposal.context.origins.push("later");
+    release();
+    expect(await pending).toBe(true);
+    expect(writer.snapshot()).toEqual([expectedWork]);
+  });
+
+  it("keeps later fields fixed while an earlier field hash awaits", async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    const spy = vi.spyOn(crypto.subtle, "digest").mockImplementation(async (algorithm, bytes) => {
+      if (new TextDecoder().decode(bytes) === '"Original request"') {
+        entered();
+        await held;
+      }
+      return digest(algorithm, bytes);
+    });
+    try {
+      const writer = createOrchestratorDecisions({ owner, save: async () => true });
+      const proposal = workProposal();
+      const pending = writer.recordWork(proposal, async () => true);
+      await started;
+      proposal.action.target.repo = "acme/other";
+      proposal.input.words = "later input";
+      proposal.context.revision = 2;
+      release();
+      expect(await pending).toBe(true);
+      expect(writer.snapshot()).toEqual([expectedWork]);
+    } finally {
+      release();
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("orchestrator decision records", () => {
