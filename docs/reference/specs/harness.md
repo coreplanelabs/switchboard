@@ -222,3 +222,11 @@ A canonical child uses the absolute bound committed at its original admission. S
 | Criterion | Proof |
 | --- | --- |
 | Pi and OpenCode expose the active lease to relayed read-delegation tools. A valid requester spawn receives a finite positive remainder and returns its child result; an unknown budget stays held in the orchestrator. | `[unit]` `src/core/harness/opencode/bridge.test.ts::relayed read delegation budget::*`; `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::delegation keeps its saved source through the spawn path: %s` |
+
+## Native source input capability
+
+The pinned OpenCode API accepts caller-assigned IDs and metadata on synthetic input. `resume: false` keeps that input in its native inbox. This capability alone does not enable Switchboard source delivery, authorize delivery to an ended run, prove a model read the input, or acknowledge a Switchboard checkpoint. Native process restart and the common runtime path still need integration proof.
+
+| Criterion | Proof |
+| --- | --- |
+| Two synthetic inputs with identical text retain distinct IDs and metadata in the native inbox. Reusing an ID with changed content returns the original input and preserves both original inputs. Enqueue without resume makes no extra model call. A consumer must check saved content, not only HTTP success and input ID. | `[integration]` `src/core/harness/opencode/testing/realDriver.test.ts::OpenCode against the real @opencode/cli binary::keeps distinct synthetic input identities when their text is identical` |
