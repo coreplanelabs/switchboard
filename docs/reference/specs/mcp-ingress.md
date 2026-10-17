@@ -42,6 +42,7 @@ The State Worker must expose the confirmation `get` and atomic `approve` routes 
 
 | Criterion | Evidence |
 |-----------|----------|
+| The production wrapper passes the native admission trace through unchanged. Unavailable and exception responses retain the observed inner stage and exclude private error text; observer failure preserves the original result. The adapter never retries the admission. | `[unit]` `src/channels/mcp.test.ts::native admission through the production process wrapper::preserves the original %s result and diagnostic without replay` |
 | SSO uses the browser's identity and grants, refuses invalid assertions and does not require a separate MCP credential; the existing non-Cloudflare verifier uses the same seam | `[unit]` `src/channels/mcpSso.test.ts::MCP SSO::*` |
 | SSO authentication precedes request body reads, and the existing browser origin guard refuses cross-site session requests | `[unit]` `src/channels/mcp.test.ts::createMcpHandler (node:http wrapper)::authenticates SSO before body read and dispatches with the browser account`, `src/channels/mcpSso.test.ts::MCP SSO::uses the browser origin guard to refuse cross-site SSO requests` |
 | Personal bearer authority, revocation and store failure cannot borrow an Access assertion; ordinary browser agent grants can reach core dispatch | `[unit]` `src/channels/mcpSso.test.ts::MCP SSO::keeps a personal bearer…`, `::dispatches an ordinary browser account through its actual agent baseline` |

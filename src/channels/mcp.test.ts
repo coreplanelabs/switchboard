@@ -1,10 +1,14 @@
 import { DEFAULT_NEGOTIATED_PROTOCOL_VERSION } from "@modelcontextprotocol/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders } from "node:http";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import { createMcpHandler, handleMcpRequest, McpIO, toCaller } from "./mcp.js";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { NO_GRANTS, type Grants } from "../core/authz/types.js";
-import type { DispatchFn, IngressConfig, IngressIdentity } from "./http.js";
+import type { DispatchFn, IngressConfig, IngressIdentity, OrganizationIngress } from "./http.js";
+import { observeAdmission } from "../core/organization/admissionTrace.js";
 import type { CoreDeps } from "../core/dispatcher.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
@@ -80,6 +84,90 @@ function rpc(
 // The body of a successful JSON-RPC response.
 type RpcResult = { jsonrpc: "2.0"; id: unknown; result: Record<string, unknown> };
 type RpcError = { jsonrpc: "2.0"; id: unknown; error: { code: number; message: string } };
+
+describe("native admission through the production process wrapper", () => {
+  // Execute the production composition expression without booting Slack or an HTTP listener.
+  function productionAdmission(browserWiring?: { admit: OrganizationIngress }): OrganizationIngress {
+    const file = ts.createSourceFile(
+      "index.ts",
+      readFileSync(new URL("../index.ts", import.meta.url), "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    let expression: ts.Expression | undefined;
+    const visit = (node: ts.Node) => {
+      if (ts.isVariableDeclaration(node) && node.name.getText(file) === "nativeAdmission")
+        expression = node.initializer;
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    if (!expression) throw new Error("The production native admission binding is missing.");
+    const code = ts.transpileModule(`const admit = ${expression.getText(file)}; admit`, {
+      compilerOptions: { target: ts.ScriptTarget.ESNext },
+    }).outputText;
+    return runInNewContext(code, { browserWiring }, { timeout: 100 }) as OrganizationIngress;
+  }
+
+  it.each(["unavailable", "exception", "observer-failure"] as const)(
+    "preserves the original %s result and diagnostic without replay",
+    async (mode) => {
+      const calls: IncomingMessage[] = [];
+      const admit = productionAdmission({
+        async admit(msg, _io, _evidence, _continuation, trace) {
+          calls.push(msg);
+          if (mode === "observer-failure" && trace?.span) {
+            const setAttrs = trace.span.setAttrs;
+            trace.span.setAttrs = () => {
+              throw new Error("PRIVATE-OBSERVER-MARKER");
+            };
+            try {
+              observeAdmission(trace, { stage: "native-proof" });
+            } finally {
+              trace.span.setAttrs = setAttrs;
+            }
+          } else observeAdmission(trace, { stage: "native-proof", reason: "native-source-unavailable" });
+          if (mode === "exception") throw new Error("PRIVATE-EXCEPTION-MARKER");
+          return { status: "unavailable" };
+        },
+      });
+      const response = await handleMcpRequest(
+        rpc("tools/call", {
+          name: "dispatch",
+          arguments: {
+            text: "Review the current change.",
+            thread: "trace-wrapper",
+            async: true,
+            idempotencyKey: "trace-wrapper-key",
+          },
+        }),
+        deps,
+        { auth: good, admit },
+      );
+      expect(response.body).toMatchObject({
+        result: {
+          isError: true,
+          structuredContent: {
+            admission: { status: "unavailable" },
+            diagnostic: {
+              stage: mode === "observer-failure" ? "host" : "native-proof",
+              reason:
+                mode === "exception"
+                  ? "exception"
+                  : mode === "observer-failure"
+                    ? "unavailable"
+                    : "native-source-unavailable",
+              receiptObserved: false,
+            },
+          },
+        },
+      });
+      expect(calls.map((msg) => ({ text: msg.text, thread: msg.threadKey }))).toEqual([
+        { text: "Review the current change.", thread: "mcp:default:trace-wrapper" },
+      ]);
+      expect(JSON.stringify(response.body)).not.toMatch(/PRIVATE-(?:OBSERVER|EXCEPTION)-MARKER/);
+    },
+  );
+});
 
 describe("handleMcpRequest — initialize", () => {
   it("returns the protocol version, tools capability, and server info", async () => {

@@ -1403,8 +1403,8 @@ export async function runBot(): Promise<void> {
   if (process.env.PORT) {
     // Native credentials retain their exact source identity. A configured
     // email is never evidence of a person binding.
-    const nativeAdmission: import("./channels/http.js").OrganizationIngress = (msg, io, evidence, continuation) =>
-      browserWiring ? browserWiring.admit(msg, io, evidence, continuation) : Promise.resolve({ status: "unavailable" });
+    const nativeAdmission: import("./channels/http.js").OrganizationIngress = (...args) =>
+      browserWiring ? browserWiring.admit(...args) : Promise.resolve({ status: "unavailable" });
     const ingress = createIngressHandler(deps, {
       auth,
       publicBaseUrl: process.env.PUBLIC_BASE_URL,
