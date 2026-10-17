@@ -4,7 +4,7 @@ import { EXEC_INFRA_REASONS } from "../execution/execResult.js";
 import type { CheckExecutionOwner, CheckExecutionState } from "./checkExecutionTypes.js";
 
 export const STREAM_CAP = 4_000;
-export const COMMAND_CAP = 2_000;
+export const COMMAND_CAP = 16_000;
 export const RECEIPT_CAP = 32;
 export const sha = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
 export const resultSchema = z.object({

@@ -179,8 +179,8 @@ describe("cancelled check terminal custody", () => {
           valid = await checkStateFixture(owner, {
             initial: valid,
             callId: `call-${index + 1}`,
-            output: "x".repeat(4000),
-            stderr: "y".repeat(4000),
+            output: "x".repeat(2000),
+            stderr: "y".repeat(2000),
           });
         checks = await checkStateFixture(owner, { initial: valid, callId: "call-32", unknown: true });
       }
@@ -192,11 +192,15 @@ describe("cancelled check terminal custody", () => {
             tool: "fixture",
             ok: true,
             summary: "saved result",
-            output: "é".repeat(680000),
+            output: "é".repeat(720000),
             seq: 1,
           },
         ];
         expect(new TextEncoder().encode(JSON.stringify(ending)).byteLength).toBeLessThan(MAX_RECORD_BYTES);
+        expect(
+          new TextEncoder().encode(JSON.stringify(ending)).byteLength +
+            new TextEncoder().encode(JSON.stringify(checks)).byteLength,
+        ).toBeGreaterThan(MAX_RECORD_BYTES);
       }
       await expect(ledger.finishCancellation(cancellation, ending)).rejects.toThrow(
         fault === "malformed" ? "canonical check state is unreadable" : "check evidence exceeds record byte limit",

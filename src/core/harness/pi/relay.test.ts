@@ -1470,39 +1470,45 @@ describe.each(["pi", "opencode"])("hosted %s check lifecycle", (name) => {
     expect(w.saved).toEqual(saved);
     expect(w.execResult.mock.calls).toHaveLength(64);
   });
-  it("retains the original check failure before recovery stops native result delivery", async () => {
-    const w = setupCheck();
-    let beforeStop: RunEvent[] = [];
-    w.harness.toolContext.recovery = new ToolRecovery(undefined, async (state) => {
-      if (state.stopped) beforeStop = structuredClone(w.events);
-      return true;
-    });
-    const initial = w.execResult.getMockImplementation()!;
-    w.execResult.mockImplementation(async (command, opts) => {
-      if (!command.startsWith("set -eu")) throw new ExecInfraError("PRIVATE failure /private/path", "transport-lost");
-      return initial(command, opts);
-    });
-    const answer = await w.ask();
-    expect(answer.isError).toBe(true);
-    const failure = beforeStop.find((e) => e.type === "run_note" && e.kind === "harness_error");
-    expect(failure).toMatchObject({
-      type: "run_note",
-      summary: expect.stringContaining('"callId":"check"'),
-    });
-    expect(failure).toMatchObject({ summary: expect.stringContaining('"infrastructureReason":"transport-lost"') });
-    expect(failure).toMatchObject({ summary: expect.stringContaining('"kind":"unknown","reason":"transport"') });
-    expect(w.saved.at(-1)?.receipts[0]?.outcome).toEqual({
-      kind: "unknown",
-      reason: "transport",
-      infrastructureReason: "transport-lost",
-    });
-    expect(JSON.stringify(beforeStop)).not.toContain("PRIVATE");
-    expect(await w.ask("another")).toMatchObject({
-      isError: true,
-      content: [{ type: "text", text: expect.stringContaining("original operation remains held") }],
-    });
-    expect(w.execResult).toHaveBeenCalledTimes(2);
-  });
+  it.each(["short", "maximum"])(
+    "retains the original check failure before recovery stops native result delivery for %s commands",
+    async (size) => {
+      const w = setupCheck();
+      let beforeStop: RunEvent[] = [];
+      w.harness.toolContext.recovery = new ToolRecovery(undefined, async (state) => {
+        if (state.stopped) beforeStop = structuredClone(w.events);
+        return true;
+      });
+      const initial = w.execResult.getMockImplementation()!;
+      w.execResult.mockImplementation(async (command, opts) => {
+        if (!command.startsWith("set -eu")) throw new ExecInfraError("PRIVATE failure /private/path", "transport-lost");
+        return initial(command, opts);
+      });
+      const answer = await w.ask(
+        "check",
+        size === "maximum" ? `git status --short #${"x".repeat(15_980)}` : "git status --short",
+      );
+      expect(answer.isError).toBe(true);
+      const failure = beforeStop.find((e) => e.type === "run_note" && e.kind === "harness_error");
+      expect(failure).toMatchObject({
+        type: "run_note",
+        summary: expect.stringContaining('"callId":"check"'),
+      });
+      expect(failure).toMatchObject({ summary: expect.stringContaining('"infrastructureReason":"transport-lost"') });
+      expect(failure).toMatchObject({ summary: expect.stringContaining('"kind":"unknown","reason":"transport"') });
+      expect(w.saved.at(-1)?.receipts[0]?.outcome).toEqual({
+        kind: "unknown",
+        reason: "transport",
+        infrastructureReason: "transport-lost",
+      });
+      expect(JSON.stringify(beforeStop)).not.toContain("PRIVATE");
+      expect(await w.ask("another")).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: expect.stringContaining("original operation remains held") }],
+      });
+      expect(w.execResult).toHaveBeenCalledTimes(2);
+    },
+  );
   it.each(["command", "stdout", "stderr"] as const)(
     "retains structural failure evidence when %s contains a cookie header",
     async (field) => {

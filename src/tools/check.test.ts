@@ -80,7 +80,7 @@ const checkpoint = {
   next: "Ask for review of the current diff",
 };
 
-function phaseContext(exitCode = 0) {
+function phaseContext(exitCode = 0, previous?: CheckExecutionState) {
   let notes = "previous working notes";
   let state: CheckExecutionState | undefined;
   const metadata = {
@@ -97,6 +97,7 @@ function phaseContext(exitCode = 0) {
     executor: {},
     callId: "verified-phase",
     checkExecution: createCheckExecution({
+      previous,
       executor: () => ({ execResult }),
       workspace: () => "/work/repo",
       owner: { runId: "phase-run", requester: "cli:owner", threadKey: "cli:thread", repo: "acme/repo" },
@@ -121,6 +122,47 @@ function phaseContext(exitCode = 0) {
 }
 
 const phaseInput = { command: "node tests/focused.js", purpose: "verification", checkpoint };
+
+describe("run_check command size", () => {
+  const tool: Tool = {
+    name: runCheckTool.name,
+    description: runCheckTool.description,
+    parameters: runCheckTool.inputSchema as Tool["parameters"],
+  };
+  const validate = (input: ToolCall["arguments"]) =>
+    validateToolArguments(tool, { type: "toolCall", id: "long-check", name: tool.name, arguments: input });
+
+  it("records and replays a multiline check above the old command limit without truncation", async () => {
+    const command = `node <<'JS'\nconst value = "${"x".repeat(3_000)}";\nconsole.log(value.length);\nJS`;
+    const input = { command, purpose: "verification" };
+    expect(validate(input)).toEqual(input);
+    const s = phaseContext();
+    const result = await runCheckTool.run(input, s.ctx);
+    expect(result).toContain("Command completed with exit 0");
+    expect(s.state()?.receipts[0]).toMatchObject({
+      command,
+      purpose: "verification",
+      outcome: { kind: "completed", stdout: "2 tests passed", exitCode: 0 },
+    });
+    expect(await runCheckTool.run(input, s.ctx)).toBe(result);
+    expect(s.execResult).toHaveBeenCalledTimes(2);
+    const resumed = phaseContext(0, s.state());
+    expect(await runCheckTool.run(input, resumed.ctx)).toContain('"stdout":"2 tests passed"');
+    expect(resumed.execResult).not.toHaveBeenCalled();
+  });
+
+  it("accepts a bounded command and rejects oversized input before execution", async () => {
+    const accepted = { command: `true #${"x".repeat(15_994)}`, purpose: "baseline" };
+    const oversized = { ...accepted, command: `${accepted.command}x` };
+    expect(validate(accepted)).toEqual(accepted);
+    expect(() => validate(oversized)).toThrow('Validation failed for tool "run_check"');
+    const s = phaseContext();
+    expect(await runCheckTool.run(oversized, s.ctx)).toContain("invalid check input");
+    expect(s.execResult).not.toHaveBeenCalled();
+    expect(await runCheckTool.run(accepted, s.ctx)).toContain("Command completed with exit 0");
+    expect(s.state()?.receipts[0]).toMatchObject({ command: accepted.command, outcome: { kind: "completed" } });
+  });
+});
 
 describe("run_check phase checkpoints", () => {
   it("reports partial output with source-reading guidance instead of silently clipping a check", async () => {

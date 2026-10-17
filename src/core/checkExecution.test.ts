@@ -1022,8 +1022,77 @@ describe("recorded coding checks", () => {
     expect(s.saved.at(-1)?.receipts).toHaveLength(32);
   });
 
-  it("observes a real checkout and executes in its recorded cwd without interpreting the command", async () => {
-    const workspace = realpathSync(mkdtempSync(join(tmpdir(), "swb-recorded-check-")));
+  it.each(["ascii", "escaped"])(
+    "refuses %s receipt capacity before dispatch without losing saved identities",
+    async (encoding) => {
+      const s = setup();
+      const sizes: number[] = [];
+      s.binding.save = async (state) => {
+        const size = new TextEncoder().encode(JSON.stringify(state)).length;
+        sizes.push(size);
+        if (size > 512 * 1024) return false;
+        s.saved.push(structuredClone(state));
+        return true;
+      };
+      s.execResult
+        .mockReset()
+        .mockImplementation(async (command: string) =>
+          command.startsWith("set -eu")
+            ? metadata
+            : { ...ok, stdout: (encoding === "ascii" ? "x" : "\0").repeat(4_000), stderr: "y".repeat(4_000) },
+        );
+      const longInput = { ...input, command: `true #${(encoding === "ascii" ? "x" : "\t").repeat(15_994)}` };
+      const capability = s.capability();
+      const first = await capability.run(longInput, "large-0");
+      expect(first).toMatchObject({ kind: "recorded", receipt: { outcome: { kind: "completed", exitCode: 0 } } });
+      for (let i = 1; i < 32; i++) {
+        const calls = s.execResult.mock.calls.length;
+        const result = await capability.run(longInput, `large-${i}`);
+        if (result.kind === "recorded") continue;
+        expect(result).toEqual({ kind: "unavailable", reason: "capacity" });
+        expect(s.execResult).toHaveBeenCalledTimes(calls);
+        expect(Math.max(...sizes)).toBeLessThanOrEqual(256 * 1024);
+        const restored = setup(s.saved.at(-1));
+        expect(await restored.capability().run(longInput, "large-0")).toEqual({ ...first, replayed: true });
+        expect(restored.execResult).not.toHaveBeenCalled();
+        return;
+      }
+      throw new Error("Expected byte capacity before the receipt-count limit");
+    },
+  );
+
+  it.each(["ordinary", "long"])(
+    "keeps a quoted check within the receiver limit at the %s checkout path",
+    async (kind) => {
+      const s = setup();
+      const cwd = kind === "long" ? `/${"'".repeat(3_799)}` : "/work/repo";
+      s.binding.workspace = () => cwd;
+      s.execResult.mockReset().mockImplementation(async (command: string) => {
+        if (command.length > 64_000) throw new Error("receiver command limit exceeded before execution");
+        return command.startsWith("set -eu")
+          ? { ...metadata, stdout: `${cwd}\n${"a".repeat(40)}\n${"b".repeat(40)}\n` }
+          : { ...ok, stdout: "quoted check completed" };
+      });
+      s.binding.executor = () => ({ execResult: s.execResult, inspectCheckResult: async () => undefined });
+      const quoteInput = { ...input, command: `true #${"'".repeat(15_994)}` };
+      const result = await s.capability().run(quoteInput, "quoted-check");
+      expect(result).toMatchObject({
+        kind: "recorded",
+        receipt: {
+          command: quoteInput.command,
+          outcome: { kind: "completed", stdout: "quoted check completed", exitCode: 0 },
+        },
+      });
+      const restored = setup(s.saved.at(-1));
+      expect(await restored.capability().run(quoteInput, "quoted-check")).toEqual({ ...result, replayed: true });
+      expect(restored.execResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["ordinary", "quote-heavy"])("executes %s checks in their recorded checkout", async (kind) => {
+    const workspace = realpathSync(
+      mkdtempSync(join(tmpdir(), `swb-recorded-check-${kind === "quote-heavy" ? "'".repeat(100) : ""}`)),
+    );
     const env = { PATH: "/usr/bin:/bin:/usr/local/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
     const git = (...args: string[]) =>
       execFileSync("git", args, { cwd: workspace, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -1038,6 +1107,7 @@ describe("recorded coding checks", () => {
       s.binding.workspace = () => workspace;
       s.binding.executor = () => ({
         async execResult(command, options) {
+          if (command.length > 64_000) throw new Error("receiver command limit exceeded before execution");
           try {
             const stdout = execFileSync("bash", ["-c", command], {
               cwd: tmpdir(),
@@ -1054,13 +1124,26 @@ describe("recorded coding checks", () => {
         },
       });
       const capability = s.capability();
-      const actualInput = { ...input, command: 'printf "%s" "$PWD"; exit 7' };
+      const literal = '$PWD `pwd` \\ "';
+      const quoteHeavy = `printf '%s|%s' "$PWD" '${literal}'; exit 7\n# `;
+      const actualInput = {
+        ...input,
+        command:
+          kind === "quote-heavy"
+            ? quoteHeavy.padEnd(16_000, "'")
+            : `# ${"x".repeat(3_000)}\nprintf "%s" "$PWD"; exit 7`,
+      };
       const receipt = await capability.run(actualInput, "real-call");
       expect(receipt).toMatchObject({
         kind: "recorded",
         receipt: {
+          command: actualInput.command,
           workspace: { cwd: workspace, head: git("rev-parse", "HEAD") },
-          outcome: { kind: "completed", stdout: workspace, exitCode: 7 },
+          outcome: {
+            kind: "completed",
+            stdout: kind === "quote-heavy" ? `${workspace}|${literal}` : workspace,
+            exitCode: 7,
+          },
         },
       });
       const scratch = realpathSync(mkdtempSync(join(tmpdir(), "swb-check-scratch-")));
