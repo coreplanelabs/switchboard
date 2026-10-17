@@ -13699,6 +13699,7 @@ const WIDE_BODY_ROUTES = new Set([
   "/runs/put",
   "/runs/shutdown",
   "/runs/finish",
+  "/runs/cancellation/finish",
   "/runs/append",
   "/runs/transcript/write",
   "/runs/session/write",
@@ -15438,10 +15439,8 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
   // rules out the absent header of a chunked/streamed body, a blank value,
   // and forms `Number()` would accept ("0x1000", "5e2", "12.5"); each is
   // 411 Length Required. A well-formed length over the cap is 413. Every
-  // legitimate client (WorkerMemoryStore) sends a sized JSON body. The cap
-  // is per route — decided AFTER routing and before the parse: /runs/put
-  // carries a whole run record (budgeted to 1.5 MiB upstream) and gets 2 MiB;
-  // every other route keeps the 512 KB fence.
+  // legitimate client (WorkerMemoryStore) sends a sized JSON body. Whole run
+  // records share the 2 MiB bulk cap; ordinary controls keep the 512 KiB cap.
   const header = request.headers.get("content-length");
   if (header === null || !/^\d+$/.test(header.trim())) {
     return json({ error: "body must declare a numeric Content-Length" }, 411);
