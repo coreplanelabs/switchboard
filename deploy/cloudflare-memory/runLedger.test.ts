@@ -17575,6 +17575,66 @@ describe("keyed SQLite delivery row witness", () => {
 });
 
 describe("typed SQLite source evidence", () => {
+  it.each([
+    { agent: "review" },
+    { agent: "coding" },
+    { agent: "orchestrator", parentRunId: "older-root" },
+    { agent: "orchestrator", parentInstanceId: "unit-owner", idempotencyKey: "unit-owner:U11/coding" },
+  ])("refuses a common notice outside its original SQLite orchestrator: %j", async (changed) => {
+    const key = `notice-owner-${JSON.stringify(changed)}`;
+    const threadKey = "slack:C1:owner-guard";
+    const request = claimBody(key, "r1", threadKey);
+    Object.assign(request.run.meta, changed);
+    expect((await post("/runs/claim", request)).status).toBe(200);
+    const received = await post("/runs/source-events/receive", {
+      storeKey: key,
+      event: {
+        version: 2,
+        kind: "source-evidence",
+        sourceId: "fixture:owner",
+        deliveryId: "one",
+        objectId: "fixture:comment",
+        changeId: "one",
+        payload: {},
+        content: { kind: "text", state: "present", text: "Evidence" },
+      },
+    });
+    const record = (await post("/runs/source-events/read", { storeKey: key, key: received.data.receipt.key })).data
+      .record;
+    const message = await sourceEvidenceMessageFromRecord(record, {
+      kind: "notice",
+      owner: {
+        runId: "r1",
+        requesterId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey,
+      },
+    });
+    expect(
+      (
+        await post("/runs/inbox/deliver", {
+          storeKey: key,
+          runId: "r1",
+          delivery: { version: 1, key: "source", message },
+        })
+      ).data,
+    ).toEqual({ kind: "refused", reason: "invalid-delivery" });
+    expect((await post("/runs/inbox", { storeKey: key, runId: "r1", message })).data).toEqual({
+      ok: false,
+      reason: "invalid-message",
+    });
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1" })).data.items).toEqual([]);
+    expect(
+      (
+        await post("/runs/inbox/deliver", {
+          storeKey: key,
+          runId: "r1",
+          delivery: { version: 1, key: "ordinary", message: { text: "Requester input", userId: "slack:UALICE" } },
+        })
+      ).data,
+    ).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+  });
+
   it.each(["notice", "fold"] as const)("retains common source %s data and custody through reclaim", async (kind) => {
     const key = `common-source-${kind}`,
       threadKey = "slack:C1:common-source";
@@ -17591,9 +17651,59 @@ describe("typed SQLite source evidence", () => {
     const received = await post("/runs/source-events/receive", { storeKey: key, event });
     expect(received.data).toMatchObject({ kind: "received", receipt: { sequence: 1 } });
     const rootId = kind === "notice" ? "r1" : "root";
-    const owner = { runId: rootId, requesterId: "slack:UALICE", channelId: "slack:C1", threadKey };
+    const owner = {
+      runId: rootId,
+      requesterId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: kind === "notice" ? threadKey : "slack:C1:root",
+    };
     const request = claimBody(key, "r1", threadKey);
     request.run.meta.agent = kind === "notice" ? "orchestrator" : "review";
+    if (kind === "fold") {
+      const root = claimBody(key, rootId, owner.threadKey);
+      const rootSession = `${owner.threadKey}:orchestrator`;
+      root.run.meta.agent = "orchestrator";
+      root.run.meta.session = { key: rootSession, seedFrom: 0, request: 0, range: { from: 0, to: 0 } };
+      expect((await post("/runs/claim", root)).status).toBe(200);
+      expect(
+        (
+          await post("/runs/state", {
+            storeKey: key,
+            runId: rootId,
+            gen: "g1",
+            state: {
+              orchestratorDecisions: [
+                {
+                  version: 2,
+                  kind: "source-fold",
+                  id: JSON.stringify([rootId, "fold-two"]),
+                  owner,
+                  source: { kind: "source-fact", receipt: received.data.receipt },
+                  target: { kind: "run", hash: "a".repeat(64) },
+                  inputHash: "b".repeat(64),
+                  contextHash: "c".repeat(64),
+                },
+              ],
+            },
+          })
+        ).status,
+      ).toBe(200);
+      request.run.meta.parentRunId = rootId;
+      request.run.meta.childHandoff = {
+        version: 1,
+        source: { runId: rootId, requester: owner.requesterId, channelId: owner.channelId, threadKey: owner.threadKey },
+        session: { key: rootSession, from: 0, to: -1 },
+        assets: [],
+        orchestratorOwner: owner,
+        consumer: {
+          runId: "r1",
+          requester: owner.requesterId,
+          channelId: owner.channelId,
+          threadKey,
+          attempt: "first",
+        },
+      };
+    }
     expect((await post("/runs/claim", request)).status).toBe(200);
     const read = await post("/runs/source-events/read", { storeKey: key, key: received.data.receipt.key });
     const routing =
@@ -17616,6 +17726,40 @@ describe("typed SQLite source evidence", () => {
       routing,
       content: { kind: "facts", facts: { state: "closed", nested: { value: null } } },
     });
+    if (kind === "fold") {
+      const live = (await post("/runs/live", { storeKey: key })).data.runs as LiveRunRow[];
+      const rootState = live.find((row) => row.runId === rootId)!.state;
+      expect((await post("/runs/state", { storeKey: key, runId: rootId, gen: "g1", state: {} })).data.ok).toBe(true);
+      expect(
+        (
+          await post("/runs/inbox/deliver", {
+            storeKey: key,
+            runId: "r1",
+            delivery: { version: 1, key: "input-two", message },
+          })
+        ).data,
+      ).toEqual({ kind: "refused", reason: "invalid-delivery" });
+      expect((await post("/runs/state", { storeKey: key, runId: rootId, gen: "g1", state: rootState })).data.ok).toBe(
+        true,
+      );
+    }
+    const raced = await runInDurableObject(
+      env.RUNS.get(env.RUNS.idFromName(key)),
+      async (instance: RunHistoryDO, state) => {
+        const pending = instance.deliverInbox("r1", { version: 1, key: "raced-root", message });
+        state.storage.sql.exec(
+          "UPDATE live_runs SET meta_json=json_set(meta_json, '$.agent', 'coding') WHERE run_id=?",
+          rootId,
+        );
+        const result = await pending;
+        state.storage.sql.exec(
+          "UPDATE live_runs SET meta_json=json_set(meta_json, '$.agent', 'orchestrator') WHERE run_id=?",
+          rootId,
+        );
+        return result;
+      },
+    );
+    expect(raced).toEqual({ kind: "refused", reason: "invalid-delivery" });
     expect(
       (
         await post("/runs/inbox/deliver", {
