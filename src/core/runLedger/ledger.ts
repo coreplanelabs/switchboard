@@ -40,6 +40,27 @@ import type {
 
 export type { HeartbeatFacts } from "../plane/decide.js";
 
+type ObservedAppendBoolean = boolean | "absent" | "invalid";
+export interface SessionAppendDiagnostic {
+  status: number;
+  ok: ObservedAppendBoolean;
+  contextSaved: ObservedAppendBoolean;
+  appended: ObservedAppendBoolean;
+  reason:
+    | "context-index-unavailable"
+    | "context-source-unavailable"
+    | "invalid-thread-session"
+    | "absent"
+    | "invalid"
+    | "unrecognized";
+}
+export interface SessionAppendResult {
+  ok: boolean;
+  appended: boolean;
+  /** Observed reply fields only; this is not proof that a write committed. */
+  diagnostic?: SessionAppendDiagnostic;
+}
+
 /** The admission-stage ask's body (record 0064, "The queue"): the thread key,
  *  the requester and the request in the durable inbox's shape — what the
  *  object stores under the minted id and the admitted run restarts from. */
@@ -249,7 +270,7 @@ export interface RunLedger {
     rowId: string,
     rows: readonly { part: number; json: string }[],
     context?: ContextDependencies,
-  ): Promise<{ ok: boolean; appended: boolean }>;
+  ): Promise<SessionAppendResult>;
   /** Own the session log for the run: its writes land, other source-tracked writers are fenced.
    *  Taken after the history claim, so a refused claim never steals a live run's log.
    *  `maxBytes` is the log's byte budget (session-log item 5); absent, the implementation's

@@ -71,7 +71,13 @@ export async function appendThreadTurn(
     [{ part: 0, json: storedTurnRow({ ...input, context: input.context ?? UNKNOWN_CONTEXT_DEPENDENCIES }) }],
     input.context ?? UNKNOWN_CONTEXT_DEPENDENCIES,
   );
-  if (!result.ok) throw new Error("thread session append was refused");
+  if (!result.ok) {
+    const diagnostic = result.diagnostic;
+    const observed = diagnostic
+      ? ` (HTTP ${diagnostic.status}; reply.ok=${diagnostic.ok}; reply.contextSaved=${diagnostic.contextSaved}; reply.appended=${diagnostic.appended}; reason=${diagnostic.reason})`
+      : "";
+    throw new Error(`thread session append was refused${observed}`);
+  }
   return { appended: result.appended };
 }
 
