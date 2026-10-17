@@ -5,7 +5,8 @@ import type { FirstTestReceipt } from "./firstTestReceipt.js";
 import type { DescriptionIssue, PrDescription, RecordedJson, RenderedPointer } from "./prDescriptionTypes.js";
 import type { HarnessScope } from "./harness/scope.js";
 import type { ModelCard } from "./modelCard.js";
-import type { ProviderFailureCause, ProviderFailureDetails } from "./provider.js";
+import type { ProviderFailureCause, ProviderFailureDetails, ProviderFailureDiagnostic } from "./provider.js";
+import type { ProxyUnknownTerminalReason, ProxyRejectionObservation } from "./modelProxy/terminalEvidence.js";
 import type { RunStateEvent } from "./runLiveState.js";
 import type { Effort } from "../effort.js";
 import type { AddressSeverity } from "./reviewVerdict.js";
@@ -53,6 +54,22 @@ export interface PrDescriptionArtifactEvent extends PrDescriptionArtifact {
   type: "review_artifact";
   seq?: number;
   at?: number;
+}
+
+/** Model error evidence for operators and investigating agents, never retry authority. */
+export interface ModelFailureDiagnostic {
+  kind: "unknown";
+  phase: "run" | "follow_up";
+  stops: { pi: string; provider: string };
+  diagnostic: {
+    source: "proxy" | "unverified";
+    reason?: ProxyUnknownTerminalReason;
+    rejection?: ProxyRejectionObservation;
+    errorMessage: "missing" | "empty" | "present";
+    contentParts: number | "invalid";
+    responseId?: string;
+    error?: Omit<ProviderFailureDiagnostic, "response" | "headers">;
+  };
 }
 
 // Run visibility (docs/reference/specs/run-visibility.md): a typed stream of what an agent is doing —
@@ -688,6 +705,8 @@ export type RunEvent =
       summary: string;
       /** Redacted provider evidence captured before a harness flattens its error. */
       providerFailure?: ProviderFailureDetails & { cause: ProviderFailureCause };
+      /** Bounded Pi evidence on a harness error, independent of provider classification. */
+      modelFailure?: ModelFailureDiagnostic;
       /** Redacted request-bound storage diagnosis; never a mutation receipt. */
       storageFailure?: import("./storageFailureDiagnostic.js").StorageFailureDiagnostic;
       /** Closed observation only; never a command outcome or recovery receipt. */

@@ -4742,6 +4742,85 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(JSON.stringify(notes)).not.toContain("sk-proj-");
   });
 
+  it.each(["working", "throwing"])(
+    "persists structured Pi problem details and logs the same evidence with run correlation (%s)",
+    async (observer) => {
+      const logs = vi.spyOn(console, "warn").mockImplementation(() => {
+        if (observer === "throwing") throw new Error("PRIVATE_LOGGER_EXCEPTION");
+      });
+      const progress = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const s = setup(
+          new Error(
+            '422 {"type":"https://gateway.test/problems/input","title":"Invalid input","status":422,"detail":"A tool result has no matching call. PRIVATE_DIAGNOSTIC","request_id":"req_problem_123","input":"PRIVATE_REQUEST"}',
+          ),
+        );
+        await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+        s.ending.drain(undefined);
+        await s.writer.settled();
+        const record = (await s.store.get("run-l"))!;
+        const failure = {
+          kind: "unknown",
+          phase: "run",
+          stops: { pi: "error", provider: "missing" },
+          diagnostic: {
+            source: "unverified",
+            errorMessage: "present",
+            contentParts: 0,
+            error: {
+              type: "«redacted-url»",
+              title: "Invalid input",
+              status: 422,
+              detail: "A tool result has no matching call. PRIVATE_DIAGNOSTIC",
+              requestId: "req_problem_123",
+            },
+          },
+        };
+        expect(record.events).toContainEqual(
+          expect.objectContaining({ type: "run_note", kind: "harness_error", modelFailure: failure }),
+        );
+        if (observer === "throwing")
+          expect(record.events).toContainEqual(
+            expect.objectContaining({
+              type: "run_note",
+              kind: "harness_error",
+              summary: "Model failure telemetry could not be written.",
+            }),
+          );
+        expect(JSON.stringify(record.events)).not.toContain("PRIVATE_LOGGER_EXCEPTION");
+        const lines = logs.mock.calls
+          .map(([line]) => String(line))
+          .filter((line) => line.startsWith('{"event":"model_failure"'));
+        expect(lines.map((line) => JSON.parse(line))).toEqual([
+          {
+            event: "model_failure",
+            runId: "run-l",
+            traceId: s.ctx.root.traceId,
+            agent: s.ctx.agent.name,
+            model: s.ctx.resolved.modelRef,
+            kind: "unknown",
+            phase: "run",
+            source: "unverified",
+            errorMessage: "present",
+            contentParts: 0,
+            piStop: "error",
+            providerStop: "missing",
+            errorStatus: 422,
+            errorFingerprint: "ebb081543eabceddd3d6fbf12a285155526513c08dc734db982a10a90d4f57ea",
+            hasRequestId: true,
+            hasResponseId: false,
+          },
+        ]);
+        expect(JSON.stringify(record.events)).not.toContain("PRIVATE_REQUEST");
+        expect(JSON.stringify([...logs.mock.calls, ...progress.mock.calls])).not.toContain("PRIVATE_DIAGNOSTIC");
+        expect(record.status).toBe("failed");
+      } finally {
+        logs.mockRestore();
+        progress.mockRestore();
+      }
+    },
+  );
+
   it("a failed run leaves its reason on the record: the loop's throw is published as a `run_failed` run_note before the finish, so the run page says why", async () => {
     const s = setup(new Error("harness container: read failed — runtime-replaced"));
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { stream as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import type { Model } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { PI_EVENT_HOME } from "../../../load/piRpc.js";
@@ -771,6 +772,62 @@ describe("turns, narration and the answer — the loop's rules", () => {
       if (secretId.terminalFailure?.kind !== "unknown") throw new Error("Expected an unknown terminal");
       expect(secretId.terminalFailure.diagnostic).not.toHaveProperty("responseId");
     }
+  });
+
+  it("retains problem details from the installed Responses adapter without treating them as recovery authority", async () => {
+    const message = await responsesStream(
+      {
+        id: "test",
+        name: "test",
+        api: "openai-responses",
+        provider: "openai",
+        baseUrl: "https://proxy.test",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 1000,
+      },
+      normalizeContext({ messages: [] }),
+      {
+        apiKey: "test",
+        maxRetries: 0,
+        fetch: (async () =>
+          new Response(
+            JSON.stringify({
+              type: "https://gateway.test/problems/invalid-input?token=private",
+              title: "Invalid input",
+              status: 422,
+              detail: "The tool result has no matching call. bearer-value sk-proj-12345678901234567890",
+              request_id: "req_problem_123",
+              input: "PRIVATE_REQUEST",
+              output: "PRIVATE_RESPONSE",
+            }),
+            { status: 422, headers: { "content-type": "application/problem+json" } },
+          )) as typeof fetch,
+      },
+    ).result();
+    expect(message.stopReason).toBe("error");
+    const bridge = new PiBridge({ emit: () => {}, clock: () => NOW, secretValues: ["bearer-value"] });
+    const result = bridge.observe({ type: "message_end", message });
+    expect(result.terminalFailure).toMatchObject({
+      kind: "unknown",
+      diagnostic: {
+        source: "unverified",
+        error: {
+          type: "«redacted-url»",
+          title: "Invalid input",
+          status: 422,
+          detail: "The tool result has no matching call. «redacted» «redacted-api-key»",
+          requestId: "req_problem_123",
+        },
+      },
+    });
+    expect(result.providerFailure).toBeUndefined();
+    if (result.terminalFailure?.kind !== "unknown") throw new Error("Expected an unknown terminal");
+    expect(JSON.stringify(result.terminalFailure.diagnostic)).not.toMatch(
+      /PRIVATE_|token=private|bearer-value|sk-proj-/,
+    );
   });
 
   it("recognizes the installed Anthropic adapter's missing-stop error as a local stream failure", async () => {

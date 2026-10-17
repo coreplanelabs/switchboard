@@ -158,6 +158,10 @@ export interface ProviderFailureDiagnostic {
   code?: string | number;
   param?: string | null;
   message?: string;
+  /** Problem-detail fields are evidence only, separate from the classified status. */
+  title?: string;
+  detail?: string;
+  status?: number;
   requestId?: string;
   headers?: Record<string, string>;
   response?: string;
@@ -181,16 +185,28 @@ function safeProviderDiagnostic(
   if (!row) return undefined;
   const result: ProviderFailureDiagnostic = {};
   const hide = (text: string, cap: number) => redactAndCap(redactProviderSecrets(text, secretValues), cap);
-  for (const field of ["errorClass", "type", "code", "param", "message", "requestId", "response"] as const) {
+  for (const field of [
+    "errorClass",
+    "type",
+    "code",
+    "param",
+    "message",
+    "title",
+    "detail",
+    "requestId",
+    "response",
+  ] as const) {
     const item = row[field];
     if (typeof item === "string") {
-      const cap = field === "response" ? 16_384 : field === "message" ? 4_096 : 256;
+      const cap = field === "response" ? 16_384 : field === "message" || field === "detail" ? 4_096 : 256;
       const text = hide(item, cap);
       Object.assign(result, { [field]: text });
       if (text.length > cap) result.truncated = true;
     }
   }
   if (typeof row.code === "number" && Number.isFinite(row.code)) result.code = row.code;
+  if (typeof row.status === "number" && Number.isInteger(row.status) && row.status >= 100 && row.status <= 599)
+    result.status = row.status;
   if (row.param === null) result.param = null;
   if (row.truncated === true) result.truncated = true;
   const headers = providerFailureRecord(row.headers);
@@ -215,7 +231,7 @@ function safeProviderDiagnostic(
     if (Object.keys(safe).length) result.headers = safe;
   }
   const bytes = () => new TextEncoder().encode(JSON.stringify(result)).length;
-  for (const field of ["response", "message"] as const) {
+  for (const field of ["response", "message", "detail"] as const) {
     while (bytes() > 16_384 && result[field] !== undefined) {
       result.truncated = true;
       const text = result[field]!;
@@ -276,6 +292,9 @@ function providerDiagnostic(
       code: error?.code ?? sdk?.code,
       param: error?.param,
       message: error?.message ?? (body || Array.isArray(parsed) ? undefined : (sdk?.message ?? text)),
+      title: error?.title,
+      detail: error?.detail,
+      status: error?.status,
       requestId:
         body?.request_id ??
         sdk?.request_id ??

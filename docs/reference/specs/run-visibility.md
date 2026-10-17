@@ -26,6 +26,7 @@ You can see what an [agent](../vocabulary.md#agent) is doing while it works, in 
 
 | Criterion | Evidence |
 |-----------|----------|
+| Structured Pi diagnostics remain visible in `runs get --include messages` and `runs events`; Pi strings are marked as untrusted while closed source, phase and numeric status remain structured | `[unit]` `src/core/commands/runs.test.ts::provider diagnostics in machine history::fences structured Pi diagnostics for an investigating agent through %s` |
 | Ack card posted before executor selection; 👀 title names agent+model; the same card carries the run and ends ✅ (no second card) | `[unit]` `src/core/dispatcher.test.ts::acknowledges the thread with a 👀 card BEFORE executor selection …` (red-verified: statuses were empty at selection time before the change) |
 | Setup stopped before the run closes the card with a reason: ask-once branch → `not started`; thrown setup error → `❌ setup failed` + the error reply | `[unit]` `::closes the ack card with a reason when setup stops before the run …`, `::closes the ack card with ❌ when setup throws …`; resident-repos row "needs-ref → ONE question" |
 | Live: a mention on a repo with no warm resident shows the 👀 card within ~2 s, then the spinner, then ✅ — no multi-minute gap | `[agent]` Mention the bot (any agent — the ack path is agent-agnostic, the dispatcher posts before executor selection) on a repo with no warm resident; time the thread: 👀 card within ~2 s of the mention, then the spinner frames, then ✅ — never a multi-minute silent gap before the first card. |

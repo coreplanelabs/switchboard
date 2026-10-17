@@ -3173,6 +3173,18 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         expect(notes).toHaveLength(1);
         expect(notes[0]).toMatchObject({
           summary: `the ${followUp ? "follow-up " : ""}model call ended without a classified result; no provider failure was established — pi stop: "error"; provider stop: "missing"; terminal evidence: {"source":"proxy","reason":"consumer_rejected"${observation === undefined ? "" : ',"rejection":{"phase":"response_validation","kind":"worker-exit"}'},"errorMessage":"present","contentParts":1}`,
+          modelFailure: {
+            kind: "unknown",
+            phase: followUp ? "follow_up" : "run",
+            stops: { pi: "error", provider: "missing" },
+            diagnostic: {
+              source: "proxy",
+              reason: "consumer_rejected",
+              errorMessage: "present",
+              contentParts: 1,
+              ...(observation ? { rejection: observation } : {}),
+            },
+          },
         });
         expect(JSON.stringify(notes)).not.toContain("private");
         expect(JSON.stringify(notes)).not.toContain(envelope._switchboard_proxy_auth);

@@ -23,6 +23,7 @@ import {
   redactSecrets,
   type RunEvent,
   type RunNoteKind,
+  type ModelFailureDiagnostic,
 } from "../../runEvents.js";
 import {
   proxyProviderFailureIsAuthenticated,
@@ -30,8 +31,6 @@ import {
   readProxyTurnBudgetExhausted,
   proxyTurnBudgetExhaustedIsAuthenticated,
   type ProxyUnknownTerminalEnvelope,
-  type ProxyUnknownTerminalReason,
-  type ProxyRejectionObservation,
 } from "../../modelProxy/providerFailureAuth.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 import { classifyProviderFailure, type ProviderFailure, type ProviderFailureDiagnostic } from "../../provider.js";
@@ -127,15 +126,7 @@ export type PiTerminalFailure =
       kind: "unknown";
       detail: string;
       stops: { pi: string; provider: string };
-      diagnostic: {
-        source: "proxy" | "unverified";
-        reason?: ProxyUnknownTerminalReason;
-        rejection?: ProxyRejectionObservation;
-        errorMessage: "missing" | "empty" | "present";
-        contentParts: number | "invalid";
-        responseId?: string;
-        error?: Omit<ProviderFailureDiagnostic, "response" | "headers">;
-      };
+      diagnostic: ModelFailureDiagnostic["diagnostic"];
     }
   | { kind: "provider_refusal"; detail: string; failure: ProviderFailure }
   | { kind: "provider_failure"; detail: string; failure: ProviderFailure };
