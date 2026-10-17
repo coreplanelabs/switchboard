@@ -1,5 +1,7 @@
 import { ORCHESTRATOR_DECISION_BYTES_MAX, ORCHESTRATOR_DECISIONS_MAX } from "../budgets.js";
 import { sourceEventReceiptOf, type SourceEventReceipt } from "../runLedger/sourceEvents.js";
+import { sourceHash } from "../references/receipts.js";
+import type { IncomingMessage } from "../types.js";
 
 export interface OrchestratorOwner {
   runId: string;
@@ -31,6 +33,13 @@ export type OrchestratorWorkAction =
 export interface OrchestratorWorkDecision extends DecisionSource {
   tool: OrchestratorWorkAction["tool"];
   targetHash: string;
+}
+export interface OrchestratorWorkProposal {
+  source: Pick<IncomingMessage, "messageId" | "userId" | "channelId" | "threadKey" | "text">;
+  callId: string;
+  action: OrchestratorWorkAction;
+  input: unknown;
+  context: unknown;
 }
 /** A source reference is evidence, never an imported requester or grant. */
 export interface OrchestratorSourceFoldDecision {
@@ -168,6 +177,20 @@ export function orchestratorDecisionsOf(value: unknown, owner: OrchestratorOwner
     : undefined;
 }
 
+/** The caller retains its objects while validation and hashing await. */
+function captureProposal<T>(value: T): T | undefined {
+  try {
+    return structuredClone(value);
+  } catch {
+    try {
+      console.warn(JSON.stringify({ event: "orchestrator.decision.refused", cause: "uncloneable-proposal" }));
+    } catch {
+      // Diagnostic failure must not change admission or block the queue.
+    }
+    return undefined;
+  }
+}
+
 /** Use the run's owner-fenced state writer. Never replace an unreadable history.
  * A failed acknowledgement closes this writer before an action can execute. */
 export function createOrchestratorDecisions(input: {
@@ -183,16 +206,9 @@ export function createOrchestratorDecisions(input: {
   let entries = restored ?? [];
   let tail: Promise<unknown> = Promise.resolve();
   const record = (decision: OrchestratorDecision): Promise<boolean> => {
-    try {
-      decision = structuredClone(decision);
-    } catch {
-      try {
-        console.warn(JSON.stringify({ event: "orchestrator.decision.refused", cause: "uncloneable-proposal" }));
-      } catch {
-        // Diagnostic failure must not change admission or block the queue.
-      }
-      return Promise.resolve(false);
-    }
+    const captured = captureProposal(decision);
+    if (captured === undefined) return Promise.resolve(false);
+    decision = captured;
     const next = tail.then(async () => {
       if (held || !isOrchestratorDecision(decision, owner)) return false;
       const existing = entries.find((entry) => entry.id === decision.id);
@@ -224,5 +240,31 @@ export function createOrchestratorDecisions(input: {
       return structuredClone(entries);
     },
     record,
+    async recordWork(proposal: OrchestratorWorkProposal, check: () => Promise<boolean>): Promise<boolean> {
+      const captured = captureProposal(proposal);
+      if (captured === undefined) return false;
+      proposal = captured;
+      if (!proposal.source.messageId || !(await check())) return false;
+      const saved = await record({
+        version: 1,
+        id: JSON.stringify([owner.runId, proposal.callId]),
+        owner: {
+          runId: owner.runId,
+          requesterId: proposal.source.userId,
+          channelId: proposal.source.channelId,
+          threadKey: proposal.source.threadKey,
+        },
+        source: {
+          kind: "request",
+          messageId: proposal.source.messageId,
+          textHash: await sourceHash(proposal.source.text),
+        },
+        tool: proposal.action.tool,
+        targetHash: await sourceHash(proposal.action.target),
+        inputHash: await sourceHash(proposal.input),
+        contextHash: await sourceHash(proposal.context),
+      });
+      return saved && (await check());
+    },
   };
 }
