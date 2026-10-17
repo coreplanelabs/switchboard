@@ -17726,6 +17726,66 @@ describe("typed SQLite source evidence", () => {
       routing,
       content: { kind: "facts", facts: { state: "closed", nested: { value: null } } },
     });
+    for (const changed of [
+      { ...message!, content: { kind: "facts", facts: { state: "open" } } },
+      { ...message!, source: { ...message!.source, authorId: "fixture:other" } },
+      { ...message!, source: { ...message!.source, objectId: "fixture:other-object" } },
+      { ...message!, receipt: { ...message!.receipt, sequence: 99 } },
+      { ...message!, receipt: { ...message!.receipt, bodyHash: "f".repeat(64) } },
+      { ...message!, userId: owner.requesterId },
+    ]) {
+      expect(
+        (
+          await post("/runs/inbox/deliver", {
+            storeKey: key,
+            runId: "r1",
+            delivery: { version: 1, key: "input-two", message: changed },
+          })
+        ).data,
+      ).toEqual({ kind: "refused", reason: "invalid-delivery" });
+      expect((await post("/runs/inbox", { storeKey: key, runId: "r1", message: changed })).data).toEqual({
+        ok: false,
+        reason: "invalid-message",
+      });
+    }
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1" })).data.items).toEqual([]);
+    const sourceRace = await runInDurableObject(
+      env.RUNS.get(env.RUNS.idFromName(key)),
+      async (instance: RunHistoryDO, state) => {
+        const saved = state.storage.sql
+          .exec<{ event_json: string }>("SELECT event_json FROM source_events WHERE key=?", message!.receipt.key)
+          .one().event_json;
+        const logs: unknown[][] = [];
+        const warn = console.warn;
+        console.warn = (...fields: unknown[]) => {
+          logs.push(fields);
+        };
+        try {
+          const prepare = await instance.pushInbox("r1", { ...message!, userId: "source-text-must-stay-private" });
+          const pending = instance.pushInbox("r1", { ...message! });
+          state.storage.sql.exec(
+            "UPDATE source_events SET event_json=? WHERE key=?",
+            JSON.stringify({ ...JSON.parse(saved), payload: { native: "source-text-must-stay-private" } }),
+            message!.receipt.key,
+          );
+          return { prepare, append: await pending, logs };
+        } finally {
+          console.warn = warn;
+          state.storage.sql.exec("UPDATE source_events SET event_json=? WHERE key=?", saved, message!.receipt.key);
+        }
+      },
+    );
+    expect(sourceRace).toEqual({
+      prepare: { ok: false, reason: "invalid-message" },
+      append: { ok: false, reason: "invalid-message" },
+      logs: [
+        [
+          "[runs/inbox] source evidence refused",
+          { runId: "r1", kind: "source-evidence", version: 2, phase: "prepare" },
+        ],
+        ["[runs/inbox] source evidence refused", { runId: "r1", kind: "source-evidence", version: 2, phase: "append" }],
+      ],
+    });
     if (kind === "fold") {
       const live = (await post("/runs/live", { storeKey: key })).data.runs as LiveRunRow[];
       const rootState = live.find((row) => row.runId === rootId)!.state;
@@ -17769,6 +17829,20 @@ describe("typed SQLite source evidence", () => {
         })
       ).data,
     ).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+    const missingSource = await runInDurableObject(
+      env.RUNS.get(env.RUNS.idFromName(key)),
+      async (instance: RunHistoryDO, state) => {
+        state.storage.sql.exec("UPDATE source_events SET key=? WHERE key=?", "hidden-source", message!.receipt.key);
+        const duplicate = await instance.deliverInbox("r1", { version: 1, key: "input-two", message });
+        const push = await instance.pushInbox("r1", { ...message! });
+        state.storage.sql.exec("UPDATE source_events SET key=? WHERE key=?", message!.receipt.key, "hidden-source");
+        return { duplicate, push };
+      },
+    );
+    expect(missingSource).toMatchObject({
+      duplicate: { kind: "duplicate", receipt: { seq: 1 } },
+      push: { ok: false, reason: "invalid-message" },
+    });
     expect((await post("/runs/handoff", { storeKey: key, gen: "g1", runIds: ["r1"] })).status).toBe(200);
     expect((await post("/runs/reclaim", { storeKey: key, gen: "g2", now: Date.now(), leaseMs: LEASE_MS })).status).toBe(
       200,
