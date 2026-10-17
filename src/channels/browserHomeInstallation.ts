@@ -4,6 +4,7 @@ import {
   type RequestContextSelection,
 } from "../core/organization/admissionTrace.js";
 import type { TraceOptions } from "../core/trace/types.js";
+import { operatorModeOf } from "../config.js";
 import { historyFailure } from "../core/organization/ownerFailure.js";
 import { contextAccessForMessage } from "../core/dispatch/contextAccess.js";
 import { COMMAND_RUN_AGENT } from "../core/runOwner.js";
@@ -1708,7 +1709,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       if (current.actor.viewingAs || current.actor.onBehalfOf) return "delegation";
       if (continuation) return "continuation";
       if (hasMedia) return "media";
-      if (core.config.config.routing?.operator !== "on") return "routing";
+      if (operatorModeOf(core.config.config) !== "on") return "routing";
       independent = requestOnlyReviewTarget(msg.text);
       return independent ? "selected" : "target";
     };
