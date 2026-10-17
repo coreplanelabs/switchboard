@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createOrchestratorDecisions,
   type OrchestratorDecision,
@@ -21,6 +21,83 @@ const fold = (): OrchestratorSourceFoldDecision => ({
 });
 
 describe("orchestrator source fold decisions", () => {
+  it("captures the complete decision before its first queued turn", async () => {
+    const writer = createOrchestratorDecisions({ owner, save: async () => true });
+    const input = fold();
+    const pending = writer.record(input);
+    input.source.receipt.sequence = 99;
+    input.target.hash = "f".repeat(64);
+    expect(await pending).toBe(true);
+    expect(writer.snapshot()).toEqual([fold()]);
+    expect(await writer.record(fold())).toBe(true);
+  });
+
+  it("keeps a waiting source decision fixed behind an earlier save", async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const writer = createOrchestratorDecisions({
+      owner,
+      save: async (rows) => {
+        if (rows.length === 1) {
+          entered();
+          await wait;
+        }
+        return true;
+      },
+    });
+    const first = { ...fold(), id: '["root","first"]' };
+    const firstSave = writer.record(first);
+    await started;
+    const input = fold();
+    const secondSave = writer.record(input);
+    input.source.receipt.bodyHash = "f".repeat(64);
+    input.contextHash = "a".repeat(64);
+    release();
+    expect(await firstSave).toBe(true);
+    expect(await secondSave).toBe(true);
+    expect(writer.snapshot()).toEqual([first, fold()]);
+  });
+
+  it("retains its original save callback while the write is queued", async () => {
+    const dependencies = {
+      owner,
+      stored: [] as readonly OrchestratorDecision[],
+      async save(rows: readonly OrchestratorDecision[]) {
+        this.stored = rows;
+        return true;
+      },
+    };
+    const writer = createOrchestratorDecisions(dependencies);
+    const pending = writer.record(fold());
+    dependencies.save = async () => true;
+    expect(await pending).toBe(true);
+    expect(dependencies.stored).toEqual([fold()]);
+  });
+
+  it("rejects an uncloneable proposal without blocking a later valid decision", async () => {
+    const writer = createOrchestratorDecisions({ owner, save: async () => true });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await writer.record(new Proxy(fold(), {}))).toBe(false);
+      expect(warning.mock.calls.map(([value]) => JSON.parse(value as string))).toEqual([
+        { event: "orchestrator.decision.refused", cause: "uncloneable-proposal" },
+      ]);
+      warning.mockImplementation(() => {
+        throw new Error("diagnostic sink failed");
+      });
+      expect(await writer.record(new Proxy(fold(), {}))).toBe(false);
+      expect(await writer.record(fold())).toBe(true);
+      expect(writer.snapshot()).toEqual([fold()]);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it("retains source evidence and its exact destination reference through history recovery", async () => {
     let stored: readonly OrchestratorDecision[] = [];
     const writer = createOrchestratorDecisions({
