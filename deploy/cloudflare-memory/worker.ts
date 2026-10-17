@@ -301,6 +301,7 @@ import {
   type ContextDependencies,
 } from "../../src/core/references/contextDependencies.js";
 import { contextReferencesOf, type ContextReference } from "../../src/core/runLedger/contextRetention.js";
+import { sourceEvidenceOwnerMatches } from "../../src/core/runLedger/sourceEvidence.js";
 import { isChildHandoff, type ChildHandoff } from "../../src/core/dispatch/handoff.js";
 import {
   type SessionSources,
@@ -8233,6 +8234,8 @@ export class RunHistoryDO extends DurableObject<Env> {
   private appendInbox(runId: string, message: Record<string, unknown>): InboxPushResult {
     const owner = this.liveRow(runId);
     if (!owner) return { ok: false, reason: "not-live" };
+    if (!sourceEvidenceOwnerMatches(message, owner, (id) => this.liveRow(id)))
+      return { ok: false, reason: "invalid-message" };
     const stored = bindInboxCustody(message, {
       runId,
       channelId: owner.meta.channelId,

@@ -10,6 +10,7 @@ import {
 import { parseStoredJson } from "../storedJson.js";
 import { terminalPublicationRetentionRequired } from "../branchPublication.js";
 import { contextReferencesOf } from "./contextRetention.js";
+import { sourceEvidenceOwnerMatches } from "./sourceEvidence.js";
 import { RequiredTranscriptError } from "./transcript.js";
 import { TRANSCRIPT_PART_BYTES } from "./types.js";
 import { holdUnreadIngress } from "./unreadIngress.js";
@@ -2288,6 +2289,8 @@ export class InMemoryRunLedger implements RunLedger {
   private appendInbox(runId: string, message: Record<string, unknown>): InboxPushResult {
     const row = this.live.get(runId);
     if (!row) return { ok: false, reason: "not-live" };
+    if (!sourceEvidenceOwnerMatches(message, row, (id) => this.live.get(id)))
+      return { ok: false, reason: "invalid-message" };
     const stored = bindInboxCustody(message, {
       runId,
       channelId: row.meta.channelId,
