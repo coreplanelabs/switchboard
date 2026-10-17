@@ -10711,6 +10711,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
     const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
     let sourceReads: unknown;
+    let githubSource: unknown;
     let orchestratorDecisions: unknown;
     let branchPublication: unknown;
     let reviewPublication: unknown;
@@ -10731,6 +10732,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       branchPushReceipts = (parseStoredJson(row.summary_json) as Record<string, unknown>).branchPushReceipts;
       if (branchPushReceipts !== undefined && !branchPushReceiptsOf(branchPushReceipts)) return null;
       sourceReads = row.source_reads_json == null ? undefined : parseStoredJson(row.source_reads_json);
+      githubSource = (parseStoredJson(row.summary_json) as Record<string, unknown>).githubSource;
       orchestratorDecisions = (parseStoredJson(row.summary_json) as Record<string, unknown>).orchestratorDecisions;
       if (row.work_evidence_json != null) {
         const evidence = parseWorkEvidence(parseStoredJson(row.work_evidence_json), summary);
@@ -10757,6 +10759,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       ...(reviewPublication === undefined ? {} : { reviewPublication }),
       ...(branchPushReceipts === undefined ? {} : { branchPushReceipts }),
       ...(sourceReads === undefined ? {} : { sourceReads }),
+      ...(githubSource === undefined ? {} : { githubSource }),
       ...(orchestratorDecisions === undefined ? {} : { orchestratorDecisions }),
       ...(workReads === undefined ? {} : { workReads }),
       ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
@@ -11222,6 +11225,7 @@ function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
     const {
       branchPublication: _branchPublication,
       orchestratorDecisions: _orchestratorDecisions,
+      githubSource: _githubSource,
       reviewPublication: _reviewPublication,
       branchPushReceipts: _branchPushReceipts,
       ...summary

@@ -119,6 +119,27 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       }
     });
 
+    it("keeps the native GitHub task identity in full records without listing it", async () => {
+      const { store } = make();
+      const githubSource: NonNullable<RunRecord["githubSource"]> = {
+        version: 1,
+        source: { host: "github.com", appId: 11, installationId: 22 },
+        repositoryId: 33,
+        pullRequestId: 44,
+        number: 42,
+        head: { repositoryId: 33, ref: "private/source-branch", sha: "a".repeat(40) },
+        baseRef: "main",
+      };
+      const base = record("github-source-history", NOW, { targetPr: 42, githubSource });
+      await store.put(base);
+      expect((await store.get(base.id))?.githubSource).toEqual(githubSource);
+      for (const summary of [await store.getSummary(base.id), ...(await store.list({}))]) {
+        expect(summary?.id).toBe(base.id);
+        expect(summary).not.toHaveProperty("githubSource");
+        expect(JSON.stringify(summary)).not.toContain("private/source-branch");
+      }
+    });
+
     it("archives source bodies only in full records and preserves the dependency references in summaries", async () => {
       const { store } = make();
       const base = record("archive", NOW);
