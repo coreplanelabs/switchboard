@@ -82,7 +82,9 @@ export const reviewReadTool: RunnableTool = {
   async run(input, ctx) {
     const fail = (message: string) => `error: review_read: ${message}`;
     const target = ctx.reviewReadTarget?.();
-    const checkout = ctx.checkout?.();
+    // Cold reviews prepare Git in the executor's cwd without a checkout binding.
+    // The reader still verifies that directory's HEAD before returning source.
+    const checkout = ctx.checkout?.() ?? ".";
     if (
       !target ||
       target.repo !== ctx.repo ||
