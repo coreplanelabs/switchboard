@@ -23,8 +23,11 @@ Switchboard turns the run-friction **analysis** ([run-friction.md](run-friction.
 
 ## Validation criteria
 
+Interrupted tool results keep an `unconfirmed` signature plus the existing normalized call identity. Distinct calls do not create false recurrence. A cut result and a confirmed transport failure remain separate patterns. Proposed fixes retain the unknown command outcome and interruption cause.
+
 | Criterion | Evidence |
 |-----------|----------|
+| Analyzer-to-proposal classification preserves interrupted call identity, the recurrence threshold and unknown outcomes without changing confirmed transport failures | `[unit]` `src/core/frictionProposals.test.ts::interrupted results from the analyzer to proposals::*` |
 | Command normalization: prefix/tail stripped, volatile tokens blanked, length capped | `[unit]` `src/core/frictionProposals.test.ts::normalizeCommand::*` |
 | Shell-aware signatures: segment heads, noise/redirections/env/wrappers dropped, capped; the two real chainings of `npm ci` share one install signature; install flags kept minus quiet flags | `[unit]` `::commandSignature::*`, `::installSignature::*`, `::patternSignature::clusters the SAME install chained differently across real runs…` |
 | Signatures: tool findings by category + command (label prefixes dropped), unknown tool by tool name, notes by kind, `slow_model_turn` by the single key `model_turn` (a slow think is the agent/model tier's property, not the command's) | `[unit]` `::patternSignature::*` |

@@ -328,6 +328,8 @@ export function patternSignature(f: FrictionFinding): string {
       return "slow_model_turn:model_turn";
     case "infra_failure": {
       if (summary.startsWith("sandbox dead")) return "infra_failure:sandbox_dead";
+      const unconfirmed = /^tool result unconfirmed during\s*/.exec(summary);
+      if (unconfirmed) return `infra_failure:unconfirmed ${commandSignature(summary.slice(unconfirmed[0].length))}`;
       const mid = /^no result for tool call \(the run ended mid-tool\):\s*/.exec(summary);
       if (mid) return `infra_failure:mid-tool ${commandSignature(summary.slice(mid[0].length))}`;
       const during = /^exec infrastructure failed during\s*/.exec(summary);
@@ -630,6 +632,9 @@ function suggestedFix(p: FrictionPattern): string {
         ? `Runs outpace the runaway guard: the turn cap is \`RUNAWAY_TURNS_PER_MINUTE\` (${RUNAWAY_TURNS_PER_MINUTE} turns a minute) over the affected agent's wall clock, a pace a working run does not sustain — so a run that reaches it is looping, not working. Read the evidence rows for a retry loop (the same call re-issued turn after turn) and fix its cause where the agent reads before acting (the target repo's AGENTS.md, the resident command table), or have the prompt batch tool calls (several commands per \`bash\` call). The cap is derived from \`maxMinutes\` (\`src/agents/registry.ts\`), not a knob to turn.`
         : `Runs exhaust the TIME budget and are cut off mid-work. Raise the affected agent's ask (\`ASKS\` in \`src/core/budgets.ts\`; the fit check says what else must move), or split the task shape that triggers it — a run that is forced to write up findings is a run whose work was wasted.`;
     case "infra_failure":
+      if (p.signature.startsWith("unconfirmed ")) {
+        return `Runs ended without a confirmed result for \`${p.signature.replace(/^unconfirmed /, "")}\`. The command outcome and the cause of the interruption remain unknown. Use the original run and operation records to identify the interruption and recover a completion receipt. This evidence does not establish a command or transport failure.`;
+      }
       if (p.signature === "sandbox_dead") {
         return `The sandbox died mid-run in ${p.runIds.length} runs. Check container sizing first (the \`deploy/cloudflare-*/wrangler.template.jsonc\` comments: the 1 GiB \`basic\` tier died running vitest; thread sandboxes are \`standard-4\` — 4 vCPU / 12 GiB / 20 GB, the platform's largest — and residents a custom type of the same size), then the memory footprint of the failing command, then the sandbox/resident Worker logs (\`deploy/bin/cf-logs\`) around the affected runs.`;
       }

@@ -24,9 +24,12 @@ Results pair with pending calls by `callId`, not completion order. A replayed st
 
 ## Validation criteria
 
+An interrupted tool result (`cut:true`) records an unconfirmed outcome. It takes infrastructure precedence over command failure, setup and slow-call classifications. It does not prove that the command failed and does not make a later matching call a retry. Its interval uses the same union as other infrastructure findings. Storage failure notes remain separate evidence of the storage error.
+
 | Criterion | Evidence |
 |-----------|----------|
 | Empty stream → zeroed diagnosis, no findings, `no friction detected` | `[unit]` `src/core/runFriction.test.ts::analyzeRunFriction — empty / untimed input::an empty stream yields a clean, zeroed diagnosis…` |
+| Cut tool results retain their unconfirmed outcome and concurrent interval union beside storage failures, for live and finished runs; actual failures and retries remain visible | `[unit]` `src/core/runFriction.test.ts::keeps storage failures and cut tool outcomes separate from command failures, finished=%s`; `src/core/runFriction.test.ts::does not treat a cut result as a command failure or retry, but retains a real failure and retry` |
 | Clean fast run → no findings; `runMs`/`toolTimeMs` computed | `[unit]` `::a clean, fast run has no findings and a no-friction verdict` |
 | Untimed stream (no stamps) still classifies, with no durations and no timed fields | `[unit]` `::untimed events (a hand-written capture) still classify failures/retries, with no durations` |
 | Deterministic; input not mutated | `[unit]` `::is deterministic: the same stream yields a deep-equal diagnosis`, `::does not mutate its input` |

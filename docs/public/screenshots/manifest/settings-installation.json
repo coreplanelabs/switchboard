@@ -184,7 +184,7 @@
     "src/core/routingTelemetry.ts": "f228a3997db4b4ca703948103d5579ca4a80a906a39944f7e71abe307a3d6780",
     "src/core/runDuration.ts": "dca2a672930febee9fae33e917c5129d6271fd1f9781a7dbcb4cb2217dbe2dae",
     "src/core/runEvents.ts": "5d0d3e03ca8d9d9e8929d94f08500b04a309051079f9ff0eea74fd0d53823814",
-    "src/core/runFriction.ts": "704757bd3b15cdf00e08c02e8b8fc191e99d6e28af7c0d7d16a6ea31425d771c",
+    "src/core/runFriction.ts": "17b333469dd00275c262a97792bec5bb7cee6b05dfc713e0491220845decae23",
     "src/core/runIdentity.ts": "de4ec56068e42c38d84ba40b63c373426d4ebd6aad20f55b6d15bcd2e372e95a",
     "src/core/runLedger/cancellation.ts": "e9e2746ba05d16e5a6dce368d9ca835359931c91acf56fab0ec5bff86706d16f",
     "src/core/runLedger/contextRetention.ts": "faed15938ed9de6c83e46265dd9598f2e9981190252ccebd29548852bbd71ad8",
@@ -468,8 +468,8 @@
       "response:*/*:/assets/fa9648c65d44afab.js": "be6f136511acc845b8a7f081a78cebb32a09124b4cbe63c5d516994c6566528e",
       "response:*/*:/assets/green.css": "8f6663fec4f5945d4f3b2029b33027267e49a58e705961f50c2cc0d075977535",
       "response:*/*:/settings/installation": "2dc3c17c5425ba5508efed7dae9adfdbbd6aa6b3c4ead47061ba339b7436cfb7",
-      "response:application/json:/home/session": "758484f4ef1b98a4996129dcb7d885736b16972ab88b82cde977c923c25d1e1a",
-      "response:text/event-stream:/home/events": "822db382206410195d71724e7ae970b5573cd45ca7a6ed8459fa4ea55cbc469b"
+      "response:application/json:/home/session": "507c36d2fad3f056749931ac4f49fc3d3d4bb8b8e94e5cb909060d7c6940018c",
+      "response:text/event-stream:/home/events": "01b7c57341aa0073dcd9c8a8c59760e67dd34fecb54c38ae2a6465144e71a349"
     }
   }
 }
