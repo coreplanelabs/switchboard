@@ -1,13 +1,246 @@
 import { describe, expect, it, vi } from "vitest";
-import { BASE_URL_ENV, decide, main, readToken } from "./preflight.mjs";
+import { BASE_URL_ENV, decide, fetchResidents, main, readToken } from "./preflight.mjs";
+
+// Older receivers advertise native isolation but no acquisition protocol.
+function knownOldHealth(url) {
+  return new URL(url).pathname === "/healthz"
+    ? Response.json({ ok: true, build: { commit: "a".repeat(40) }, features: { nativeRunScopes: "native-v1" } })
+    : undefined;
+}
+
+describe("ordinary deployment acquisition client", () => {
+  const workerVersion = "00000000-0000-4000-8000-000000000002";
+  const health = {
+    ok: true,
+    build: { commit: "a".repeat(40) },
+    features: { nativeRunScopes: "native-v1", deployFenceAcquisition: "v1" },
+  };
+  const receipt = (id, phase, extra = {}) => ({
+    schema: 1,
+    purpose: "deploy-fence-acquisition",
+    id,
+    phase,
+    workerVersion,
+    build: "a".repeat(40),
+    ...extra,
+  });
+  async function exchange(reply, options) {
+    const calls = [];
+    const lines = [];
+    let id;
+    const wire = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const path = new URL(url).pathname;
+      const body = init.body ? JSON.parse(init.body) : undefined;
+      calls.push({ path, method: init.method, body, signal: init.signal });
+      if (path === "/healthz") return Response.json(health);
+      if (path === "/prepare-deploy-fence") id = body.id;
+      return reply(path, init, id);
+    });
+    const log = vi.spyOn(console, "error").mockImplementation((line) => lines.push(String(line)));
+    try {
+      const fetched = await fetchResidents("https://resident.example.test", "fixture", options);
+      return { fetched, calls, lines, decision: decide(fetched, { force: true }) };
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+    }
+  }
+
+  it("cancels the original timed-out preparation and shares deadlines within each phase", async () => {
+    const result = await exchange((path, _init, id) => {
+      if (path === "/prepare-deploy-fence") throw new DOMException("lost original request", "TimeoutError");
+      if (path === "/abandon-deploy-fence-acquisition") throw new Error("lost original cancellation reply");
+      return Response.json({ acquisition: receipt(id, "abandoned", { disposition: "fence-withdrawn" }) });
+    });
+    expect(result.fetched).toMatchObject({
+      ok: false,
+      error: "timeout",
+      protocol: "v1",
+      acquisitionUnverified: false,
+      acquisition: { phase: "abandoned" },
+    });
+    expect(result.decision.allow).toBe(false);
+    expect(result.decision.forced).toBe(false);
+    expect(result.calls.map(({ path, method }) => [method, path])).toEqual([
+      ["GET", "/healthz"],
+      ["POST", "/prepare-deploy-fence"],
+      ["POST", "/abandon-deploy-fence-acquisition"],
+      ["GET", "/deploy-fence-acquisition"],
+    ]);
+    expect(result.calls[1].body).toEqual({ id: result.fetched.acquisitionId });
+    expect(result.calls[2].body).toEqual({ id: result.fetched.acquisitionId });
+    expect(result.calls[0].signal).toBe(result.calls[1].signal);
+    expect(result.calls[2].signal).toBe(result.calls[3].signal);
+    expect(result.calls[2].signal).not.toBe(result.calls[1].signal);
+    expect(result.lines[0]).toContain(result.fetched.acquisitionId);
+  });
+
+  it.each(["sealed", "unreadable"])("halts an uncertain original preparation when cleanup is %s", async (outcome) => {
+    const result = await exchange((path, _init, id) => {
+      if (path === "/prepare-deploy-fence") throw new Error("lost preparation reply");
+      if (outcome === "unreadable") throw new Error("unavailable original disposition");
+      return Response.json({ acquisition: receipt(id, "sealed") }, { status: 409 });
+    });
+    expect(result.fetched).toMatchObject({ ok: false, acquisitionUnverified: true });
+    expect(result.decision).toEqual({
+      allow: false,
+      forced: false,
+      message: "deployment check outcome is unverified; the original acquisition remains held",
+    });
+    expect(result.decision.message).not.toContain("preflight REFUSED");
+    expect(result.calls.filter(({ method }) => method === "POST").map(({ path }) => path)).toEqual([
+      "/prepare-deploy-fence",
+      "/abandon-deploy-fence-acquisition",
+    ]);
+  });
+
+  it.each([401, 403, 400])("does not use another mutation after preparation HTTP %s", async (status) => {
+    const result = await exchange(() => Response.json({ error: "access or input refused" }, { status }));
+    expect(result.fetched).toMatchObject({ ok: false, httpStatus: status, acquisitionUnverified: true });
+    expect(result.decision.allow).toBe(false);
+    expect(result.calls.map(({ path }) => path)).toEqual(["/healthz", "/prepare-deploy-fence"]);
+  });
+
+  it("does not read through a cancellation authorization refusal", async () => {
+    const result = await exchange((path) => {
+      if (path === "/prepare-deploy-fence") throw new Error("lost");
+      return Response.json({ error: "access refused" }, { status: 403 });
+    });
+    expect(result.decision).toMatchObject({ allow: false, forced: false });
+    expect(result.fetched.acquisitionUnverified).toBe(true);
+    expect(result.calls.map(({ path }) => path)).toEqual([
+      "/healthz",
+      "/prepare-deploy-fence",
+      "/abandon-deploy-fence-acquisition",
+    ]);
+  });
+
+  it("rejects a forged ready receipt and cannot turn a retained status read into upload permission", async () => {
+    const result = await exchange((path, _init, id) => {
+      if (path === "/prepare-deploy-fence")
+        return Response.json({ ...payload([]).payload, acquisition: receipt(id, "sealed", { extra: "untrusted" }) });
+      return Response.json({ acquisition: receipt(id, "sealed") }, { status: 409 });
+    });
+    expect(result.fetched).toMatchObject({
+      ok: false,
+      error: "acquisition-response-unverified",
+      acquisitionUnverified: true,
+    });
+    expect(result.decision.allow).toBe(false);
+    expect(result.calls.map(({ path }) => path)).toEqual([
+      "/healthz",
+      "/prepare-deploy-fence",
+      "/abandon-deploy-fence-acquisition",
+    ]);
+  });
+
+  it("retains an acknowledged busy abandonment as a refusal without another cancellation write", async () => {
+    const result = await exchange((_path, _init, id) =>
+      Response.json({
+        ...payload([]).payload,
+        fenceReady: false,
+        acquisition: receipt(id, "abandoned", { disposition: "fence-withdrawn" }),
+      }),
+    );
+    expect(result.fetched).toMatchObject({
+      ok: true,
+      protocol: "v1",
+      payload: { fenceReady: false, acquisition: { phase: "abandoned" } },
+    });
+    expect(result.decision).toMatchObject({ allow: false, forced: false });
+    expect(result.calls.map(({ path }) => path)).toEqual(["/healthz", "/prepare-deploy-fence"]);
+  });
+
+  it.each(["future", null])("refuses unrecognized capability %s before installing any fence", async (capability) => {
+    const wire = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        Response.json({ ...health, features: { ...health.features, deployFenceAcquisition: capability } }),
+      );
+    try {
+      const fetched = await fetchResidents("https://resident.example.test", "fixture");
+      expect(fetched).toMatchObject({
+        ok: false,
+        error: "capability-unverified",
+        diagnostic: { requestOutcome: "not-started" },
+      });
+      expect(decide(fetched).allow).toBe(false);
+      expect(wire.mock.calls.map(([url, init]) => [init.method, new URL(url).pathname])).toEqual([["GET", "/healthz"]]);
+    } finally {
+      wire.mockRestore();
+    }
+  });
+
+  it("keeps explicitly selected legacy deployment modes on the original protocol", async () => {
+    const result = await exchange(() => Response.json(payload([]).payload), { legacy: true });
+    expect(result.fetched.ok).toBe(true);
+    expect(decide(result.fetched).allow).toBe(true);
+    expect(result.calls.map(({ path }) => path)).toEqual(["/deploy-fence"]);
+  });
+
+  it("uses the sealed acquisition protocol advertised by the receiver", async () => {
+    const calls = [];
+    const wire = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const path = new URL(url).pathname;
+      calls.push({ path, method: init.method });
+      if (path === "/healthz")
+        return Response.json({
+          ok: true,
+          build: { commit: "a".repeat(40) },
+          features: { nativeRunScopes: "native-v1", deployFenceAcquisition: "v1" },
+        });
+      if (path === "/prepare-deploy-fence") {
+        const { id } = JSON.parse(init.body);
+        const workerVersion = "00000000-0000-4000-8000-000000000002";
+        return Response.json({
+          ...payload([]).payload,
+          draining: {
+            ...payload([]).payload.draining,
+            swapAcquisitionId: id,
+            swapVersion: workerVersion,
+            swapBuild: "a".repeat(40),
+          },
+          acquisition: {
+            schema: 1,
+            purpose: "deploy-fence-acquisition",
+            id,
+            phase: "sealed",
+            workerVersion,
+            build: "a".repeat(40),
+          },
+          deployDiagnostic: {
+            schema: 1,
+            producer: { build: "a".repeat(40), workerVersion },
+            fenceDisposition: "retained",
+          },
+        });
+      }
+      return Response.json({ error: "legacy mutation refused" }, { status: 409 });
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const fetched = await fetchResidents("https://resident.example.test", "fixture");
+      expect(fetched.ok).toBe(true);
+      expect(decide(fetched).allow).toBe(true);
+      expect(calls).toEqual([
+        { path: "/healthz", method: "GET" },
+        { path: "/prepare-deploy-fence", method: "POST" },
+      ]);
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+    }
+  });
+});
 
 describe("resident deploy fence HTTP refusal", () => {
   const prefix = "[resident-deploy-fence-diagnostic] ";
   async function capture(response, failDiagnostic = false) {
     const lines = [];
     const wire = vi.spyOn(globalThis, "fetch");
-    if (typeof response === "function") wire.mockImplementation(response);
-    else wire.mockResolvedValue(response);
+    wire.mockImplementation(
+      (url, init) => knownOldHealth(url) ?? (typeof response === "function" ? response(url, init) : response),
+    );
     const log = vi.spyOn(console, "error").mockImplementation((line) => {
       if (failDiagnostic && String(line).startsWith(prefix)) throw new Error("private-log-error");
       lines.push(String(line));
@@ -21,7 +254,10 @@ describe("resident deploy fence HTTP refusal", () => {
       return {
         exit,
         lines,
-        calls: wire.mock.calls.map(([url, init]) => ({ path: new URL(url).pathname, method: init.method })),
+        mutations: wire.mock.calls
+          .filter(([, init]) => init.method !== "GET")
+          .map(([url, init]) => ({ path: new URL(url).pathname, method: init.method })),
+        reads: wire.mock.calls.filter(([, init]) => init.method === "GET").map(([url]) => new URL(url).pathname),
         diagnostic: diagnostic ? JSON.parse(diagnostic.slice(prefix.length)) : null,
       };
     } finally {
@@ -42,7 +278,7 @@ describe("resident deploy fence HTTP refusal", () => {
     );
     expect(result).toMatchObject({
       exit: 1,
-      calls: [{ path: "/deploy-fence", method: "POST" }],
+      mutations: [{ path: "/deploy-fence", method: "POST" }],
       diagnostic: {
         schema: 1,
         httpStatus: 409,
@@ -56,6 +292,7 @@ describe("resident deploy fence HTTP refusal", () => {
         nextStep: "inspect-original-fence",
       },
     });
+    expect(result.reads).toEqual(["/healthz"]);
     const text = result.lines.join("\n");
     expect(text).toContain("resident Worker responded HTTP 409");
     expect(text).not.toContain("not consulted");
@@ -75,7 +312,7 @@ describe("resident deploy fence HTTP refusal", () => {
         activeAdmissions: null,
       });
       expect(result.lines.join("\n")).not.toMatch(/private-token|\/workspace\/private/);
-      expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+      expect(result.mutations).toEqual([{ path: "/deploy-fence", method: "POST" }]);
     },
   );
 
@@ -97,7 +334,7 @@ describe("resident deploy fence HTTP refusal", () => {
     const result = await capture(response);
     expect(result).toMatchObject({ exit: 1, diagnostic: { httpStatus: 409, bodyState: "too-large" } });
     expect(cancelled).toBe(true);
-    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(result.mutations).toEqual([{ path: "/deploy-fence", method: "POST" }]);
   });
 
   it("reports only valid producer and admission facts without turning them into upload authority", async () => {
@@ -124,7 +361,7 @@ describe("resident deploy fence HTTP refusal", () => {
         nativeOutcome: "unverified",
       },
     });
-    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(result.mutations).toEqual([{ path: "/deploy-fence", method: "POST" }]);
     expect(JSON.stringify(result.diagnostic)).not.toMatch(/private-test-token|\/workspace\/private/);
     expect(Buffer.byteLength(JSON.stringify(result.diagnostic))).toBeLessThanOrEqual(1024);
     body.deployDiagnostic.producer.build = "/workspace/private";
@@ -157,13 +394,13 @@ describe("resident deploy fence HTTP refusal", () => {
       },
     });
     expect(result.lines.join("\n")).not.toMatch(/not consulted|private-stream-error/);
-    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(result.mutations).toEqual([{ path: "/deploy-fence", method: "POST" }]);
   });
 
   it("keeps refusal and performs no recovery when diagnostic output fails", async () => {
     const result = await capture(Response.json({ error: "deploy-fence-read-unavailable" }, { status: 503 }), true);
     expect(result.exit).toBe(1);
-    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(result.mutations).toEqual([{ path: "/deploy-fence", method: "POST" }]);
     expect(result.lines.join("\n")).toContain("http-status:503");
     expect(result.lines.join("\n")).not.toContain("private-log-error");
   });
@@ -187,7 +424,7 @@ describe("resident deploy fence HTTP refusal", () => {
         nextStep: "reconcile-original-request",
       },
     });
-    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(result.mutations).toEqual([{ path: "/deploy-fence", method: "POST" }]);
     expect(result.lines.join("\n")).toContain("request outcome is unknown");
     expect(result.lines.join("\n")).not.toMatch(/not consulted|set RESIDENT_DRAIN_TOKEN|private-request-error/);
   });
@@ -214,7 +451,7 @@ describe("resident deploy fence HTTP refusal", () => {
         nextStep: "reconcile-original-request",
       },
     });
-    expect(result.calls).toEqual([{ path: "/deploy-fence", method: "POST" }]);
+    expect(result.mutations).toEqual([{ path: "/deploy-fence", method: "POST" }]);
     expect(result.lines.join("\n")).toContain("resident Worker responded HTTP 200");
     expect(result.lines.join("\n")).not.toMatch(/not consulted|private-body-error/);
   });
@@ -620,6 +857,8 @@ describe("resident deploy preflight — main()", () => {
     const lines = [],
       requests = [];
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const health = knownOldHealth(url);
+      if (health) return health;
       requests.push({ url, method: init.method, headers: init.headers });
       return Response.json(
         payload([
@@ -847,7 +1086,9 @@ describe("resident deploy admission diagnostic", () => {
     const lines = [],
       requests = [];
     const log = vi.spyOn(console, "error").mockImplementation((line) => lines.push(String(line)));
-    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const health = knownOldHealth(url);
+      if (health) return health;
       requests.push(init.method);
       return responseStatus === 200
         ? Response.json(body)
@@ -960,7 +1201,9 @@ describe("resident deploy admission diagnostic", () => {
 
   it("keeps refusal when the global diagnostic sink fails", async () => {
     const body = refused([row]);
-    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(body));
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (url) => knownOldHealth(url) ?? Response.json(body));
     const lines = [];
     const logger = vi.spyOn(console, "error").mockImplementation((line) => {
       if (String(line).startsWith("[resident-deploy-admission-diagnostic]")) throw new Error("private-sink-error");
@@ -1327,7 +1570,10 @@ describe("resident deploy preflight — decide()", () => {
     });
     const lines = [];
     const logger = vi.spyOn(console, "error").mockImplementation((line) => lines.push(String(line)));
-    vi.stubGlobal("fetch", async () => new Response(JSON.stringify(fetched.payload), { status: 200 }));
+    vi.stubGlobal(
+      "fetch",
+      async (url) => knownOldHealth(url) ?? new Response(JSON.stringify(fetched.payload), { status: 200 }),
+    );
     try {
       expect(
         await main([], { RESIDENT_BASE_URL: "https://resident.invalid", RESIDENT_DRAIN_TOKEN: "private-token" }),
