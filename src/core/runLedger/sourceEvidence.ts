@@ -2,16 +2,20 @@ import { sourceHash } from "../references/receipts.js";
 import { DURABLE_INBOX_MAX_BYTES, inboxCustodyOf, type InboxTarget } from "./inboxMessage.js";
 import { sourceEventReceiptOf, sourceSnapshot, type SourceEvent, type SourceEventReceipt } from "./sourceEvents.js";
 
-export interface SourceEvidenceMessage {
-  version: 1;
+interface SourceEvidenceFields {
   kind: "source-evidence";
   source: Pick<SourceEvent, "sourceId" | "deliveryId" | "objectId" | "changeId" | "occurredAt"> & {
     authorId: string | null;
   };
   receipt: SourceEventReceipt;
+}
+interface LegacySourceEvidenceMessage extends SourceEvidenceFields {
+  version: 1;
   decision: { runId: string; id: string };
   text: string;
 }
+
+export type SourceEvidenceMessage = LegacySourceEvidenceMessage;
 
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -19,6 +23,13 @@ const identity = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 512;
 const closed = (value: Record<string, unknown>, keys: readonly string[]) =>
   Object.keys(value).every((key) => keys.includes(key));
+
+function decisionReferenceOf(value: unknown): { runId: string; id: string } | undefined {
+  if (!object(value) || !closed(value, ["runId", "id"]) || !identity(value.runId) || !identity(value.id)) return;
+  const invocation: unknown = JSON.parse(value.id);
+  if (Array.isArray(invocation) && invocation.length === 2 && invocation[0] === value.runId && identity(invocation[1]))
+    return { runId: value.runId, id: value.id };
+}
 
 /** Decode data, not authority. A consumer must separately verify the canonical
  * source and saved decision. Current runtimes still hold this message kind. */
@@ -55,14 +66,8 @@ export async function prepareSourceEvidenceMessage(
       !identity(decision.id)
     )
       return;
-    const invocation: unknown = JSON.parse(decision.id);
-    if (
-      !Array.isArray(invocation) ||
-      invocation.length !== 2 ||
-      invocation[0] !== decision.runId ||
-      !identity(invocation[1])
-    )
-      return;
+    const reference = decisionReferenceOf(decision);
+    if (!reference) return;
     const receipt = sourceEventReceiptOf(snapshot.receipt);
     if (!receipt) return;
     if (target) {
@@ -90,7 +95,7 @@ export async function prepareSourceEvidenceMessage(
         ...(source.occurredAt !== undefined ? { occurredAt: Number(source.occurredAt) } : {}),
       },
       receipt,
-      decision: { runId: decision.runId, id: decision.id },
+      decision: reference,
       text: snapshot.text,
     };
     if (new TextEncoder().encode(JSON.stringify(message)).byteLength > DURABLE_INBOX_MAX_BYTES) return;
