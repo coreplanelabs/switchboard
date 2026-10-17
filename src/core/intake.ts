@@ -348,17 +348,23 @@ export type EvidenceRelevanceResult =
       verdict: "relevant" | "unrelated" | "unclassified";
       source: "model" | "error" | "timeout";
     } & Pick<IntakeDecision, "reason" | "providerFailure" | "providerFailureDetails" | "attempts">)
-  | { kind: "held"; reason: "missing-or-oversized-input" | "cancelled" };
+  | { kind: "held"; reason: "missing-or-oversized-input" | "cancelled" | "context-unavailable" };
 
 /** A recommendation only. The caller must retain source custody and save
  * this result against its task context before offering or ignoring input.
  * No source producer calls this function yet. */
 export async function classifyEvidenceRelevance(
   input: EvidenceRelevanceInput,
-  deps: Pick<IntakeDeps, "model" | "capField" | "timeoutMs"> & { signal?: AbortSignal },
+  deps: Pick<IntakeDeps, "model" | "capField" | "timeoutMs"> & {
+    signal?: AbortSignal;
+    /** Check current source access and task context against these exact input
+     * bytes. Missing or unavailable proof holds input. Honor the signal. */
+    validateInput: ((input: Readonly<EvidenceRelevanceInput>, signal: AbortSignal) => Promise<boolean>) | undefined;
+  },
 ): Promise<EvidenceRelevanceResult> {
   const { taskContext, message } = input;
-  const { model, capField, timeoutMs, signal: callerSignal } = deps;
+  const { model, capField, timeoutMs, signal: callerSignal, validateInput } = deps;
+  const snapshot = Object.freeze({ taskContext, message });
   const bounded = (value: unknown, max: number): value is string =>
     typeof value === "string" && value.trim().length > 0 && new TextEncoder().encode(value).byteLength <= max;
   if (
@@ -367,10 +373,47 @@ export async function classifyEvidenceRelevance(
   )
     return { kind: "held", reason: "missing-or-oversized-input" };
   if (callerSignal?.aborted) return { kind: "held", reason: "cancelled" };
+  const reportHold = (stage: "attempt" | "send" | "result", cause: "missing" | "refused" | "exception") => {
+    try {
+      console.warn(JSON.stringify({ event: "intake.source.validation.held", stage, cause }));
+    } catch {
+      // A diagnostic sink cannot permit or fail source input.
+    }
+  };
+  if (!validateInput) {
+    reportHold("attempt", "missing");
+    return { kind: "held", reason: "context-unavailable" };
+  }
   const tool = "evidence_relevance";
+  let contextHeld = false;
   try {
     const deadline = AbortSignal.timeout(timeoutMs ?? ROUTE_TIMEOUT_MS);
     const signal = callerSignal ? AbortSignal.any([callerSignal, deadline]) : deadline;
+    const checkInput = async (stage: "attempt" | "send" | "result") => {
+      signal.throwIfAborted();
+      if (contextHeld) throw new Error("The source input context could not be verified.");
+      let allowed = false;
+      let cause: "refused" | "exception" = "refused";
+      let onAbort: () => void = () => {};
+      try {
+        const interrupted = new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(signal.reason);
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        allowed = (await Promise.race([validateInput(snapshot, signal), interrupted])) === true;
+      } catch {
+        // Source-store details must not become a provider failure or reason.
+        cause = "exception";
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+      signal.throwIfAborted();
+      if (!allowed) {
+        contextHeld = true;
+        reportHold(stage, cause);
+        throw new Error("The source input context could not be verified.");
+      }
+    };
     const result = await askStructured<Extract<EvidenceRelevanceResult, { kind: "classified" }>>(
       {
         prompt: {
@@ -426,8 +469,8 @@ export async function classifyEvidenceRelevance(
         floor: (reason) => ({ kind: "classified", verdict: "unclassified", source: "error", reason }),
       },
       async (prompt, options) => {
-        signal.throwIfAborted();
-        return model(prompt, options);
+        await checkInput("attempt");
+        return model(prompt, { ...options, beforeSend: () => checkInput("send") });
       },
       { maxTokens: outputCapWithReasoning(ROUTE_MIN_OUTPUT_TOKENS, { capField }), signal },
     );
@@ -440,9 +483,11 @@ export async function classifyEvidenceRelevance(
         reason: "The relevance check timed out.",
         attempts: result.attempts,
       };
+    await checkInput("result");
     return { ...result.value, attempts: result.attempts };
   } catch (err) {
     if (callerSignal?.aborted) return { kind: "held", reason: "cancelled" };
+    if (contextHeld) return { kind: "held", reason: "context-unavailable" };
     const failure = intakeModelFailure(err);
     return {
       kind: "classified",

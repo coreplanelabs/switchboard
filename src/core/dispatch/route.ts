@@ -263,7 +263,12 @@ export class MultiToolCallError extends Error {
  *  (`providerStructuredModel`); tests script one. */
 export type RouteModel = (
   prompt: RoutePrompt,
-  opts: { maxTokens: number; signal: AbortSignal; observe?: (value: RouteModelObservation) => void },
+  opts: {
+    maxTokens: number;
+    signal: AbortSignal;
+    observe?: (value: RouteModelObservation) => void;
+    beforeSend?: () => Promise<void>;
+  },
 ) => Promise<RouteToolCall | string>;
 
 import type { RoutingModelObservation as RouteModelObservation } from "../routingTelemetry.js";
@@ -522,6 +527,7 @@ export function providerStructuredModel(
       messages,
       maxTokens: call.maxTokens,
       signal: call.signal,
+      ...(call.beforeSend ? { beforeSend: call.beforeSend } : {}),
       ...(call.observe ? { observer: { onResponse: (requestId: string) => observe({ requestId }) } } : {}),
       // The caller's configured effort, card-decided (`turnEffort`): intake's
       // `intake.effort` or the operator's `defaults.efforts.general`. Absent →

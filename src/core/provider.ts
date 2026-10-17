@@ -59,6 +59,9 @@ export interface CompletionRequest {
   /** Cancellation for a hard run stop: providers pass it to their HTTP
    *  call so an aborted run stops billing/streaming now. Absent → never aborts. */
   signal?: AbortSignal;
+  /** Recheck current context immediately before each HTTP send, including
+   * SDK retries. A rejected check must prevent the send. Never serialized. */
+  beforeSend?: () => Promise<void>;
   /** Prompt-cache TTL for this call's breakpoints; providers that cache apply
    *  it to every breakpoint. Absent → the provider default (`5m`). */
   cacheTtl?: CacheTtl;
