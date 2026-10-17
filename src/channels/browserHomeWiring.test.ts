@@ -1,5 +1,12 @@
 // Feature: docs/reference/specs/browser-home.md — native authority and durable production readiness.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
+import { createMcpApprovalView } from "./mcpApprovalView.js";
+import { InMemoryConfirmationStore } from "../core/confirmations.js";
+import { runsStop } from "../core/commands/runs.js";
+import type { Actor } from "../core/authz/types.js";
+import type { Confirmation } from "../core/confirmations.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -224,6 +231,7 @@ async function fixture(
     }) as unknown as IncomingMessage;
   return {
     wiring,
+    config,
     credential,
     people,
     request,
@@ -248,6 +256,273 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
+  async function accessOffer(command: "runs.stop" | "repo.offboard" = "runs.stop") {
+    let currentPerson = "slack:UALICE",
+      sessionValid = true,
+      sessionUnavailable = false;
+    const personByEmail = async () => ({ id: currentPerson, name: "Alice" });
+    const identity: AccessIdentity = { sub: "opaque", email: "same-address@example.test" };
+    const dashboard: DashboardVerifier = {
+      mode: "access",
+      describe: () => "fixture",
+      verify: async () =>
+        sessionUnavailable
+          ? { ok: false, status: 503, body: "Source unavailable" }
+          : sessionValid
+            ? { ok: true, identity }
+            : { ok: false, status: 403, body: "Session unavailable" },
+    };
+    const s = await fixture(true, true, undefined, undefined, dashboard, false, { personByEmail });
+    await s.wiring.initialize();
+    const home = await s.wiring.context(s.request(), s.credential);
+    if (!home) throw new Error("Expected the verified browser owner");
+    s.core.clock = () => 1000;
+    const confirmations = new InMemoryConfirmationStore({ clock: () => 1000 });
+    s.core.confirmations = confirmations;
+    const executions: unknown[] = [];
+    s.registry.create(
+      "Original fixture review",
+      {
+        agent: "review",
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:original",
+        channelVisibility: "public",
+        repo: "sample/api",
+      },
+      { id: "original-review" },
+    );
+    const stopRun: typeof s.runs.stopRun = async (id, mode, actor, opts) => {
+      executions.push({ id, mode, actor, opts });
+      return { ok: true, value: { id, mode, state: "stopped" } };
+    };
+    const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
+    registry.register(runsStop);
+    registry.register({
+      id: "repo.offboard",
+      action: "repo:write",
+      effect: "write",
+      annotations: { destructive: true },
+      describe: "Owned fixture action",
+      handler: async () => {
+        executions.push({ command: "repo.offboard" });
+        return {};
+      },
+    });
+    const commands = bindCommands(registry, { runs: async () => ({ ...s.runs, stopRun }) });
+    s.core.commands = commands;
+    const options = {
+      auth: { tokens: {} },
+      sso: dashboard,
+      personByEmail,
+      commands,
+      approvalsEnabled: true,
+      publicBaseUrl: "https://dashboard.fixture.test",
+    };
+    const rpc = (name: string, args: unknown) =>
+      handleMcpRequest(
+        {
+          method: "POST",
+          headers: { authorization: "Bearer fixture-access-session", origin: options.publicBaseUrl },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "offer-request",
+            method: "tools/call",
+            params: { name, arguments: args },
+          }),
+        },
+        s.core,
+        options,
+      );
+    const result = await rpc(
+      command === "runs.stop" ? "runs_stop" : "repo_offboard",
+      command === "runs.stop" ? { id: "original-review", mode: "hard" } : {},
+    );
+    expect(result.status).toBe(200);
+    const saved = structuredClone([...confirmations.rows.values()][0]);
+    if (!saved || saved.kind !== "run") throw new Error("Expected the direct registry offer");
+    expect(saved).toMatchObject({
+      kind: "run",
+      command,
+      message: {
+        userId: "slack:UALICE",
+        authenticatedAs: "access:opaque",
+        approvalConnection: { credentialId: "access:opaque" },
+      },
+      caller: { kind: "access", id: "access:opaque" },
+    });
+    expect(saved.originalOrganization).toBeUndefined();
+    expect(executions).toEqual([]);
+    const file = ts.createSourceFile(
+      "index.ts",
+      readFileSync(new URL("../index.ts", import.meta.url), "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    let expression: ts.Expression | undefined;
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isVariableDeclaration(node) &&
+        node.name.getText(file) === "mcpApproval" &&
+        node.initializer &&
+        ts.isCallExpression(node.initializer)
+      ) {
+        const options = node.initializer.arguments[1];
+        if (options && ts.isObjectLiteralExpression(options))
+          for (const property of options.properties)
+            if (ts.isPropertyAssignment(property) && property.name.getText(file) === "resolveApprovalSource")
+              expression = property.initializer;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    if (!expression) throw new Error("Expected the production approval source binding");
+    const actors = new WeakMap<object, Actor>();
+    const code = ts.transpileModule(`const resolve = ${expression.getText(file)}; resolve`, {
+      compilerOptions: { target: ts.ScriptTarget.ESNext },
+    }).outputText;
+    const resolveApprovalSource = runInNewContext(code, { browserWiring: s.wiring, verifiedPageActors: actors }) as (
+      identity: AccessIdentity,
+      row: Confirmation,
+    ) => Promise<import("../core/confirmations.js").ConfirmationSource | undefined>;
+    const page = (action?: string, beforeBody?: () => void, browser = s.credential, viewer = home.actor) =>
+      new Promise<{ status: number; text: string }>((resolve) => {
+        let status = 0;
+        actors.set(browser, viewer);
+        async function* chunks() {
+          beforeBody?.();
+          if (action) yield Buffer.from(`action=${action}`);
+        }
+        const req = Object.assign(chunks(), {
+          url: `/settings/approve?id=${saved.id}`,
+          method: action ? "POST" : "GET",
+          headers: {
+            origin: options.publicBaseUrl,
+            "sec-fetch-site": "same-origin",
+            "content-type": "application/x-www-form-urlencoded",
+          },
+        });
+        createMcpApprovalView(s.core, { ...options, resolveApprovalSource })(
+          req as never,
+          {
+            writeHead: (value: number) => {
+              status = value;
+            },
+            end: (text: string) => resolve({ status, text }),
+          } as unknown as ServerResponse,
+          browser,
+          viewer,
+        );
+      });
+    return {
+      ...s,
+      home,
+      page,
+      saved,
+      confirmations,
+      executions,
+      rpc,
+      revokeSession: () => {
+        sessionValid = false;
+      },
+      sourceOutage: () => {
+        sessionUnavailable = true;
+      },
+      changeRequester: () => {
+        currentPerson = "slack:UBOB";
+      },
+    };
+  }
+
+  it("shows a direct Access MCP offer through the production browser source resolver without executing it", async () => {
+    const s = await accessOffer();
+    const shown = await s.page();
+    expect({ status: shown.status, executions: s.executions.length }).toEqual({ status: 200, executions: 0 });
+    expect(shown.text).toContain("Confirm saved action");
+    expect(await s.confirmations.get(s.saved.id)).toEqual(s.saved);
+    expect((await s.page("approve")).status).toBe(200);
+    expect(await s.confirmations.get(s.saved.id)).toMatchObject({
+      approvedBy: "browser",
+      browserApproved: true,
+      message: s.saved.message,
+      input: s.saved.input,
+      parsedInput: s.saved.kind === "run" ? s.saved.parsedInput : undefined,
+    });
+    expect(s.executions).toEqual([]);
+    const resumed = await s.rpc("approval_resume", { id: s.saved.id });
+    expect(resumed.body).not.toHaveProperty("error");
+    expect(s.executions).toEqual([
+      { id: "original-review", mode: "hard", actor: { kind: "access", id: "access:opaque" }, opts: undefined },
+    ]);
+    const repeated = await s.rpc("approval_resume", { id: s.saved.id });
+    expect(repeated.body).toHaveProperty("error");
+    expect(s.executions).toEqual([
+      { id: "original-review", mode: "hard", actor: { kind: "access", id: "access:opaque" }, opts: undefined },
+    ]);
+  });
+
+  it.each([
+    "foreign-session",
+    "changed-requester",
+    "tampered-caller",
+    "Person-view",
+    "posted-by",
+    "derived",
+    "protected-source",
+    "expired",
+    "grant-loss",
+    "revoked-session",
+    "source-outage",
+  ] as const)("holds a direct Access offer with %s without changing it or executing", async (cause) => {
+    const s = await accessOffer(cause === "grant-loss" ? "repo.offboard" : "runs.stop");
+    const row = s.confirmations.rows.get(s.saved.id)!;
+    if (row.kind !== "run") throw new Error("Expected the original direct offer");
+    let browser = s.credential,
+      viewer = s.home.actor;
+    if (cause === "foreign-session") browser = { ...browser, sub: "another" };
+    if (cause === "changed-requester") s.changeRequester();
+    if (cause === "tampered-caller") row.caller = { kind: "access", id: "access:another" };
+    if (cause === "Person-view") viewer = { ...viewer, viewingAs: { id: "access:another" } };
+    if (cause === "posted-by") row.message.postedBy = "app:another";
+    if (cause === "derived")
+      row.derivation = {
+        kind: "operator",
+        context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+      };
+    if (cause === "protected-source")
+      row.originalOrganization = { ingressRunId: "unproved-original", organizationSequence: 1 };
+    if (cause === "expired") s.core.clock = () => s.saved.expiresAt;
+    if (cause === "grant-loss") {
+      const original = s.config.grantsFor.bind(s.config);
+      vi.spyOn(s.config, "grantsFor").mockImplementation((id) => (id === "access:opaque" ? NO_GRANTS : original(id)));
+    }
+    if (cause === "revoked-session") s.revokeSession();
+    if (cause === "source-outage") s.sourceOutage();
+    const expected = structuredClone(row);
+    const shown = await s.page(undefined, undefined, browser, viewer);
+    expect(shown.status).toBe(
+      cause === "expired" ? 410 : cause === "source-outage" ? 503 : cause === "grant-loss" ? 403 : 404,
+    );
+    expect(await s.confirmations.get(s.saved.id)).toEqual(expected);
+    expect(s.executions).toEqual([]);
+  });
+
+  it.each(["session", "requester", "grants"] as const)("rechecks Access %s after the approval body", async (cause) => {
+    const s = await accessOffer(cause === "grants" ? "repo.offboard" : "runs.stop");
+    expect((await s.page()).status).toBe(200);
+    const shown = await s.page("approve", () => {
+      if (cause === "session") s.revokeSession();
+      if (cause === "requester") s.changeRequester();
+      if (cause === "grants") {
+        const original = s.config.grantsFor.bind(s.config);
+        vi.spyOn(s.config, "grantsFor").mockImplementation((id) => (id === "access:opaque" ? NO_GRANTS : original(id)));
+      }
+    });
+    expect(shown.status).toBe(403);
+    expect(await s.confirmations.get(s.saved.id)).toEqual(s.saved);
+    expect(s.executions).toEqual([]);
+  });
+
   it.each(["slack proof", "email lookup", "profile email"] as const)(
     "returns independently proved owners within 1500 ms when optional %s stalls",
     async (stalled) => {

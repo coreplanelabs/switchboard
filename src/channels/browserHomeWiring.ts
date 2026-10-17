@@ -41,7 +41,7 @@ import { FileEmojiStore, createSlackEmojiCache } from "./slackEmoji.js";
 import type { PageSender } from "./webShell.js";
 import type { PageSeed, ViewablePerson } from "./webSeed.js";
 import { readableRuns } from "./liveView/viewer.js";
-import { accessActor, resolveAccessActor } from "./commandHttp.js";
+import { accessActor, resolveAccessActor, callerFor, callerIdFor } from "./commandHttp.js";
 import { isServiceToken } from "./accessAuth.js";
 import type { PersonLookup } from "./requester.js";
 import { holdsAll } from "../core/authz/viewAs.js";
@@ -53,7 +53,7 @@ import {
   workViewModeFromCookie,
 } from "./workViewScope.js";
 import { viewAsFromCookie } from "./viewAs.js";
-import { WebIO, turnsOf, historyOf } from "./web.js";
+import { WebIO, turnsOf, historyOf, requesterOf } from "./web.js";
 import { retentionPolicyOf } from "../core/runStore.js";
 import {
   DAY_MS,
@@ -733,7 +733,7 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     if (!gate.ok || gate.identity.sub !== credential.sub || isServiceToken(gate.identity)) return;
     return tokenPageActor(gate.identity);
   }
-  async function approvalSource(row: Confirmation, viewer: Actor) {
+  async function approvalSource(row: Confirmation, viewer: Actor, credential?: AccessIdentity) {
     if (
       !installation ||
       !authentication ||
@@ -745,6 +745,44 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
       return;
     if (row.originalOrganization) return installation.approvalSource(row, viewer);
     const connection = row.message.approvalConnection;
+    if (connection?.credentialId.startsWith("access:")) {
+      // A registry command retains its Access caller and optional person link.
+      // Rebuild that same caller; a personal-device source cannot represent it.
+      if (
+        row.kind !== "run" ||
+        row.derivation ||
+        !credential ||
+        isServiceToken(credential) ||
+        credential.viewAs ||
+        callerIdFor(credential) !== viewer.id ||
+        connection.credentialId !== viewer.id ||
+        connection.mode !== undefined ||
+        !/^[0-9a-f]{64}$/.test(connection.id) ||
+        row.message.authenticatedAs !== viewer.id ||
+        row.message.postedBy !== undefined ||
+        !row.message.channelId.startsWith("mcp:") ||
+        !row.message.threadKey.startsWith(`${row.message.channelId}:command:`) ||
+        row.caller?.kind !== "access" ||
+        row.caller.id !== viewer.id
+      )
+        return;
+      const proof = await native.currentBrowser(native.browserIdentity(credential));
+      if (proof.status === "unavailable") throw new Error("Current approval source proof is unavailable.");
+      if (proof.status !== "verified" || proof.kind !== "human" || proof.actorId !== viewer.id || !proof.access) return;
+      const caller = await callerFor(proof.access, {
+        grantsFor: (id) => options.config.grantsFor(id),
+        personByEmail: options.personByEmail,
+        channelsOf: options.channelsOf,
+      });
+      if (
+        caller.actor.kind !== "user" ||
+        caller.actor.viewingAs ||
+        caller.id !== connection.credentialId ||
+        requesterOf(caller.actor, proof.access).userId !== row.message.userId
+      )
+        return;
+      return { actor: caller.actor, io: new SingleShotIO([], row.message.threadKey) };
+    }
     if (connection) {
       const credential = await connectionIdentity(connection.id, {
         auth: options.auth(),
