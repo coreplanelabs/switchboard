@@ -389,6 +389,84 @@ const toolResultsOf = (events: RunEvent[]) =>
   events.filter((e): e is Extract<RunEvent, { type: "tool_result" }> => e.type === "tool_result");
 
 describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode/cli binary", () => {
+  it("keeps distinct synthetic input identities when their text is identical", async () => {
+    const run = await driveRealRun("run-source-identities", (_results, chunks) => chunks.text("seed complete"));
+    try {
+      const current = run.facts.at(-1)!;
+      if (current.harness !== "opencode" || !current.bearerHash) throw new Error("OpenCode facts are missing");
+      roots.push(current.root);
+      const paths = openCodeRunPathsAt(current.root);
+      const secretHeaders = { Authorization: openCodeAuthHeader(current.bearerHash) };
+      const request = (method: "GET" | "POST", path: string, body?: unknown) =>
+        run.container.request(paths, {
+          method,
+          path: `/api/session/${current.sessionID}${path}`,
+          port: current.port,
+          secretHeaders,
+          ...(body === undefined
+            ? {}
+            : { body: JSON.stringify(body), headers: { "content-type": "application/json" } }),
+        });
+      const first = await request("POST", "/synthetic", {
+        id: "msg_source_first",
+        text: "same displayed text",
+        metadata: { inputId: "source-first", inboxSeq: 8 },
+        delivery: "queue",
+        resume: false,
+      });
+      const second = await request("POST", "/synthetic", {
+        id: "msg_source_second",
+        text: "same displayed text",
+        metadata: { inputId: "source-second", inboxSeq: 9 },
+        delivery: "queue",
+        resume: false,
+      });
+      expect([first.status, second.status]).toEqual([200, 200]);
+      expect([JSON.parse(first.body).data.id, JSON.parse(second.body).data.id]).toEqual([
+        "msg_source_first",
+        "msg_source_second",
+      ]);
+      const duplicate = await request("POST", "/synthetic", {
+        id: "msg_source_first",
+        text: "changed input",
+        metadata: { inputId: "replacement", inboxSeq: 99 },
+        delivery: "queue",
+        resume: false,
+      });
+      expect(duplicate.status).toBe(200);
+      expect(JSON.parse(duplicate.body).data).toMatchObject({
+        id: "msg_source_first",
+        type: "synthetic",
+        payload: { text: "same displayed text", metadata: { inputId: "source-first", inboxSeq: 8 } },
+      });
+      const saved = await request("GET", "/inbox");
+      expect(saved.status).toBe(200);
+      expect(
+        JSON.parse(saved.body).data.map((item: { id: string; type: string; payload: unknown }) => ({
+          id: item.id,
+          type: item.type,
+          payload: item.payload,
+        })),
+      ).toEqual([
+        {
+          id: "msg_source_first",
+          type: "synthetic",
+          payload: { text: "same displayed text", metadata: { inputId: "source-first", inboxSeq: 8 } },
+        },
+        {
+          id: "msg_source_second",
+          type: "synthetic",
+          payload: { text: "same displayed text", metadata: { inputId: "source-second", inboxSeq: 9 } },
+        },
+      ]);
+      // These inputs remain in the native inbox; they have not reached a model.
+      expect(run.modelSeen.bodies).toHaveLength(1);
+      expect(run.session.answer).toBe("seed complete");
+    } finally {
+      await run.session.end();
+    }
+  }, 120_000);
+
   it("drives a run end to end: the bearer is the key, the relay runs in the bot, a push to a protected branch is refused, the record speaks the vocabulary, and the id-join holds", async () => {
     const run = await driveRealRun("run-real", conformanceScript);
     const { session, events, steps, facts, statusReports, modelSeen } = run;
