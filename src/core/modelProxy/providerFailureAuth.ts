@@ -6,6 +6,12 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
+  PROXY_INTERRUPTION_KINDS,
+  type ProxyUnknownTerminalReason,
+  type ProxyRejectionObservation,
+} from "./terminalEvidence.js";
+export type { ProxyUnknownTerminalReason, ProxyRejectionObservation } from "./terminalEvidence.js";
+import {
   PROVIDER_FAILURE_CAUSES,
   type ProviderFailureCause,
   type ProviderFailureDetails,
@@ -144,24 +150,6 @@ export function proxyProviderFailureIsAuthenticated(value: unknown): boolean {
 // An unknown terminal is not a ProviderFailure. Its separate signed type keeps
 // pi's abort race from turning missing recovery evidence into a local retry.
 const UNKNOWN_TERMINAL_TYPE = "model_terminal_unknown";
-export type ProxyUnknownTerminalReason = "malformed_json" | "consumer_rejected" | "unverified_terminal";
-const INTERRUPTION_KINDS = [
-  "aborted",
-  "capacity",
-  "worker-error",
-  "worker-exit",
-  "protocol",
-  "frame-bytes",
-  "stream-bytes",
-  "fields",
-  "output-bytes",
-  "graph",
-  "ipc-bytes",
-  "storage",
-] as const;
-export type ProxyRejectionObservation =
-  | { phase: "admission" | "request_validation" | "response_validation"; kind: (typeof INTERRUPTION_KINDS)[number] }
-  | { phase: "sdk_consume"; kind: "rejected" };
 
 /** Closed source observations confer no provider, ending or retry authority. */
 function rejectionOf(value: unknown): ProxyRejectionObservation | undefined {
@@ -175,7 +163,7 @@ function rejectionOf(value: unknown): ProxyRejectionObservation | undefined {
       return kind.value === "rejected" ? { phase: "sdk_consume", kind: "rejected" } : undefined;
     if (
       ["admission", "request_validation", "response_validation"].includes(phase.value) &&
-      INTERRUPTION_KINDS.includes(kind.value)
+      PROXY_INTERRUPTION_KINDS.includes(kind.value)
     )
       return { phase: phase.value, kind: kind.value };
     return undefined;
