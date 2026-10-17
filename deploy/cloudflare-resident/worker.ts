@@ -11706,6 +11706,17 @@ export class ResidentDO extends Sandbox<Env> {
         await this.putThreadBinding(binding, true);
       }
     }
+    const remaining = binding.workspacePredecessors?.length ?? 0;
+    const reconciled = (initial.workspacePredecessors?.length ?? 0) - remaining;
+    if (reconciled > 0) {
+      try {
+        console.log(
+          JSON.stringify({ event: "resident.workspace-predecessors.reconciled", threadKey, reconciled, remaining }),
+        );
+      } catch {
+        /* Observation cannot change workspace preservation. */
+      }
+    }
   }
 
   private async ackWorkspaceSettlement(value: WorkspaceSettlement): Promise<boolean> {
@@ -12004,6 +12015,9 @@ export class ResidentDO extends Sandbox<Env> {
       await this.reportBlockedWorkspace({ binding, reason: "thread-operation-in-flight" });
       return { error: "workspace-preserved: thread-operation-in-flight", status: 409, reason: "workspace-preserved" };
     }
+    // Attach can retain an already terminal predecessor before the watchdog
+    // runs. Apply its exact settlement before pending metadata blocks reuse.
+    await this.reconcileWorkspaceBinding(binding.threadKey);
     const decision = await this.workspaceRemovalDecision(binding, await this.isRuntimeActive());
     if (decision.removable) return null;
     await this.reportBlockedWorkspace({ binding, reason: decision.reason });
