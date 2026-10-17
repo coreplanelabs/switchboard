@@ -191,7 +191,7 @@
     "src/core/runLedger/inboxMessage.ts": "e106aed8682ea9c75899670e0d64f3ce6970c7caa67532ad60f20c7040e17b7f",
     "src/core/runLedger/pausedStop.ts": "7655d5215036ec7db6c22a82fa012ee274ee5b6239c62a98196a4fe4b110cdf0",
     "src/core/runLedger/sessionLog.ts": "9e9c3237b687b64900c471f7a1c3ef945960a830b63c660922643551e66b9d7f",
-    "src/core/runLedger/sourceEvents.ts": "64dfccadeebad0f9ffd69cf442873ebacd32c618d5f0d4a328e92ae66d6428a0",
+    "src/core/runLedger/sourceEvents.ts": "2c1f139f73d55534dbb8dd584729b5dcfd8df10432b22004ee159a91917076f2",
     "src/core/runLedger/transcript.ts": "1ddeecfc8d2f9ac4cd7801ac45774451e07ba87a5b04f04d458de82cd5d400af",
     "src/core/runLedger/types.ts": "c930d86acb229f8aab9a1ed09a66b02f5292c221ff78eba19af10b217410cc7a",
     "src/core/runMetrics.ts": "90ba2ff8a339e9e183a3bd1b86a40fedb1579c6b28790528164e6c82440a11d2",
@@ -505,10 +505,10 @@
       "response:*/*:/assets/green.css": "8f6663fec4f5945d4f3b2029b33027267e49a58e705961f50c2cc0d075977535",
       "response:*/*:/runs/unit-c1/events": "c7af14f456de042b0dee697ce32e86c0e4b497aa0a06120afef7330eae5ae719",
       "response:*/*:/runs/unit/plan-acme-3:U13?session=coding&q=lockfile&open=unit-c1&turn=47": "b7e4bf7d84b169e32e507ac6d4618cdafb7c8bd2f5be44fea73f5706cfca9528",
-      "response:application/json:/home/session": "129033fe4fba04efb556ada6d1e64e87a807c1dbb464466328b4128fd9ba8265",
-      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "9b1b6579a24a7c045dea3cb6c0a09d6f30ab958b832935f2c5a4c2b0fc714cde",
-      "response:text/event-stream:/home/events": "1b84aa39dd5f2676520265b07f5864def86e57bcde79204196d16a045a1706fa",
-      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "343d68badbe0fdf97984444d4093d6cfcfb2ce1596f781d3847a9e698dba7258"
+      "response:application/json:/home/session": "203b14a72769e0f35876642c0afbd5c4433b651ef2d3d3d5b09e71d387ae0e67",
+      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "64be414c3e196bc2ef1f10e3e7aff47006bfbcaeee613db84b7bf4bab393b14b",
+      "response:text/event-stream:/home/events": "31a2aaef03511327f2e38fee5c35d6bdd545e32e1b7e77b17a924a098d8dd5e7",
+      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "43778a03d2a6a17eb03332c2360060cac3868a58037c89b37fa99c131de98c96"
     }
   }
 }

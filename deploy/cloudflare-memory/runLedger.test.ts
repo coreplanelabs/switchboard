@@ -5,7 +5,10 @@ import { isRunRecord } from "../../src/core/runRecord.ts";
 import { reclaimedRunRecord } from "../../src/core/dispatch/record.ts";
 import { sourceHash, mergeSessionSources } from "../../src/core/references/receipts.ts";
 import { inboxDeliveryWitness } from "../../src/core/runLedger/inboxDelivery.ts";
-import { prepareSourceEvidenceMessage } from "../../src/core/runLedger/sourceEvidence.ts";
+import {
+  prepareSourceEvidenceMessage,
+  sourceEvidenceMessageFromRecord,
+} from "../../src/core/runLedger/sourceEvidence.ts";
 import {
   pullOwnerQualificationSnapshot,
   qualifyPullOwnerSnapshot,
@@ -17492,6 +17495,70 @@ describe("keyed SQLite delivery row witness", () => {
 });
 
 describe("typed SQLite source evidence", () => {
+  it.each(["notice", "fold"] as const)("retains common source %s data and custody through reclaim", async (kind) => {
+    const key = `common-source-${kind}`,
+      threadKey = "slack:C1:common-source";
+    const event = {
+      version: 2,
+      kind: "source-fact",
+      sourceId: "fixture:installation:2",
+      deliveryId: "delivery-two",
+      objectId: "fixture:pull:7",
+      changeId: "revision-two",
+      payload: { native: "opaque" },
+      content: { kind: "facts", facts: { state: "closed", nested: { value: null } } },
+    };
+    const received = await post("/runs/source-events/receive", { storeKey: key, event });
+    expect(received.data).toMatchObject({ kind: "received", receipt: { sequence: 1 } });
+    const rootId = kind === "notice" ? "r1" : "root";
+    const owner = { runId: rootId, requesterId: "slack:UALICE", channelId: "slack:C1", threadKey };
+    const request = claimBody(key, "r1", threadKey);
+    request.run.meta.agent = kind === "notice" ? "orchestrator" : "review";
+    expect((await post("/runs/claim", request)).status).toBe(200);
+    const read = await post("/runs/source-events/read", { storeKey: key, key: received.data.receipt.key });
+    const routing =
+      kind === "notice"
+        ? { kind, owner }
+        : { kind, owner, decision: { runId: rootId, id: JSON.stringify([rootId, "fold-two"]) } };
+    const message = await sourceEvidenceMessageFromRecord(read.data.record, routing);
+    expect(message).toEqual({
+      version: 2,
+      kind: "source-evidence",
+      source: {
+        sourceId: event.sourceId,
+        deliveryId: event.deliveryId,
+        objectId: event.objectId,
+        changeId: event.changeId,
+        authorId: null,
+        kind: "source-fact",
+      },
+      receipt: received.data.receipt,
+      routing,
+      content: { kind: "facts", facts: { state: "closed", nested: { value: null } } },
+    });
+    expect(
+      (
+        await post("/runs/inbox/deliver", {
+          storeKey: key,
+          runId: "r1",
+          delivery: { version: 1, key: "input-two", message },
+        })
+      ).data,
+    ).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+    expect((await post("/runs/handoff", { storeKey: key, gen: "g1", runIds: ["r1"] })).status).toBe(200);
+    expect((await post("/runs/reclaim", { storeKey: key, gen: "g2", now: Date.now(), leaseMs: LEASE_MS })).status).toBe(
+      200,
+    );
+    const observed = await post("/runs/inbox/read", { storeKey: key, runId: "r1", gen: "g2", peek: true });
+    expect(observed.status).toBe(200);
+    const stored = observed.data.items[0].message;
+    const target = { runId: "r1", channelId: "slack:C1", threadKey, requester: "slack:UALICE" };
+    expect(await prepareSourceEvidenceMessage(stored, target)).toEqual(message);
+    expect(stored.target).toMatchObject({ producerGen: "g1" });
+    expect(messageFromInbox(stored, 0, target)).toBeUndefined();
+    expect(observed.data.boundary.lastStep).toBeNull();
+  });
+
   it("retains source provenance and a decision reference without becoming requester input", async () => {
     const key = "typed-source-evidence",
       threadKey = "slack:C1:evidence";

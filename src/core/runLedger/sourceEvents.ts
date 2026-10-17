@@ -188,7 +188,7 @@ export function sourceSnapshot(value: unknown): unknown {
 
 /** Common content is source data. It cannot carry requester credentials,
  * destination claims or controls. The provider payload remains opaque. */
-function sourceContentOf(value: unknown, kind: SourceEventFields["kind"]): SourceEventContent | undefined {
+export function sourceContentOf(value: unknown, kind: SourceEventFields["kind"]): SourceEventContent | undefined {
   if (!object(value)) return;
   if (kind === "source-fact") {
     if (value.kind === "facts" && closed(value, ["kind", "facts"]) && object(value.facts))
