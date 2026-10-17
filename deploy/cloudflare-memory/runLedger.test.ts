@@ -16118,7 +16118,17 @@ describe("cancelled check terminal custody in real SQLite", () => {
     thread = "slack:private:cancelled-check";
   const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
   const selector = { runId: id, callId: "call-1", phase: "command" as const };
-  async function prepared(checks: unknown) {
+  const largeHistory = (): AppendableEvent[] =>
+    Array.from({ length: 300 }, (_, index) => ({
+      type: "tool_result",
+      tool: "fixture",
+      ok: true,
+      summary: "Synthetic retained output",
+      output: "x".repeat(1800),
+      at: index,
+      seq: index + 1,
+    }));
+  async function prepared(checks: unknown, events: AppendableEvent[] = []) {
     const key = storeKey();
     const client = new WorkerRunLedger({
       baseUrl: BASE,
@@ -16148,7 +16158,7 @@ describe("cancelled check terminal custody in real SQLite", () => {
     expect(await client.requestStop(id, "hard")).toMatchObject({ ok: true });
     const stop = await client.prepareCancellation(id, { kind: "chat", id: "slack:operator" });
     if (!stop.ok) throw new Error("cancellation not prepared");
-    const ending = reclaimedRunRecord({ row: stop.row, events: [], status: "stopped_hard", finishedAt: Date.now() });
+    const ending = reclaimedRunRecord({ row: stop.row, events, status: "stopped_hard", finishedAt: Date.now() });
     ending.cancellation = {
       version: 1,
       actor: stop.cancellation.actor,
@@ -16157,6 +16167,76 @@ describe("cancelled check terminal custody in real SQLite", () => {
     };
     return { key, client, cancellation: stop.cancellation, ending };
   }
+  it("saves complete large cancellation history through the actual HTTP route", async () => {
+    const events = largeHistory();
+    const { key, client, cancellation, ending } = await prepared(undefined, events);
+    const body = { storeKey: key, cancellation, record: ending };
+    const bytes = new TextEncoder().encode(JSON.stringify(body)).byteLength;
+    expect(bytes).toBeGreaterThan(524288);
+    expect(bytes).toBeLessThan(2097152);
+    expect(isRunRecord(ending)).toBe(true);
+    expect(await post("/runs/cancellation/finish", body, { ...AUTH, authorization: "Bearer wrong" })).toEqual({
+      status: 401,
+      data: { error: "unauthorized" },
+    });
+    const saved = await post("/runs/cancellation/finish", body);
+    expect(saved).toMatchObject({ status: 200, data: { ok: true, stored: true } });
+    const retained = (await post("/runs/get", { storeKey: key, id })).data.record as RunRecord;
+    expect(retained).toMatchObject({
+      id,
+      status: "stopped_hard",
+      eventCount: 300,
+      storedEventCount: 300,
+      truncated: false,
+      cancellation: ending.cancellation,
+    });
+    expect(retained.events).toEqual(events);
+    expect(await client.listLive()).toEqual([]);
+  });
+  it("keeps the cancellation bulk body limit and the ordinary control body limit", async () => {
+    const { key, client, cancellation, ending } = await prepared(undefined);
+    expect(
+      await post("/runs/cancellation/finish", {
+        storeKey: key,
+        cancellation,
+        record: ending,
+        padding: "x".repeat(2097152),
+      }),
+    ).toEqual({ status: 413, data: { error: "body must be at most 2097152 bytes" } });
+    expect(
+      await post("/runs/cancellation/read", {
+        storeKey: key,
+        cancellation,
+        binding: null,
+        padding: "x".repeat(600000),
+      }),
+    ).toEqual({ status: 413, data: { error: "body must be at most 524288 bytes" } });
+    expect(await post("/runs/cancellation/read", { storeKey: key, cancellation, binding: null })).toEqual({
+      status: 200,
+      data: { prepared: true, cancellationId: cancellation.id },
+    });
+    expect((await client.listLive())[0]).toMatchObject({ runId: id, ownerGen: "g1", state: { cancellation } });
+    expect((await post("/runs/get", { storeKey: key, id })).data).toEqual({ record: null });
+  });
+  it.each(["owner", "ticket", "record"] as const)(
+    "holds large cancellation history when its %s does not match",
+    async (fault) => {
+      const { key, client, cancellation, ending } = await prepared(undefined, largeHistory());
+      const changed = structuredClone(cancellation),
+        record = structuredClone(ending);
+      if (fault === "owner") changed.ownerGen = "foreign";
+      if (fault === "ticket") changed.id = crypto.randomUUID();
+      if (fault === "record") delete record.cancellation;
+      else record.cancellation!.cancellation = changed;
+      expect(await post("/runs/cancellation/finish", { storeKey: key, cancellation: changed, record })).toEqual(
+        fault === "record"
+          ? { status: 400, data: { error: "invalid cancellation" } }
+          : { status: 409, data: { ok: false, reason: "fenced" } },
+      );
+      expect((await client.listLive())[0]).toMatchObject({ runId: id, ownerGen: "g1", state: { cancellation } });
+      expect((await post("/runs/get", { storeKey: key, id })).data).toEqual({ record: null });
+    },
+  );
   it("keeps the original unknown check as a sealed private source after cancellation", async () => {
     const checks = await checkStateFixture(owner, { unknown: true });
     const { client, cancellation, ending } = await prepared(checks);
