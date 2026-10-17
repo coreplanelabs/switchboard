@@ -3498,7 +3498,7 @@ describe("runOperator — the loop over a scripted model", () => {
           tool: "bind_preset",
           input: JSON.stringify(bind.input),
           outcome: "rejected",
-          result: "the accepted model must preserve the authored formal value",
+          result: "the authored formal model needs its typed model field; preserve the requested model",
         },
       ],
       [
@@ -3506,7 +3506,7 @@ describe("runOperator — the loop over a scripted model", () => {
           tool: "bind_preset",
           input: JSON.stringify(bind.input),
           outcome: "rejected",
-          result: "the accepted model must preserve the authored formal value",
+          result: "the authored formal model needs its typed model field; preserve the requested model",
         },
       ],
     ]);
