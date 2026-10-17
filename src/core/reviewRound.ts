@@ -55,8 +55,10 @@ import { systemClock } from "./trace/clock.js";
 import type { PullRequestFacts } from "../execution/githubPulls.js";
 import type { GithubReviewWriteResult } from "../execution/githubComments.js";
 import { sourceHash } from "./references/receipts.js";
+import { minutesToMs, postStepMinutes } from "./budgets.js";
 import {
   acceptedReviewPublication,
+  awaitReviewPublication,
   reviewPublicationOf,
   REVIEW_PUBLICATION_OWNER_ABSENT,
   sameReviewPublication,
@@ -877,11 +879,102 @@ export type ReviewPostOutcome = ReviewPost;
  * failed run): the Slack-only notes and the
  * head-moved-after-post note (one best-effort GET; unknown → no note, never a
  * false alarm). Safe to call at any lifecycle position — it touches only its
- * inputs, so the plain dispatch path keeps calling it AFTER workspace release
- * and registry finish, while a ship round may invoke it inside its loop.
+ * inputs. The run loop calls it before closing the stream, so the final record
+ * carries its outcome; a ship round may invoke the same bounded step.
  * Never throws; the returned `ReviewPostOutcome` preserves unconfirmed writes.
  */
-export async function runReviewPostStep(
+export async function runReviewPostStep(input: Parameters<typeof reviewPostStep>[0]): Promise<ReviewPostOutcome> {
+  const controller = new AbortController();
+  const allowance = minutesToMs(postStepMinutes("review"));
+  const remaining = input.remainingMs?.();
+  const waitMs = remaining === undefined ? allowance : Math.max(0, Math.min(allowance, remaining));
+  const deadlineAt = systemClock() + waitMs;
+  let stage = "preflight";
+  let timedOut = false;
+  let failure: { stage: string; errorClass: string } | undefined;
+  const captureFailure = (error: unknown) => {
+    if (timedOut || failure) return;
+    // Exception names and messages can contain private source or credential data.
+    const errorClass =
+      error instanceof TypeError
+        ? "TypeError"
+        : error instanceof RangeError
+          ? "RangeError"
+          : error instanceof SyntaxError
+            ? "SyntaxError"
+            : error instanceof ReferenceError
+              ? "ReferenceError"
+              : error instanceof Error
+                ? "Error"
+                : "ThrownValue";
+    failure = { stage, errorClass };
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error("Review publication deadline reached"));
+  }, waitMs);
+  const checkDeadline = () => {
+    if (systemClock() >= deadlineAt) {
+      timedOut = true;
+      controller.abort(new Error("Review publication deadline reached"));
+    }
+    controller.signal.throwIfAborted();
+  };
+  const bounded = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
+    checkDeadline();
+    stage = name;
+    try {
+      const value = await awaitReviewPublication(controller.signal, work);
+      // A transport that ignores cancellation cannot resume into a later POST.
+      checkDeadline();
+      return value;
+    } catch (error) {
+      captureFailure(error);
+      throw error;
+    }
+  };
+  let outcome: ReviewPostOutcome;
+  try {
+    const journal = input.publicationJournal;
+    outcome = await reviewPostStep({
+      ...input,
+      ...(journal
+        ? {
+            publicationJournal: {
+              runId: journal.runId,
+              read: () => bounded("journal_read", () => journal.read()),
+              commit: (receipt) => bounded("journal_commit", () => journal.commit(receipt, controller.signal)),
+              canPublish: () => bounded("publication_guard", () => journal.canPublish()),
+            },
+          }
+        : {}),
+      post: (target, body) => bounded("native_post", () => input.post(target, body, controller.signal)),
+      fetchPrHead: (pr) => bounded("head_read", () => input.fetchPrHead(pr)),
+      ...(input.fetchPrFacts ? { fetchPrFacts: (pr) => bounded("facts_read", () => input.fetchPrFacts!(pr)) } : {}),
+      reply: (text) => bounded("reply", () => input.reply(text)).catch(() => {}),
+    });
+  } catch (error) {
+    captureFailure(error);
+    outcome = { posted: false, uncertain: true, reason: "the review publication outcome is unconfirmed" };
+  } finally {
+    clearTimeout(timer);
+  }
+  const summary = failure
+    ? `Review publication failed during ${failure.stage} (${failure.errorClass}); the original outcome remains unconfirmed.`
+    : timedOut
+      ? `Review publication deadline reached during ${stage}; the original outcome remains unconfirmed.`
+      : undefined;
+  if (summary && !outcome.posted && "uncertain" in outcome && outcome.uncertain) {
+    try {
+      input.publish?.({ type: "run_note", kind: "review_publication_unknown", summary, at: systemClock() });
+    } catch {
+      console.warn(`[review-post] ${input.logKey}: ${summary}`);
+    }
+  }
+  return outcome;
+}
+
+async function reviewPostStep(
   input: {
     agent: AgentDef;
     requestText: string;
@@ -900,7 +993,9 @@ export async function runReviewPostStep(
     carried?: { reviewed: string; current: string; commits: number };
     hardStopped: boolean;
     /** The GitHub post; the dispatcher passes `deps.postReviewComment ?? postReviewComment`. */
-    post: (target: ReviewCommentTarget, body: string) => Promise<GithubReviewWriteResult | void>;
+    post: (target: ReviewCommentTarget, body: string, signal?: AbortSignal) => Promise<GithubReviewWriteResult | void>;
+    /** The post step shares the original run's remaining lease. */
+    remainingMs?: () => number | undefined;
     /** The original run's fenced, trim-independent publication receipt. */
     publicationJournal?: ReviewPublicationJournal;
     fetchPrHead: FetchPrHead;

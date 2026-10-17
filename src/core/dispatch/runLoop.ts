@@ -19,6 +19,7 @@ import type { RunnableTool, ToolContext } from "../../tools/runnableTool.js";
 import { PUSHED_MAX } from "../../execution/residentRebind.js";
 import {
   reviewPublicationOf,
+  awaitReviewPublication,
   acceptedReviewPublication,
   sameReviewPublication,
   REVIEW_PUBLICATION_OWNER_ABSENT,
@@ -2983,6 +2984,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // restored onto it, which makes the status, the card and the label the
   // stop's, exactly as if this process had taken it.
   const finish = resume?.plan.kind === "finish" ? resume.plan : undefined;
+  const finishDeadline = finish
+    ? Math.min(clock() + finish.remainingMs, ctx.admissionDeadlineAt ?? Infinity)
+    : undefined;
   const reentry = resume?.plan.kind === "resume" ? resume.plan : undefined;
   const loopEnding: LoopEnding = finish && resume ? loopEndingOf(resume.events) : { kind: "answered" };
   if (loopEnding.kind === "soft_stop") run.control.requestStop("soft");
@@ -5011,6 +5015,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     else if (agent.name === "review" && !tailSkipped())
       reviewPost = await root.span("run.review_post_step", () =>
         runReviewPostStep({
+          remainingMs: () =>
+            run.control.remainingMs() ?? (finishDeadline === undefined ? undefined : finishDeadline - clock()),
           pinnedHead,
           ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
           agent,
@@ -5047,10 +5053,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 : undefined;
             },
             canPublish: async () => (await publicationWriteAllowed()) && (await publicationAllowed()),
-            commit: async (receipt: ReviewPublicationReceipt) => {
+            commit: async (receipt: ReviewPublicationReceipt, signal?: AbortSignal) => {
               const admission: { state: "committed" | "refused" | "unknown" } = { state: "unknown" };
               await events.write(async () => {
-                const row = await originalPublicationOwner();
+                const row = await awaitReviewPublication(signal, originalPublicationOwner);
                 if (
                   !row ||
                   receipt.runId !== run.id ||
@@ -5061,14 +5067,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 const prior = reviewPublicationOf(row.state.reviewPublication);
                 if (receipt.state === "pending") {
                   if (row.state.reviewPublication !== undefined) return;
-                  if (!(await publicationWriteAllowed()) || !(await publicationAllowed())) {
-                    const current = await originalPublicationOwner();
+                  if (
+                    !(await awaitReviewPublication(signal, publicationWriteAllowed)) ||
+                    !(await awaitReviewPublication(signal, publicationAllowed))
+                  ) {
+                    const current = await awaitReviewPublication(signal, originalPublicationOwner);
                     if (current && current.state.reviewPublication === undefined) admission.state = "refused";
                     return;
                   }
                 } else if (!prior || prior.state !== "pending" || !sameReviewPublication(prior, receipt)) return;
-                if ((await ledgerRun!.commitState({ reviewPublication: receipt })) === "ok")
-                  admission.state = "committed";
+                signal?.throwIfAborted();
+                // Issued canonical writes keep the store's bounded transport
+                // and unknown-write custody; only read waits are abandoned.
+                const saved = await ledgerRun!.commitState({ reviewPublication: receipt });
+                signal?.throwIfAborted();
+                if (saved === "ok") admission.state = "committed";
               });
               if (admission.state === "committed") reviewPublication = structuredClone(receipt);
               return admission.state;

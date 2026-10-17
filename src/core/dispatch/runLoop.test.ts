@@ -12476,6 +12476,68 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(out.reviewPost).toMatchObject({ posted: true, head: HEAD });
   });
 
+  it("finishes an unknown review when the event-lane admission read stalls and ignores its late result", async () => {
+    vi.useFakeTimers();
+    const post = vi.fn(async () => ({ state: "accepted" as const }));
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+      review: { head: HEAD, post },
+    });
+    const resume = finishing("original review bytes", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+    });
+    if (resume.plan.kind === "finish") resume.plan.remainingMs = 40;
+    const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+    const read = s.deps.runLedger!.readLiveRuns.bind(s.deps.runLedger!);
+    let admissionReads = 0;
+    let release!: () => void;
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    vi.spyOn(s.deps.runLedger!, "readLiveRuns").mockImplementation(async () => {
+      const rows = await read();
+      if (admissionReads++ === 4) {
+        reached();
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return rows;
+    });
+    try {
+      const running = runLoop(s.deps, ctx);
+      await waiting;
+      const result = Promise.race([running, new Promise((resolve) => setTimeout(() => resolve("still waiting"), 41))]);
+      await vi.advanceTimersByTimeAsync(41);
+      expect(await result).toMatchObject({ kind: "answered", reviewPost: { posted: false, uncertain: true } });
+      expect(s.registry.getById(s.run.id)).toMatchObject({ finished: true, status: "completed" });
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      s.ending.drain(true);
+      await s.writer.settled();
+      const record = (await s.store.get(s.run.id))!;
+      expect(record.reviewPost).toEqual({
+        posted: false,
+        uncertain: true,
+        reason: "the review publication outcome is unconfirmed",
+      });
+      expect(record.reviewPublication).toBeUndefined();
+      expect(record.events).toContainEqual(
+        expect.objectContaining({ type: "run_note", kind: "review_publication_unknown" }),
+      );
+      expect(post).not.toHaveBeenCalled();
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+
   it("an uncertain terminal review retains its receipt without reserving PR mutation ownership", async () => {
     const post = vi.fn(async () => ({ state: "uncertain" as const }));
     const s = setup("", {

@@ -17020,6 +17020,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         expect(resumed.deps.postReviewComment).toHaveBeenCalledWith(
           { repo: "acme/api", number: 7, commitId: head },
           expect.stringContaining("Reviewed private code"),
+          expect.any(AbortSignal),
         );
         expect(replies.join("\n")).toContain("Reviewed private code");
       }
@@ -29242,6 +29243,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.deps.postReviewComment).toHaveBeenCalledWith(
       { repo: "acme/api", number: 7, commitId: head },
       expect.stringContaining("Reviewed the new head"),
+      expect.any(AbortSignal),
     );
     expect(replies.join("\n")).not.toContain("continuation is ambiguous");
     expect(await Promise.all([INSTANCE, ...s.otherInstances].map((id) => s.instances.listUnits(id)))).toEqual(
@@ -29385,6 +29387,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       expect(s.deps.postReviewComment).toHaveBeenLastCalledWith(
         { repo: "acme/api", number: 7, commitId: head },
         expect.stringContaining("Reviewed the new head"),
+        expect.any(AbortSignal),
       );
       expect(registry.getById(`fresh-review-${runIndex}`)).toMatchObject({ agent: "review", threadKey: THREAD });
       expect(replies.join("\n")).not.toContain("old blocker");

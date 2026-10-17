@@ -34,6 +34,8 @@ export const CREDENTIAL_INSPECTION_MAX_MS = 20 * SECOND_MS;
 
 /** One source revalidation pass, inside the existing three-minute write-up allowance. */
 export const SOURCE_REVALIDATE_MAX_MS = 30 * SECOND_MS;
+/** One native review request, including installation-token mint and response body. */
+export const REVIEW_POST_REQUEST_MS = 15 * SECOND_MS;
 
 export const secondsToMs = (seconds: number): number => seconds * SECOND_MS;
 
