@@ -22,7 +22,7 @@ import { secretsFrom } from "../secrets.js";
 import { DatabaseSync } from "node:sqlite";
 import { SqliteOrganizationStore } from "../core/organization/sqlite.js";
 import type { DirectorySqlStorage } from "../core/identity/sqlite.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -54,7 +54,7 @@ import { scriptPiFromProvider } from "../core/harness/pi/testing/providerPi.js";
 import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import { createMcpApprovalView } from "./mcpApprovalView.js";
 import { createMcpHandler, handleMcpRequest, type McpOptions } from "./mcp.js";
-import { ConfigStore } from "../config.js";
+import { ConfigStore, operatorModeOf } from "../config.js";
 import { NullMcpToolSource } from "../mcp/source.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { ThreadsElsewhere } from "../core/runLedger/threadsElsewhere.js";
@@ -3782,6 +3782,46 @@ describe("browser installation", () => {
       },
     };
   }
+  it.each(["omitted", "on", "off", "shadow"] as const)(
+    "uses the loaded %s operator mode for new MCP Review context",
+    async (mode) => {
+      const s = await ssoInstallation("access", undefined, (core) => {
+        const workspace = core.config.config.workspaceDir;
+        if (!workspace) throw new Error("Fixture workspace is unavailable");
+        const path = join(workspace, "..", "config.yaml");
+        const yaml = readFileSync(path, "utf8").replace(
+          "routing: { operator: off }",
+          mode === "omitted" ? "routing: {}" : `routing: { operator: ${mode} }`,
+        );
+        writeFileSync(path, yaml);
+        core.config = new ConfigStore(path, join(workspace, "..", "overrides.json"));
+      });
+      expect(s.core.config.config.routing?.operator).toBe(mode === "omitted" ? undefined : mode);
+      expect(Object.hasOwn(s.core.config.config.routing ?? {}, "operator")).toBe(mode !== "omitted");
+      expect(operatorModeOf(s.core.config.config)).toBe(mode === "omitted" ? "on" : mode);
+      await s.core.config.setOrgOverride({ verbosity: "debug" });
+      expect(Object.hasOwn(s.core.config.config.routing ?? {}, "operator")).toBe(mode !== "omitted");
+      const log = createSpanLog();
+      s.core.spanLog = log;
+      const response = await s.send({
+        text: "agent:review model:anthropic/general-model effort:high https://github.com/sample/api/pull/42",
+        thread: "new-loaded-mode",
+        idempotencyKey: "new-loaded-review",
+      });
+      expect(response.wire.result).toMatchObject({
+        structuredContent: { admission: { status: "accepted", runId: expect.any(String) } },
+      });
+      const owned = await s.ledger.readIngressByRun(response.wire.result.structuredContent.admission.runId);
+      expect(owned.status).toBe("record");
+      if (owned.status !== "record") throw new Error("No original admission record");
+      expect(owned.record.origin?.sourceReference?.contextMode).toBe(
+        mode === "omitted" || mode === "on" ? "request" : undefined,
+      );
+      expect(log.read({ span: "request" }).lines.at(-1)?.attrs.requestContextSelection).toBe(
+        mode === "omitted" || mode === "on" ? "selected" : "routing",
+      );
+    },
+  );
   it("admits a fresh request-only Review after restart and a new signed credential", async () => {
     const s = await ssoInstallation("access");
     const log = createSpanLog();
@@ -3996,6 +4036,7 @@ describe("browser installation", () => {
   );
   it.each([
     "plain",
+    "default-on",
     "multiline-request",
     "long-request",
     "prior-child",
@@ -4022,6 +4063,7 @@ describe("browser installation", () => {
       const head = "e".repeat(40);
       const succeeds = [
         "plain",
+        "default-on",
         "multiline-request",
         "long-request",
         "prior-child",
@@ -4236,7 +4278,14 @@ describe("browser installation", () => {
       }
       repo.pulls[0]!.body = "FRESH-GITHUB-DATA";
       s.restartNative();
-      s.core.config.config.routing!.operator = "on";
+      if (variant === "default-on") {
+        const path = join(s.path, "config.yaml");
+        writeFileSync(path, readFileSync(path, "utf8").replace("routing: { operator: off }", "routing: {}"));
+        const loaded = new ConfigStore(path, join(s.path, "overrides.json"));
+        expect(Object.hasOwn(loaded.config.routing ?? {}, "operator")).toBe(false);
+        s.core.config.config.routing = loaded.config.routing;
+        expect(operatorModeOf(s.core.config.config)).toBe("on");
+      } else s.core.config.config.routing!.operator = "on";
       const freshText =
         variant === "multiline-request"
           ? text.replace(" https://", " Please review the change below.\nhttps://")
@@ -4360,6 +4409,11 @@ describe("browser installation", () => {
       );
       if (variant === "read-first") expect(operatorCalls).toBe(2);
       expect(await s.runStore.get(oldId)).toEqual(old);
+      if (variant === "default-on") {
+        const original = await s.ledger.readIngressByRun(oldId);
+        if (original.status !== "record" || !original.record.origin) throw new Error("No retained original source");
+        expect(await s.authentication.resolveEnvelope(original.record.origin)).toEqual({ status: "unavailable" });
+      }
     },
     30_000,
   );
