@@ -108,6 +108,39 @@ describe("review_read", () => {
     });
   });
 
+  it.each(["missing getter", "missing path"])(
+    "reads the pinned source from the cold executor directory with a %s",
+    async (missing) => {
+      const ctx = context();
+      ctx.checkout = missing === "missing getter" ? undefined : () => undefined;
+      const page = await read({ kind: "diff" }, ctx);
+      expect(page.source).toMatchObject({ repo: "example/project", pr: 7, head, base, mergeBase: base });
+      expect(page.text).toContain("diff --git a/catalog.txt b/catalog.txt\n");
+      expect(await read({ kind: "file", path: "unicode.txt" }, ctx)).toMatchObject({
+        text: "\uFEFFé😀\r\nend\n",
+        eof: true,
+      });
+      ctx.reviewReadTarget = () => ({ repo: "example/project", pr: 7, head: "0".repeat(40), baseRef: "main" });
+      expect(await read({ kind: "file", path: "unicode.txt" }, ctx)).toEqual({
+        error: "bound review head does not match the checkout",
+      });
+    },
+  );
+
+  it("uses an explicit checkout instead of the executor directory and never falls back from it", async () => {
+    const ctx = context();
+    ctx.executor = new LocalExecutor(tmpdir());
+    expect(await read({ kind: "file", path: "unicode.txt" }, ctx)).toMatchObject({
+      text: "\uFEFFé😀\r\nend\n",
+      eof: true,
+    });
+    ctx.executor = new LocalExecutor(root);
+    ctx.checkout = () => tmpdir();
+    expect(await read({ kind: "file", path: "unicode.txt" }, ctx)).toEqual({
+      error: "Git source could not be read completely within the 10 MiB limit",
+    });
+  });
+
   it("reconstructs a private full diff and oversized source line through bounded UTF8 byte pages", async () => {
     for (const input of [{ kind: "file", path: "catalog.txt" }, { kind: "diff" }]) {
       const expected =
