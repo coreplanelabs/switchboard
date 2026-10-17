@@ -135,4 +135,6 @@ The [resident replica placement proposal](../plans/2026-10-14-002-resident-repli
 
 The proposed [shared message handling design](../plans/2026-10-14-002-feat-github-activity-inbox-plan.md) routes external agent messages through the orchestrator. Its [implementation plan](../plans/2026-10-14-003-feat-shared-message-handling-execution-plan.md) lists changes, effort and proof for the shared core, thin GitHub adapter and review-head continuation.
 
+The proposed [source input delivery contract](../plans/2026-10-16-004-source-input-delivery-contract.md) separates the first orchestrator notice from an internal fold. It defines proof that a runtime accepted an input, current source access and retention of unresolved input before producers can be enabled.
+
 The [native launch and hard-stop design](../plans/2026-10-14-001-native-launch-fence-design.md) records per-run isolation, descendant termination and cancellation before VM startup. Its early setup amendment describes stop failures before a runtime is selected.
