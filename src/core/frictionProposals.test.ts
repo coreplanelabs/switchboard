@@ -82,6 +82,49 @@ function oneOffRun(runId: string, finishedAt: number): FrictionRunRecord {
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 7, 28);
 
+describe("interrupted results from the analyzer to proposals", () => {
+  const interrupted = (runId: string, summary: string, tool: string): FrictionRunRecord => ({
+    runId,
+    finishedAt: T0,
+    diagnosis: analyzeRunFriction([
+      { type: "tool_call", tool, callId: "original", summary },
+      { type: "tool_result", tool, callId: "original", ok: false, cut: true, summary: "the run ended" },
+    ]),
+  });
+
+  it("keeps unrelated cut calls below the recurrence threshold and clusters the same call", () => {
+    const install = interrupted("install", "$ npm ci", "bash");
+    const read = interrupted("read", "read file.ts", "read");
+    expect([install, read].map((run) => patternSignature(run.diagnosis.findings[0]))).toEqual([
+      "infra_failure:unconfirmed npm ci",
+      "infra_failure:unconfirmed read",
+    ]);
+    expect(proposeImprovements(clusterFriction([install, read]), { runsAnalyzed: 2 })).toEqual([]);
+    const repeated = interrupted("install-again", "$ npm ci", "bash");
+    expect(proposeImprovements(clusterFriction([install, repeated]), { runsAnalyzed: 2 }).map((p) => p.key)).toEqual([
+      "infra_failure:unconfirmed npm ci",
+    ]);
+  });
+
+  it("keeps cut outcomes distinct from confirmed transport failures in proposal keys and text", () => {
+    const cuts = [interrupted("cut-one", "$ npm ci", "bash"), interrupted("cut-two", "$ npm ci", "bash")];
+    const failed = ["failed-one", "failed-two"].map((runId) => ({
+      runId,
+      finishedAt: T0,
+      diagnosis: analyzeRunFriction([
+        { type: "tool_call", tool: "bash", callId: "original", summary: "$ npm ci" },
+        { type: "tool_result", tool: "bash", callId: "original", ok: false, infra: true, summary: "ECONNRESET" },
+      ]),
+    }));
+    const proposals = proposeImprovements(clusterFriction([...cuts, ...failed]), { runsAnalyzed: 4 });
+    expect(proposals.map((p) => p.key)).toEqual(["infra_failure:npm ci", "infra_failure:unconfirmed npm ci"]);
+    expect(proposals[0].body).toContain("The exec transport failed during `npm ci` in 2 runs");
+    expect(proposals[1].body).toContain("Runs ended without a confirmed result for `npm ci`.");
+    expect(proposals[1].body).toContain("The command outcome and the cause of the interruption remain unknown.");
+    expect(proposals[1].body).not.toContain("The exec transport failed");
+  });
+});
+
 // ---- signatures -------------------------------------------------------------
 
 describe("normalizeCommand", () => {

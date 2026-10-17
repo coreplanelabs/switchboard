@@ -233,7 +233,7 @@
     "src/core/routingTelemetry.ts": "f228a3997db4b4ca703948103d5579ca4a80a906a39944f7e71abe307a3d6780",
     "src/core/runDuration.ts": "dca2a672930febee9fae33e917c5129d6271fd1f9781a7dbcb4cb2217dbe2dae",
     "src/core/runEvents.ts": "5d0d3e03ca8d9d9e8929d94f08500b04a309051079f9ff0eea74fd0d53823814",
-    "src/core/runFriction.ts": "704757bd3b15cdf00e08c02e8b8fc191e99d6e28af7c0d7d16a6ea31425d771c",
+    "src/core/runFriction.ts": "17b333469dd00275c262a97792bec5bb7cee6b05dfc713e0491220845decae23",
     "src/core/runIdentity.ts": "de4ec56068e42c38d84ba40b63c373426d4ebd6aad20f55b6d15bcd2e372e95a",
     "src/core/runLedger/cancellation.ts": "e9e2746ba05d16e5a6dce368d9ca835359931c91acf56fab0ec5bff86706d16f",
     "src/core/runLedger/contextRetention.ts": "faed15938ed9de6c83e46265dd9598f2e9981190252ccebd29548852bbd71ad8",
@@ -518,8 +518,8 @@
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
       "response:*/*:/assets/green.css": "8f6663fec4f5945d4f3b2029b33027267e49a58e705961f50c2cc0d075977535",
       "response:*/*:/settings/runtime": "0181577b21e4d5444a06d0b50245572959c39256df9e6d118b4743a8a7eec348",
-      "response:application/json:/home/session": "589417470c6b0c0d13e25a7f4bc3d2bb206518e723443b10486068614ac20743",
-      "response:text/event-stream:/home/events": "008d76eb93f2dc4d14ce73b4be383b7d08595459855e99cbaecf62271b63ea8a",
+      "response:application/json:/home/session": "e0be98a2e47de2e9894d27d3361b53783dd8703ef9ed29c6218203256adfd202",
+      "response:text/event-stream:/home/events": "278ed13b17b44c11d158f37d4272dcc94d82ff5c9b24663bb7307edc47ca5303",
       "response:text/event-stream:/residents?stream=1": "9f2308ba970c4abb63e1c386283877742b4a4feec64ade544d6d3a6d32968540"
     }
   }

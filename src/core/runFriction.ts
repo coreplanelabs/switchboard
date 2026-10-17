@@ -505,17 +505,16 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
           ? { interval: { start: span.startedAt, end: span.startedAt + durationMs } }
           : {};
 
-      if (!ev.ok) failedCalls.add(callSignature(ev.tool, callSummary));
+      if (!ev.ok && !ev.cut) failedCalls.add(callSignature(ev.tool, callSummary));
 
-      if (ev.infra) {
-        // An infra-level failure is the sandbox, not the command: classify once,
-        // as infra — but name the command that was running, so "the sandbox died
-        // during installs" is readable from the findings alone.
+      if (ev.infra || ev.cut) {
+        // A cut result closes the transcript pair without proving command failure.
+        // Keep the incomplete outcome distinct from an executor failure.
         findings.push(
           timed({
             category: "infra_failure",
             severity: "high",
-            summary: `exec infrastructure failed during ${callSummary} → ${ev.summary}`,
+            summary: `${ev.cut ? "tool result unconfirmed" : "exec infrastructure failed"} during ${callSummary} → ${ev.summary}`,
             tool: ev.tool,
             ...interval,
             eventIndex: anchor,

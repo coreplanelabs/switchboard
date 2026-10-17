@@ -184,7 +184,7 @@
     "src/core/routingTelemetry.ts": "f228a3997db4b4ca703948103d5579ca4a80a906a39944f7e71abe307a3d6780",
     "src/core/runDuration.ts": "dca2a672930febee9fae33e917c5129d6271fd1f9781a7dbcb4cb2217dbe2dae",
     "src/core/runEvents.ts": "5d0d3e03ca8d9d9e8929d94f08500b04a309051079f9ff0eea74fd0d53823814",
-    "src/core/runFriction.ts": "704757bd3b15cdf00e08c02e8b8fc191e99d6e28af7c0d7d16a6ea31425d771c",
+    "src/core/runFriction.ts": "17b333469dd00275c262a97792bec5bb7cee6b05dfc713e0491220845decae23",
     "src/core/runIdentity.ts": "de4ec56068e42c38d84ba40b63c373426d4ebd6aad20f55b6d15bcd2e372e95a",
     "src/core/runLedger/cancellation.ts": "e9e2746ba05d16e5a6dce368d9ca835359931c91acf56fab0ec5bff86706d16f",
     "src/core/runLedger/contextRetention.ts": "faed15938ed9de6c83e46265dd9598f2e9981190252ccebd29548852bbd71ad8",
@@ -461,8 +461,8 @@
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
       "response:*/*:/assets/green.css": "8f6663fec4f5945d4f3b2029b33027267e49a58e705961f50c2cc0d075977535",
       "response:*/*:/home": "a1921f2898434dbe411c71c2d21ef430adbdda4570885854c5d00874cb89f8a7",
-      "response:application/json:/home/session": "e1b64ef31f99d24a6645ce74a2aa4dd6f44c0c7d119dae896cab3e50a561924d",
-      "response:text/event-stream:/home/events": "1640a435427936ca62adbe8d76b2559d42b719d805b603b5aeb20b367b6471a8"
+      "response:application/json:/home/session": "8adb0313b77196f61e2a1ad200457deb801ef006acc758fff3ad9858aef5c3ad",
+      "response:text/event-stream:/home/events": "321bc04b89719398be56ac44cabb75e6dc70363b72531e07ff7a1ffbe4e9c81b"
     }
   }
 }

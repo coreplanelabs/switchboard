@@ -13,6 +13,100 @@ import {
 // Streams below are synthetic: one per friction category, plus edges.
 
 const T0 = 1_700_000_000_000;
+it.each([false, true])(
+  "keeps storage failures and cut tool outcomes separate from command failures, finished=%s",
+  (finished) => {
+    const diagnosis = analyzeRunFriction(
+      [
+        { type: "tool_call", tool: "run_check", callId: "check", summary: "run_check", at: T0 },
+        { type: "tool_call", tool: "read", callId: "read", summary: "read file.ts", at: T0 },
+        {
+          type: "run_note",
+          kind: "storage_failure",
+          summary: "Storage request failed: /runs/state (transport): TimeoutError",
+          at: T0 + 10_000,
+        },
+        {
+          type: "tool_result",
+          tool: "run_check",
+          callId: "check",
+          ok: false,
+          cut: true,
+          summary: "the run ended",
+          at: T0 + 10_000,
+        },
+        {
+          type: "tool_result",
+          tool: "read",
+          callId: "read",
+          ok: false,
+          cut: true,
+          summary: "the run ended",
+          at: T0 + 10_000,
+        },
+        { type: "run_note", kind: "checkpoint_deferred", summary: "Original work remains held.", at: T0 + 10_000 },
+      ],
+      { finished },
+    );
+    expect(diagnosis.findings).toEqual([
+      {
+        category: "infra_failure",
+        severity: "high",
+        summary: "Storage request failed: /runs/state (transport): TimeoutError",
+        eventIndex: 2,
+      },
+      {
+        category: "infra_failure",
+        severity: "high",
+        summary: "tool result unconfirmed during run_check → the run ended",
+        tool: "run_check",
+        durationMs: 10_000,
+        interval: { start: T0, end: T0 + 10_000 },
+        eventIndex: 0,
+      },
+      {
+        category: "infra_failure",
+        severity: "high",
+        summary: "tool result unconfirmed during read file.ts → the run ended",
+        tool: "read",
+        durationMs: 10_000,
+        interval: { start: T0, end: T0 + 10_000 },
+        eventIndex: 1,
+      },
+    ]);
+    expect(diagnosis.byCategory.infra_failure).toEqual({ count: 3, durationMs: 10_000 });
+    expect(diagnosis.byCategory.failed_tool).toEqual({ count: 0, durationMs: 0 });
+    expect(diagnosis.verdict).toBe("infra failures dominated: 3 findings, 10s (100% of run time)");
+  },
+);
+it("does not treat a cut result as a command failure or retry, but retains a real failure and retry", () => {
+  const diagnosis = analyzeRunFriction([
+    { type: "tool_call", tool: "bash", callId: "cut", summary: "$ npm ci" },
+    { type: "tool_result", tool: "bash", callId: "cut", ok: false, cut: true, summary: "the run ended" },
+    { type: "tool_call", tool: "bash", callId: "failed", summary: "$ npm ci" },
+    { type: "tool_result", tool: "bash", callId: "failed", ok: false, summary: "registry unavailable" },
+    { type: "tool_call", tool: "bash", callId: "completed", summary: "$ npm ci" },
+    { type: "tool_result", tool: "bash", callId: "completed", ok: true, summary: "installed" },
+  ]);
+  expect(diagnosis.findings).toEqual([
+    {
+      category: "infra_failure",
+      severity: "high",
+      summary: "tool result unconfirmed during $ npm ci → the run ended",
+      tool: "bash",
+      eventIndex: 0,
+    },
+    {
+      category: "setup_install",
+      severity: "high",
+      summary: "install failed: $ npm ci → registry unavailable",
+      tool: "bash",
+      eventIndex: 2,
+    },
+    { category: "retry", severity: "low", summary: "retried after failure: $ npm ci", tool: "bash", eventIndex: 4 },
+    { category: "setup_install", severity: "low", summary: "install: $ npm ci", tool: "bash", eventIndex: 4 },
+  ]);
+});
 it("treats late argument evidence as a side fact without another tool execution", () => {
   expect(
     analyzeRunFriction([
