@@ -36,7 +36,7 @@ export const submitVerdictTool: RunnableTool = {
     "`approve` when no finding at or above the severity to address remains (the level in force for this run, `minor` by default: " +
     "a major or minor finding means `request_changes`; nits alone never block), `request_changes` otherwise. " +
     "Switchboard writes the verdict as the first line of the GitHub comment itself (`LGTM:` only for approve); " +
-    "a review with no submitted verdict is posted as NOT approving. Call it once, after your analysis; a later call replaces the earlier one. " +
+    "a review with no submitted verdict is posted as NOT approving. If required evidence is unavailable or the review is incomplete, do not submit a verdict; explain the blocker in your final message. Missing evidence is not a code finding. Call it once, after your complete analysis; a later call replaces the earlier one. " +
     "`head` is the commit you reviewed — run `git rev-parse HEAD` in the checkout you read and tested and pass its output; " +
     "Switchboard posts to the PR only if that commit IS the PR's head, so a review of the wrong branch can never land on a PR. " +
     "Enumerate EVERY issue you report in `findings` with STABLE ids assigned in order (F1, F2, …) — a fix round " +
@@ -217,6 +217,14 @@ async function validateVerdictSubmission(
   const invalidCases = verdict.droppedFindings?.filter((reason) =>
     /dropped — (invariant and a non-empty cases array|each case needs|a single finding cannot carry)/.test(reason),
   );
+  if (
+    verdict.droppedFindings?.length === 1 &&
+    verdict.droppedFindings[0] === "findings: changes requested requires validated findings"
+  )
+    return rejectedVerdict(
+      "input",
+      "error: request_changes requires validated findings. If the review is incomplete, stop without a verdict and explain the missing evidence in your final message; no verdict recorded",
+    );
   if (invalidCases?.length)
     return rejectedVerdict(
       "input",

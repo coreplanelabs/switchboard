@@ -66,7 +66,7 @@
     "scripts/web-preview.ts": "10648c20d64f5f2a1c9c7d5dc1771c216764c321772e2f663cf285e303b803df",
     "scripts/web-review-fixture.ts": "79f92a9a98a0424f85eccb6d88753547ca364e84dfd126550a5bfe7c8330b785",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
-    "src/agents/registry.ts": "92115158db2d47c57988e0f8525fb1f40f7adc72acf0d2ae662e978405cd8cd7",
+    "src/agents/registry.ts": "7aae539c33a688722b7d4c9801d9609cbad2b8c2032c8b4acd4c562e37f99829",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
@@ -492,7 +492,7 @@
       "response:*/*:/assets/584f41c14968e449.js": "f86a486cc9cca6dedb3dd3f2b985660eace4b54d306d631ad73507f99bcc6d5e",
       "response:*/*:/assets/6cc5f6bbe4a3ebcc.js": "9c85a9b329073ed96fc3f06f0bf4352ee8013d4b37dcd6b4c225c080fb3b0643",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
-      "response:*/*:/assets/7704038c40f6cb06.js": "e4151c05a6618f0cf29d76f9f5977ba75bb12eee58ae778c93fdffaae1d0d584",
+      "response:*/*:/assets/7704038c40f6cb06.js": "f9dc4684effc4f93b2765cf794e0895621fbb751aa23c0c9f7bba4ae5aca6151",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
       "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
       "response:*/*:/assets/92945a3a5a7d8c72.js": "42caffec235cd70c2a88070f92c0cab6061901a928bf27ecc0f1f9e69323d37d",
@@ -506,10 +506,10 @@
       "response:*/*:/assets/green.css": "cf168e62c30a12bc39311bd4df28d489e84dff5f3e382401e00a6d2d09a3fbf1",
       "response:*/*:/runs/unit-c1/events": "c7af14f456de042b0dee697ce32e86c0e4b497aa0a06120afef7330eae5ae719",
       "response:*/*:/runs/unit/plan-acme-3:U13?session=coding&q=lockfile&open=unit-c1&turn=47": "b7e4bf7d84b169e32e507ac6d4618cdafb7c8bd2f5be44fea73f5706cfca9528",
-      "response:application/json:/home/session": "b32d2c6aa420885a05dfa83882095c3fb2ed4c387233d7e3fd129facdae9b645",
-      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "ea3f83e992a0bfbe2a59275d782bfc3a893388dc6679c7a6176517c1eb172989",
-      "response:text/event-stream:/home/events": "c568448d36b87bfb9ff003fa6665827b0f0bb87aafe53af752deb2806e18eb04",
-      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "d157a39d6126bc1b3af42c305ca1eb268c2fbed315eb28d616a73b041a2fff4f"
+      "response:application/json:/home/session": "28725566184421be9f1dae9291b24a31ebc6e089a3f8cf8f054e0fda08e45fed",
+      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "8c646542476d1929243fda51fabb3f69e36ab5a386e7273f6bd6607a8bc629ca",
+      "response:text/event-stream:/home/events": "7afcdf9a31fd492a8c98390442d62a6eb26f9ce5d1726f62c07de40948435320",
+      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "bb7aed958751df84ac25a6df533ecd314e5eb576d5f8aeec00e149c1a34e2055"
     }
   }
 }

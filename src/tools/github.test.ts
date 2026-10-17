@@ -88,6 +88,84 @@ const text = async (
 ) => String(await tool.run(input, ctx));
 
 describe("github_* reads", () => {
+  it("delivers later history pages without rereading changing CI checks", async () => {
+    const gh = mem();
+    gh.repos.get("acme/api")!.feedback = {
+      7: {
+        reviews: [],
+        comments: [{ id: 1, author: "ada", body: "evidence ".repeat(20000), createdAt: "2026-01-01T00:00:00Z" }],
+      },
+    };
+    const ctx = ctxFor(gh);
+    ctx.reviewHistory = { target: { repo: "acme/api", number: 7 } };
+    const args = { repo: "acme/api", number: 7, includeReviewHistory: true, includeChecks: true };
+    expect(await text(githubPullGetTool, args, ctx)).toContain("Review history page 1/2");
+    gh.getCommitChecks = async () => {
+      throw new GithubApiError(503, "CI is changing");
+    };
+    expect(await text(githubPullGetTool, { ...args, historyPage: 2 }, ctx)).toContain("Review history ends here.");
+    expect(ctx.reviewHistory.snapshot).toEqual({ head: "a".repeat(40), findings: [] });
+  });
+  it("github_pull_get reports unavailable checks without presenting passing CI or completing history", async () => {
+    const gh = mem();
+    gh.getCommitChecks = async () => {
+      throw new GithubApiError(403, "Checks denied");
+    };
+    const ctx = ctxFor(gh);
+    ctx.reviewHistory = { target: { repo: "acme/api", number: 7 } };
+    expect(
+      await text(
+        githubPullGetTool,
+        { repo: "acme/api", number: 7, includeChecks: true, includeReviewHistory: true },
+        ctx,
+      ),
+    ).toMatch(/^error: github_pull_get: GitHub refused \(HTTP 403\)/);
+    expect(ctx.reviewHistory.snapshot).toBeUndefined();
+    expect(await text(githubPullGetTool, { repo: "acme/api", number: 7 }, ctx)).toContain("Fix login");
+  });
+  it("github_pull_get exposes checks and CI links for its exact head without a supplied run ID", async () => {
+    const gh = mem();
+    gh.repos.get("acme/api")!.checks = {
+      ["a".repeat(40)]: [
+        {
+          id: 42,
+          name: "ci / bot",
+          head: "a".repeat(40),
+          status: "completed",
+          conclusion: "success",
+          url: "https://github.com/acme/api/runs/42",
+          detailsUrl: "https://depot.dev/workflows/example",
+        },
+        {
+          id: 43,
+          name: "typecheck",
+          head: "a".repeat(40),
+          status: "in_progress",
+          conclusion: null,
+          url: "https://github.com/acme/api/runs/43",
+          detailsUrl: "https://github.com/acme/api/actions/runs/7/job/43",
+        },
+      ],
+    };
+    const ctx = ctxFor(gh);
+    const output = await text(
+      githubPullGetTool,
+      { repo: "acme/api", number: 7, includeChecks: true, includeReviewHistory: true },
+      ctx,
+    );
+    expect(output).toContain("Checks for acme/api @ " + "a".repeat(40));
+    expect(output).toContain('"name":"ci / bot"');
+    expect(output).toContain('"conclusion":"success"');
+    expect(output).toContain('"detailsUrl":"https://depot.dev/workflows/example"');
+    expect(output).toContain('"status":"in_progress","conclusion":null');
+    expect(historyDocument(output)).toEqual({ outstandingFindings: [], reviews: [], comments: [], reviewComments: [] });
+    expect(await text(githubPullGetTool, { repo: "acme/api", number: 7 }, ctx)).not.toContain("Checks for");
+    gh.repos.get("acme/api")!.pulls![0]!.head.sha = "b".repeat(40);
+    expect(await text(githubPullGetTool, { repo: "acme/api", number: 7, includeChecks: true }, ctx)).toContain(
+      "No check runs reported",
+    );
+  });
+
   const review = (id: number, verdict: ReviewVerdict, prose = "Review prose"): PullReviewFeedback => ({
     id,
     author: "review[bot]",

@@ -28,6 +28,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_ISSUE_PAGES = 3;
 /** `getActionsRun` reads at most this many 100-row job pages. */
 const MAX_JOB_PAGES = 3;
+const MAX_CHECK_PAGES = 3;
 /** A job log is read to its end (a tail window), so it gets a longer deadline than a JSON call. */
 const LOG_TIMEOUT_MS = MINUTE_MS;
 /** GitHub rejects an issue body over 65536 chars; clip with a visible note. */
@@ -207,6 +208,8 @@ export interface GithubApi {
   ): Promise<IssueSummary[]>;
   getIssue(repo: string, number: number): Promise<{ issue: IssueSummary; comments: IssueComment[] }>;
   getPullRequest(repo: string, number: number): Promise<PullSummary>;
+  /** Complete latest check runs at one immutable commit, or an explicit error. */
+  getCommitChecks(repo: string, head: string): Promise<CommitCheck[]>;
   /** Complete review and conversation history, or an explicit error. Read-scoped context only. */
   getPullRequestFeedback(repo: string, number: number): Promise<PullFeedback>;
   createIssue(repo: string, input: NewIssueInput): Promise<IssueSummary>;
@@ -227,6 +230,16 @@ export interface GithubApi {
   /** One job's log, its last `maxChars` characters (default `ACTIONS_LOG_MAX_CHARS`);
    *  the 302 to the signed blob URL is followed without the App credential. */
   getActionsJobLog(repo: string, jobId: number, maxChars?: number): Promise<ActionsJobLog>;
+}
+
+export interface CommitCheck {
+  id: number;
+  name: string;
+  head: string;
+  status: string;
+  conclusion: string | null;
+  url: string;
+  detailsUrl: string | null;
 }
 
 export interface CompareDiff {
@@ -340,6 +353,7 @@ export type GithubRoute =
   | "issue"
   | "issue_comments"
   | "pull"
+  | "commit_checks"
   | "pull_reviews"
   | "pull_review_comments"
   | "head_ref"
@@ -649,6 +663,88 @@ export class RestGithubApi implements GithubApi {
         ...(requestId ? { requestId } : {}),
       },
     };
+  }
+
+  async getCommitChecks(repo: string, head: string): Promise<CommitCheck[]> {
+    if (!/^[0-9a-f]{40}$/i.test(head)) throw new GithubApiError(400, "Invalid check commit");
+    const checks: CommitCheck[] = [];
+    const ids = new Set<number>();
+    let total: number | undefined;
+    for (let page = 1; page <= MAX_CHECK_PAGES; page++) {
+      const response = await this.request(
+        "read",
+        "GET",
+        "commit_checks",
+        `/repos/${repo}/commits/${head}/check-runs?filter=latest&per_page=100&page=${page}`,
+      );
+      const body = (await githubJson(response, "commit_checks")) as {
+        total_count?: unknown;
+        check_runs?: unknown;
+      } | null;
+      if (
+        !body ||
+        !Number.isSafeInteger(body.total_count) ||
+        (body.total_count as number) < 0 ||
+        !Array.isArray(body.check_runs) ||
+        body.check_runs.length > 100
+      )
+        throw new GithubApiError(502, "Invalid check page");
+      if (total === undefined) total = body.total_count as number;
+      if (total > MAX_CHECK_PAGES * 100)
+        throw new GithubApiError(413, "Commit checks exceed the complete-read page limit");
+      if (body.total_count !== total) throw new GithubApiError(502, "Commit check count changed during read");
+      for (const row of body.check_runs as Array<Record<string, unknown>>) {
+        if (
+          !row ||
+          typeof row !== "object" ||
+          Array.isArray(row) ||
+          typeof row.id !== "number" ||
+          !Number.isSafeInteger(row.id) ||
+          row.id <= 0 ||
+          ids.has(row.id) ||
+          typeof row.name !== "string" ||
+          !row.name ||
+          typeof row.head_sha !== "string" ||
+          row.head_sha.toLowerCase() !== head.toLowerCase() ||
+          typeof row.status !== "string" ||
+          !["queued", "in_progress", "completed", "waiting", "requested", "pending"].includes(row.status) ||
+          (row.conclusion !== null && typeof row.conclusion !== "string") ||
+          (row.status === "completed" &&
+            ![
+              "success",
+              "failure",
+              "neutral",
+              "cancelled",
+              "skipped",
+              "timed_out",
+              "action_required",
+              "stale",
+              "startup_failure",
+            ].includes(row.conclusion as string)) ||
+          typeof row.html_url !== "string" ||
+          (row.details_url !== null && typeof row.details_url !== "string")
+        )
+          throw new GithubApiError(502, "Invalid commit check row");
+        ids.add(row.id);
+        checks.push({
+          id: row.id,
+          name: row.name,
+          head: row.head_sha,
+          status: row.status,
+          conclusion: row.conclusion,
+          url: row.html_url,
+          detailsUrl: row.details_url,
+        });
+      }
+      if (checks.length === total) {
+        if (/rel="next"/.test(response.headers.get("link") ?? ""))
+          throw new GithubApiError(502, "Incomplete commit check pagination");
+        return checks;
+      }
+      if (checks.length > total || body.check_runs.length < 100)
+        throw new GithubApiError(502, "Incomplete commit check page");
+    }
+    throw new GithubApiError(413, "Commit checks exceed the complete-read page limit");
   }
 
   async getPullRequestFeedback(repo: string, number: number): Promise<PullFeedback> {
@@ -1221,6 +1317,7 @@ export interface InMemoryRepo {
   files?: Record<string, string>;
   issues?: IssueSummary[];
   pulls?: PullSummary[];
+  checks?: Record<string, CommitCheck[]>;
   feedback?: Record<number, Omit<PullFeedback, "reviewComments"> & { reviewComments?: PullReviewComment[] }>;
   defaultBranch?: string;
   private?: boolean;
@@ -1387,6 +1484,10 @@ export class InMemoryGithubApi implements GithubApi {
     nativeIdOf(pull.base.repositoryId);
     if (pull.source) credentialSourceOf(pull.source);
     return pull;
+  }
+
+  async getCommitChecks(repo: string, head: string): Promise<CommitCheck[]> {
+    return structuredClone(this.repo(repo).checks?.[head] ?? []);
   }
 
   async getPullRequestFeedback(repo: string, number: number): Promise<PullFeedback> {

@@ -591,6 +591,87 @@ describe("RestGithubApi — reads use the read token", () => {
 });
 
 describe("RestGithubApi — pull request reads", () => {
+  it("reads every check page at the exact commit with the read credential", async () => {
+    const sha = "a".repeat(40);
+    const row = (id: number) => ({
+      id,
+      name: `check ${id}`,
+      head_sha: sha,
+      status: "completed",
+      conclusion: "success",
+      html_url: `https://github.com/acme/api/runs/${id}`,
+      details_url: "https://depot.dev/workflows/example",
+    });
+    const { api: gh, calls } = api((c) => ({
+      status: 200,
+      body: {
+        total_count: 101,
+        check_runs: c.url.endsWith("page=1") ? Array.from({ length: 100 }, (_, i) => row(i + 1)) : [row(101)],
+      },
+    }));
+    const checks = await gh.getCommitChecks("acme/api", sha);
+    expect(checks).toHaveLength(101);
+    expect(checks[100]).toEqual({
+      id: 101,
+      name: "check 101",
+      head: sha,
+      status: "completed",
+      conclusion: "success",
+      url: "https://github.com/acme/api/runs/101",
+      detailsUrl: "https://depot.dev/workflows/example",
+    });
+    expect(calls.map((c) => ({ url: c.url, method: c.method, auth: c.headers.authorization }))).toEqual(
+      [1, 2].map((page) => ({
+        url: `https://api.github.com/repos/acme/api/commits/${sha}/check-runs?filter=latest&per_page=100&page=${page}`,
+        method: "GET",
+        auth: "Bearer tok-read",
+      })),
+    );
+  });
+
+  it.each(["missing", "partial", "wrong head", "duplicate", "over limit", "count changed", "invalid conclusion"])(
+    "refuses %s check evidence instead of presenting an empty or complete CI result",
+    async (mode) => {
+      const sha = "a".repeat(40);
+      const row = {
+        id: 1,
+        name: "CI",
+        head_sha: mode === "wrong head" ? "b".repeat(40) : sha,
+        status: "completed",
+        conclusion: mode === "invalid conclusion" ? "unknown" : "success",
+        html_url: "https://github.com/acme/api/runs/1",
+        details_url: null,
+      };
+      const { api: gh } = api((c) => ({
+        status: 200,
+        body:
+          mode === "missing"
+            ? {}
+            : {
+                total_count:
+                  mode === "over limit"
+                    ? 301
+                    : mode === "partial"
+                      ? 2
+                      : mode === "duplicate"
+                        ? 2
+                        : mode === "count changed"
+                          ? c.url.endsWith("page=1")
+                            ? 101
+                            : 102
+                          : 1,
+                check_runs:
+                  mode === "duplicate"
+                    ? [row, row]
+                    : mode === "count changed" && c.url.endsWith("page=1")
+                      ? Array.from({ length: 100 }, (_, i) => ({ ...row, id: i + 1 }))
+                      : [row],
+              },
+      }));
+      await expect(gh.getCommitChecks("acme/api", sha)).rejects.toThrow("check");
+    },
+  );
+
   it.each([
     {
       scenario: "lagging same-repository metadata",

@@ -115,7 +115,7 @@
     "scripts/web-preview.ts": "10648c20d64f5f2a1c9c7d5dc1771c216764c321772e2f663cf285e303b803df",
     "scripts/web-review-fixture.ts": "79f92a9a98a0424f85eccb6d88753547ca364e84dfd126550a5bfe7c8330b785",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
-    "src/agents/registry.ts": "92115158db2d47c57988e0f8525fb1f40f7adc72acf0d2ae662e978405cd8cd7",
+    "src/agents/registry.ts": "7aae539c33a688722b7d4c9801d9609cbad2b8c2032c8b4acd4c562e37f99829",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
@@ -532,7 +532,7 @@
       "response:*/*:/assets/584f41c14968e449.js": "f86a486cc9cca6dedb3dd3f2b985660eace4b54d306d631ad73507f99bcc6d5e",
       "response:*/*:/assets/6cc5f6bbe4a3ebcc.js": "9c85a9b329073ed96fc3f06f0bf4352ee8013d4b37dcd6b4c225c080fb3b0643",
       "response:*/*:/assets/741ba52eabf30821.js": "f5fef1993ede945b74da67ef014b9cda19515adbc5ccee1edea95c00e4e83e13",
-      "response:*/*:/assets/7704038c40f6cb06.js": "e4151c05a6618f0cf29d76f9f5977ba75bb12eee58ae778c93fdffaae1d0d584",
+      "response:*/*:/assets/7704038c40f6cb06.js": "f9dc4684effc4f93b2765cf794e0895621fbb751aa23c0c9f7bba4ae5aca6151",
       "response:*/*:/assets/85531ad14b438306.js": "7f28a73baf1ada0ba2007dc1b82a661c93cdf8e6b19c392b858ce603d2099c64",
       "response:*/*:/assets/8ebca7d8a97580d8.js": "6df4dac9c84bb63354d5da9b3e722747640a08a981f335ef9be615194458ae39",
       "response:*/*:/assets/92945a3a5a7d8c72.js": "42caffec235cd70c2a88070f92c0cab6061901a928bf27ecc0f1f9e69323d37d",
@@ -545,10 +545,10 @@
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
       "response:*/*:/assets/green.css": "cf168e62c30a12bc39311bd4df28d489e84dff5f3e382401e00a6d2d09a3fbf1",
       "response:*/*:/runs/unit/plan-acme-3:U13": "b7e4bf7d84b169e32e507ac6d4618cdafb7c8bd2f5be44fea73f5706cfca9528",
-      "response:application/json:/home/session": "98460a67df4ed6d4a00fb49128adcf57ed4651ce61b14086587ac0923394ab68",
-      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "517b59e694dba28b6d1e07ed41e409306c8bfcf610092e703aff73d7edb0126b",
-      "response:text/event-stream:/home/events": "3723772e53dafdef8a33a1343176cb77b9fee99eed5ee30a98b14c9e90034897",
-      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "57fe4936d933689fc4a2c179d858eaf09562487bbf3a523a4a068e0f180dcc55"
+      "response:application/json:/home/session": "9f4b975e8d6149d5676c28b3c069d20144d426b28d725904284f77fbdd7c6f85",
+      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "b54cdd94c93efad4fdab956e3b120cff6c8b85bbdbb6072fd344875eebfc1446",
+      "response:text/event-stream:/home/events": "6ba2dbc4f3b1d9987f6aefe95405c5919d3a79e49ed567694de12070ad3548c5",
+      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "b927b6d9ead40c8d0c33b054fce057bf0cc61a8bf7972b131411b03d51f583d2"
     }
   }
 }
