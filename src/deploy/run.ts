@@ -1053,6 +1053,47 @@ export async function confirmConsumerConfigPublication(
   return { ok: true };
 }
 
+/** Reusing installed bytes grants no write: both the serving receipt and the
+ * durable quote must still match, including a successor with identical YAML. */
+async function confirmInstalledConfig(
+  source: ConfigSourceObservation,
+  document: Readonly<BaseConfigDocument>,
+  identity: ConfigConsumerIdentity,
+  binding: ActualConfigConsumerBinding,
+  readSource: (key: string) => Promise<ReadBaseOutcome>,
+  expectedImage: string | undefined,
+): Promise<{ ok: true } | { ok: false; problem: string }> {
+  const current = eligibleConfigPublicationConsumer(
+    identity,
+    binding.health,
+    binding.application,
+    binding.instances,
+    expectedImage,
+  );
+  if (!current.ok) return current;
+  const stored = await readSource(source.key);
+  const receiptChanged =
+    current.consumer.key !== source.key ||
+    current.consumer.version !== source.version ||
+    current.consumer.sha256 !== source.sha256;
+  const sourceChanged =
+    !stored.ok ||
+    stored.version !== source.version ||
+    stored.document?.yaml !== document.yaml ||
+    stored.document.sha256 !== document.sha256 ||
+    stored.document.source !== document.source ||
+    stored.document.pushedAt !== document.pushedAt;
+  if (receiptChanged || sourceChanged)
+    return {
+      ok: false,
+      problem:
+        "installed config or its durable source changed during deployment " +
+        `(receipt ${receiptChanged ? "changed" : "unchanged"}; ` +
+        `durable source ${!stored.ok ? "unreadable" : sourceChanged ? "changed" : "unchanged"})`,
+    };
+  return { ok: true };
+}
+
 /** Direct config writes prepare and send immediately; deployments prepare before
  *  uploads and call publishConfigPublication with those same operation inputs. */
 export async function pushConfigDocument(
@@ -2929,6 +2970,7 @@ async function runSelectedDeployPlan(
   }
   let configPublication: PreparedConfigPublication | undefined;
   let configSource: ConfigSourceObservation | undefined;
+  let installedConfig: Readonly<BaseConfigDocument> | undefined;
   const stateWorkerUrl = plan.config.stateWorkerUrl;
   if (plan.steps.some((s) => s.name === "bot")) {
     if (stateWorkerUrl === undefined) {
@@ -2971,24 +3013,58 @@ async function runSelectedDeployPlan(
           !unchangedConfigSourceApplication(original, sourceApp))
       )
         return { kind: "refused", problems: ["original config source changed; reconcile current settings"] };
-      const prepared = await prepareConfigPublication(read, {
-        stateWorkerUrl,
-        key: consumerConfigKey(identity.identity),
-        consumer: identity.identity,
-        inputSourceKey: input.key,
-        expectedInputSource: { version: input.version, sha256: input.sha256 },
-        env: process.env,
-        onSnapshot: (key) =>
-          io.log(`[deploy:all] config: input snapshot "${key}" (private data, not restoration authority)`),
-      });
-      if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
-      if (!prepared.ok) return { kind: "refused", problems: [prepared.problem] };
-      configPublication = prepared.publication;
-      configSource = input;
-      io.log(
-        `[deploy:all] config: ${read.how} validates; frozen "${configPublication.key}" v${configPublication.prior.version} ` +
-          `(sha256 ${configPublication.prior.document?.sha256 ?? "absent"}); candidate sha256 ${configPublication.candidate.sha256}`,
+      // Only a fresh owned consumer on the selected release image can reuse a
+      // revision. An original witness or a matching hash alone cannot do this.
+      const serving = eligibleConfigPublicationConsumer(
+        identity.identity,
+        sourceHealth,
+        sourceApp,
+        sourceInstances,
+        bot.botImage,
       );
+      if (observed.ok && bot.botImage !== undefined && serving.ok) {
+        const stored = await new ConfigDocumentClient({
+          baseUrl: stateWorkerUrl,
+          token: process.env[STATE_WORKER_TOKEN_ENV] ?? "",
+        }).readBase(input.key);
+        if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
+        if (!stored.ok) return { kind: "refused", problems: [stored.problem] };
+        if (
+          stored.version !== input.version ||
+          stored.document?.sha256 !== input.sha256 ||
+          sha256Hex(stored.document.yaml) !== input.sha256
+        )
+          return {
+            kind: "refused",
+            problems: [
+              "input source changed since its observed serving pair; reconcile current settings before publication",
+            ],
+          };
+        if (stored.document.yaml === read.text && stored.document.source === read.how.replace(/^config from /, ""))
+          installedConfig = Object.freeze({ ...stored.document });
+      }
+      configSource = input;
+      if (installedConfig) {
+        io.log(`[deploy:all] config: already installed "${input.key}" v${input.version}; no config publication`);
+      } else {
+        const prepared = await prepareConfigPublication(read, {
+          stateWorkerUrl,
+          key: consumerConfigKey(identity.identity),
+          consumer: identity.identity,
+          inputSourceKey: input.key,
+          expectedInputSource: { version: input.version, sha256: input.sha256 },
+          env: process.env,
+          onSnapshot: (key) =>
+            io.log(`[deploy:all] config: input snapshot "${key}" (private data, not restoration authority)`),
+        });
+        if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
+        if (!prepared.ok) return { kind: "refused", problems: [prepared.problem] };
+        configPublication = prepared.publication;
+        io.log(
+          `[deploy:all] config: ${read.how} validates; frozen "${configPublication.key}" v${configPublication.prior.version} ` +
+            `(sha256 ${configPublication.prior.document?.sha256 ?? "absent"}); candidate sha256 ${configPublication.candidate.sha256}`,
+        );
+      }
     }
   }
   for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
@@ -3034,9 +3110,9 @@ async function runSelectedDeployPlan(
   try {
     for (const step of plan.steps) {
       if (deps.signal?.aborted) break;
-      if ((step.name === "resident" || step.name === "bot") && configPublication) {
-        // Publish the same prepared bytes after Memory and before either consumer.
-        // The original Bot application remains the source authority.
+      if ((step.name === "resident" || step.name === "bot") && (configPublication || installedConfig)) {
+        // Check the original Bot source before either consumer. Real changes
+        // publish once; installed bytes retain their exact durable revision.
         const currentApp =
           configConsumerStep?.liveGate?.kind === "bot"
             ? await deps.readAppState(configConsumerStep.dir, configConsumerStep.liveGate.containerApp)
@@ -3051,7 +3127,35 @@ async function runSelectedDeployPlan(
           });
           break;
         }
-        if (!configPublished) {
+        if (installedConfig && stateWorkerUrl && configConsumerStep?.liveGate?.kind === "bot") {
+          const [health, instances] = await Promise.all([
+            deps.readHealth(configConsumerStep.liveGate.healthUrl),
+            deps.readInstances(configConsumerStep.dir, configConsumerStep.liveGate.containerApp),
+          ]);
+          const client = new ConfigDocumentClient({
+            baseUrl: stateWorkerUrl,
+            token: process.env[STATE_WORKER_TOKEN_ENV] ?? "",
+          });
+          const confirmed = await confirmInstalledConfig(
+            configSource,
+            installedConfig,
+            { commit: expectedCommit },
+            { health, application: currentApp, instances },
+            (key) => client.readBase(key),
+            configConsumerStep.botImage,
+          );
+          if (cancelled()) break;
+          if (!confirmed.ok) {
+            results.push({
+              name: step.name,
+              script: step.script,
+              live: "not deployed",
+              status: `FAILED: ${confirmed.problem}`,
+            });
+            break;
+          }
+        }
+        if (configPublication && !configPublished) {
           const pushed = await publishConfigPublication(configPublication, { env: process.env });
           if (cancelled()) break;
           if (!pushed.ok) {
@@ -3078,14 +3182,21 @@ async function runSelectedDeployPlan(
       if (cancelled()) break;
       windowSettled = false;
       const acceptanceStep =
-        step.liveGate?.kind === "bot" && configPublication
+        step.liveGate?.kind === "bot" && (configPublication || installedConfig)
           ? { ...step, liveGate: { ...step.liveGate, requireRunningSingleton: true as const } }
           : step;
       let r = await deployStep(acceptanceStep, plan, expectedCommit, io, deps);
       windowSettled = r.noUpload === true || r.ok;
-      if (r.ok && !deps.signal?.aborted && step.liveGate?.kind === "bot" && configPublication) {
+      if (
+        r.ok &&
+        !deps.signal?.aborted &&
+        step.liveGate?.kind === "bot" &&
+        stateWorkerUrl &&
+        configSource &&
+        (configPublication || installedConfig)
+      ) {
         const client = new ConfigDocumentClient({
-          baseUrl: configPublication.stateWorkerUrl,
+          baseUrl: stateWorkerUrl,
           token: process.env[STATE_WORKER_TOKEN_ENV] ?? "",
         });
         const [health, app, instances] = await Promise.all([
@@ -3095,15 +3206,26 @@ async function runSelectedDeployPlan(
         ]);
         const confirmed = cancelled()
           ? { ok: false as const, problem: "deployment cancelled" }
-          : await confirmConsumerConfigPublication(
-              configPublication,
-              { commit: expectedCommit },
-              health,
-              app,
-              instances,
-              (key) => client.readBase(key),
-              step.botImage,
-            );
+          : configPublication
+            ? await confirmConsumerConfigPublication(
+                configPublication,
+                { commit: expectedCommit },
+                health,
+                app,
+                instances,
+                (key) => client.readBase(key),
+                step.botImage,
+              )
+            : installedConfig
+              ? await confirmInstalledConfig(
+                  configSource,
+                  installedConfig,
+                  { commit: expectedCommit },
+                  { health, application: app, instances },
+                  (key) => client.readBase(key),
+                  step.botImage,
+                )
+              : { ok: false as const, problem: "selected config operation is unavailable" };
         if (cancelled())
           r = { ...r, ok: false, live: "deployed, not live: deployment cancelled", reason: "deployment cancelled" };
         else if (!confirmed.ok) {

@@ -395,6 +395,178 @@ describe("config publication inputs", () => {
 });
 
 describe("runDeployPlan config publication", () => {
+  function installedRunner() {
+    const store = stateStore();
+    const h = runner(store);
+    const commit = "a".repeat(40);
+    const document = baseConfigDocument(candidateText, h.source, new Date(1));
+    store.slotState.document = document;
+    store.slotState.version = 2;
+    h.plan.steps.find((step) => step.name === "bot")!.botImage = "registry.example/bot:old";
+    const originalHealth = h.deps.readHealth;
+    h.deps.readHealth = async (...args) =>
+      args[0].endsWith("/residents")
+        ? originalHealth(...args)
+        : {
+            status: 200,
+            body: {
+              ok: true,
+              draining: false,
+              inFlight: 0,
+              features: { nativeRunScopes: "native-v1" },
+              build: { commit },
+              loadedBase: {
+                schema: 1,
+                source: { kind: "state", key: `base-${commit}`, version: 2 },
+                sha256: document.sha256,
+                process: { commit },
+              },
+            },
+          };
+    processes.botCode = 0;
+    return { ...h, store, document };
+  }
+
+  it("keeps the installed owned revision on an identical same-image deployment", async () => {
+    const h = installedRunner();
+    const result = await runDeployPlan(h.plan, h.io, h.deps);
+    expect(result, JSON.stringify({ result, logs: h.logs })).toMatchObject({ kind: "ran", ok: true });
+    expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+    expect(h.store.snapshotCalls).toEqual([]);
+    expect(h.store.calls.filter((call) => call === "put")).toEqual([]);
+    expect(processes.calls).toEqual(["upload:memory", "upload:bot"]);
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({ kind: "ran", ok: true });
+    expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+  });
+
+  it("refuses an unloaded successor even when its config bytes are identical", async () => {
+    const h = installedRunner();
+    h.store.slotState.version = 3;
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({
+      kind: "refused",
+      problems: ["input source changed since its observed serving pair; reconcile current settings before publication"],
+    });
+    expect(h.store.slotState).toEqual({ version: 3, document: h.document });
+    expect(processes.calls).toEqual([]);
+    expect(h.store.snapshotCalls).toEqual([]);
+  });
+
+  it("refuses stored bytes that do not match the installed digest", async () => {
+    const h = installedRunner();
+    const changed = candidateText.replace("organization: example", "organization: changed");
+    writeFileSync(h.source, changed);
+    h.store.slotState.document = { ...h.document, yaml: changed };
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({ kind: "refused" });
+    expect(h.store.slotState).toEqual({ version: 2, document: { ...h.document, yaml: changed } });
+    expect(processes.calls).toEqual([]);
+  });
+
+  it.each(["memory", "bot"])(
+    "refuses a same-hash successor during %s upload without changing its config",
+    async (worker) => {
+      const h = installedRunner();
+      const update = () => {
+        h.store.slotState.version = 3;
+      };
+      if (worker === "memory") processes.onMemory = update;
+      else processes.onBot = update;
+      expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({ kind: "ran", ok: false });
+      expect(h.store.slotState).toEqual({ version: 3, document: h.document });
+      expect(h.store.calls.filter((call) => call === "put")).toEqual([]);
+      expect(h.store.snapshotCalls).toEqual([]);
+      expect(processes.calls).toEqual(worker === "memory" ? ["upload:memory"] : ["upload:memory", "upload:bot"]);
+    },
+  );
+
+  it("names a changed receipt separately from an unchanged durable source", async () => {
+    const h = installedRunner();
+    const oldHealth = h.deps.readHealth;
+    let uploaded = false;
+    processes.onBot = () => {
+      uploaded = true;
+    };
+    h.deps.readHealth = async (...args) => {
+      const current = await oldHealth(...args);
+      if (!uploaded || "error" in current || !current.body?.loadedBase) return current;
+      return {
+        status: 200,
+        body: {
+          ...current.body,
+          loadedBase: {
+            schema: 1,
+            source: { kind: "state", key: `base-${"a".repeat(40)}`, version: 3 },
+            sha256: h.document.sha256,
+            process: { commit: "a".repeat(40) },
+          },
+        },
+      };
+    };
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({
+      kind: "ran",
+      ok: false,
+      results: [
+        expect.anything(),
+        {
+          status:
+            "FAILED: installed config or its durable source changed during deployment (receipt changed; durable source unchanged)",
+        },
+      ],
+    });
+    expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+  });
+
+  it("refuses changed provenance even when revision and config bytes stay equal", async () => {
+    const h = installedRunner();
+    processes.onBot = () => {
+      h.store.slotState.document = { ...h.document, source: "other-source" };
+    };
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({
+      kind: "ran",
+      ok: false,
+      results: [
+        expect.anything(),
+        {
+          status:
+            "FAILED: installed config or its durable source changed during deployment (receipt unchanged; durable source changed)",
+        },
+      ],
+    });
+    expect(h.store.slotState).toEqual({ version: 2, document: { ...h.document, source: "other-source" } });
+    expect(h.store.snapshotCalls).toEqual([]);
+  });
+
+  it.each([false, true])("changed config requires its new loaded revision (installed: %s)", async (installed) => {
+    const h = installedRunner();
+    const changed = candidateText.replace("organization: example", "organization: changed");
+    writeFileSync(h.source, changed);
+    const oldHealth = h.deps.readHealth;
+    let activated = false;
+    processes.onBot = () => {
+      activated = installed;
+    };
+    h.deps.readHealth = async (...args) => {
+      const current = await oldHealth(...args);
+      if (!activated || "error" in current || !current.body?.loadedBase) return current;
+      return {
+        status: 200,
+        body: {
+          ...current.body,
+          loadedBase: {
+            schema: 1,
+            source: { kind: "state", key: `base-${"a".repeat(40)}`, version: 3 },
+            sha256: h.store.slotState.document?.sha256,
+            process: { commit: "a".repeat(40) },
+          },
+        },
+      };
+    };
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({ kind: "ran", ok: installed });
+    expect(h.store.slotState.version).toBe(3);
+    expect(h.store.slotState.document?.yaml).toBe(changed);
+    expect(h.store.snapshotCalls).toEqual(["put", "get"]);
+    expect(h.store.calls.filter((call) => call === "put")).toEqual(["put"]);
+  });
+
   it("seals the retained Resident window before the same plan uploads Bot", async () => {
     const store = stateStore();
     const h = runner(store, ["memory", "resident", "bot"], true, true);
