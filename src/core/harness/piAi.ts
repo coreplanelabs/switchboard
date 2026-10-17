@@ -204,6 +204,10 @@ export class PiAiProvider implements Provider {
           }
         : {}),
       fetch: (async (input, init) => {
+        if (req.beforeSend) {
+          await req.beforeSend();
+          req.signal?.throwIfAborted();
+        }
         delete failureContext.headers;
         try {
           const response = await (this.fetchImpl ?? globalThis.fetch)(input, init);
