@@ -936,6 +936,87 @@ describe("unified sessions — durable owner and retention lifecycle", () => {
     expect((await post("/runs/session/tail", { key })).data.next).toBe(0);
   });
 
+  it.each(["missing", "live", "unreadable-archive"] as const)(
+    "preserves the committed report when source registration sees %s history",
+    async (sourceState) => {
+      const id = unique();
+      const storeKey = `runs:unified-${id}`;
+      const threadKey = `slack:C1:${id}`;
+      const key = contextThreadSessionKey(threadKey);
+      const context: ContextDependencies = {
+        version: 1,
+        status: "known",
+        revision: 0,
+        origins: [{ runId: "source", requester: "slack:UALICE", channelId: "slack:C1", threadKey }],
+        slack: [],
+        mcp: [],
+      };
+      if (sourceState === "live") expect((await claim(storeKey, "source", threadKey)).data.ok).toBe(true);
+      else expect((await post("/runs/put", { storeKey, record: record("source", threadKey) })).status).toBe(200);
+      const append = (rowId: string, text: string) =>
+        post("/runs/session/append", {
+          storeKey,
+          key,
+          rowId,
+          context,
+          rows: [{ part: 0, json: storedTurnRow({ role: "assistant", text, context }) }],
+        });
+      expect(await append("earlier-report", "earlier report")).toEqual({
+        status: 200,
+        data: { ok: true, appended: true, contextSaved: true },
+      });
+      if (sourceState === "missing") await post("/runs/delete", { storeKey, id: "source" });
+      if (sourceState === "unreadable-archive")
+        await sql(
+          storeKey,
+          "UPDATE runs SET summary_json=json_set(summary_json, '$.status', 'unsupported-fixture') WHERE run_id='source'",
+        );
+      // No full record is readable in any arm. Registration distinguishes
+      // source-row presence; it does not prove terminal or execution authority.
+      expect((await post("/runs/get", { storeKey, id: "source" })).data.record).toBeNull();
+      expect(await append("later-report", "later report")).toEqual(
+        sourceState === "missing"
+          ? {
+              status: 409,
+              data: { ok: false, appended: true, reason: "context-source-unavailable" },
+            }
+          : {
+              status: 200,
+              data: { ok: true, appended: true, contextSaved: true },
+            },
+      );
+      const entry = (await post("/runs/session/entry", { key, rowId: "later-report" })).data.rows as {
+        idx: number;
+        part: number;
+        json: string;
+      }[];
+      expect(entry.map(({ idx, part, json }) => ({ idx, part, turn: JSON.parse(json) }))).toEqual([
+        {
+          idx: 1,
+          part: 0,
+          turn: { part: { type: "text", text: "later report" }, role: "assistant", context },
+        },
+      ]);
+      expect((await post("/runs/session/tail", { key })).data.next).toBe(2);
+      const retained = (await post("/runs/session/read-tail", { key, maxBytes: 100_000 })).data
+        .sources as SessionSources;
+      expect(retained.context).toEqual(context);
+      expect(await append("later-report", "later report")).toEqual(
+        sourceState === "missing"
+          ? {
+              status: 409,
+              data: { ok: false, appended: false, reason: "context-source-unavailable" },
+            }
+          : {
+              status: 200,
+              data: { ok: true, appended: false, contextSaved: true },
+            },
+      );
+      expect((await post("/runs/session/tail", { key })).data.next).toBe(2);
+      expect((await post("/runs/get", { storeKey, id: "source" })).data.record).toBeNull();
+    },
+  );
+
   it("never recreates explicitly deleted sources when a shared report is replayed", async () => {
     const id = unique();
     const storeKey = `runs:unified-${id}`;
