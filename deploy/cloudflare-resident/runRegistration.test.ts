@@ -1,5 +1,7 @@
-import { NativeRunScopes } from "./nativeScope.js";
+import { NativeRunScopes, CloudflareNativeScopeTransport } from "./nativeScope.js";
 import { RecordedCheckOperation } from "./checkOperation.js";
+import { checkCommandHash } from "../../src/execution/checkOperation.js";
+import type { CheckSource } from "../../src/core/checkInspection.js";
 import { NativeOperationJournal, unstartedNativeOperator } from "./nativeOperation.js";
 import { ErrorCode, OperationInterruptedError, RPCTransportError } from "@cloudflare/sandbox/errors";
 import { levelPosts, memorySide, mergeOutbox, seatSide } from "./levels.js";
@@ -1742,6 +1744,204 @@ function statusObservationFailure(kind: "invalid_frame" | "protocol_error" = "in
     context: { kind, originalMessage: "synthetic-private-status", errorName: "TypeError" },
   });
 }
+
+describe("native timeout ending custody", () => {
+  it.each([
+    "acknowledged",
+    "refused",
+    "foreign",
+    "launcher-unconfirmed",
+    "salvage-pending",
+    "missing-proof",
+    "missing-proof-log-failed",
+  ] as const)("retires only an originally acknowledged timeout: %s", async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      const h = workloadResident();
+      h.native.failWarnLog = outcome === "missing-proof-log-failed";
+      const threadKey = "slack:C1:timeout-proof";
+      const owner = { runId: "run-timeout", ownerGen: "generation", ownerFence: 7 };
+      const context = { threadKey, ...owner, incarnation: "test-incarnation" };
+      const request = { command: "printf progress; sleep 5", timeoutMs: 50 };
+      const operation = { key: "a".repeat(64), commandHash: await checkCommandHash(request.command) };
+      const neighbor = {
+        opOwner: "op:neighbor",
+        native: { version: 1, closed: false, pending: { next: { kind: "opaque" } } },
+      };
+      h.rows.set("native-operation:op:neighbor", neighbor);
+      h.rows.set("private-file", "uncommitted work");
+      let finish!: (code: number) => void;
+      const exitCode = new Promise<number>((resolve) => {
+        finish = resolve;
+      });
+      let launchSubmitted!: () => void;
+      const submitted = new Promise<void>((resolve) => {
+        launchSubmitted = resolve;
+      });
+      const calls: Array<Record<string, unknown>> = [];
+      const native = new CloudflareNativeScopeTransport({
+        running: true,
+        exec: async (_argv: unknown, options: { stdin: ReadableStream }) => {
+          const call = JSON.parse(await new Response(options.stdin).text());
+          calls.push(call);
+          if (call.mode === "launch") {
+            launchSubmitted();
+            return { stdout: new Response("progress").body, stderr: new Response("").body, exitCode };
+          }
+          if (call.mode === "kill-attempt" && outcome !== "launcher-unconfirmed") finish(137);
+          const answer =
+            call.mode === "inspect"
+              ? { version: 1, boot: "11111111-1111-4111-8111-111111111111" }
+              : {
+                  ref:
+                    call.mode === "kill-attempt" && outcome === "foreign"
+                      ? { ...call.ref, owner: { ...owner, runId: "foreign" } }
+                      : call.ref,
+                  ...(call.attempt ? { attempt: call.attempt } : {}),
+                  closed: false,
+                  ...(call.mode === "kill-attempt" ? { populated: false } : {}),
+                };
+          return {
+            stdout: new Response(JSON.stringify(answer)).body,
+            stderr: new Response("").body,
+            exitCode: Promise.resolve(call.mode === "kill-attempt" && outcome === "refused" ? 125 : 0),
+          };
+        },
+      } as any);
+      h.instance.ctx.container = { running: true };
+      h.instance.threadOperationScope = new AsyncLocalStorage();
+      h.instance.nativeScopeTransport = () => ({
+        request: async (value: Record<string, unknown>, timeoutMs: number) => {
+          const output = await native.request(value, timeoutMs);
+          if (value.mode === "launch" && outcome.startsWith("missing-proof")) {
+            const { nativeEnding: _ending, ...partial } = output;
+            return partial;
+          }
+          return output;
+        },
+      });
+      const scopes = new NativeRunScopes(h.instance.ctx.storage, native);
+      await scopes.birth(threadKey, owner, true, async () => {});
+      const checks = new RecordedCheckOperation(h.instance.ctx.storage);
+      const journal = new NativeOperationJournal(h.instance.ctx.storage);
+      let nativeKey = "";
+      let salvageAttempt = "";
+      const pending = checks
+        .execute(
+          context,
+          operation,
+          request,
+          async () => true,
+          async (key) => {
+            nativeKey = key;
+            const scope = { key, owner, threadKey, active: true };
+            const answer = await h.instance.withNativeOperationScope(key, owner, scope, async () => {
+              const result = await h.instance.threadOperationScope.run(scope, () =>
+                Object.getPrototypeOf(h.instance).run.call(h.instance, ["/bin/sh", "-c", request.command], {
+                  timeoutMs: 50,
+                }),
+              );
+              if (outcome === "salvage-pending") salvageAttempt = await journal.begin(key, "opaque");
+              return result;
+            });
+            return {
+              stdout: answer.stdout,
+              stderr: answer.stderr,
+              exitCode: answer.exitCode,
+              truncated: answer.truncated === true,
+            };
+          },
+        )
+        .then(
+          (value) => ({ kind: "returned", value }),
+          (error: Error) => ({ kind: "failed", message: error.message }),
+        );
+      await Promise.race([
+        submitted,
+        pending.then((answer) => {
+          throw new Error("failed before native submission: " + JSON.stringify(answer));
+        }),
+      ]);
+      await vi.advanceTimersByTimeAsync(2050);
+      const answer = await pending;
+      const selected: CheckSource = {
+        version: 1,
+        state: "terminal",
+        threadKey,
+        operation,
+        selector: { runId: owner.runId, callId: "original-timeout", phase: "command" },
+        resource: {
+          type: "run",
+          id: owner.runId,
+          userId: "u1",
+          channelId: "slack:C1",
+          channelVisibility: "private",
+          repo: "acme/app",
+        },
+      };
+      expect(calls.map((call) => call.mode)).toEqual(["inspect", "bootstrap", "launch", "kill-attempt"]);
+      expect(calls[3]).toMatchObject({ ref: calls[2].ref, attempt: calls[2].attempt });
+      expect(h.rows.get("native-operation:op:neighbor")).toEqual(neighbor);
+      expect(h.rows.get("private-file")).toBe("uncommitted work");
+      if (outcome === "acknowledged") {
+        expect(answer).toMatchObject({
+          kind: "returned",
+          value: { kind: "completed", result: { stdout: "progress", exitCode: 124 } },
+        });
+        expect(h.rows.has(nativeKey)).toBe(false);
+        expect(await checks.inspectRecorded(selected, true)).toEqual({
+          kind: "retired",
+          reason: "native_ended",
+          proofHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
+      } else if (outcome === "salvage-pending") {
+        expect(answer).toMatchObject({ kind: "returned", value: { kind: "unknown" } });
+        expect(h.rows.get(nativeKey)).toMatchObject({
+          native: { closed: true, pending: { [salvageAttempt]: { kind: "opaque" } } },
+        });
+        expect(await checks.inspectRecorded(selected, true)).toEqual({ kind: "unavailable", reason: "proof" });
+        await journal.settle(nativeKey, salvageAttempt);
+        expect(await checks.inspectRecorded(selected, true)).toMatchObject({
+          kind: "retired",
+          reason: "native_ended",
+        });
+        expect(calls.filter((call) => call.mode === "launch")).toHaveLength(1);
+        expect(calls.filter((call) => call.mode === "kill-attempt")).toHaveLength(1);
+      } else {
+        expect(answer).toMatchObject({ kind: "failed" });
+        if (outcome.startsWith("missing-proof")) {
+          expect(answer).toEqual({ kind: "failed", message: "native timeout ending is unconfirmed" });
+          const diagnostics = h.native.logs
+            .filter((line) => line.startsWith("[native-timeout-ending] "))
+            .map((line) => JSON.parse(line.slice("[native-timeout-ending] ".length)));
+          expect(diagnostics).toEqual(
+            outcome === "missing-proof-log-failed"
+              ? []
+              : [
+                  {
+                    phase: "unconfirmed",
+                    runId: "run-timeout",
+                    ownerGen: "generation",
+                    ownerFence: 7,
+                    boot: "11111111-1111-4111-8111-111111111111",
+                    attempt: expect.stringMatching(/^[a-f0-9-]{36}$/),
+                    exitCode: 124,
+                  },
+                ],
+          );
+        }
+        expect(h.rows.get(nativeKey)).toMatchObject({ ...owner, native: { closed: true } });
+        expect(await checks.inspectRecorded(selected, true)).toEqual({
+          kind: "pending",
+          reason: "native_ending_unproven",
+        });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("native process identity collection", () => {
   const execute = (h: ReturnType<typeof workloadResident>) =>
     h.instance.withOpNativeOperation("op:identity-test", () =>

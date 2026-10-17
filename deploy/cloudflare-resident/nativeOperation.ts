@@ -14,6 +14,8 @@ import {
   nativeScopeClosed,
   nativeScopeKey,
   nativeScopeRetirementKey,
+  nativeTimeoutEndingSchema,
+  type NativeTimeoutEnding,
   type NativeScopeRef,
 } from "./nativeScope.js";
 
@@ -23,6 +25,7 @@ const RETIREMENT_PREFIX = "native-retirement:";
 const CONTROL_PREFIX = "native-operation-control:";
 const PAGE_SIZE = 25;
 const ATTEMPT_LIMIT = 64;
+const TIMEOUT_RECEIPT_BYTES = 64 * 1024;
 const TERMINAL_SCOPE_RECORD_LIMIT = 64;
 const TERMINAL_SCOPE_PREPARATION_BYTES = 64 * 1024;
 const processIdentity = z.object({
@@ -87,12 +90,25 @@ export interface NativeOperationRows {
 export interface NativeOperationStorage extends NativeOperationRows {
   transaction<T>(action: (rows: NativeOperationRows) => Promise<T>): Promise<T>;
 }
-export type NativeOperationReceipt = {
+type ProcessEndingReceipt = {
   key: string;
   recordHash: string;
   outcome: "native-ended";
   processes: NativeTerminal[];
 };
+const timeoutReceiptSchema = z
+  .object({
+    key: z.string().min(1).max(512),
+    recordHash: z.string().regex(/^[a-f0-9]{64}$/),
+    outcome: z.literal("native-ended"),
+    purpose: z.literal("native-timeout-ending"),
+    originalOperationOutcome: z.literal("unknown"),
+    nativeEnding: nativeTimeoutEndingSchema,
+    processes: z.tuple([]),
+  })
+  .strict();
+type TimeoutEndingReceipt = z.infer<typeof timeoutReceiptSchema>;
+export type NativeOperationReceipt = ProcessEndingReceipt | TimeoutEndingReceipt;
 export type NativeEndingRead =
   | { kind: "missing" }
   | { kind: "unavailable" }
@@ -185,6 +201,40 @@ function recoverable(record: NativeOperationRecord): boolean {
   return Object.values(record.native.pending).every(
     (attempt) => attempt.kind === "process" && attempt.process !== undefined,
   );
+}
+
+function timeoutOwnsAttempt(key: string, record: NativeOperationRecord, ending: NativeTimeoutEnding): boolean {
+  const selected = record.native.pending[ending.attempt];
+  return (
+    isWorkspaceOwner(record) &&
+    key.startsWith(`native-operation:${ending.ref.threadKey}:${ending.ref.owner.runId}:`) &&
+    record.runId === ending.ref.owner.runId &&
+    record.ownerGen === ending.ref.owner.ownerGen &&
+    record.ownerFence === ending.ref.owner.ownerFence &&
+    record.native.threadKey === ending.ref.threadKey &&
+    JSON.stringify(record.native.scope) === JSON.stringify(ending.ref) &&
+    Object.keys(record.native.pending).length === 1 &&
+    selected?.kind === "process" &&
+    selected.process === undefined
+  );
+}
+
+/** This variant records original attempt ending, never a reconstructed command result. */
+async function timeoutArchiveOf(value: unknown, key: string) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  if (new TextEncoder().encode(JSON.stringify(value)).byteLength > TIMEOUT_RECEIPT_BYTES) return;
+  const archive = value as { original?: unknown; receipt?: unknown };
+  const original = recordSchema.safeParse(archive.original);
+  const receipt = timeoutReceiptSchema.safeParse(archive.receipt);
+  if (
+    !original.success ||
+    !receipt.success ||
+    receipt.data.key !== key ||
+    receipt.data.recordHash !== (await recordHash(archive.original)) ||
+    !timeoutOwnsAttempt(key, original.data, receipt.data.nativeEnding)
+  )
+    return;
+  return { original: original.data, receipt: receipt.data };
 }
 /** An empty, live operator scope is the same pre-allocation exemption as before. */
 export function unstartedNativeOperator(value: unknown, owner: string): boolean {
@@ -589,18 +639,84 @@ export class NativeOperationJournal {
     }
   }
 
-  async settle(key: string, id: string): Promise<void> {
-    await this.storage.transaction(async (rows) => {
-      const value = await rows.get(key);
-      // Recovery may already have archived the same observed terminal process.
-      if (value === undefined && (await rows.get(RECEIPT_PREFIX + key)) !== undefined) return;
-      if (await this.retirement(key, value, rows)) return;
-      const record = recordSchema.parse(value);
-      if (await this.frozen(key, value, rows)) return;
-      delete record.native.pending[id];
-      if (record.native.closed && Object.keys(record.native.pending).length === 0) await rows.delete(key);
-      else await rows.put(key, record);
-    });
+  async settle(key: string, id: string, nativeEnding?: NativeTimeoutEnding): Promise<void> {
+    const ending = nativeEnding === undefined ? undefined : nativeTimeoutEndingSchema.parse(nativeEnding);
+    if (ending && ending.attempt !== id) throw new Error("native timeout attempt changed");
+    let expected: { original: unknown; receipt: TimeoutEndingReceipt } | undefined;
+    const observed = async () => {
+      const archive = await this.storage.get(RECEIPT_PREFIX + key);
+      const saved = await timeoutArchiveOf(archive, key);
+      if (
+        !ending ||
+        !saved ||
+        JSON.stringify(saved.receipt.nativeEnding) !== JSON.stringify(ending) ||
+        (expected && JSON.stringify(archive) !== JSON.stringify(expected))
+      )
+        return false;
+      const current = await this.storage.get(key);
+      if (current === undefined) return true;
+      const parsed = recordSchema.safeParse(current);
+      return (
+        parsed.success &&
+        isWorkspaceOwner(parsed.data) &&
+        workspaceOwnerKey(parsed.data) === workspaceOwnerKey(ending.ref.owner) &&
+        parsed.data.native.threadKey === ending.ref.threadKey &&
+        JSON.stringify(parsed.data.native.scope) === JSON.stringify(ending.ref) &&
+        !Object.hasOwn(parsed.data.native.pending, id)
+      );
+    };
+    try {
+      await this.storage.transaction(async (rows) => {
+        const value = await rows.get(key);
+        // Recovery may already have archived the same observed terminal process.
+        if (value === undefined && (await rows.get(RECEIPT_PREFIX + key)) !== undefined) {
+          if (ending) throw new Error("native timeout receipt needs readback");
+          return;
+        }
+        if (await this.retirement(key, value, rows)) {
+          if (ending) throw new Error("native timeout operation is retired");
+          return;
+        }
+        const record = recordSchema.parse(value);
+        if (await this.frozen(key, value, rows)) {
+          if (ending) throw new Error("native timeout operation is retired");
+          return;
+        }
+        if (ending) {
+          if (!timeoutOwnsAttempt(key, record, ending)) throw new Error("native timeout admission changed");
+          if ((await rows.get(RECEIPT_PREFIX + key)) !== undefined)
+            throw new Error("native timeout receipt already exists");
+          expected = {
+            original: value,
+            receipt: {
+              key,
+              recordHash: await recordHash(value),
+              outcome: "native-ended",
+              purpose: "native-timeout-ending",
+              originalOperationOutcome: "unknown",
+              nativeEnding: ending,
+              processes: [],
+            },
+          };
+          if (new TextEncoder().encode(JSON.stringify(expected)).byteLength > TIMEOUT_RECEIPT_BYTES)
+            throw new Error("native timeout receipt is too large");
+          await rows.put(RECEIPT_PREFIX + key, expected);
+        }
+        delete record.native.pending[id];
+        if (record.native.closed && Object.keys(record.native.pending).length === 0) await rows.delete(key);
+        else await rows.put(key, record);
+      });
+    } catch (error) {
+      // Qualify only this original committed receipt; never repeat native work or the write.
+      if (ending) {
+        try {
+          if (await observed()) return;
+        } catch {
+          /* An unreadable acknowledgment stays unknown. */
+        }
+      }
+      throw error;
+    }
   }
 
   async close(key: string): Promise<void> {
@@ -654,6 +770,8 @@ export class NativeOperationJournal {
     if (!validNativeOperationKey(key)) return { kind: "unavailable" };
     const archived = await rows.get<unknown>(RECEIPT_PREFIX + key);
     if (archived === undefined) return { kind: "missing" };
+    const timeout = await timeoutArchiveOf(archived, key);
+    if (timeout) return (await rows.get(key)) === undefined ? { kind: "ended", ...timeout } : { kind: "unavailable" };
     if (!archived || typeof archived !== "object" || Array.isArray(archived)) return { kind: "unavailable" };
     const value = archived as { original?: unknown; receipt?: unknown };
     const original = recordSchema.safeParse(value.original);
@@ -700,12 +818,13 @@ export class NativeOperationJournal {
   ): Promise<NativeOperationReceipt | Refusal> {
     const value = await this.storage.get<unknown>(key);
     if (value === undefined) {
-      const saved = await this.storage.get<{ receipt: NativeOperationReceipt }>(RECEIPT_PREFIX + key);
-      if (saved?.receipt.recordHash === expectedHash) return saved.receipt;
+      const saved = await this.readEnding(key);
+      if (saved.kind === "ended" && saved.receipt.recordHash === expectedHash) return saved.receipt;
       const controls = (await this.controls(key)).filter((control) => control.recordHash === expectedHash);
       return { ...refuse("record-missing-or-changed"), ...(controls.length ? { controls } : {}) };
     }
     if ((await recordHash(value)) !== expectedHash) return refuse("record-changed");
+    if ((await this.storage.get(RECEIPT_PREFIX + key)) !== undefined) return refuse("native-ending-receipt-exists");
     if ((await this.frozen(key, value))?.state === "prepared") return refuse("terminal-retirement-prepared");
     if (await this.retirement(key, value)) return refuse("original-runtime-retired; historical effects unknown");
     const parsed = recordSchema.safeParse(value);
@@ -810,6 +929,7 @@ export class NativeOperationJournal {
       )
         return refuse("record-or-owner-changed");
       const receipt: NativeOperationReceipt = { key, recordHash: expectedHash, outcome: "native-ended", processes };
+      if ((await rows.get(RECEIPT_PREFIX + key)) !== undefined) return refuse("native-ending-receipt-exists");
       // Archive and release are one commit. The original record remains evidence,
       // but the receipt prefix cannot contribute to the unresolved-operation guard.
       await rows.put(RECEIPT_PREFIX + key, { original: current, receipt });

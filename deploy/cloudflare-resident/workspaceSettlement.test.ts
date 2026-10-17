@@ -390,7 +390,20 @@ function harness(
             return { stdout: "{}", stderr: "", exitCode: 0, timedOut: false };
           }
           const process = await instance.processSandbox.exec(request.argv, { env: request.env });
-          return process.output();
+          const output = await process.output();
+          if (!output.timedOut) return output;
+          return {
+            ...output,
+            exitCode: 124,
+            nativeEnding: {
+              version: 1,
+              ref: request.ref,
+              attempt: request.attempt,
+              closed: false,
+              populated: false,
+              launcherExitCode: 137,
+            },
+          };
         }
         if (request.mode === "inspect")
           return {
@@ -1333,7 +1346,13 @@ describe("resident cancellation admission", () => {
         owner,
       );
       if (outcome === "lost") await expect(publication).rejects.toThrow("publication result lost");
-      else expect(await publication).toMatchObject({ exitCode: outcome === "timeout" ? 124 : 1 });
+      else if (outcome === "timeout") {
+        await expect(publication).rejects.toThrow("native timeout admission changed");
+        const journal = [...h.rows].find(([key]) => key.startsWith("native-operation:"))!;
+        expect(journal[1].native.closed).toBe(true);
+        expect(Object.values(journal[1].native.pending)).toEqual([{ kind: "opaque" }, { kind: "process" }]);
+        expect(h.rows.has("native-operation-receipt:" + journal[0])).toBe(false);
+      } else expect(await publication).toMatchObject({ exitCode: 1 });
       h.instance.run = async () => ({ exitCode: 0, timedOut: false, truncated: false });
       const original = structuredClone([...h.rows].filter(([key]) => key.startsWith("native-operation:")));
       expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: true });
