@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.303.0](https://github.com/coreplanelabs/switchboard/compare/v1.302.0...v1.303.0) (2026-10-17)
+
+
+### Features
+
+* **core:** make Stop terminal and Kill destructive ([#3208](https://github.com/coreplanelabs/switchboard/issues/3208)) ([9ecdf9b](https://github.com/coreplanelabs/switchboard/commit/9ecdf9b0c364106025c2e21f3fb0a56f9ac9a8d2))
+* **web:** compare review metrics week over week ([#3221](https://github.com/coreplanelabs/switchboard/issues/3221)) ([028b415](https://github.com/coreplanelabs/switchboard/commit/028b415b0912d50b54d0fb4bcb72a85cc39cc001))
+
+
+### Bug fixes
+
+* **core:** explain refused model source checks ([#3224](https://github.com/coreplanelabs/switchboard/issues/3224)) ([8eafd69](https://github.com/coreplanelabs/switchboard/commit/8eafd69215854e4d1ede0c91037da5071aa01ee4))
+* **core:** expose original intake failure stages ([#3228](https://github.com/coreplanelabs/switchboard/issues/3228)) ([7f0a391](https://github.com/coreplanelabs/switchboard/commit/7f0a391e1b4f47cbc2b54315e45b4bea934e5abb))
+* **core:** keep context when long tasks continue ([#3216](https://github.com/coreplanelabs/switchboard/issues/3216)) ([5a95d9f](https://github.com/coreplanelabs/switchboard/commit/5a95d9f2939c19439a092e2b001739fd6671d878))
+* **core:** keep routing calls serial and evidence repairs precise ([38991e6](https://github.com/coreplanelabs/switchboard/commit/38991e627dfa71b07066df55059a338d256bb78a))
+* **core:** recover MCP admission with exact credential proofs ([#3232](https://github.com/coreplanelabs/switchboard/issues/3232)) ([e4c3de0](https://github.com/coreplanelabs/switchboard/commit/e4c3de03fee8db89683d6cabe5513438808897ed))
+* **core:** refuse new keyed inbox deliveries while finishing ([#3227](https://github.com/coreplanelabs/switchboard/issues/3227)) ([9413a2d](https://github.com/coreplanelabs/switchboard/commit/9413a2def7216eb43e1f7ddbd0cb2cac3164faaa))
+* **core:** require the model named in a formal request ([118cba7](https://github.com/coreplanelabs/switchboard/commit/118cba738cdb8ef4ce275731e24a4539cca490de))
+* **core:** retain tool inputs and routing results in run history ([8a7d1f5](https://github.com/coreplanelabs/switchboard/commit/8a7d1f520a6bfb5ce0d5e8f1171cdee30c6f6cc2))
+* **deploy:** cancel unsealed deployment checks safely ([7a61d40](https://github.com/coreplanelabs/switchboard/commit/7a61d4065d609e2c6af435b84eb6d695108e1eb5))
+* **deploy:** retry a refused resident reopen once ([#3230](https://github.com/coreplanelabs/switchboard/issues/3230)) ([1f38db2](https://github.com/coreplanelabs/switchboard/commit/1f38db28e3ef2ca86466c30509e6c9d2dbc2b937))
+* **deploy:** verify the staging smoke reader before upload ([#3225](https://github.com/coreplanelabs/switchboard/issues/3225)) ([569ddb0](https://github.com/coreplanelabs/switchboard/commit/569ddb0230e71f42025ccd6f1f0e719438343921))
+* **harness:** let agents recover from changed tool requests ([#3220](https://github.com/coreplanelabs/switchboard/issues/3220)) ([90eaf7e](https://github.com/coreplanelabs/switchboard/commit/90eaf7e99e960c23b29baac9c6c3dd63e4f0d9ae))
+* **review:** keep reviews within recorded check limits ([#3223](https://github.com/coreplanelabs/switchboard/issues/3223)) ([0a8061d](https://github.com/coreplanelabs/switchboard/commit/0a8061d71b89e35dbd2b55594f0da8a7edb8377e))
+* **runs:** retain proof when native commands time out ([#3231](https://github.com/coreplanelabs/switchboard/issues/3231)) ([09a0b3e](https://github.com/coreplanelabs/switchboard/commit/09a0b3eaddd4eb4f6ed459a82e9d7742f8ffc02b))
+* **tools:** accept longer verification commands ([#3222](https://github.com/coreplanelabs/switchboard/issues/3222)) ([4a3d7b9](https://github.com/coreplanelabs/switchboard/commit/4a3d7b946c819399c33d28dc2dc9691bbdc65504))
+* **web:** refresh weekly metrics screenshot records ([#3238](https://github.com/coreplanelabs/switchboard/issues/3238)) ([84db5b4](https://github.com/coreplanelabs/switchboard/commit/84db5b42c539727a6ff6b12d50bd2d9f7822a1c4))
+
 ## [1.302.0](https://github.com/coreplanelabs/switchboard/compare/v1.301.0...v1.302.0) (2026-10-16)
 
 
