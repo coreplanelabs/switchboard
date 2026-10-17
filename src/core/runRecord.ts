@@ -1,6 +1,7 @@
 import { isOrchestratorCommandDecision, orchestratorDecisionsOf } from "./dispatch/orchestratorDecisions.js";
 import { cancellationOf, cancellationRecordMatches } from "./runLedger/cancellation.js";
 import { RUN_ID_PATTERN } from "./runIdentity.js";
+import { githubPullSourceContextOf, type GithubPullSourceContext } from "../execution/githubReadSource.js";
 import { isBranchIdentityBaseline, type BranchIdentityBaseline } from "./branchIdentityBaseline.js";
 import { validMaintenanceTransport, maintenanceEventsMatch } from "./coordinator/maintenanceIdentity.js";
 import {
@@ -290,6 +291,8 @@ export interface RunRecord {
    *  row's target). Distinct from `pr`, the one a coding post-step opened, and
    *  from `reviewPost.target`, which exists only when a post succeeded. */
   targetPr?: number;
+  /** Original native GitHub task identity. Internal data, not current access proof. */
+  githubSource?: GithubPullSourceContext;
   /** How the review run's post-step ended (docs/reference/specs/agent-review.md
    *  item 18): the verdict posted to a named pull request at a pinned head, or
    *  not posted with the reason — what a coordinator's `read-record` answers
@@ -899,6 +902,7 @@ export type RunListItem = Omit<
   RunRecord,
   | "events"
   | "sourceReads"
+  | "githubSource"
   | "orchestratorDecisions"
   | "branchIdentityBaseline"
   | "workReads"
@@ -1347,6 +1351,10 @@ export function isRunRecord(v: unknown): v is RunRecord {
     return false;
   if (r.headSha !== undefined && (typeof r.headSha !== "string" || !REVIEW_HEAD_PATTERN.test(r.headSha))) return false;
   if (r.targetPr !== undefined && (!Number.isSafeInteger(r.targetPr) || (r.targetPr as number) < 1)) return false;
+  if (r.githubSource !== undefined) {
+    const source = githubPullSourceContextOf(r.githubSource);
+    if (!source || source.number !== r.targetPr) return false;
+  }
   // The handoff is checked for shape, not bounds (docs/reference/specs/agent-ship.md
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;
@@ -1585,6 +1593,7 @@ export function isRunListItem(v: unknown): v is RunListItem {
     r.reviewPublication !== undefined ||
     r.branchPushReceipts !== undefined ||
     r.sourceReads !== undefined ||
+    r.githubSource !== undefined ||
     r.branchIdentityBaseline !== undefined ||
     r.workReads !== undefined ||
     r.unitSeedReceipt !== undefined ||

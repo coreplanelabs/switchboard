@@ -2858,6 +2858,40 @@ describe("durable branch identity baseline", () => {
 });
 
 describe("retained source archive storage", () => {
+  it("retains native GitHub task identity only in full records and refuses corrupt identity", async () => {
+    const key = storeKey(),
+      base = record("github-source-history", Date.now());
+    const githubSource = {
+      version: 1,
+      source: { host: "github.com", appId: 11, installationId: 22 },
+      repositoryId: 33,
+      pullRequestId: 44,
+      number: 42,
+      head: { repositoryId: 33, ref: "private/source-branch", sha: "a".repeat(40) },
+      baseRef: "main",
+    };
+    expect((await post("/runs/put", { storeKey: key, record: { ...base, targetPr: 42, githubSource } })).status).toBe(
+      200,
+    );
+    expect(((await post("/runs/get", { storeKey: key, id: base.id })).data.record as RunRecord).githubSource).toEqual(
+      githubSource,
+    );
+    for (const result of [
+      await post("/runs/summary", { storeKey: key, id: base.id }),
+      await post("/runs/list", { storeKey: key }),
+    ]) {
+      expect(result.status).toBe(200);
+      expect(JSON.stringify(result.data)).not.toContain("githubSource");
+      expect(JSON.stringify(result.data)).not.toContain("private/source-branch");
+    }
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        "UPDATE runs SET summary_json=json_set(summary_json, '$.githubSource.number', 43) WHERE run_id=?",
+        base.id,
+      );
+    });
+    expect((await post("/runs/get", { storeKey: key, id: base.id })).data.record).toBeNull();
+  });
   it("retains orchestrator decisions in full records without exposing them in summaries", async () => {
     const key = storeKey(),
       base = record("orchestrator-history", Date.now());

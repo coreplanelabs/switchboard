@@ -713,6 +713,7 @@ function persistedView(
     Pick<
       RunRecord,
       | "sourceReads"
+      | "githubSource"
       | "orchestratorDecisions"
       | "branchIdentityBaseline"
       | "workReads"
@@ -730,6 +731,7 @@ function persistedView(
     workspaceDisposition: _workspaceDisposition,
     audienceRefusal: _audienceRefusal,
     sourceReads: _sourceReads,
+    githubSource: _githubSource,
     orchestratorDecisions: _orchestratorDecisions,
     branchIdentityBaseline: _branchIdentityBaseline,
     workReads: _workReads,

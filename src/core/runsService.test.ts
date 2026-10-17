@@ -301,6 +301,15 @@ describe("RunsService.getRun", () => {
       },
     ];
     const internal = {
+      githubSource: {
+        version: 1 as const,
+        source: { host: "github.com" as const, appId: 11, installationId: 22 },
+        repositoryId: 33,
+        pullRequestId: 44,
+        number: 42,
+        head: { repositoryId: 33, ref: "private/source-branch", sha: "a".repeat(40) },
+        baseRef: "main",
+      },
       orchestratorDecisions,
       branchPublication: {
         version: 1 as const,
@@ -350,7 +359,7 @@ describe("RunsService.getRun", () => {
         assets: [],
       },
     };
-    await store!.put({ ...base, ...internal });
+    await store!.put({ ...base, targetPr: 42, ...internal });
     for (const view of [
       await svc.getRun(base.id),
       await svc.getRun(base.id, { include: "messages" }),
@@ -359,6 +368,8 @@ describe("RunsService.getRun", () => {
     ]) {
       const json = JSON.stringify(view);
       for (const field of [
+        "githubSource",
+        "private/source-branch",
         "branchPublication",
         "private-intent",
         "private/branch",

@@ -36,6 +36,31 @@ import { pendingQuestionOf, bindFromAnswer } from "./dispatch/operator.js";
 import type { ChildHandoff } from "./dispatch/handoff.js";
 import type { OrchestratorSourceFoldDecision } from "./dispatch/orchestratorDecisions.js";
 
+it("accepts a typed archived GitHub identity only for its original PR and keeps legacy absence", () => {
+  const githubSource: NonNullable<RunRecord["githubSource"]> = {
+    version: 1,
+    source: { host: "github.com", appId: 11, installationId: 22 },
+    repositoryId: 33,
+    pullRequestId: 44,
+    number: 42,
+    head: { repositoryId: 33, ref: "private/source-branch", sha: "a".repeat(40) },
+    baseRef: "main",
+  };
+  const kept = JSON.parse(JSON.stringify(record({ targetPr: 42, githubSource })));
+  expect(isRunRecord(kept)).toBe(true);
+  expect(isRunListItem({ ...kept, events: undefined })).toBe(false);
+  for (const invalid of [null, { ...githubSource, number: 43 }, { ...githubSource, repositoryId: "33" }]) {
+    kept.githubSource = invalid;
+    expect(isRunRecord(kept)).toBe(false);
+    delete kept.targetPr;
+    expect(isRunRecord(kept)).toBe(false);
+    kept.targetPr = 42;
+  }
+  delete kept.githubSource;
+  expect(isRunRecord(kept)).toBe(true);
+  expect(isRunListItem({ ...kept, events: undefined })).toBe(true);
+});
+
 it("full records validate source folds across JSON without requester conversion", () => {
   const selection: OrchestratorSourceFoldDecision = {
     version: 2,
