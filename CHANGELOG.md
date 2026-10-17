@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.304.1](https://github.com/coreplanelabs/switchboard/compare/v1.304.0...v1.304.1) (2026-10-17)
+
+
+### Bug fixes
+
+* **core:** preserve native admission diagnostics ([#3245](https://github.com/coreplanelabs/switchboard/issues/3245)) ([2089705](https://github.com/coreplanelabs/switchboard/commit/2089705742154516fc099bbb9a9026e1340f6562))
+* **deploy:** keep the installed config on repeat deployments ([#3244](https://github.com/coreplanelabs/switchboard/issues/3244)) ([0519a84](https://github.com/coreplanelabs/switchboard/commit/0519a84124491f6def96f895c3a12937ba34f4a6))
+* **resident:** keep UID status reads free of migration ([#3243](https://github.com/coreplanelabs/switchboard/issues/3243)) ([a8e3c31](https://github.com/coreplanelabs/switchboard/commit/a8e3c3163f0d9150653bba0b186a646171a2661d))
+* **web:** show routine notices as information ([#3248](https://github.com/coreplanelabs/switchboard/issues/3248)) ([36e1d1c](https://github.com/coreplanelabs/switchboard/commit/36e1d1c905260632a5ea21fb70506c0a5ba2118f))
+
 ## [1.304.0](https://github.com/coreplanelabs/switchboard/compare/v1.303.0...v1.304.0) (2026-10-17)
 
 
