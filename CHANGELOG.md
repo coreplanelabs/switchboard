@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.304.0](https://github.com/coreplanelabs/switchboard/compare/v1.303.0...v1.304.0) (2026-10-17)
+
+
+### Features
+
+* **web:** use the new Switchboard logo across product surfaces ([#3239](https://github.com/coreplanelabs/switchboard/issues/3239)) ([ff6a0ff](https://github.com/coreplanelabs/switchboard/commit/ff6a0ff8d439b2b82b12326a9dc92feaa3f3be9e))
+
+
+### Bug fixes
+
+* **core:** isolate new MCP Reviews from earlier context ([#3234](https://github.com/coreplanelabs/switchboard/issues/3234)) ([c98e49f](https://github.com/coreplanelabs/switchboard/commit/c98e49f4d434dc85f5f8546feb4082e7b1d98a70))
+
 ## [1.303.0](https://github.com/coreplanelabs/switchboard/compare/v1.302.0...v1.303.0) (2026-10-17)
 
 
