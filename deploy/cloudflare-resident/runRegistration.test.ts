@@ -5,7 +5,7 @@ import type { CheckSource } from "../../src/core/checkInspection.js";
 import { NativeOperationJournal, unstartedNativeOperator } from "./nativeOperation.js";
 import { ErrorCode, OperationInterruptedError, RPCTransportError } from "@cloudflare/sandbox/errors";
 import { levelPosts, memorySide, mergeOutbox, seatSide } from "./levels.js";
-import { uidLedger, uidOwner, issuedUidCount, claimUid, reserveUid } from "./uidOwnership";
+import { uidLedger, uidOwner, issuedUidCount, claimUid, reserveUid, readUidReport } from "./uidOwnership";
 import { provisionUidCommand } from "./uidProvision";
 import { isResidentPoolUser } from "../../src/execution/residentPoolSpends.js";
 import {
@@ -1144,6 +1144,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
     `${compiledOwnerFlow}\n({ OwnerFlowUnderTest, threadWorktreePath, replacementWorktreePath })`,
     {
       uidLedger,
+      readUidReport,
       uidOwner,
       issuedUidCount,
       claimUid,
@@ -1458,6 +1459,7 @@ function workloadResident(
        "ensurePoolAccount",
        "markPoolUserSpent",
        "currentUidLedger",
+       "getResidentInfo",
      ]
        .map((name) => methodOf(workloadSource, name) ?? "")
        .join("\n")} }`,
@@ -1482,6 +1484,7 @@ function workloadResident(
   let onOwnerRead: ((runId: string) => Promise<void>) | undefined;
   const Native = runInNewContext(`${compiled}\nResident`, {
     uidLedger,
+    readUidReport,
     uidOwner,
     issuedUidCount,
     claimUid,
@@ -1524,6 +1527,25 @@ function workloadResident(
     THREAD_KEY_PREFIX: "thread:",
     IMAGE_REPORT_PENDING_KEY: "image-pending",
     SNAPSHOT_KEY: "snapshot",
+    STATE_KEY: "resident:state",
+    REASON_KEY: "resident:reason",
+    UPDATED_KEY: "resident:updatedAt",
+    FACTS_KEY: "resident:facts",
+    DISK_KEY: "resident:disk",
+    MIRROR_MUTEX_KEY: "resident:mirrorMutex",
+    LIFECYCLE_KEY: "resident:lifecycle",
+    REFRESH_INSTANCE_KEY: "resident:refreshInstance",
+    AUTO_REBUILDS_KEY: "resident:autoRebuilds",
+    INFRA_STREAK_KEY: "resident:infraStreak",
+    MEMORY_KEY: "resident:memory",
+    IMAGE_RECONCILE_KEY: "imageReconcile",
+    RECREATE_ADMISSION_KEY: "resident:recreateAdmission",
+    PROVISION_RUN_CALLBACK: "runProvisioning",
+    PROVISIONING_CALLBACK: "onProvisioningDeadline",
+    BUILD_ID: "test-build",
+    inFlightKey: (kind: string) => `resident:in-flight:${kind}`,
+    inFlightRow: (refresh: unknown, hydration: unknown) => ({ refresh: refresh ?? null, hydration: hydration ?? null }),
+    lifecycleOf: () => "workflow",
     idleForPoolRecycle,
     retryPoolRecycleAfterRefresh,
     liveDrain,
@@ -1669,6 +1691,8 @@ function workloadResident(
     workspaceExclusiveOpsInFlight: new Set<string>(),
     getStatus: async () => ({ state: "warm" }),
     memoryGauge: async () => null,
+    listSchedules: async () => [],
+    snapshotHandle: async () => null,
     incarnation: "test-incarnation",
     registry: () => ({ getDrain: async () => null }),
     swapIncarnation: () => {},
@@ -1696,7 +1720,10 @@ function workloadResident(
     ctx: {
       id: { toString: () => "fixture-container" },
       storage: {
-        get: async (key: string) => structuredClone(rows.get(key)),
+        get: async (key: string | string[]) =>
+          Array.isArray(key)
+            ? new Map(key.filter((name) => rows.has(name)).map((name) => [name, structuredClone(rows.get(name))]))
+            : structuredClone(rows.get(key)),
         list: async ({ prefix, limit, startAfter = "" }: { prefix: string; limit?: number; startAfter?: string }) =>
           new Map(
             [...rows]
@@ -1734,6 +1761,63 @@ function workloadResident(
     },
   };
 }
+
+describe("resident UID status report", () => {
+  it("reports initialized ownership and leaves inconsistent stored counts unverified", async () => {
+    const { instance, rows } = workloadResident();
+    rows.set("uid:state", { generation: "current", next: 35, issued: 1 });
+    rows.set("uid:current:user:worker34", "thread:current");
+    const before = structuredClone(rows);
+    expect(await instance.getResidentInfo()).toMatchObject({
+      poolUsersSpent: 1,
+      poolUserSpends: [{ user: "worker34", owner: "thread:current" }],
+      poolUserSpendsComplete: true,
+    });
+    expect(rows).toEqual(before);
+    rows.set("uid:state", { generation: "current", next: 35, issued: 2 });
+    const corrupt = structuredClone(rows);
+    expect(await instance.getResidentInfo()).toMatchObject({
+      poolUsersSpent: null,
+      poolUserSpends: null,
+      poolUserSpendsComplete: false,
+    });
+    expect(rows).toEqual(corrupt);
+  });
+
+  it("marks a bounded owner preview incomplete without changing ownership", async () => {
+    const { instance, rows, native, lifecycle } = workloadResident();
+    rows.set("uid:state", { generation: "current", next: 229, issued: 129 });
+    for (let i = 100; i <= 228; i++) rows.set(`uid:current:user:worker${i}`, `thread:owner-${i}`);
+    const before = structuredClone(rows);
+    const info = await instance.getResidentInfo();
+    expect(info).toMatchObject({ poolUsersSpent: 129, poolUserSpendsComplete: false });
+    expect(info.poolUserSpends).toHaveLength(128);
+    expect(rows).toEqual(before);
+    expect(native.execCount).toBe(0);
+    expect(lifecycle).toEqual([]);
+  });
+
+  it.each([{ legacy: [] }, { legacy: [{ user: "worker11", owner: "thread:old" }] }])(
+    "reports absent current UID state as unverified without migrating legacy rows %j",
+    async ({ legacy }) => {
+      const { instance, rows } = workloadResident();
+      rows.set("resident:spentPoolUsers", legacy);
+      const before = structuredClone(rows);
+      instance.run = async () => {
+        throw new Error("status must not run a command");
+      };
+      expect(await instance.getResidentInfo()).toMatchObject({
+        uidAllocation: "dynamic",
+        poolUsersTotal: null,
+        poolUsersSpent: null,
+        poolUserSpends: null,
+        poolUserSpendsComplete: false,
+        workloadLimit: 16,
+      });
+      expect(rows).toEqual(before);
+    },
+  );
+});
 
 function statusObservationFailure(kind: "invalid_frame" | "protocol_error" = "invalid_frame") {
   return new RPCTransportError({

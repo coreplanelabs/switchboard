@@ -317,7 +317,15 @@ import {
   rebuildPoolBindingIndex,
   releasePoolBinding,
 } from "../../src/execution/residentPoolSpends.js";
-import { reserveUid, uidOwner, uidLedger, issuedUidCount, resetUidGeneration, claimUid } from "./uidOwnership";
+import {
+  reserveUid,
+  uidOwner,
+  uidLedger,
+  issuedUidCount,
+  resetUidGeneration,
+  claimUid,
+  readUidReport,
+} from "./uidOwnership";
 import { provisionUidCommand } from "./uidProvision";
 import {
   recordFiring,
@@ -14674,12 +14682,7 @@ export class ResidentDO extends Sandbox<Env> {
     // The runs whose process lives in the container between operator calls
     // (item 44): what the deploy preflight must see, added to both counts.
     const registeredRuns = await this.registeredRunsBeyondOps();
-    const uidReport = await this.ctx.storage
-      .transaction(async (txn) => ({
-        issued: await issuedUidCount(txn),
-        preview: [...(await uidLedger(txn, 128))].map(([user, owner]) => ({ user, owner })),
-      }))
-      .catch(() => null);
+    const uidReport = await this.ctx.storage.transaction((txn) => readUidReport(txn)).catch(() => null);
     return {
       resource: map.get(RESOURCE_KEY) ?? null,
       state:

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { reserveUid, uidOwner, issuedUidCount, resetUidGeneration, claimUid, uidLedger } from "./uidOwnership";
+import {
+  reserveUid,
+  uidOwner,
+  issuedUidCount,
+  resetUidGeneration,
+  claimUid,
+  uidLedger,
+  readUidReport,
+} from "./uidOwnership";
 
 function store(legacy: unknown = []) {
   const rows = new Map<string, unknown>([["resident:spentPoolUsers", legacy]]);
@@ -92,5 +100,63 @@ describe("indexed resident UID ownership", () => {
         ["worker34", "thread:new"],
       ]),
     );
+  });
+});
+
+describe("stored resident UID report", () => {
+  it("distinguishes a verified empty generation from missing state without changing either", async () => {
+    const { tx, rows } = store([{ user: "worker11", owner: "thread:old" }]);
+    const legacy = structuredClone(rows);
+    expect(await readUidReport(tx)).toBeNull();
+    expect(rows).toEqual(legacy);
+    rows.set("uid:state", { generation: "current", next: 34, issued: 0 });
+    const before = structuredClone(rows);
+    expect(await readUidReport(tx)).toEqual({ issued: 0, preview: [] });
+    expect(rows).toEqual(before);
+  });
+
+  it("reports the stored generation's exact owners without migrating legacy records", async () => {
+    const { tx, rows } = store([{ user: "worker11", owner: "thread:legacy" }]);
+    rows.set("uid:state", { generation: "current", next: 35, issued: 1 });
+    rows.set("uid:current:user:worker34", "thread:new");
+    rows.set("uid:old:user:worker11", "thread:legacy");
+    const before = structuredClone(rows);
+    expect(await readUidReport(tx)).toEqual({ issued: 1, preview: [{ user: "worker34", owner: "thread:new" }] });
+    expect(rows).toEqual(before);
+  });
+
+  it("leaves corrupt state, missing indexes and understated counts unverified", async () => {
+    const { tx, rows } = store();
+    for (const state of [
+      null,
+      { generation: "bad", next: 1, issued: 0 },
+      { generation: "current", next: 35, issued: 1 },
+    ]) {
+      rows.set("uid:state", state);
+      const before = structuredClone(rows);
+      expect(await readUidReport(tx)).toBeNull();
+      expect(rows).toEqual(before);
+    }
+    rows.set("uid:state", { generation: "current", next: 35, issued: 0 });
+    rows.set("uid:current:user:worker34", "thread:new");
+    const before = structuredClone(rows);
+    expect(await readUidReport(tx)).toBeNull();
+    expect(rows).toEqual(before);
+  });
+
+  it("keeps a bounded preview incomplete and detects an extra index at its boundary", async () => {
+    const { tx, rows } = store();
+    rows.set("uid:state", { generation: "current", next: 229, issued: 129 });
+    for (let i = 100; i <= 228; i++) rows.set(`uid:current:user:worker${i}`, `thread:owner-${i}`);
+    const before = structuredClone(rows);
+    expect(await readUidReport(tx)).toEqual({
+      issued: 129,
+      preview: Array.from({ length: 128 }, (_, i) => ({ user: `worker${i + 100}`, owner: `thread:owner-${i + 100}` })),
+    });
+    expect(rows).toEqual(before);
+    rows.set("uid:state", { generation: "current", next: 229, issued: 128 });
+    const understated = structuredClone(rows);
+    expect(await readUidReport(tx)).toBeNull();
+    expect(rows).toEqual(understated);
   });
 });
