@@ -2367,6 +2367,54 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  selected once at construction, the `SHIP_COORDINATOR?` shape. */
   private readonly metrics: RunMetricsSink;
 
+  /** A source refusal must reject its caller after the input gate closes,
+   * rather than reset this shared object and interrupt unrelated runs. */
+  private async withInputGate<T>(
+    operation: "archiveCheckpoint" | "readContextCheckpoint" | "normalizeContextOrigins" | "setState",
+    runId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    let ownerGen: string | null = null;
+    const result = await this.ctx.blockConcurrencyWhile(async () => {
+      try {
+        ownerGen = this.liveRow(runId)?.ownerGen ?? null;
+        return { ok: true as const, value: await action() };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    });
+    if (!result.ok) {
+      try {
+        // Exception prose can contain source data; emit only fixed class labels.
+        const errorName =
+          (
+            [
+              [SourceSeedPendingError, "SourceSeedPendingError"],
+              [RequiredTranscriptError, "RequiredTranscriptError"],
+              [CanonicalArchiveRefusal, "CanonicalArchiveRefusal"],
+              [SyntaxError, "SyntaxError"],
+              [TypeError, "TypeError"],
+              [Error, "Error"],
+            ] as const
+          ).find(([type]) => result.error instanceof type)?.[1] ?? "ThrownValue";
+        console.log(
+          JSON.stringify({
+            event: "checkpoint.gate_refused",
+            operation,
+            runId,
+            ownerGen,
+            errorName,
+            message: "Checkpoint operation failed",
+          }),
+        );
+      } catch {
+        // A diagnostic failure must preserve the original operation error.
+      }
+      throw result.error;
+    }
+    return result.value;
+  }
+
   recordClaimObservation(input: NativeClaimObservation): { stored: boolean } {
     const value = nativeClaimObservationOf(input);
     if (!value) throw new Error("invalid claim observation");
@@ -6351,44 +6399,37 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   private async archiveCheckpoint(record: RunRecord): Promise<RunRecord> {
-    const result = await this.ctx.blockConcurrencyWhile(async () => {
-      try {
-        await this.recoverPendingCheckpoint(record.id);
-        const live = this.liveRow(record.id);
-        for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
-          const canonical = live?.state[field];
-          if (canonical === undefined) continue;
-          if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
-            throw new CanonicalArchiveRefusal("work evidence is not canonical");
-          record = { ...record, [field]: structuredClone(canonical) };
-        }
-        if (!workEvidenceBelongsToRun(record, record))
-          throw new CanonicalArchiveRefusal("work evidence does not match its canonical run");
-        const receipt = live?.state.contextCheckpointReceipt;
-        if (!isContextCheckpointReceipt(receipt)) return record;
-        if (
-          record.contextCheckpointReceipt !== undefined &&
-          JSON.stringify(record.contextCheckpointReceipt) !== JSON.stringify(receipt)
-        )
-          throw new CanonicalArchiveRefusal("checkpoint receipt is not canonical");
-        const context = applyContextCheckpoint(
-          mergeContextDependencies(
-            record.contextDependencies ?? (live!.state.contextDependencies as ContextDependencies),
-            receipt.normalized,
-          ),
-          receipt,
-        );
-        const sealed = { ...record, contextDependencies: context, contextCheckpointReceipt: receipt };
-        if (!isRunRecord(sealed))
-          throw new CanonicalArchiveRefusal("checkpoint archive does not match its canonical run");
-        return sealed;
-      } catch (error) {
-        if (error instanceof CanonicalArchiveRefusal) return error;
-        throw error;
+    return this.withInputGate("archiveCheckpoint", record.id, async () => {
+      await this.recoverPendingCheckpoint(record.id);
+      const live = this.liveRow(record.id);
+      for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
+        const canonical = live?.state[field];
+        if (canonical === undefined) continue;
+        if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
+          throw new CanonicalArchiveRefusal("work evidence is not canonical");
+        record = { ...record, [field]: structuredClone(canonical) };
       }
+      if (!workEvidenceBelongsToRun(record, record))
+        throw new CanonicalArchiveRefusal("work evidence does not match its canonical run");
+      const receipt = live?.state.contextCheckpointReceipt;
+      if (!isContextCheckpointReceipt(receipt)) return record;
+      if (
+        record.contextCheckpointReceipt !== undefined &&
+        JSON.stringify(record.contextCheckpointReceipt) !== JSON.stringify(receipt)
+      )
+        throw new CanonicalArchiveRefusal("checkpoint receipt is not canonical");
+      const context = applyContextCheckpoint(
+        mergeContextDependencies(
+          record.contextDependencies ?? (live!.state.contextDependencies as ContextDependencies),
+          receipt.normalized,
+        ),
+        receipt,
+      );
+      const sealed = { ...record, contextDependencies: context, contextCheckpointReceipt: receipt };
+      if (!isRunRecord(sealed))
+        throw new CanonicalArchiveRefusal("checkpoint archive does not match its canonical run");
+      return sealed;
     });
-    if (result instanceof CanonicalArchiveRefusal) throw result;
-    return result;
   }
 
   private async recoverPendingCheckpoint(runId: string): Promise<void> {
@@ -6438,7 +6479,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   async readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined> {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    return this.withInputGate("readContextCheckpoint", runId, async () => {
       await this.recoverPendingCheckpoint(runId);
       const source = await this.checkpointSource(runId);
       return source?.receipt && (await validateContextCheckpoint(source.receipt, source)) ? source : undefined;
@@ -6446,7 +6487,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   async normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult> {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    return this.withInputGate("normalizeContextOrigins", request.runId, async () => {
       await this.recoverPendingCheckpoint(request.runId);
       const row = this.liveRow(request.runId);
       const fence = checkFence(row, request.gen);
@@ -8067,7 +8108,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     )
       return { ok: false, reason: "fenced" };
     if (this.promotionHeld(runId, gen)) return pending();
-    return this.ctx.blockConcurrencyWhile(async (): Promise<FenceResult | PromotionHold> => {
+    return this.withInputGate("setState", runId, async (): Promise<FenceResult | PromotionHold> => {
       const row = this.liveRow(runId);
       const fence = checkFence(row, gen);
       if (!fence.ok) return fence;

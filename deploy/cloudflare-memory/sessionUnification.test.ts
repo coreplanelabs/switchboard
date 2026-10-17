@@ -1,6 +1,6 @@
 import { contextDependenciesHash, mergeContextDependencies } from "../../src/core/references/contextDependencies.ts";
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fetchMemoryTest } from "./testFetch.ts";
 import { testSessionSources } from "../../src/core/testing/slackReceipts.ts";
 import { contextThreadSessionKey, threadSessionKey } from "../../src/core/runLedger/sessionLog.ts";
@@ -91,6 +91,404 @@ const writeOne = async (key: string, runId: string) => {
     attachments: [],
   });
 };
+
+async function checkpointFixture(unit = false) {
+  const id = unique(),
+    storeKey = `runs:gate-${id}`,
+    threadKey = `slack:C1:${id}`,
+    key = `${threadKey}:coding`;
+  const context: ContextDependencies = {
+    version: 1,
+    status: "known",
+    revision: 0,
+    origins: [{ runId: "current", requester: "slack:UALICE", channelId: "slack:C1", threadKey }],
+    slack: [],
+    mcp: [],
+  };
+  expect(
+    (
+      await claim(storeKey, "current", threadKey, {
+        channelVisibility: "public",
+        session: session(key, threadKey),
+        ...(unit
+          ? {
+              parentInstanceId: "instance",
+              coordinatorUnit: "U11",
+              coordinatorAttempt: 0,
+              idempotencyKey: "instance:U11/coding",
+            }
+          : {}),
+      })
+    ).data.ok,
+  ).toBe(true);
+  await writeOne(key, "current");
+  await post("/runs/session/write", {
+    storeKey,
+    key,
+    gen: "g1",
+    sourceRunId: "current",
+    sources: { ...testSessionSources({ channelId: "slack:C1", threadKey, userId: "slack:UALICE" }, []), context },
+    rows: [],
+    attachments: [],
+  });
+  await post("/runs/state", {
+    storeKey,
+    runId: "current",
+    gen: "g1",
+    state: { contextDependencies: context, contextCheckpoint: { key, through: 0 } },
+  });
+  await post("/runs/step", {
+    storeKey,
+    runId: "current",
+    gen: "g1",
+    record: {
+      step: 0,
+      seq: 0,
+      turnIndex: 1,
+      inFlight: [],
+      inboxConsumedSeq: 0,
+      remainingMs: 1000,
+      turn: 0,
+      iteration: 0,
+    },
+  });
+  const data = (await post("/runs/session/read", { key, from: 0, to: 0 })).data;
+  const request = {
+    runId: "current",
+    gen: "g1",
+    key,
+    expected: {
+      beforeHash: await contextDependenciesHash(context),
+      revision: 0,
+      inputs: {
+        transcriptHash: await sourceHash(
+          assembleTranscript(data.rows as Parameters<typeof assembleTranscript>[0], [], 0),
+        ),
+        systemHash: await sourceHash("work"),
+        notepadHash: await sourceHash(""),
+      },
+    },
+  };
+  return { storeKey, threadKey, key, context, request };
+}
+
+/** Keep the test object alive while observing callback errors that would reset it. */
+async function observeGate<T>(state: DurableObjectState, action: () => Promise<T>) {
+  const original = state.blockConcurrencyWhile.bind(state),
+    escaped: string[] = [];
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const diagnostics = () =>
+    log.mock.calls
+      .filter(([line]) => typeof line === "string" && line.includes('"event":"checkpoint.gate_refused"'))
+      .map(([line]) => JSON.parse(line as string));
+  const gate = vi
+    .spyOn(state, "blockConcurrencyWhile")
+    .mockImplementation(async <R>(callback: () => Promise<R>): Promise<R> => {
+      const result = await original(async () => {
+        try {
+          return { ok: true as const, value: await callback() };
+        } catch (error) {
+          escaped.push((error as Error).message);
+          return { ok: false as const, error };
+        }
+      });
+      if (!result.ok) throw result.error;
+      return result.value;
+    });
+  try {
+    return { value: await action(), escaped, diagnostics: diagnostics() };
+  } catch (error) {
+    return { error: (error as Error).message, escaped, diagnostics: diagnostics() };
+  } finally {
+    gate.mockRestore();
+    log.mockRestore();
+  }
+}
+
+describe("checkpoint input gate failures", () => {
+  it.each(["normalize", "read", "archive"] as const)(
+    "keeps a real pending-source refusal outside the %s gate and preserves recovery",
+    async (operation) => {
+      const { storeKey, threadKey, key, context, request } = await checkpointFixture();
+      const committed = (await post("/runs/session/checkpoint", { storeKey, ...request })).data;
+      expect(committed).toMatchObject({ ok: true, receipt: { runId: "current", membershipCount: 1 } });
+      await sql(
+        storeKey,
+        "UPDATE live_runs SET state_json=? WHERE run_id='current'",
+        JSON.stringify({
+          contextDependencies: context,
+          contextCheckpoint: { key, through: 0 },
+          pendingContextCheckpoint: committed.receipt,
+        }),
+      );
+      const source = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(key));
+      await runInDurableObject(source, (_log, state) => {
+        state.storage.sql.exec(
+          "INSERT INTO meta(key,value) VALUES('expected_seed_pending',?)",
+          "unreadable original seed evidence",
+        );
+      });
+      const result = await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey)), async (owner, state) => {
+        return observeGate(state, async () =>
+          operation === "normalize"
+            ? owner.normalizeContextOrigins(request)
+            : operation === "read"
+              ? owner.readContextCheckpoint("current")
+              : owner.put({ ...record("current", threadKey), session: session(key, threadKey) }),
+        );
+      });
+      const saved = (
+        await sql<{ state_json: string }>(storeKey, "SELECT state_json FROM live_runs WHERE run_id='current'")
+      )[0];
+      expect(JSON.parse(saved.state_json)).toEqual({
+        pendingContextCheckpoint: committed.receipt,
+        contextDependencies: context,
+        contextCheckpoint: { key, through: 0 },
+      });
+      expect(result).toEqual({
+        error: "The original source seed remains held pending confirmation.",
+        escaped: [],
+        diagnostics: [
+          {
+            event: "checkpoint.gate_refused",
+            operation:
+              operation === "normalize"
+                ? "normalizeContextOrigins"
+                : operation === "read"
+                  ? "readContextCheckpoint"
+                  : "archiveCheckpoint",
+            runId: "current",
+            ownerGen: "g1",
+            errorName: "Error",
+            message: "Checkpoint operation failed",
+          },
+        ],
+      });
+      await runInDurableObject(source, (_log, state) => {
+        state.storage.sql.exec("DELETE FROM meta WHERE key='expected_seed_pending'");
+      });
+      expect((await post("/runs/session/checkpoint", { storeKey, ...request })).data).toEqual({
+        ok: true,
+        receipt: committed.receipt,
+      });
+    },
+  );
+  it.each(["normalize", "unit seed"] as const)(
+    "rejects an unreadable transcript outside the %s gate without acknowledging it",
+    async (operation) => {
+      const { storeKey, threadKey, key, request } = await checkpointFixture(operation === "unit seed");
+      const source = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(key));
+      const original = await runInDurableObject(source, (_log, state) => {
+        const original = state.storage.sql.exec<{ json: string }>("SELECT json FROM turns WHERE idx=0").one().json;
+        state.storage.sql.exec("UPDATE turns SET json=? WHERE idx=0", JSON.stringify({ internalTranscript: {} }));
+        return original;
+      });
+      const receipt: NonNullable<RunRecord["unitSeedReceipt"]> = {
+        version: 1,
+        binding: { instanceId: "instance", unit: "U11", instanceAttempt: 0, idempotencyKey: "instance:U11/coding" },
+        child: { runId: "current", requester: "slack:UALICE", channelId: "slack:C1", threadKey },
+        ownerGen: "g1",
+        workBriefHash: "a".repeat(64),
+        capsuleHash: "b".repeat(64),
+        contractHash: "c".repeat(64),
+        seed: {
+          key,
+          from: 0,
+          through: 0,
+          messagesHash: request.expected.inputs.transcriptHash,
+          systemHash: request.expected.inputs.systemHash,
+        },
+        acknowledgedAt: Date.now(),
+      };
+      const result = await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey)), (owner, state) =>
+        observeGate(state, async () =>
+          operation === "normalize"
+            ? owner.normalizeContextOrigins(request)
+            : owner.setState("current", "g1", { contextCheckpoint: { key, through: 0 }, unitSeedReceipt: receipt }),
+        ),
+      );
+      expect(result).toEqual({
+        error: "required transcript: unknown codec",
+        escaped: [],
+        diagnostics: [
+          {
+            event: "checkpoint.gate_refused",
+            operation: operation === "normalize" ? "normalizeContextOrigins" : "setState",
+            runId: "current",
+            ownerGen: "g1",
+            errorName: "Error",
+            message: "Checkpoint operation failed",
+          },
+        ],
+      });
+      expect(
+        JSON.parse(
+          (await sql<{ state_json: string }>(storeKey, "SELECT state_json FROM live_runs WHERE run_id='current'"))[0]
+            .state_json,
+        ),
+      ).toEqual({
+        contextDependencies: expect.objectContaining({ revision: 0 }),
+        contextCheckpoint: { key, through: 0 },
+      });
+      await runInDurableObject(source, (_log, state) => {
+        state.storage.sql.exec("UPDATE turns SET json=? WHERE idx=0", original);
+      });
+      const restored = await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey)), async (owner) =>
+        operation === "normalize"
+          ? owner.normalizeContextOrigins(request)
+          : owner.setState("current", "g1", { contextCheckpoint: { key, through: 0 }, unitSeedReceipt: receipt }),
+      );
+      expect(restored).toMatchObject({ ok: true });
+    },
+  );
+
+  it("rejects an unexpected storage fault outside the gate and keeps the original checkpoint recoverable", async () => {
+    const { storeKey, request } = await checkpointFixture();
+    const result = await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey)), async (owner, state) => {
+      const exec = state.storage.sql.exec.bind(state.storage.sql);
+      const failure = vi.spyOn(state.storage.sql, "exec").mockImplementation((query, ...bindings) => {
+        if (query.includes("SELECT json FROM run_steps")) throw new Error("checkpoint storage unavailable");
+        return exec(query, ...bindings);
+      });
+      try {
+        return await observeGate(state, () => owner.normalizeContextOrigins(request));
+      } finally {
+        failure.mockRestore();
+      }
+    });
+    expect(result).toEqual({
+      error: "checkpoint storage unavailable",
+      escaped: [],
+      diagnostics: [
+        {
+          event: "checkpoint.gate_refused",
+          operation: "normalizeContextOrigins",
+          runId: "current",
+          ownerGen: "g1",
+          errorName: "Error",
+          message: "Checkpoint operation failed",
+        },
+      ],
+    });
+    expect((await post("/runs/session/checkpoint", { storeKey, ...request })).data).toMatchObject({
+      ok: true,
+      receipt: { runId: "current", membershipCount: 1 },
+    });
+  });
+
+  it.each(["available", "throwing"] as const)(
+    "keeps diagnostics private and original errors unchanged with the %s sink",
+    async (sink) => {
+      const { storeKey, request } = await checkpointFixture();
+      const result = await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey)), async (owner, state) => {
+        const error = Object.assign(new Error("PRIVATE source text"), {
+          name: "PRIVATE exception name",
+          cause: new Error("PRIVATE source cause"),
+        });
+        const diagnostics: unknown[] = [];
+        const log = vi.spyOn(console, "log").mockImplementation((line) => {
+          if (typeof line === "string" && line.includes('"event":"checkpoint.gate_refused"')) {
+            diagnostics.push(JSON.parse(line));
+            if (sink === "throwing") throw new Error("PRIVATE diagnostic failure");
+          }
+        });
+        const exec = state.storage.sql.exec.bind(state.storage.sql);
+        const fault = vi.spyOn(state.storage.sql, "exec").mockImplementation((query, ...bindings) => {
+          if (query.includes("SELECT json FROM run_steps")) throw error;
+          return exec(query, ...bindings);
+        });
+        let caught: unknown;
+        try {
+          await owner.normalizeContextOrigins(request);
+        } catch (failure) {
+          caught = failure;
+        } finally {
+          fault.mockRestore();
+          log.mockRestore();
+        }
+        return { sameError: caught === error, diagnostics, restored: await owner.normalizeContextOrigins(request) };
+      });
+      expect(result).toEqual({
+        sameError: true,
+        diagnostics: [
+          {
+            event: "checkpoint.gate_refused",
+            operation: "normalizeContextOrigins",
+            runId: "current",
+            ownerGen: "g1",
+            errorName: "Error",
+            message: "Checkpoint operation failed",
+          },
+        ],
+        restored: { ok: true, receipt: expect.objectContaining({ runId: "current", membershipCount: 1 }) },
+      });
+    },
+  );
+
+  it("serializes a competing state write until the remote checkpoint returns", async () => {
+    const { storeKey, request } = await checkpointFixture();
+    const result = await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey)), async (owner, state) => {
+      const target = owner as unknown as { env: { SESSION_LOGS: typeof env.SESSION_LOGS; RUNS: typeof env.RUNS } };
+      const original = target.env.SESSION_LOGS;
+      const entered = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
+      target.env = {
+        ...target.env,
+        SESSION_LOGS: new Proxy(original, {
+          get(namespace, property) {
+            if (property !== "get") {
+              const value = Reflect.get(namespace, property);
+              return typeof value === "function"
+                ? (...args: unknown[]) => Reflect.apply(value, namespace, args)
+                : value;
+            }
+            return (id: DurableObjectId) => {
+              const log = original.get(id);
+              return new Proxy(log, {
+                get(receiver, method) {
+                  if (method === "checkpointSnapshot")
+                    return async (...args: Parameters<import("./worker.ts").SessionLogDO["checkpointSnapshot"]>) => {
+                      const snapshot = await log.checkpointSnapshot(...args);
+                      entered.resolve();
+                      await release.promise;
+                      return snapshot;
+                    };
+                  const value = Reflect.get(receiver, method);
+                  return typeof value === "function"
+                    ? (...args: unknown[]) => Reflect.apply(value, receiver, args)
+                    : value;
+                },
+              });
+            };
+          },
+        }),
+      };
+      const checkpoint = owner.normalizeContextOrigins(request);
+      await entered.promise;
+      let completed = false;
+      const competing = target.env.RUNS.get(state.id)
+        .setState("current", "g1", { contextCheckpointReceipt: { invalid: true } })
+        .then((result) => {
+          completed = true;
+          return result;
+        });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(completed).toBe(false);
+        release.resolve();
+        const [saved, refused] = await Promise.all([checkpoint, competing]);
+        return { saved, refused, source: await owner.readContextCheckpoint("current") };
+      } finally {
+        release.resolve();
+        await Promise.allSettled([checkpoint, competing]);
+        target.env = { ...target.env, SESSION_LOGS: original };
+      }
+    });
+    expect(result.saved).toMatchObject({ ok: true, receipt: { runId: "current", membershipCount: 1 } });
+    expect(result.refused).toEqual({ ok: false, reason: "fenced" });
+    expect(result.source).toMatchObject({ receipt: result.saved.ok ? result.saved.receipt : undefined });
+  });
+});
 
 describe("unified sessions — durable owner and retention lifecycle", () => {
   it("acknowledges only exact committed unit input and keeps its private receipt immutable through adoption and finish", async () => {
