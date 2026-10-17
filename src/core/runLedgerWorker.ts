@@ -168,7 +168,15 @@ import {
   RUN_STORE_TIMEOUT_MS,
   TransientStoreError,
 } from "./runStoreWorker.js";
-import type { FinishResult, HeartbeatFacts, HeartbeatResult, RequesterTarget, RunLedger } from "./runLedger/ledger.js";
+import type {
+  FinishResult,
+  HeartbeatFacts,
+  HeartbeatResult,
+  RequesterTarget,
+  RunLedger,
+  SessionAppendDiagnostic,
+  SessionAppendResult,
+} from "./runLedger/ledger.js";
 import type {
   PlaneAckOutcome,
   PlaneAskAnswer,
@@ -278,6 +286,28 @@ export function buildRunLedger(
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
     ...(deps.onFailure ? { onFailure: deps.onFailure } : {}),
   });
+}
+
+/** Remote messages and malformed values cannot enter the failure text. */
+function sessionAppendDiagnostic(status: number, data: Record<string, unknown>): SessionAppendDiagnostic {
+  const observed = (key: string): SessionAppendDiagnostic["ok"] =>
+    !Object.hasOwn(data, key) ? "absent" : typeof data[key] === "boolean" ? data[key] : "invalid";
+  const reason = data.reason;
+  return {
+    status,
+    ok: observed("ok"),
+    contextSaved: observed("contextSaved"),
+    appended: observed("appended"),
+    reason: !Object.hasOwn(data, "reason")
+      ? "absent"
+      : typeof reason !== "string"
+        ? "invalid"
+        : reason === "context-index-unavailable" ||
+            reason === "context-source-unavailable" ||
+            reason === "invalid-thread-session"
+          ? reason
+          : "unrecognized",
+  };
 }
 
 export class WorkerRunLedger implements RunLedger {
@@ -1014,7 +1044,7 @@ export class WorkerRunLedger implements RunLedger {
     rowId: string,
     rows: readonly { part: number; json: string }[],
     context?: ContextDependencies,
-  ): Promise<{ ok: boolean; appended: boolean }> {
+  ): Promise<SessionAppendResult> {
     this.checkSessionKey(key);
     if (context !== undefined && !isContextDependencies(context)) throw new Error("invalid context dependencies");
     const r = await this.post("/runs/session/append", {
@@ -1024,7 +1054,30 @@ export class WorkerRunLedger implements RunLedger {
       rows,
       context: context ?? UNKNOWN_CONTEXT_DEPENDENCIES,
     });
-    return { ok: r.data.ok === true && r.data.contextSaved === true, appended: r.data.appended === true };
+    const ok = r.data.ok === true && r.data.contextSaved === true;
+    const diagnostic = !ok ? sessionAppendDiagnostic(r.status, r.data) : undefined;
+    if (diagnostic) {
+      try {
+        const requestId = this.requestObservations.get(r.request)?.requestId;
+        console.warn(
+          JSON.stringify({
+            event: "storage.session.append.refused",
+            side: "client",
+            operation: r.request.operation,
+            requestDigest: r.request.digest,
+            ...(requestId ? { requestId } : {}),
+            diagnostic,
+          }),
+        );
+      } catch {
+        // A failed log cannot replace the original refusal or authorize a retry.
+      }
+    }
+    return {
+      ok,
+      appended: r.data.appended === true,
+      ...(diagnostic ? { diagnostic } : {}),
+    };
   }
 
   async claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void> {

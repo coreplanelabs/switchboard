@@ -1,4 +1,5 @@
 import { planContextCheckpoint } from "./references/contextCheckpoint.js";
+import { createHash } from "node:crypto";
 import { contextDependenciesHash } from "./references/contextDependencies.js";
 import { storeRequestWitness } from "./storeResponse.js";
 import { UNKNOWN_CONTEXT_DEPENDENCIES } from "./references/contextDependencies.js";
@@ -14,6 +15,7 @@ import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { pointOf } from "./runMetrics.js";
 import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest, type IntakeReceipt } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
+import { appendThreadTurn } from "./runLedger/threadSession.js";
 
 // The Worker client (docs/reference/specs/run-history.md item 28): routes, bodies, the
 // step write's order (transcript before record), fenced answers as results,
@@ -338,13 +340,153 @@ describe("WorkerRunLedger", () => {
     const rows = [{ part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "request" } }) }];
     const old = stubWorker(() => ({ status: 200, data: { ok: true, appended: true } }));
     expect(await old.ledger.appendSession("slack:C1:1.0:@thread", "event", rows, UNKNOWN_CONTEXT_DEPENDENCIES)).toEqual(
-      { ok: false, appended: true },
+      {
+        ok: false,
+        appended: true,
+        diagnostic: { status: 200, ok: true, contextSaved: "absent", appended: true, reason: "absent" },
+      },
     );
     const current = stubWorker(() => ({ status: 200, data: { ok: true, appended: true, contextSaved: true } }));
     expect(
       await current.ledger.appendSession("slack:C1:1.0:@thread", "event", rows, UNKNOWN_CONTEXT_DEPENDENCIES),
     ).toEqual({ ok: true, appended: true });
     expect(current.calls[0].body).toMatchObject({ storeKey: "runs:default", context: UNKNOWN_CONTEXT_DEPENDENCIES });
+  });
+
+  it.each([
+    {
+      label: "registration refusal after an observed append",
+      status: 409,
+      data: { ok: false, appended: true, reason: "context-source-unavailable" },
+      expected:
+        "thread session append was refused (HTTP 409; reply.ok=false; reply.contextSaved=absent; reply.appended=true; reason=context-source-unavailable)",
+    },
+    {
+      label: "bare keyed refusal",
+      status: 200,
+      data: { ok: false, appended: false },
+      expected:
+        "thread session append was refused (HTTP 200; reply.ok=false; reply.contextSaved=absent; reply.appended=false; reason=absent)",
+    },
+    {
+      label: "missing context acknowledgment",
+      status: 200,
+      data: { ok: true, appended: true },
+      expected:
+        "thread session append was refused (HTTP 200; reply.ok=true; reply.contextSaved=absent; reply.appended=true; reason=absent)",
+    },
+    {
+      label: "unknown and malformed reply fields",
+      status: 409,
+      data: { ok: null, appended: "PRIVATE_APPEND", contextSaved: false, reason: "PRIVATE_REASON" },
+      expected:
+        "thread session append was refused (HTTP 409; reply.ok=invalid; reply.contextSaved=false; reply.appended=invalid; reason=unrecognized)",
+    },
+    {
+      label: "absent reply fields",
+      status: 200,
+      data: {},
+      expected:
+        "thread session append was refused (HTTP 200; reply.ok=absent; reply.contextSaved=absent; reply.appended=absent; reason=absent)",
+    },
+  ])("keeps closed thread append observations: $label", async ({ status, data, expected }) => {
+    const worker = stubWorker(() => ({ status, data }));
+    await expect(
+      appendThreadTurn(worker.ledger, {
+        threadKey: "slack:C1:1.0",
+        rowId: "private-row",
+        role: "assistant",
+        text: "PRIVATE_REPORT",
+        context: UNKNOWN_CONTEXT_DEPENDENCIES,
+      }),
+    ).rejects.toMatchObject({ message: expected });
+    expect(worker.calls.map((call) => call.path)).toEqual(["/runs/session/append"]);
+  });
+
+  it("keeps successful thread append and transport failure behavior", async () => {
+    const input = {
+      threadKey: "slack:C1:1.0",
+      rowId: "private-row",
+      role: "assistant" as const,
+      text: "PRIVATE_REPORT",
+      context: UNKNOWN_CONTEXT_DEPENDENCIES,
+    };
+    const success = stubWorker(() => ({ status: 200, data: { ok: true, appended: true, contextSaved: true } }));
+    expect(await appendThreadTurn(success.ledger, input)).toEqual({ appended: true });
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+      throw new Error("PRIVATE_TRANSPORT");
+    });
+    const failed = stubWorker(undefined, { fetch });
+    await expect(appendThreadTurn(failed.ledger, input)).rejects.toThrow(
+      "run ledger /runs/session/append: transport outcome unknown",
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs one closed request-bound append refusal even when its caller drops the error", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const requests: Array<{ payload: string; requestId: string | null }> = [];
+    const worker = stubWorker(undefined, {
+      fetch: async (_url, init) => {
+        requests.push({
+          payload: String(init?.body),
+          requestId: new Headers(init?.headers).get("x-switchboard-storage-request-id"),
+        });
+        return Response.json(
+          { ok: false, appended: true, reason: "PRIVATE_REASON", error: "PRIVATE_EXCEPTION" },
+          { status: 409 },
+        );
+      },
+    });
+    const input = {
+      threadKey: "slack:C1:1.0",
+      rowId: "private-row",
+      role: "assistant" as const,
+      text: "PRIVATE_REPORT",
+    };
+    try {
+      await appendThreadTurn(worker.ledger, input).catch(() => {});
+      const success = stubWorker(() => ({ status: 200, data: { ok: true, appended: true, contextSaved: true } }));
+      expect(await appendThreadTurn(success.ledger, input)).toEqual({ appended: true });
+      expect(requests).toHaveLength(1);
+      expect(warn.mock.calls).toHaveLength(1);
+      expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toEqual({
+        event: "storage.session.append.refused",
+        side: "client",
+        operation: "/runs/session/append",
+        requestId: requests[0].requestId,
+        requestDigest: createHash("sha256")
+          .update(JSON.stringify({ operation: "/runs/session/append", payload: requests[0].payload }))
+          .digest("hex"),
+        diagnostic: {
+          status: 409,
+          ok: false,
+          contextSaved: "absent",
+          appended: true,
+          reason: "unrecognized",
+        },
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps the refused append result when its structured log sink throws", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      throw new Error("PRIVATE_LOG_EXCEPTION");
+    });
+    const worker = stubWorker(() => ({ status: 200, data: { ok: true, appended: true } }));
+    try {
+      expect(await worker.ledger.appendSession("slack:C1:1.0:@thread", "private-row", [])).toEqual({
+        ok: false,
+        appended: true,
+        diagnostic: { status: 200, ok: true, contextSaved: "absent", appended: true, reason: "absent" },
+      });
+      expect(warn.mock.calls).toHaveLength(1);
+      expect(worker.calls.map((call) => call.path)).toEqual(["/runs/session/append"]);
+    } finally {
+      warn.mockRestore();
+    }
   });
   it("requires explicit source metadata acknowledgment from the memory worker", async () => {
     const sources = testSessionSources({ channelId: "slack:D1", threadKey: "slack:D1:1.0", userId: "slack:UALICE" });
