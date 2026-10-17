@@ -777,6 +777,7 @@ export function buildOperatorPrompt(input: OperatorInput, projection = actionPro
 export function operatorTools(input: OperatorInput, projection = actionProjection(input)): ToolDef[] {
   const choice = !input.owner ? requestedPreset(input.text, input.projection.presets) : undefined;
   const presets = projection.presets.filter((p) => choice === undefined || p.name === choice).map((p) => p.name);
+  const requiredSettings = ["settingsEvidence", ...(formalSettings(input.text).model !== undefined ? ["model"] : [])];
   const repositoryWriters = projection.presets
     .filter((preset) => preset.identity === "write" && machineNeedsRepo(preset.machine))
     .map((preset) => preset.name);
@@ -784,7 +785,7 @@ export function operatorTools(input: OperatorInput, projection = actionProjectio
     model: {
       type: "string",
       description:
-        "the model ref the run uses, ONLY when the request names a model in plain words: a `<provider>/<model>` ref `provider_models` lists, resolved from the person's word — omit when no model is named, and ask instead of guessing when the word matches several refs or none",
+        "the requested `<provider>/<model>` ref: copy an authored full ref, or resolve a plain-word choice through provider_models. Required when the current formal prefix names a model; omit when no model is named, and ask instead of guessing when a word matches several refs or none",
     },
     modelWord: {
       type: "string",
@@ -832,7 +833,7 @@ export function operatorTools(input: OperatorInput, projection = actionProjectio
             inputSchema: {
               type: "object",
               additionalProperties: false,
-              required: ["preset", "reason", "settingsEvidence"],
+              required: ["preset", "reason", ...requiredSettings],
               properties: {
                 preset: {
                   type: "string",
@@ -885,7 +886,7 @@ export function operatorTools(input: OperatorInput, projection = actionProjectio
           inputSchema: {
             type: "object",
             additionalProperties: false,
-            required: ["kind", "targets", "actionQuote", "targetQuotes", "reason", "settingsEvidence"],
+            required: ["kind", "targets", "actionQuote", "targetQuotes", "reason", ...requiredSettings],
             properties: {
               ...settingProperties,
               kind: { type: "string", enum: choice === "review" || choice === "ship" ? [choice] : ["review", "ship"] },
@@ -920,9 +921,12 @@ export function operatorTools(input: OperatorInput, projection = actionProjectio
           additionalProperties: false,
           description:
             "Required for a preset proposal: complete classifications for all five controls and the requested values a yes must preserve from the original request",
-          required: ["settingsEvidence"],
+          required: requiredSettings,
           properties: {
-            model: { type: "string", description: "the requested provider/model ref from provider_models" },
+            model: {
+              type: "string",
+              description: "the requested provider/model ref; required when the current formal prefix names it",
+            },
             modelWord: {
               type: "string",
               description: "one exact model-name word from the request for a plain-words model choice",
@@ -1434,9 +1438,13 @@ function requestSettingsOf(
     ...(renewals !== undefined ? { renewals: renewals as number } : {}),
     ...(verbosity !== undefined ? { verbosity: verbosity as Verbosity } : {}),
   };
-  for (const [key, value] of Object.entries(formalSettings(requestText)))
-    if (accepted[key as keyof OperatorRequestSettings] !== value)
+  for (const [key, value] of Object.entries(formalSettings(requestText))) {
+    if (accepted[key as keyof OperatorRequestSettings] !== value) {
+      if (key === "model" && model === undefined)
+        return { violation: "the authored formal model needs its typed model field; preserve the requested model" };
       return { violation: `the accepted ${key} must preserve the authored formal value` };
+    }
+  }
   return { settings: accepted };
 }
 
