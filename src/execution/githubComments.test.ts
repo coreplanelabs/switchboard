@@ -3,6 +3,7 @@ import { buildReviewPostBody, MAX_REVIEW_POST_CODE_POINTS, parseVerdictInput } f
 import { branchPublicationOf } from "../core/branchPublication.js";
 import { postReviewComment } from "./githubComments.js";
 import { nativeReviewReceiptOf } from "../core/reviewPublication.js";
+import * as githubApp from "./githubApp.js";
 
 // Feature: docs/reference/specs/agent-review.md — the bot-process post is a COMMENT-event
 // pull-request review (what the auto-approve workflow listens to), pinned to
@@ -26,8 +27,30 @@ describe("postReviewComment", () => {
     }
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
+  });
+
+  it("cannot issue a native review when token mint resolves after cancellation", async () => {
+    let release!: (token: string) => void;
+    vi.spyOn(githubApp, "resolveGithubToken").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const calls = stubFetch();
+    const controller = new AbortController();
+    const running = postReviewComment(
+      { repo: "acme/api", number: 42, commitId: "b".repeat(40) },
+      "review",
+      controller.signal,
+    );
+    controller.abort();
+    release("late-token");
+    expect(await running).toEqual({ state: "uncertain" });
+    expect(calls).toEqual([]);
   });
 
   function stubFetch(status = 200) {

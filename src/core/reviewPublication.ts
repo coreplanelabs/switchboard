@@ -24,12 +24,30 @@ export interface ReviewPublicationJournal {
   /** Null means confirmed absent; undefined or malformed bytes mean unknown. */
   read(): Promise<unknown>;
   /** The existing fenced run owner also admits the exact publication target. */
-  commit(receipt: ReviewPublicationReceipt): Promise<"committed" | "refused" | "unknown">;
+  commit(receipt: ReviewPublicationReceipt, signal?: AbortSignal): Promise<"committed" | "refused" | "unknown">;
   /** Fresh owner, stop, requester/grant and audience checks before native POST. */
   canPublish(): Promise<boolean>;
 }
 /** Trusted adapter result, never decoded from stored receipt bytes. */
 export const REVIEW_PUBLICATION_OWNER_ABSENT = Object.freeze({ kind: "owner_absent" as const });
+
+/** Bound a local wait without retrying or detaching an issued native write. */
+export async function awaitReviewPublication<T>(signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
+  if (!signal) return work();
+  signal.throwIfAborted();
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const value = await Promise.race([work(), aborted]);
+    signal.throwIfAborted();
+    return value;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 export function reviewPublicationOf(value: unknown): ReviewPublicationReceipt | undefined {

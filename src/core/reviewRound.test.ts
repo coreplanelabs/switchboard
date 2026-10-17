@@ -1018,7 +1018,14 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
         },
       });
       expect(out).toEqual({ posted: false, uncertain: true, reason: "the review publication outcome is unconfirmed" });
-      expect(events).toEqual([]);
+      expect(events).toEqual([
+        {
+          type: "run_note",
+          kind: "review_publication_unknown",
+          summary: "Review publication failed during native_post (Error); the original outcome remains unconfirmed.",
+          at: expect.any(Number),
+        },
+      ]);
     });
 
     it("a review with no pull request to post to records the skip without a target; a non-review round and a hard-stopped round publish nothing", async () => {
@@ -1652,6 +1659,200 @@ describe("runReviewPostStep durable original publication", () => {
       { state: "accepted" },
     ]);
     expect(JSON.stringify(h.receipts)).not.toContain("original review bytes");
+  });
+  it.each(["journal_read", "publication_guard", "native_post"])(
+    "records the stage and safe error class for an unexpected %s failure",
+    async (stage) => {
+      const h = setup();
+      const error = new TypeError("private review text and credential must not leave the failing boundary");
+      error.name = "private exception name";
+      const fail = async () => {
+        throw error;
+      };
+      if (stage === "journal_read") h.publicationJournal.read = fail;
+      else if (stage === "publication_guard") h.publicationJournal.canPublish = fail;
+      else h.input.post = fail;
+      expect(await runReviewPostStep(h.input)).toEqual({
+        posted: false,
+        uncertain: true,
+        reason: "the review publication outcome is unconfirmed",
+      });
+      expect(h.events).toContainEqual({
+        type: "run_note",
+        kind: "review_publication_unknown",
+        summary: `Review publication failed during ${stage} (TypeError); the original outcome remains unconfirmed.`,
+        at: expect.any(Number),
+      });
+      expect(JSON.stringify(h.events)).not.toContain("private");
+    },
+  );
+  it("records an unexpected preflight error without exposing exception text", async () => {
+    const h = setup();
+    const input = {
+      ...h.input,
+      get heads(): typeof h.input.heads {
+        throw new RangeError("private preflight details");
+      },
+    };
+    expect(await runReviewPostStep(input)).toEqual({
+      posted: false,
+      uncertain: true,
+      reason: "the review publication outcome is unconfirmed",
+    });
+    expect(h.events).toContainEqual({
+      type: "run_note",
+      kind: "review_publication_unknown",
+      summary: "Review publication failed during preflight (RangeError); the original outcome remains unconfirmed.",
+      at: expect.any(Number),
+    });
+    expect(JSON.stringify(h.events)).not.toContain("private");
+  });
+  it("keeps the unknown outcome and logs its safe diagnostic when the event sink throws", async () => {
+    const h = setup();
+    h.publicationJournal.read = async () => {
+      throw new TypeError("private journal details");
+    };
+    h.input.publish = () => {
+      throw new Error("private sink details");
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await runReviewPostStep(h.input)).toEqual({
+        posted: false,
+        uncertain: true,
+        reason: "the review publication outcome is unconfirmed",
+      });
+      expect(warn.mock.calls).toEqual([
+        [
+          "[review-post] t: Review publication failed during journal_read (TypeError); the original outcome remains unconfirmed.",
+        ],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  it("ends a stalled journal read within the remaining lease and cannot post after its late reply", async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    let release!: (value: unknown) => void;
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    h.publicationJournal.read = () => {
+      reached();
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    };
+    try {
+      const input = { ...h.input, remainingMs: () => 40 };
+      const running = runReviewPostStep(input);
+      await waiting;
+      const result = Promise.race([running, new Promise((resolve) => setTimeout(() => resolve("still waiting"), 41))]);
+      await vi.advanceTimersByTimeAsync(41);
+      expect(await result).toEqual({
+        posted: false,
+        uncertain: true,
+        reason: "the review publication outcome is unconfirmed",
+      });
+      release(null);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.posts).toEqual([]);
+      expect(h.events).toMatchObject([
+        {
+          type: "run_note",
+          kind: "review_publication_unknown",
+          summary: "Review publication deadline reached during journal_read; the original outcome remains unconfirmed.",
+        },
+      ]);
+    } finally {
+      release?.(null);
+      vi.useRealTimers();
+    }
+  });
+  it("retains pending native publication at the deadline and never repeats the original POST", async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    let release!: () => void;
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const post = h.input.post;
+    h.input.post = async (target, body) => {
+      const result = await post(target, body);
+      reached();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return result;
+    };
+    try {
+      const input = { ...h.input, remainingMs: () => 40 };
+      const running = runReviewPostStep(input);
+      await waiting;
+      const result = Promise.race([running, new Promise((resolve) => setTimeout(() => resolve("still waiting"), 41))]);
+      await vi.advanceTimersByTimeAsync(41);
+      expect(await result).toEqual({
+        posted: false,
+        uncertain: true,
+        reason: "the review publication outcome is unconfirmed",
+      });
+      expect(h.read()).toMatchObject({ state: "pending" });
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await runReviewPostStep(input)).toMatchObject({ posted: false, uncertain: true });
+      expect(h.posts).toHaveLength(1);
+      expect(h.read()).toMatchObject({ state: "pending" });
+      expect(h.events).not.toContainEqual(expect.objectContaining({ type: "review_posted" }));
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+  it("keeps committed acceptance when the auxiliary head lookup stalls past the lease", async () => {
+    vi.useFakeTimers();
+    const h = setup();
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    try {
+      const input = {
+        ...h.input,
+        remainingMs: () => 40,
+        verdict: { ...verdict, findings: [] },
+        fetchPrHead: async () => {
+          reached();
+          return new Promise<string>(() => {});
+        },
+      };
+      const running = runReviewPostStep(input);
+      await waiting;
+      const result = Promise.race([running, new Promise((resolve) => setTimeout(() => resolve("still waiting"), 41))]);
+      await vi.advanceTimersByTimeAsync(41);
+      expect(await result).toEqual({
+        posted: true,
+        target: { repo: "acme/api", number: 42 },
+        head: HEAD,
+        verdict: "approve",
+      });
+      expect(h.read()).toMatchObject({ state: "accepted" });
+      expect(h.events).toMatchObject([{ type: "review_posted", head: HEAD, verdict: "approve" }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("does not publish after the run lease has already expired", async () => {
+    const h = setup();
+    const outcome = await runReviewPostStep({ ...h.input, remainingMs: () => 0 });
+    expect(outcome).toEqual({
+      posted: false,
+      uncertain: true,
+      reason: "the review publication outcome is unconfirmed",
+    });
+    expect(h.posts).toEqual([]);
   });
   it("a void native adapter response stays uncertain and never authorizes repost", async () => {
     const h = setup();

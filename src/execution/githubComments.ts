@@ -3,6 +3,7 @@ import type { GithubWriteResult } from "./githubPulls.js";
 import { isPublicationRepo } from "../core/branchPublication.js";
 import { MAX_REVIEW_POST_CODE_POINTS } from "../core/reviewVerdict.js";
 import { nativeReviewReceiptOf, type NativeReviewReceipt } from "../core/reviewPublication.js";
+import { REVIEW_POST_REQUEST_MS } from "../core/budgets.js";
 
 export type GithubReviewWriteResult =
   { state: "accepted"; nativeReview?: NativeReviewReceipt } | Exclude<GithubWriteResult, { state: "accepted" }>;
@@ -42,7 +43,11 @@ export interface ReviewCommentTarget {
  * Post only a pinned review. A positive exact native receipt credits acceptance;
  * ambiguous transport or response bytes retain an uncertain original write.
  */
-export async function postReviewComment(target: ReviewCommentTarget, body: string): Promise<GithubReviewWriteResult> {
+export async function postReviewComment(
+  target: ReviewCommentTarget,
+  body: string,
+  parentSignal?: AbortSignal,
+): Promise<GithubReviewWriteResult> {
   if (
     !isPublicationRepo(target.repo) ||
     !Number.isSafeInteger(target.number) ||
@@ -52,11 +57,14 @@ export async function postReviewComment(target: ReviewCommentTarget, body: strin
     [...body].length > MAX_REVIEW_POST_CODE_POINTS
   )
     return { state: "refused" };
-  const token = await resolveGithubToken();
-  if (!token) return { state: "refused" };
-  const payload: Record<string, string> = { event: "COMMENT", body };
-  if (target.commitId) payload.commit_id = target.commitId;
+  const timeout = AbortSignal.timeout(REVIEW_POST_REQUEST_MS);
+  const signal = parentSignal ? AbortSignal.any([parentSignal, timeout]) : timeout;
   try {
+    const token = await resolveGithubToken("write", undefined, signal);
+    signal.throwIfAborted();
+    if (!token) return { state: "refused" };
+    const payload: Record<string, string> = { event: "COMMENT", body };
+    if (target.commitId) payload.commit_id = target.commitId;
     const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls/${target.number}/reviews`, {
       method: "POST",
       redirect: "manual",
@@ -67,7 +75,7 @@ export async function postReviewComment(target: ReviewCommentTarget, body: strin
         "user-agent": "switchboard",
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(15000),
+      signal,
     });
     if (!res.ok)
       return res.status >= 400 && res.status < 500 && res.status !== 408
