@@ -3,7 +3,6 @@ import { computed } from "vue";
 import PageHeading from "../components/PageHeading.vue";
 import EmptyState from "../components/EmptyState.vue";
 import StatusDot from "../../src/components/StatusDot.vue";
-import ResidentUidGauge from "../../src/components/residents/ResidentUidGauge.vue";
 import { useSeed } from "../../src/lib/seed";
 import {
   diskHeadroom,
@@ -106,10 +105,8 @@ const diskParts = computed(() => {
   ];
   for (const [key, kib] of Object.entries(d.parts.threads).sort((a, b) => b[1] - a[1]))
     rows.push([`thread ${key}`, formatGiB(kib)]);
-  // Homes hold an install thread's pnpm store / npm cache; a bare home (a few
-  // KiB of dotfiles) is noise, so only ones above 1 MiB are listed.
-  for (const [user, kib] of Object.entries(d.parts.homes).sort((a, b) => b[1] - a[1]))
-    if (kib >= 1024) rows.push([`home ${user}`, formatGiB(kib)]);
+  const homes = Object.values(d.parts.homes).reduce((sum, kib) => sum + kib, 0);
+  if (homes >= 1024) rows.push(["home directories", formatGiB(homes)]);
   rows.push(["other (image, /tmp, …)", formatGiB(d.parts.other)]);
   return rows;
 });
@@ -142,8 +139,6 @@ const diskParts = computed(() => {
               >Waiting for the deployed image report</span
             >
           </dd>
-          <dt>UID pool</dt>
-          <dd><ResidentUidGauge :record="record" /></dd>
           <dt>Provisioned</dt>
           <dd>{{ str(live.provisionedAt) || "Not recorded" }}</dd>
           <dt>Last refresh</dt>
@@ -224,7 +219,6 @@ const diskParts = computed(() => {
               <th>Branch</th>
               <th>Commit</th>
               <th>State</th>
-              <th>User</th>
               <th>Dependencies</th>
               <th>Disk</th>
               <th>Attached</th>
@@ -249,7 +243,6 @@ const diskParts = computed(() => {
                   {{ thread.evictedWhy || "No reason recorded" }}</span
                 >
               </td>
-              <td>{{ thread.user || "Unknown" }}</td>
               <td>{{ thread.deps || "Unknown" }}</td>
               <td>
                 {{
