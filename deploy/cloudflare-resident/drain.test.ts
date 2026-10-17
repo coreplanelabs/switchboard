@@ -21,6 +21,8 @@ import {
 } from "./drain";
 import { DRAIN } from "../../src/core/budgets";
 import { methodOf, readSource } from "./testing/sourceScan";
+import { RecordedCheckOperation, type CheckOperationStorage } from "./checkOperation.js";
+import { checkCommandHash } from "../../src/execution/checkOperation.js";
 import { TEST_MAINTENANCE } from "../../src/deploy/testing/profile.js";
 import { buildId, resolveBuildStamp, type BuildStamp } from "../../src/deploy/buildStamp.js";
 import { buildStamp } from "../bin/build-stamp.mjs";
@@ -201,7 +203,7 @@ describe("global deploy admission evidence", () => {
     };
     const storage = {
       setAlarm: async (_at: number) => {},
-      get: async (key: string) => rows.get(key),
+      get: async <T>(key: string) => rows.get(key) as T | undefined,
       put: async (key: string, value: unknown) => {
         if (failOrigin) throw new Error("private-origin-error");
         if (
@@ -220,8 +222,9 @@ describe("global deploy admission evidence", () => {
 
         return deleted;
       },
-      list: async ({ prefix }: { prefix: string }) => new Map([...rows].filter(([key]) => key.startsWith(prefix))),
-      transaction: async <T>(fn: (store: unknown) => Promise<T>): Promise<T> => {
+      list: async <T>({ prefix }: { prefix: string }) =>
+        new Map([...rows].filter(([key]) => key.startsWith(prefix))) as Map<string, T>,
+      transaction: async <T>(fn: (store: CheckOperationStorage) => Promise<T>): Promise<T> => {
         const before = new Map(rows);
         let value: T;
         try {
@@ -524,6 +527,7 @@ describe("global deploy admission evidence", () => {
         return instance;
       },
       rows,
+      storage,
       events,
       advance: () => {
         now = 2000;
@@ -1969,6 +1973,52 @@ describe("global deploy admission evidence", () => {
       expect(await h.api.activeDeployAdmissions()).toBe(0);
     },
   );
+
+  it("keeps the original Resident error when permit release remains unverified", async () => {
+    const h = fixture();
+    h.failDelete();
+    const original = new Error("original-work-failed");
+    await expect(
+      h.resident("rpc").withDeployAdmission(async () => {
+        throw original;
+      }),
+    ).rejects.toBe(original);
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    expect(h.events.at(-1)).toMatchObject({ phase: "permit-release", commit: "unverified" });
+  });
+
+  it("saves the completed check once while failed permit cleanup still blocks deployment", async () => {
+    const h = fixture();
+    h.failDelete();
+    const checks = new RecordedCheckOperation(h.storage);
+    const context = { threadKey: "t1", runId: "r1", ownerGen: "g1", ownerFence: 1, incarnation: "kernel-1" };
+    const request = { command: "printf done", timeoutMs: 1000 };
+    const operation = { key: "a".repeat(64), commandHash: await checkCommandHash(request.command) };
+    let executions = 0;
+    const execute = () =>
+      checks.execute(
+        context,
+        operation,
+        request,
+        async () => true,
+        () =>
+          h.resident("rpc").withDeployAdmission(async () => {
+            executions++;
+            return { stdout: "done", stderr: "", exitCode: 0, truncated: false };
+          }),
+      );
+    const completed = await execute();
+    expect(completed).toMatchObject({
+      kind: "completed",
+      result: { stdout: "done", stderr: "", exitCode: 0, truncated: false },
+    });
+    expect(await checks.inspect(context, operation, async () => true)).toEqual(completed);
+    expect(await execute()).toEqual(completed);
+    expect(executions).toBe(1);
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    expect(await h.fence()).toMatchObject({ activeAdmissions: 1, fenceReady: false, draining: { swapFence: false } });
+    expect(h.events.at(-1)).toMatchObject({ phase: "permit-release", commit: "unverified" });
+  });
 
   it("holds caller death debt, including foreign, legacy and expired evidence", async () => {
     const h = fixture();

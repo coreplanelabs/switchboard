@@ -10424,7 +10424,10 @@ export class ResidentDO extends Sandbox<Env> {
         );
       return await fn();
     } finally {
-      await endTrackedDeployAdmission(registry, id);
+      await endTrackedDeployAdmission(registry, id).catch(() => {
+        // The helper reports unverified cleanup. Retained permits still block deployment;
+        // preserve the original work result or error for the caller and check recorder.
+      });
     }
   }
 
