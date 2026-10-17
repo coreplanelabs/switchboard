@@ -176,6 +176,7 @@ export function createOrchestratorDecisions(input: {
   save: (entries: readonly OrchestratorDecision[]) => Promise<boolean>;
 }) {
   const owner = structuredClone(input.owner);
+  const save = input.save.bind(input);
   const previous = input.previous === undefined ? [] : input.previous;
   const restored = orchestratorDecisionsOf(previous, owner);
   let held = restored === undefined;
@@ -187,6 +188,16 @@ export function createOrchestratorDecisions(input: {
       return structuredClone(entries);
     },
     record(decision: OrchestratorDecision): Promise<boolean> {
+      try {
+        decision = structuredClone(decision);
+      } catch {
+        try {
+          console.warn(JSON.stringify({ event: "orchestrator.decision.refused", cause: "uncloneable-proposal" }));
+        } catch {
+          // Diagnostic failure must not change admission or block the queue.
+        }
+        return Promise.resolve(false);
+      }
       const next = tail.then(async () => {
         if (held || !isOrchestratorDecision(decision, owner)) return false;
         const existing = entries.find((entry) => entry.id === decision.id);
@@ -198,7 +209,7 @@ export function createOrchestratorDecisions(input: {
         )
           return false;
         try {
-          if (!(await input.save(structuredClone(saved)))) {
+          if (!(await save(structuredClone(saved)))) {
             held = true;
             return false;
           }
