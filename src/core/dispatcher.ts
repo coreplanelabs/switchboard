@@ -73,8 +73,10 @@ import { assignRunLiveState, type ResidentLiveStateObservation } from "./runLive
 import { assignLedgerLiveState } from "./runLedger/decisions.js";
 import { liveStateWords } from "./plane/decide.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
+import type { AttrDomain } from "./trace/attrs.js";
 import { cardShapeLineOf, queuedCaption } from "./runShape.js";
 import { barePrNumberOf, explicitPrOf, type RepoContext, type OperationTarget } from "./repoContext.js";
+import { requestOnlyReviewTarget, isRequestOnlyReviewDecision } from "./dispatch/requestOnlyReview.js";
 import { redactSecrets, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import type { LiveThread } from "./threadAdmission.js";
@@ -629,6 +631,8 @@ export interface DispatchOptions {
   /** Trusted current private-conversation projection in `seed`. No automatic
    * stored tails, notes, memory, artifacts or reflection may replace it. */
   authoritativeHistory?: boolean;
+  /** Server-owned canonical request policy; never an ingress body field. */
+  contextMode?: "request";
   /** Trusted organization front door; plain turns use the existing orchestrator. */
   organizationConversation?: boolean;
   /** Original durable admission ordinal, never a client-selected version. */
@@ -777,6 +781,59 @@ export async function dispatch(
   io: ChannelIO,
   opts: DispatchOptions = {},
 ): Promise<DispatchOutcome> {
+  const observeRequestContextRefusal = (
+    gate: AttrDomain["requestContextGate"],
+    reason: AttrDomain["requestContextReason"],
+    currentTrace?: RequestTrace,
+  ) => {
+    let early: RequestTrace | undefined;
+    try {
+      const observed =
+        currentTrace ??
+        opts.trace ??
+        startRequestRoot(deps, {
+          channel: channelOf(msg.channelId),
+          receivedAt: msg.receivedAt ?? (deps.clock ?? systemClock)(),
+        });
+      if (!currentTrace) early = observed;
+      const attrs = {
+        requestContextGate: gate,
+        requestContextReason: reason,
+        outcome: "setup_failed",
+        refusal: "setup_failed",
+        cause: causeOf("setup_failed"),
+      };
+      observed.root.setAttrs(attrs);
+      observed.root.start("dispatch.refuse", { attrs }).end();
+    } catch {
+      // A reporting failure cannot change the refusal or reveal its input.
+    } finally {
+      try {
+        early?.root.end("ok", { status: "refused" });
+      } catch {
+        /* Reporting is optional. */
+      }
+    }
+  };
+  if (
+    opts.contextMode === "request" &&
+    (!opts.authoritativeHistory ||
+      !opts.organizationConversation ||
+      !opts.ingressRunId ||
+      opts.seed?.length !== 0 ||
+      opts.parent ||
+      opts.coordinator ||
+      opts.parentContext ||
+      opts.childHandoff ||
+      opts.resume ||
+      opts.restart ||
+      opts.restartOf ||
+      !requestOnlyReviewTarget(msg.text))
+  ) {
+    observeRequestContextRefusal("input", "invalid_input");
+    await io.reply("This Review could not be verified as a new request.");
+    return { status: "refused", refusal: "setup_failed" };
+  }
   // A saved provider context cannot prove that excluded private bytes are absent.
   // Preserve its original owner/workspace for reconciliation; never replay it as fresh.
   if (
@@ -839,6 +896,7 @@ export async function dispatch(
       ingressRunId: opts.ingressRunId,
       organizationSequence: opts.organizationSequence,
       ...(opts.organizationRepo ? { organizationRepo: opts.organizationRepo } : {}),
+      ...(opts.contextMode ? { contextMode: opts.contextMode } : {}),
     });
   if (opts.answerTarget !== undefined) {
     const key = parseUnitKey(opts.answerTarget.unitKey);
@@ -1380,6 +1438,12 @@ export async function dispatch(
       (configuredOperator === "on" && (originalRecoveryCommand || originalAdoptionCommand))
         ? "off"
         : configuredOperator;
+    if (opts.contextMode === "request" && operatorMode !== "on") {
+      refused = true;
+      observeRequestContextRefusal("operator_mode", "routing_disabled", trace);
+      await io.reply("This Review could not be bound to the current request.");
+      return { status: "refused", refusal: "setup_failed" };
+    }
     if (typedAgent === "orchestrator")
       console.log("[dispatch] operator skipped", {
         agent: typedAgent,
@@ -1660,6 +1724,7 @@ export async function dispatch(
                 throw new NativeMediaHeldError();
             },
             ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
+            ...(opts.contextMode ? { contextMode: opts.contextMode } : {}),
             pending: pendingQuestion,
             onContext: (context) => {
               const pointer = originalOrganizationDispatchOf(msg);
@@ -1780,6 +1845,14 @@ export async function dispatch(
       // the live run. Thread occupancy itself is untouched: one live run per
       // thread, and nothing here starts a rival in an occupied one.
       const live = operatorEvent ? admission.get(msg.threadKey) : undefined;
+      if (opts.contextMode === "request" && !isRequestOnlyReviewDecision(msg.text, operatorEvent)) {
+        refused = true;
+        observeRequestContextRefusal("operator_decision", "invalid_bind", trace);
+        const refusal = refusalOf("setup_failed", "This Review could not be bound to the current request.");
+        await io.reply(refusal.text);
+        await recordRefusalOnce(refusal);
+        return { status: "refused", refusal: "setup_failed" };
+      }
       // Shadow records its decision beside a live owner's run. Under `on`,
       // even an exhausted operator turn ends at the door without a reader
       // interpreting the same message a second time.
@@ -1892,6 +1965,17 @@ export async function dispatch(
       return ended;
     }
 
+    if (
+      opts.contextMode === "request" &&
+      (operatorMode !== "on" || operatorPreset !== "review" || operatorPrTarget?.source !== "request")
+    ) {
+      refused = true;
+      observeRequestContextRefusal("typed_route", "invalid_bind", trace);
+      const refusal = refusalOf("setup_failed", "This Review could not be bound to the current request.");
+      await io.reply(refusal.text);
+      await recordRefusalOnce(refusal);
+      return { status: "refused", refusal: "setup_failed" };
+    }
     // Stage A remains for off and shadow. Under on, the operator's decision
     // is final even when it folds into an existing owner.
     if (
@@ -1980,7 +2064,7 @@ export async function dispatch(
       await recordPendingOperator();
       return ended;
     }
-    const lineage = lineageOf(thread?.[0]);
+    const lineage = opts.contextMode === "request" ? undefined : lineageOf(thread?.[0]);
     const parent: ParentRun | undefined = opts.parent ?? (lineage ? lineageParent(lineage) : undefined);
     const tellLineage = async (heard: LineageHeard) => {
       if (!lineage) return;
@@ -2002,19 +2086,22 @@ export async function dispatch(
     // explicit specialist turn. A fresh plain follow-up without an exact PR
     // target returns to its orchestrator; typed and exact PR requests keep
     // their existing authority.
-    const stickyAgent = establishedMainDm
-      ? "orchestrator"
-      : thread && !(mainDm && !exactPrReply && !resume && !restart && !opts.parent && !opts.coordinator)
-        ? stickyAgentOf(thread)
-        : undefined;
+    const stickyAgent =
+      opts.contextMode === "request"
+        ? undefined
+        : establishedMainDm
+          ? "orchestrator"
+          : thread && !(mainDm && !exactPrReply && !resume && !restart && !opts.parent && !opts.coordinator)
+            ? stickyAgentOf(thread)
+            : undefined;
     // A completed unit's publication can name the PR when the hosted run
     // record has none. A later completed run's PR supersedes that publication.
     const laterPr = (runPr: ThreadPullRequest | undefined, releasedPr: ThreadPullRequest | undefined) =>
       releasedPr !== undefined && (runPr === undefined || releasedPr.at > runPr.at) ? releasedPr : runPr;
-    let threadPr = laterPr(
-      !opts.authoritativeHistory && thread ? threadPrOf(thread) : undefined,
-      pageOwner?.releasedPr,
-    );
+    let threadPr =
+      opts.contextMode === "request"
+        ? undefined
+        : laterPr(!opts.authoritativeHistory && thread ? threadPrOf(thread) : undefined, pageOwner?.releasedPr);
     const barePrNumber = barePrNumberOf(msg.text);
     const currentPrNumber = explicitPr?.number ?? barePrNumber;
     let namedReleasedPr: ThreadPullRequest | undefined;
@@ -2571,6 +2658,7 @@ export async function dispatch(
       io,
       directives,
       agentName: agent.name,
+      ...(opts.contextMode ? { contextMode: opts.contextMode } : {}),
       resume,
       restart,
       carriedRow,
@@ -2610,6 +2698,7 @@ export async function dispatch(
         organizationSequence: opts.organizationSequence,
         organizationRepo: opts.organizationRepo,
         authoritativeHistory: opts.authoritativeHistory,
+        contextMode: opts.contextMode,
         ...(operationTarget !== undefined ? { operationTarget } : {}),
         ...(opts.parent ? { parent: opts.parent } : {}),
         ...(opts.seed ? { seed: opts.seed } : {}),
@@ -3699,6 +3788,11 @@ export async function dispatch(
     // before the first turn — the run is not changed by it.
     for (const summary of seedNotes)
       events.publish({ type: "run_note", kind: "seed", summary: oneLine(summary), at: clock() });
+    if (opts.contextMode === "request") {
+      const notice = "This Review uses your current request and GitHub. Earlier conversation context is not included.";
+      events.publish({ type: "run_note", kind: "seed", summary: notice, at: clock() });
+      await io.reply(notice);
+    }
     // A redispatched request's record names the question it answered
     // (record 0054; run-history item 2): the code the refusal carried, so the
     // Yes-run is traceable to the question whose proposal it ran.
@@ -5985,6 +6079,7 @@ export async function dispatch(
           try {
             fresh.opts.seed = await fresh.io.authoritativePrivateHistory(fresh.msg);
             Object.assign(fresh.opts, original, { authoritativeHistory: true, organizationConversation: true });
+            fresh.opts.contextMode = originalOrganizationDispatchOf(fresh.msg)?.contextMode;
           } catch {
             await tellHeld();
             console.warn(

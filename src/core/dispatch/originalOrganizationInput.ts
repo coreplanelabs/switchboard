@@ -54,6 +54,7 @@ export interface OriginalOrganizationDispatch {
   ingressRunId: string;
   organizationSequence: number;
   organizationRepo?: string;
+  contextMode?: "request";
   nativeMediaDigest?: string;
   savedNativeMediaSource?: SavedNativeMediaSource;
 }
@@ -67,6 +68,7 @@ export function withOriginalOrganizationDispatch<T extends object>(
     context.ingressRunId.length > 2048 ||
     !Number.isSafeInteger(context.organizationSequence) ||
     context.organizationSequence < 1 ||
+    (context.contextMode !== undefined && context.contextMode !== "request") ||
     (context.organizationRepo !== undefined &&
       (typeof context.organizationRepo !== "string" ||
         !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(context.organizationRepo))) ||
@@ -78,6 +80,11 @@ export function withOriginalOrganizationDispatch<T extends object>(
   )
     throw new Error("Invalid original input owner");
   const prior = originalOrganizationDispatchOf(message);
+  const contextMode =
+    context.contextMode ??
+    (prior?.ingressRunId === context.ingressRunId && prior.organizationSequence === context.organizationSequence
+      ? prior.contextMode
+      : undefined);
   const mediaDigest =
     context.nativeMediaDigest ??
     (prior?.ingressRunId === context.ingressRunId && prior.organizationSequence === context.organizationSequence
@@ -95,6 +102,7 @@ export function withOriginalOrganizationDispatch<T extends object>(
       ingressRunId: context.ingressRunId,
       organizationSequence: context.organizationSequence,
       ...(context.organizationRepo ? { organizationRepo: context.organizationRepo } : {}),
+      ...(contextMode ? { contextMode } : {}),
       ...(mediaDigest ? { nativeMediaDigest: mediaDigest } : {}),
       ...(saved ? { savedNativeMediaSource: { ...saved } } : {}),
     },

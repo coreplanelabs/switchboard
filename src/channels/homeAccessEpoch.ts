@@ -46,6 +46,63 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
       const resolved = await options.organization.resolve(current.authentication);
       if (!resolved || resolved.organization !== options.organizationId || !resolved.actor.stream) return;
       const nativePolicy = options.policyEpoch();
+      if (reference.contextMode === "request") {
+        if (
+          current.authentication.source !== "mcp" ||
+          current.authentication.kind !== "human" ||
+          !current.privateSource ||
+          current.actor.viewingAs ||
+          current.actor.onBehalfOf
+        )
+          return;
+        const repo = reference.sourceRepository?.split("/");
+        if (
+          !repo ||
+          repo.length !== 2 ||
+          !authorize(current.actor, "repo:use", { type: "repo", owner: repo[0]!, name: repo[1]! }).allow
+        )
+          return;
+        // This frame consumes no historical source. Recheck the exact current
+        // receiver and binding after awaits without observing the catalogue.
+        const receiver = await options.authentication.resolveAuthorization({
+          ...resolved,
+          source: current.authentication.source,
+          sourceReference: reference,
+          destination: { kind: "broad" },
+          target: null,
+          context: [],
+          action: "read",
+        });
+        if (
+          receiver.status !== "resolved" ||
+          receiver.policyFingerprint !== current.policyFingerprint ||
+          !receiver.privateSource ||
+          options.policyEpoch() !== nativePolicy
+        )
+          return;
+        const final = await options.organization.resolve(receiver.authentication);
+        if (
+          !final ||
+          final.organization !== resolved.organization ||
+          final.actor.stream !== resolved.actor.stream ||
+          final.actor.bindingRevision !== resolved.actor.bindingRevision ||
+          options.policyEpoch() !== nativePolicy
+        )
+          return;
+        complete = true;
+        return createHash("sha256")
+          .update(
+            JSON.stringify([
+              "request-context-v1",
+              current.policyFingerprint,
+              nativePolicy,
+              resolved.actor.stream,
+              resolved.actor.bindingRevision,
+              reference.sourceRepository,
+            ]),
+          )
+          .digest("hex");
+      }
       const observations = new Map<string, string | null>();
       let snapshotRevision: number | undefined;
       let accessRevision: number | undefined;

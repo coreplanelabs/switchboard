@@ -140,7 +140,10 @@ export function createHomeHost(options: HomeHostOptions) {
     const captured = request.envelope.sourceReference?.capturedPrivateEpoch;
     if (captured && captured !== (await currentEpoch({ actor: current.actor, authentication: current.authentication })))
       throw historyFailure("history_epoch_unavailable", "The private conversation is unavailable.");
-    const history = await options.organization.streamTail(current.authentication, 100);
+    const history =
+      request.envelope.sourceReference?.contextMode === "request"
+        ? { status: "stream_tail" as const, entries: [] }
+        : await options.organization.streamTail(current.authentication, 100);
     if (history.status !== "stream_tail")
       throw historyFailure("history_tail_unavailable", "The private conversation is unavailable.");
     const final = await options.authentication.resolveEnvelope(request.envelope);
@@ -249,7 +252,10 @@ export function createHomeHost(options: HomeHostOptions) {
       receipt: saved.receipt,
       runId: pointer.ingressRunId,
       actor: current.actor,
-      msg: withOriginalOrganizationDispatch(withChatActor(current.msg, current.actor), pointer),
+      msg: withOriginalOrganizationDispatch(withChatActor(current.msg, current.actor), {
+        ...pointer,
+        contextMode: envelope.sourceReference?.contextMode,
+      }),
     };
   }
   function sink(request: Omit<OrganizationExecutionRequest, "io">): ChannelIO {

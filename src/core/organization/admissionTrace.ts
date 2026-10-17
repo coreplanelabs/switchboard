@@ -35,6 +35,18 @@ export type AdmissionExceptionKind = (typeof EXCEPTION_KINDS)[number] | "unclass
 export type AdmissionRefreshFailure = AdmissionExceptionKind | "unavailable-result";
 export type AdmissionStage = (typeof STAGES)[number];
 export type AdmissionReason = (typeof REASONS)[number];
+export type RequestContextSelection =
+  | "selected"
+  | "retained_request"
+  | "existing_key"
+  | "source"
+  | "actor"
+  | "private_source"
+  | "delegation"
+  | "continuation"
+  | "media"
+  | "routing"
+  | "target";
 export interface AdmissionObservation {
   stage?: AdmissionStage;
   reason?: AdmissionReason;
@@ -43,6 +55,7 @@ export interface AdmissionObservation {
   credentialRelation?: "same" | "different" | "unknown";
   refreshFailure?: AdmissionRefreshFailure;
   exceptionKind?: AdmissionExceptionKind;
+  contextSelection?: RequestContextSelection;
 }
 
 /** Use only an existing closed classification; exception names and prose are private. */
@@ -74,6 +87,7 @@ export function observeAdmission(trace: TraceOptions | undefined, observation: A
       ...(observation.credentialRelation ? { credentialRelation: observation.credentialRelation } : {}),
       ...(observation.refreshFailure ? { admissionRefreshFailure: observation.refreshFailure } : {}),
       ...(observation.exceptionKind ? { admissionExceptionKind: observation.exceptionKind } : {}),
+      ...(observation.contextSelection ? { requestContextSelection: observation.contextSelection } : {}),
     };
     setObservation(trace?.span, attrs);
   } catch {

@@ -226,6 +226,7 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         ...(original?.browserRevision !== undefined ? { browserRevision: original.browserRevision } : {}),
         ...(original?.privateSource ? { privateSource: true as const } : {}),
         ...(original?.capturedPrivateEpoch ? { capturedPrivateEpoch: original.capturedPrivateEpoch } : {}),
+        ...(original?.contextMode ? { contextMode: original.contextMode } : {}),
         ...(original?.sourceRepository ? { sourceRepository: original.sourceRepository } : {}),
       };
       if (!sourceReferenceSchema.safeParse(reference).success) return denied();
