@@ -83,6 +83,7 @@ export default defineConfig({
       "threadErr.test.ts",
       "streamOp.test.ts",
       "drain.test.ts",
+      "operatorCancel.test.ts",
       "imageReconcileState.test.ts",
       "memoryGuard.test.ts",
       "memoryGate.test.ts",
