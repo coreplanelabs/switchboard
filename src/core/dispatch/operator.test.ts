@@ -121,6 +121,131 @@ const ctxOf = (over: Partial<OperatorTurnContext> = {}): OperatorTurnContext => 
   ...over,
 });
 
+describe("formal model schema and runtime agreement", () => {
+  const url = "https://github.com/acme/api/pull/7";
+  const requestText = `agent:review model:openai/gpt-6.1-sol effort:high Review ${url}.`;
+  const args = {
+    preset: "review",
+    repo: "acme/api",
+    prTarget: { number: 7, source: "request", quote: url },
+    effort: "high",
+    reason: "Review the requested pull request.",
+    settingsEvidence: operatorSettingsEvidence({ effort: { intent: "requested", quote: "effort:high" } }),
+  };
+
+  it("formal model schemas reject omission and accept the explicit value", () => {
+    const tools = operatorTools(input({ text: requestText, projection: { presets: operatorPresets(), commands: [] } }));
+    const payloads = [
+      { name: OPERATOR_BIND_TOOL, value: args },
+      {
+        name: OPERATOR_BATCH_TOOL,
+        value: {
+          kind: "review",
+          targets: [url, "https://github.com/acme/web/pull/8"],
+          actionQuote: "Review",
+          targetQuotes: [url, "https://github.com/acme/web/pull/8"],
+          reason: "Review both.",
+          settingsEvidence: args.settingsEvidence,
+        },
+      },
+      {
+        name: OPERATOR_ASK_TOOL,
+        value: {
+          text: "Review this pull request?",
+          reason: "Confirm the target.",
+          proposal: `agent:review Review ${url}`,
+          proposalSettings: { effort: "high", settingsEvidence: args.settingsEvidence },
+        },
+      },
+    ];
+    for (const { name, value } of payloads) {
+      const schema = z.fromJSONSchema(tools.find((tool) => tool.name === name)!.inputSchema);
+      expect(schema.safeParse(value).success).toBe(false);
+      const supplied =
+        name === OPERATOR_ASK_TOOL
+          ? {
+              ...value,
+              proposalSettings: {
+                effort: "high",
+                settingsEvidence: args.settingsEvidence,
+                model: "openai/gpt-6.1-sol",
+              },
+            }
+          : { ...value, model: "openai/gpt-6.1-sol" };
+      expect(schema.parse(supplied)).toEqual(supplied);
+    }
+  });
+
+  it("a missing formal model has a closed repair diagnostic and the exact model binds", () => {
+    const context = ctxOf({ requestText, presets: ["review"], providers: ["openai"] });
+    expect(parseOperatorTurn({ tool: OPERATOR_BIND_TOOL, input: args }, context)).toEqual({
+      kind: "violation",
+      violation: "the authored formal model needs its typed model field; preserve the requested model",
+    });
+    expect(
+      parseOperatorTurn({ tool: OPERATOR_BIND_TOOL, input: { ...args, model: "openai/gpt-6.1-sol" } }, context),
+    ).toMatchObject({
+      kind: "decision",
+      decision: {
+        kind: "binds",
+        binds: [
+          { preset: "review", repo: "acme/api", prTarget: args.prTarget, model: "openai/gpt-6.1-sol", effort: "high" },
+        ],
+      },
+    });
+  });
+
+  it("a different evidenced model cannot replace the formal model or change formal effort", () => {
+    const context = ctxOf({
+      requestText: `${requestText} The historical example used openai/gpt-6-luna.`,
+      presets: ["review"],
+      providers: ["openai"],
+    });
+    expect(
+      parseOperatorTurn({ tool: OPERATOR_BIND_TOOL, input: { ...args, model: "openai/gpt-6-luna" } }, context),
+    ).toEqual({ kind: "violation", violation: "the accepted model must preserve the authored formal value" });
+    expect(
+      parseOperatorTurn(
+        { tool: OPERATOR_BIND_TOOL, input: { ...args, model: "openai/gpt-6.1-sol", effort: "medium" } },
+        context,
+      ),
+    ).toEqual({ kind: "violation", violation: "the accepted effort must preserve the authored formal value" });
+  });
+
+  it.each([
+    `Review ${url}.`,
+    `Review ${url}. Explain the historical model:openai/gpt-6.1-sol setting.`,
+    `Review ${url} using sol.`,
+    `Review ${url}. Explain the quoted \`model:openai/gpt-6.1-sol\` example.`,
+  ])("no formal model prefix keeps model optional in the schema: %s", (text) => {
+    const tools = operatorTools(input({ text, projection: { presets: operatorPresets(), commands: [] } }));
+    const schema = z.fromJSONSchema(tools.find((tool) => tool.name === OPERATOR_BIND_TOOL)!.inputSchema);
+    const { effort: _effort, ...ordinary } = args;
+    const value = { ...ordinary, settingsEvidence: operatorSettingsEvidence() };
+    expect(schema.parse(value)).toEqual(value);
+  });
+
+  it("plain-word model evidence still selects a model without a formal prefix", () => {
+    const { effort: _effort, ...ordinary } = args;
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          ...ordinary,
+          model: "openai/gpt-6.1-sol",
+          modelWord: "sol",
+          settingsEvidence: operatorSettingsEvidence(),
+        },
+      },
+      ctxOf({ requestText: `Use sol to review ${url}.`, presets: ["review"], providers: ["openai"] }),
+    );
+    expect(turn).toMatchObject({
+      kind: "decision",
+      decision: { kind: "binds", binds: [{ preset: "review", model: "openai/gpt-6.1-sol" }] },
+    });
+  });
+});
+
 describe("complete operator control assessments", () => {
   const text = "Review https://github.com/acme/api/pull/7 with two renewals.";
   const prTarget = { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" };

@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { ConfigStore } from "../../config.js";
 import { secretsFrom } from "../../secrets.js";
 import { bindCommands, CommandRegistry } from "../commandRegistry.js";
@@ -152,6 +153,58 @@ function fullCatalogue() {
 }
 
 describe("the direct operator on the Responses wire", () => {
+  it("repairs a missing formal model without changing the requested review", async () => {
+    const target = { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" };
+    const missing = {
+      preset: "review",
+      repo: "acme/api",
+      prTarget: target,
+      effort: "high",
+      reason: "Review the requested pull request.",
+      settingsEvidence: operatorSettingsEvidence({ effort: { intent: "requested", quote: "effort:high" } }),
+    };
+    const supplied = { ...missing, model: "openai/gpt-5.6-sol" };
+    const replies = [missing, supplied];
+    const calls: Record<string, unknown>[] = [];
+    const config = configStore();
+    const completions = new PiAiProviders(config.config.providers, {
+      secrets: secretsFrom({}),
+      fetch: async (_url, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        const reply = replies.shift();
+        if (!reply) throw new Error("Unexpected additional operator model call");
+        return new Response(bindReviewStream(reply), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const { commands } = fullCatalogue();
+    const result = await operatorStage(
+      { config, completions, commands },
+      {
+        msg: {
+          channelId: "slack:CX",
+          userId: "slack:UX",
+          text: "agent:review model:openai/gpt-5.6-sol effort:high Review https://github.com/acme/api/pull/7",
+          threadKey: "slack:CX:1.0",
+        },
+        mode: "on",
+      },
+    );
+    const violation = "the authored formal model needs its typed model field; preserve the requested model";
+    expect(result).toMatchObject({
+      outcome: "binds",
+      binds: [{ preset: "review", repo: "acme/api", prTarget: target, model: "openai/gpt-5.6-sol", effort: "high" }],
+      attempts: [{ outcome: "violation", violation }, { outcome: "accepted" }],
+    });
+    expect(calls).toHaveLength(2);
+    const bind = (calls[0]!.tools as { name: string; parameters: Record<string, unknown> }[]).find(
+      (tool) => tool.name === "bind_preset",
+    )!;
+    const schema = z.fromJSONSchema(bind.parameters);
+    expect(schema.safeParse(missing).success).toBe(false);
+    expect(schema.parse(supplied)).toEqual(supplied);
+    expect(JSON.stringify(calls[1]!.input)).toContain(violation);
+  });
+
   it.each([
     {
       evidence: { intent: "default", quote: "including nits" },
