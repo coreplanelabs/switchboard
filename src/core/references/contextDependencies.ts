@@ -1,3 +1,4 @@
+import { isSourceInputReference, sourceInputIdentity, type SourceInputReference } from "./sourceInputReference.js";
 import { isNativeMediaSource, type NativeMediaSource } from "../dispatch/originalOrganizationInput.js";
 import { isUnitStatusReference, unitStatusIdentity, type UnitStatusReference } from "./unitStatusReference.js";
 import { isSlackSourceReceipt, type SlackSourceReceipt } from "./sourceReceipt.js";
@@ -17,8 +18,10 @@ export interface ContextOrigin {
 /** Cumulative dependencies of everything admitted to a context, including
  * summaries and notes. Each leaf keeps its original audience and action. */
 export interface ContextDependencies {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   nativeMediaSources?: readonly NativeMediaDependency[];
+  /** Exact source notices and folds retained through derived context. Access remains unqualified. */
+  sourceInputs?: readonly SourceInputReference[];
   status: "known" | "unknown" | "revoked";
   revision: number;
   origins: readonly ContextOrigin[];
@@ -93,7 +96,7 @@ export function isContextDependencies(value: unknown): value is ContextDependenc
   const c = value as ContextDependencies;
   return (
     !("savedNativeMediaSources" in c) &&
-    (c.version !== 3 ||
+    (c.version < 3 ||
       Object.keys(c).every((key) =>
         [
           "version",
@@ -107,18 +110,33 @@ export function isContextDependencies(value: unknown): value is ContextDependenc
           "memoryScopes",
           "unitStatuses",
           "nativeMediaSources",
+          "sourceInputs",
           "reason",
         ].includes(key),
       )) &&
-    (c.version === 1 ? c.executionGithub === undefined : c.version === 2 || c.version === 3) &&
-    (c.version === 3
-      ? (c.nativeMediaSources === undefined && c.status !== "known") ||
+    (c.version === 1 ? c.executionGithub === undefined : c.version === 2 || c.version === 3 || c.version === 4) &&
+    (c.version === 4
+      ? c.nativeMediaSources === undefined ||
         (Array.isArray(c.nativeMediaSources) &&
-          (c.nativeMediaSources.length > 0 || c.status !== "known") &&
           c.nativeMediaSources.length <= CONTEXT_DEPENDENCY_MAX &&
           c.nativeMediaSources.every(isNativeMediaDependency) &&
           new Set(c.nativeMediaSources.map(savedNativeKey)).size === c.nativeMediaSources.length)
-      : c.nativeMediaSources === undefined) &&
+      : c.version === 3
+        ? (c.nativeMediaSources === undefined && c.status !== "known") ||
+          (Array.isArray(c.nativeMediaSources) &&
+            (c.nativeMediaSources.length > 0 || c.status !== "known") &&
+            c.nativeMediaSources.length <= CONTEXT_DEPENDENCY_MAX &&
+            c.nativeMediaSources.every(isNativeMediaDependency) &&
+            new Set(c.nativeMediaSources.map(savedNativeKey)).size === c.nativeMediaSources.length)
+        : c.nativeMediaSources === undefined) &&
+    (c.version === 4
+      ? (c.sourceInputs === undefined && c.status !== "known") ||
+        (Array.isArray(c.sourceInputs) &&
+          (c.sourceInputs.length > 0 || c.status !== "known") &&
+          c.sourceInputs.length <= CONTEXT_DEPENDENCY_MAX &&
+          c.sourceInputs.every(isSourceInputReference) &&
+          new Set(c.sourceInputs.map(sourceInputIdentity)).size === c.sourceInputs.length)
+      : c.sourceInputs === undefined) &&
     (c.executionGithub === undefined ||
       (Array.isArray(c.executionGithub) &&
         c.executionGithub.length <= 256 &&
@@ -152,7 +170,9 @@ export function isContextDependencies(value: unknown): value is ContextDependenc
       (c.executionGithub?.length ? 1 : 0) +
       (c.githubRepos?.length ? 1 : 0) +
       (c.memoryScopes?.length ? 1 : 0) +
-      (c.unitStatuses?.length ? 1 : 0) <=
+      (c.unitStatuses?.length ? 1 : 0) +
+      (c.sourceInputs?.length ?? 0) +
+      (c.version === 4 ? (c.nativeMediaSources?.length ?? 0) : 0) <=
       CONTEXT_DEPENDENCY_MAX &&
     c.slack.every(isSlackSourceReceipt) &&
     c.mcp.every(isSourceReadReference) &&
@@ -162,7 +182,7 @@ export function isContextDependencies(value: unknown): value is ContextDependenc
     new Set(c.mcp.map(mcpKey)).size === c.mcp.length &&
     new Set(c.slack.map(canonical)).size === c.slack.length &&
     !conflictingEvidence(c.slack, c.mcp) &&
-    bytes(c) <= CONTEXT_DEPENDENCY_MAX_BYTES
+    bytes(c) <= CONTEXT_DEPENDENCY_MAX_BYTES - (c.version === 4 && c.status === "known" ? 128 : 0)
   );
 }
 
@@ -431,6 +451,16 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       }
       executionGithub.push(reference);
     }
+    const sourceInputs = [...(previous.sourceInputs ?? [])];
+    for (const reference of next.sourceInputs ?? []) {
+      const existing = sourceInputs.find((old) => sourceInputIdentity(old) === sourceInputIdentity(reference));
+      if (existing) {
+        if (canonical(existing) !== canonical(reference)) {
+          if (status !== "revoked") status = "unknown";
+          reason = "equivocation";
+        }
+      } else sourceInputs.push(reference);
+    }
     const nativeMediaSources = [...(previous.nativeMediaSources ?? [])];
     for (const leaf of next.nativeMediaSources ?? []) {
       const existing = nativeMediaSources.find((old) => savedNativeKey(old) === savedNativeKey(leaf));
@@ -449,10 +479,11 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       (githubRepos.length ? 1 : 0) +
       (memoryScopes.length ? 1 : 0) +
       (unitStatuses.length ? 1 : 0);
-    if (otherCount + nativeMediaSources.length > CONTEXT_DEPENDENCY_MAX) {
+    if (version !== 4 && otherCount + sourceInputs.length + nativeMediaSources.length > CONTEXT_DEPENDENCY_MAX) {
       if (status !== "revoked") status = "unknown";
       reason = "overflow";
-      nativeMediaSources.splice(Math.max(0, CONTEXT_DEPENDENCY_MAX - otherCount));
+      nativeMediaSources.splice(Math.max(0, CONTEXT_DEPENDENCY_MAX - otherCount - sourceInputs.length));
+      sourceInputs.splice(Math.max(0, CONTEXT_DEPENDENCY_MAX - otherCount - nativeMediaSources.length));
     }
     const revision = Math.max(previous.revision, next.revision);
     const merged = normalize({
@@ -467,12 +498,25 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       ...(unitStatuses.length ? { unitStatuses } : {}),
       ...(executionGithub.length ? { executionGithub } : {}),
       ...(nativeMediaSources.length ? { nativeMediaSources } : {}),
+      ...(sourceInputs.length ? { sourceInputs } : {}),
       ...(status !== "known" && reason ? { reason } : {}),
     });
     if (sameContent(previous, merged)) result = { ...merged, revision };
     else if (sameContent(next, merged) && next.revision > previous.revision) result = merged;
     else if (revision < Number.MAX_SAFE_INTEGER) result = { ...merged, revision: revision + 1 };
     else result = { ...merged, status: status === "revoked" ? status : "unknown", reason: "overflow" };
+    if (version === 4 && !isContextDependencies(result)) {
+      // Validate the final revision too: growing its digits spends byte budget.
+      // An oversized union holds the new input and keeps the admitted sources.
+      const heldStatus = status === "revoked" ? "revoked" : "unknown";
+      const held: ContextDependencies = {
+        ...previous,
+        status: heldStatus,
+        reason: "overflow",
+        revision: Math.min(Number.MAX_SAFE_INTEGER, Math.max(previous.revision, next.revision) + 1),
+      };
+      result = isContextDependencies(held) ? held : { ...previous, status: heldStatus };
+    }
   }
   if (bytes(result) > CONTEXT_DEPENDENCY_MAX_BYTES) {
     const origins = [...result!.origins];
@@ -483,6 +527,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
     const unitStatuses = [...(result!.unitStatuses ?? [])];
     const executionGithub = [...(result!.executionGithub ?? [])];
     const nativeMediaSources = [...(result!.nativeMediaSources ?? [])];
+    const sourceInputs = [...(result!.sourceInputs ?? [])];
     result = {
       ...result!,
       status: result!.status === "revoked" ? "revoked" : "unknown",
@@ -495,9 +540,11 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       ...(unitStatuses.length ? { unitStatuses } : {}),
       ...(executionGithub.length ? { executionGithub } : {}),
       ...(nativeMediaSources.length ? { nativeMediaSources } : {}),
+      ...(sourceInputs.length ? { sourceInputs } : {}),
     };
     while (bytes(result) > CONTEXT_DEPENDENCY_MAX_BYTES) {
-      if (nativeMediaSources.length) nativeMediaSources.pop();
+      if (sourceInputs.length) sourceInputs.pop();
+      else if (nativeMediaSources.length) nativeMediaSources.pop();
       else if (executionGithub.length) executionGithub.pop();
       else if (unitStatuses.length) unitStatuses.pop();
       else if (memoryScopes.length) memoryScopes.pop();
@@ -536,6 +583,9 @@ export function contextDependenciesContain(current: ContextDependencies, snapsho
     (snapshot.nativeMediaSources ?? []).every((leaf) =>
       current.nativeMediaSources?.some((current) => canonical(leaf) === canonical(current)),
     ) &&
+    (snapshot.sourceInputs ?? []).every((ref) =>
+      current.sourceInputs?.some((current) => canonical(ref) === canonical(current)),
+    ) &&
     snapshot.slack.every((r) => current.slack.some((c) => canonical(c) === canonical(r))) &&
     snapshot.mcp.every((r) => current.mcp.some((c) => canonical(c) === canonical(r))) &&
     (snapshot.executionGithub ?? []).every((r) =>
@@ -556,9 +606,12 @@ export async function contextDependenciesHash(value: ContextDependencies): Promi
 }
 
 function normalize(value: ContextDependencies): ContextDependencies {
-  const { githubRepos, memoryScopes, unitStatuses, executionGithub, nativeMediaSources, ...rest } = value;
+  const { githubRepos, memoryScopes, unitStatuses, executionGithub, nativeMediaSources, sourceInputs, ...rest } = value;
   return {
     ...rest,
+    ...(sourceInputs?.length
+      ? { sourceInputs: [...sourceInputs].sort((a, b) => compareText(sourceInputIdentity(a), sourceInputIdentity(b))) }
+      : {}),
     ...(nativeMediaSources?.length
       ? {
           nativeMediaSources: [...nativeMediaSources].sort((a, b) => compareText(savedNativeKey(a), savedNativeKey(b))),

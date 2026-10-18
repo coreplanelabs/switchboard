@@ -1,3 +1,5 @@
+import { testSourceInput } from "../testing/sourceInputs.js";
+import { sourceInputReferenceOf } from "./sourceInputReference.js";
 import { describe, expect, it } from "vitest";
 import {
   contextDependenciesContain,
@@ -31,6 +33,193 @@ const known = (refs: SourceReadReference[] = [], revision = 0): ContextDependenc
 const sources = () => testSessionSources({ channelId: "slack:C1", threadKey: "slack:C1:1.0", userId: "slack:U11" });
 
 describe("whole-context dependencies", () => {
+  it("retains exact source notice and fold references without accepting a downgraded envelope", async () => {
+    const notice = testSourceInput(),
+      fold = testSourceInput(true);
+    const context = { ...known(), version: 4 as const, sourceInputs: [fold, notice] };
+    expect(isContextDependencies(context)).toBe(true);
+    const merged = mergeContextDependencies(known(), context);
+    expect(merged).toMatchObject({ version: 4, status: "known", sourceInputs: [fold, notice] });
+    expect(contextDependenciesContain(merged, context)).toBe(true);
+    expect(contextDependenciesContain(known(), context)).toBe(false);
+    expect(await contextDependenciesHash(context)).toBe(
+      await contextDependenciesHash({ ...context, sourceInputs: [notice, fold] }),
+    );
+    for (const version of [1, 2, 3]) expect(isContextDependencies({ ...context, version })).toBe(false);
+    expect(isContextDependencies({ ...context, sourceInputs: [] })).toBe(false);
+    expect(isContextDependencies({ ...context, sourceInputs: undefined })).toBe(false);
+    expect(isContextDependencies({ ...context, unrecognizedRequiredSource: [notice] })).toBe(false);
+    expect(mergeContextDependencies(context, context).sourceInputs).toEqual([fold, notice]);
+    const media = {
+      executionRunId: "media-origin",
+      executionSequence: 1,
+      reference: {
+        version: 1 as const,
+        kind: "original" as const,
+        sourceRunId: "media-origin",
+        sourceSequence: 1,
+        sourceDigest: "a".repeat(64),
+        intentDigest: "b".repeat(64),
+      },
+    };
+    const mediaContext = { ...known(), version: 3 as const, nativeMediaSources: [media] };
+    const mixed = mergeContextDependencies(context, mediaContext);
+    expect(mixed).toMatchObject({
+      version: 4,
+      status: "known",
+      sourceInputs: [fold, notice],
+      nativeMediaSources: [media],
+    });
+    expect(contextDependenciesContain(mixed, context)).toBe(true);
+    expect(contextDependenciesContain(mixed, mediaContext)).toBe(true);
+  });
+
+  it("holds conflicting source identities and bounded overflow without treating retained inputs as public", async () => {
+    const notice = testSourceInput();
+    const context = { ...known(), version: 4 as const, sourceInputs: [notice] };
+    for (const changed of [
+      { accessHash: "f".repeat(64) },
+      { inputHash: "f".repeat(64) },
+      { receipt: { ...notice.receipt, bodyHash: "f".repeat(64) } },
+      { root: { ...notice.root, requester: "cli:another" } },
+    ]) {
+      const other = { ...context, sourceInputs: [{ ...notice, ...changed }] };
+      expect(mergeContextDependencies(context, other)).toMatchObject({
+        status: "unknown",
+        reason: "equivocation",
+        sourceInputs: [notice],
+      });
+      expect(contextDependenciesContain(other, context)).toBe(false);
+      expect(await contextDependenciesHash(other)).not.toBe(await contextDependenciesHash(context));
+    }
+    let retained: ContextDependencies = context;
+    for (let i = 0; i < 33; i++)
+      retained = mergeContextDependencies(retained, {
+        ...context,
+        sourceInputs: [{ ...notice, receipt: { ...notice.receipt, key: `source:${String(i).padStart(64, "0")}` } }],
+      });
+    expect(retained).toMatchObject({ version: 4, status: "unknown", reason: "overflow" });
+    expect(retained.sourceInputs).toContainEqual(notice);
+    expect(contextDependenciesContain(retained, context)).toBe(false);
+    expect(isContextDependencies(retained)).toBe(true);
+    expect(mergeContextDependencies(context, { ...known(), status: "revoked" })).toMatchObject({
+      status: "revoked",
+      sourceInputs: [notice],
+    });
+  });
+
+  it("holds a near-limit source merge when its final revision grows by a byte", async () => {
+    const reference = testSourceInput();
+    const prior: ContextDependencies = {
+      ...known(
+        Array.from({ length: 18 }, (_, i) => mcp(`near-${i}`)),
+        9,
+      ),
+      version: 4,
+      sourceInputs: [reference],
+      githubRepos: ["acme/api"],
+      memoryScopes: ["user:cli:user"],
+      executionGithub: [
+        { runId: "execution", callId: "read", resultHash: "a".repeat(64), admissionHash: "b".repeat(64) },
+      ],
+      unitStatuses: [
+        {
+          instanceId: "plan",
+          unit: "unit",
+          attempt: 0,
+          requester: "cli:user",
+          channelId: "cli:main",
+          threadKey: "cli:thread",
+          deliveryId: "delivery",
+          destinationThreadKey: "cli:thread",
+          repo: "acme/api",
+          snapshotHash: "c".repeat(64),
+        },
+      ],
+      nativeMediaSources: [
+        {
+          executionRunId: "media",
+          executionSequence: 1,
+          reference: {
+            version: 1,
+            kind: "original",
+            sourceRunId: "media",
+            sourceSequence: 1,
+            sourceDigest: "a".repeat(64),
+            intentDigest: "b".repeat(64),
+          },
+        },
+      ],
+    };
+    const incoming = {
+      ...known(),
+      origins: [{ runId: "next", requester: "cli:user", channelId: "cli:main", threadKey: "cli:thread" }],
+    };
+    const candidate = { ...prior, origins: incoming.origins };
+    const byteLength = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    // Exercise the documented byte boundary with every optional group present,
+    // so empty-field normalization cannot hide the 9-to-10 revision change.
+    for (const ref of prior.mcp) {
+      for (const field of ["runId", "actionId"] as const) {
+        const room = 16_256 - byteLength(candidate);
+        if (room > 0) ref[field] += "x".repeat(Math.min(256 - ref[field].length, room));
+      }
+      const room = 16_256 - byteLength(candidate);
+      if (room > 0) ref.callIds[0] += "x".repeat(Math.min(256 - ref.callIds[0].length, room));
+    }
+    expect(byteLength(candidate)).toBe(16_256);
+    expect(isContextDependencies(prior)).toBe(true);
+    const result = mergeContextDependencies(prior, incoming);
+    expect(result).toMatchObject({ status: "unknown", reason: "overflow", revision: 10, sourceInputs: [reference] });
+    expect(result.mcp).toEqual(expect.arrayContaining([...prior.mcp]));
+    expect(result.mcp).toHaveLength(18);
+    expect(isContextDependencies(result)).toBe(true);
+    await expect(contextDependenciesHash(result)).resolves.toMatch(/^[a-f0-9]{64}$/);
+    expect(mergeContextDependencies(result, known()).sourceInputs).toEqual([reference]);
+    const smaller = structuredClone(prior);
+    smaller.mcp[0]!.runId = smaller.mcp[0]!.runId.slice(0, -1);
+    const accepted = mergeContextDependencies(smaller, incoming);
+    expect(accepted).toMatchObject({
+      status: "known",
+      revision: 10,
+      sourceInputs: [reference],
+      origins: incoming.origins,
+    });
+    expect(isContextDependencies(accepted)).toBe(true);
+    expect(byteLength(accepted)).toBe(16_256);
+  });
+
+  it("rejects malformed source input proof and authority fields without invoking accessors", () => {
+    const notice = testSourceInput(),
+      fold = testSourceInput(true);
+    expect(sourceInputReferenceOf(notice)).toEqual(notice);
+    expect(sourceInputReferenceOf(fold)).toEqual(fold);
+    for (const invalid of [
+      { ...notice, version: 2 },
+      { ...notice, inputHash: "bad" },
+      { ...notice, accessHash: "bad" },
+      { ...notice, receipt: { ...notice.receipt, sequence: -1 } },
+      { ...notice, root: { ...notice.root, authenticatedAs: "imported-authority" } },
+      { ...notice, routing: { kind: "notice", decision: { id: "invented" } } },
+      { ...fold, routing: { kind: "fold", decision: { id: '["another-root","call-1"]', hash: "c".repeat(64) } } },
+      { ...notice, requester: "imported-authority" },
+    ]) {
+      expect(sourceInputReferenceOf(invalid)).toBeUndefined();
+      expect(isContextDependencies({ ...known(), version: 4, sourceInputs: [invalid] })).toBe(false);
+    }
+    let reads = 0;
+    const unsafe = {
+      ...notice,
+      get inputHash() {
+        reads++;
+        return "d".repeat(64);
+      },
+    };
+    expect(sourceInputReferenceOf(unsafe)).toBeUndefined();
+    expect(reads).toBe(0);
+    expect(sourceInputReferenceOf(notice)).toEqual(notice);
+  });
+
   it("retains a saved native read dependency through merge, hash and checkpoint containment without accepting a downgrade", async () => {
     const leaf = {
       executionRunId: "choice-B",

@@ -1,3 +1,4 @@
+import { testSourceInput } from "../testing/sourceInputs.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { WorkerRunLedger } from "../runLedgerWorker.js";
@@ -537,6 +538,19 @@ describe("canonical saved operator decisions", () => {
 });
 
 describe("message-bound context access", () => {
+  it("retains source-input schema without authorizing model access before the source verifier exists", async () => {
+    const f = setup();
+    expect(await f.access.validateDependencies(clean)).toEqual({ ok: true });
+    expect(await f.access.validateDependencies({ ...clean, version: 4, sourceInputs: [testSourceInput()] })).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "source_input_access_unproved",
+    });
+    expect(
+      await f.access.validateDependencies({ ...clean, version: 4, sourceInputs: [testSourceInput(true)] }),
+    ).toEqual({ ok: false, code: "saved-context-unproved", check: "source_input_access_unproved" });
+  });
+
   it.each(["allowed", "foreign-owner", "github-revoked", "persistence-failed"] as const)(
     "checks the next model call against a native GitHub result's canonical proof: %s",
     async (failure) => {

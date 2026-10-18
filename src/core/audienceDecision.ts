@@ -39,6 +39,7 @@ export const CONTEXT_REFUSAL_CHECKS = [
   "context_unknown",
   "context_changed",
   "context_validation_exception",
+  "source_input_access_unproved",
   "worker_audience_unproved",
   "execution_consumer_missing",
   "execution_owner_missing",

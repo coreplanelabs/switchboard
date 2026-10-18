@@ -403,6 +403,9 @@ function buildContextAccess(
   const validate = async (dependencies: ContextDependencies): Promise<AudienceCheck> => {
     if (!isContextDependencies(dependencies)) return denied("context_invalid");
     if (dependencies.status !== "known") return denied("context_unknown");
+    // Readers retain source input identity before current-source validation is
+    // connected. Recognizing the schema cannot authorize model disclosure.
+    if (dependencies.sourceInputs?.length) return denied("source_input_access_unproved");
     try {
       dependencies = structuredClone(dependencies);
       if (msg.threadKey.startsWith("worker:") && !(await destinationAudience()))

@@ -27,6 +27,7 @@ export function contextReferencesOf(
   const runIds = [
     ...(handoff ? childHandoffRunIds(handoff) : []),
     ...(context?.origins ?? []).map((o) => o.runId),
+    ...(context?.sourceInputs ?? []).map((ref) => ref.root.runId),
     ...(context?.mcp ?? []).map((r) => r.runId),
   ];
   for (const runId of runIds) {

@@ -1,8 +1,75 @@
+import { testSourceInput } from "../testing/sourceInputs.js";
 import { describe, expect, it } from "vitest";
 import type { ChildHandoff } from "../dispatch/handoff.js";
 import { contextReferencesOf, retainContextSources } from "./contextRetention.js";
 
 describe("context retention — bounded references follow their live holders", () => {
+  it("pins original source-input roots through ordinary context retention without making them new holders", () => {
+    const context = {
+      version: 4 as const,
+      status: "known" as const,
+      revision: 1,
+      origins: [],
+      slack: [],
+      mcp: [],
+      sourceInputs: [testSourceInput(), testSourceInput(true)],
+    };
+    const refs = contextReferencesOf("consumer", undefined, context);
+    expect(refs).toEqual([{ holderRunId: "consumer", sourceRunId: "source-root" }]);
+    const rows = [{ id: "source-root" }, { id: "consumer" }, { id: "unrelated" }];
+    expect(retainContextSources(rows, [rows[1]!], refs)).toEqual([{ id: "source-root" }, { id: "consumer" }]);
+    expect(retainContextSources(rows, [], refs)).toEqual([]);
+    expect(retainContextSources([rows[1]!], [rows[1]!], refs)).toEqual([{ id: "consumer" }]);
+  });
+
+  it("pins source roots inherited only through saved child context and its ancestors", () => {
+    const context = (runId: string) => ({
+      version: 4 as const,
+      status: "known" as const,
+      revision: 1,
+      origins: [],
+      slack: [],
+      mcp: [],
+      sourceInputs: [{ ...testSourceInput(), root: { ...testSourceInput().root, runId } }],
+    });
+    const parent = {
+      source: { runId: "parent", requester: "cli:user", channelId: "cli:main", threadKey: "cli:thread" },
+      session: { key: "parent-session", from: 0, to: 1 },
+      assets: [],
+      dependencies: { hash: "a".repeat(64), value: context("parent-source") },
+    };
+    const handoff: ChildHandoff = {
+      version: 1,
+      ...parent,
+      ancestors: [
+        {
+          ...parent,
+          source: { ...parent.source, runId: "ancestor" },
+          session: { key: "ancestor-session", from: 0, to: 1 },
+          dependencies: { hash: "b".repeat(64), value: context("ancestor-source") },
+        },
+      ],
+    };
+    const refs = contextReferencesOf("consumer", handoff);
+    expect(refs).toEqual([
+      { holderRunId: "consumer", sourceRunId: "parent", sessionKey: "parent-session" },
+      { holderRunId: "consumer", sourceRunId: "ancestor", sessionKey: "ancestor-session" },
+      { holderRunId: "consumer", sourceRunId: "parent-source" },
+      { holderRunId: "consumer", sourceRunId: "ancestor-source" },
+    ]);
+    const rows = ["consumer", "parent", "ancestor", "parent-source", "ancestor-source", "unrelated"].map((id) => ({
+      id,
+    }));
+    expect(retainContextSources(rows, [rows[0]!], refs).map((row) => row.id)).toEqual([
+      "consumer",
+      "parent",
+      "ancestor",
+      "parent-source",
+      "ancestor-source",
+    ]);
+    expect(retainContextSources(rows, [], refs)).toEqual([]);
+  });
+
   it("pins the exact original and execution sources of a retained native media dependency", () => {
     const context = {
       version: 3 as const,

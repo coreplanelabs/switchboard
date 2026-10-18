@@ -5,6 +5,7 @@
 
 - **Code**: `src/channels/githubActivityAccess.ts` (current GitHub source identity and requester read policy); `src/core/runLedger/sourceEvidence.ts`
 - **Tests**: `src/core/runLedger/sourceEvidence.test.ts`
+- **Code**: `src/core/references/sourceInputReference.ts`, `src/core/testing/sourceInputs.ts` (source-input identity reader and synthetic test fixture)
 - **Tests**: `src/core/coordinator/managedPrSourceContract.test.ts`
 
 - **Tests**: `src/core/runLedger/inboxDelivery.test.ts`, `src/core/runLedger/sourceRelevance.test.ts`
@@ -1029,6 +1030,25 @@ No producer or runtime reader is enabled. Canonical decision admission, source-j
 
 | A direct-run fold also binds its saved context hash to a version 1 projection of both participants' run targets and stored, known context dependencies. Preparation captures immutable data before awaits; append compares the current projection and saved hash. Missing, malformed, unknown, revoked or changed dependencies and changed root target metadata refuse a new row and receipt. Append warnings distinguish unavailable context with `fold-context-unavailable` from changed context with `fold-context`; neither includes private data. Unchanged context survives reclaim, and exact historical replay remains available. This proves stored data binding only: full task/source identity, current access, retention, unit delivery and native input admission remain separate gates; producers and readers stay disabled. | `[unit]` `src/core/runLedger/sourceEvidence.test.ts::source notice and fold messages::requires the actual root and its saved source-fold decision for a direct child`; `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::typed SQLite source evidence::*` |
 
+
+## Source input dependencies
+
+Version 4 of the cumulative context envelope can retain an exact source-input reference. Each reference keeps the complete source receipt, original orchestrator coordinates, typed notice or fold, complete input hash and adapter source-identity hash. A fold also keeps its original owned decision ID and hash. These are data to validate, not requester credentials, permission, a delivery target or native input acknowledgment. Unsupported versions, changed required fields and imported authority fields stay refused; older envelope versions cannot carry these references.
+
+Merges preserve source references, detect conflicting proof under the same original input identity, and apply the existing count and byte bounds. Version 4 reserves space for an explicit refusal state. The final normalized record is checked after its revision changes. If a new union exceeds capacity, it stays unknown and preserves the previous accepted context instead of discarding an older source. Checkpoint hashing and normalization retain the references. The existing retention index includes source roots from the saved child context and every flattened ancestor, as direct links from the actual consumer. It pins each original root run while that consumer remains a policy root, without resurrecting deleted data or making pinned runs independent retention roots.
+
+This is a reader-first component. The current context-access reader refuses model use of every source-input envelope with `source_input_access_unproved`. Recognizing the schema or saving a checkpoint does not prove current source access or native delivery. Canonical source/task/decision validation, per-event obligations and retention, exact native input acknowledgment, compatible reader qualification and producer activation remain separate gates.
+
+| Criterion | Proof |
+| --- | --- |
+| Exact notices and folds survive merge, stable hashing and containment; older versions, conflicting proof, unsafe JSON and imported authority fields cannot become known valid provenance | `[unit]` `src/core/references/contextDependencies.test.ts::whole-context dependencies::retains exact source notice and fold references without accepting a downgraded envelope`, `::holds conflicting source identities and bounded overflow without treating retained inputs as public`, `::rejects malformed source input proof and authority fields without invoking accessors` |
+| A committed checkpoint retains the exact source input; changed checkpoint proof fails verification | `[unit]` `src/core/references/contextCheckpoint.test.ts::ordinary context checkpoint::retains exact source input identity through a committed checkpoint and rejects changed proof` |
+| Original root records remain pinned only while their actual consumer remains retained; deleted records are not recreated | `[unit]` `src/core/runLedger/contextRetention.test.ts::context retention — bounded references follow their live holders::pins original source-input roots through ordinary context retention without making them new holders` |
+| A readable source-free context still passes; recognized notice and fold references remain unavailable to models until the source verifier exists | `[unit]` `src/core/dispatch/contextAccess.test.ts::message-bound context access::retains source-input schema without authorizing model access before the source verifier exists` |
+| Real SQLite state and session readers retain the same exact references and index the original root run. A canonical session snapshot is not native input acknowledgment. | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source-input context readers in SQLite::retains exact source references in state, session snapshots and the root retention index` |
+| Saved child and unit handoffs include source roots from both their own context and flattened ancestors directly under the retained consumer; keeping only a parent is insufficient | `[unit]` `src/core/runLedger/contextRetention.test.ts::context retention — bounded references follow their live holders::pins source roots inherited only through saved child context and its ancestors` |
+| A revision digit increase at the version 4 byte boundary cannot produce invalid known context; the one-byte-smaller union remains usable and overflow keeps prior sources | `[unit]` `src/core/references/contextDependencies.test.ts::whole-context dependencies::holds a near-limit source merge when its final revision grows by a byte` |
+| Canonical source access, pending-input retention, native input acknowledgment and enabled delivery remain unqualified | `[gap]` No source producer or runtime source reader is enabled. |
 
 ## Saved source relevance
 

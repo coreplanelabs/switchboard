@@ -1,3 +1,4 @@
+import { testSourceInput } from "../testing/sourceInputs.js";
 import { describe, expect, it } from "vitest";
 import { contextDependenciesHash, mergeContextDependencies, type ContextDependencies } from "./contextDependencies.js";
 import { testSlackReceipt } from "../testing/slackSources.js";
@@ -49,6 +50,33 @@ async function seal(
 }
 
 describe("ordinary context checkpoint", () => {
+  it("retains exact source input identity through a committed checkpoint and rejects changed proof", async () => {
+    const reference = testSourceInput(true);
+    const run: CanonicalCheckpointSource = {
+      runId: "consumer",
+      meta: meta(4),
+      context: { ...clean, version: 4, origins: [origin("consumer")], sourceInputs: [reference] },
+    };
+    const receipt = await seal(run);
+    if (!receipt) throw new Error("expected checkpoint");
+    expect(receipt.normalized.sourceInputs).toEqual([reference]);
+    const saved: CanonicalCheckpointSource = JSON.parse(
+      JSON.stringify({
+        ...run,
+        context: receipt.normalized,
+        receipt,
+        transcriptHash: receipt.inputs.transcriptHash,
+        members: [run.runId],
+        memberCheckpoints: { [run.runId]: "" },
+      }),
+    );
+    expect(await validateContextCheckpoint(receipt, saved)).toBe(true);
+    expect((await normalizeCheckpointContexts([run.context], [saved]))[0]?.sourceInputs).toEqual([reference]);
+    const altered = structuredClone(receipt);
+    altered.normalized = { ...altered.normalized, sourceInputs: [{ ...reference, accessHash: "f".repeat(64) }] };
+    expect(await validateContextCheckpoint(altered, { ...saved, receipt: altered })).toBe(false);
+  });
+
   it("validates a committed prefix when a later write breaks the run range", async () => {
     const run: CanonicalCheckpointSource = {
       runId: "broken-later",

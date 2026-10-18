@@ -1,3 +1,4 @@
+import { testSourceInput } from "../../src/core/testing/sourceInputs.ts";
 import { checkStateFixture } from "../../src/core/testing/checkState.ts";
 import type { CheckExecutionState } from "../../src/core/checkExecutionTypes.ts";
 import { cancellationRecordMatches } from "../../src/core/runLedger/cancellation.ts";
@@ -19177,5 +19178,72 @@ describe("terminal native retirement authority", () => {
         reason: fault === "live" ? "owner-live" : "terminal-source-unavailable",
       });
     }
+  });
+});
+
+describe("source-input context readers in SQLite", () => {
+  it("retains exact source references in state, session snapshots and the root retention index", async () => {
+    const key = storeKey(),
+      id = "source-context-consumer",
+      skey = "cli:source-context";
+    const ledger = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect((await post("/runs/claim", claimBody(key, "source-root", "cli:thread"))).status).toBe(200);
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, id, skey, "g1", {
+            meta: {
+              agent: "orchestrator",
+              userId: "cli:user",
+              channelId: "cli:main",
+              threadKey: skey,
+              session: { key: skey, seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const context: ContextDependencies = {
+      version: 4,
+      status: "known",
+      revision: 1,
+      origins: [],
+      slack: [],
+      mcp: [],
+      sourceInputs: [testSourceInput(), testSourceInput(true)],
+    };
+    expect(await ledger.setState(id, "g1", { contextDependencies: context })).toEqual({ ok: true });
+    const current = (await ledger.listLive()).find((row) => row.runId === id);
+    expect(current?.state.contextDependencies).toEqual(context);
+    await ledger.claimSession(skey, id, "g1");
+    expect(
+      await ledger.seed(
+        id,
+        "g1",
+        [{ idx: 0, message: { role: "user", content: [{ type: "text", text: "synthetic source context" }] } }],
+        skey,
+      ),
+    ).toEqual({ ok: true });
+    const sources = { version: 1 as const, status: "unknown" as const, context };
+    expect(await ledger.writeSessionSources(skey, id, "g1", sources)).toEqual({ ok: true });
+    expect((await ledger.readSessionTail(skey, 1)).sources).toEqual(sources);
+    const session = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(skey));
+    const snapshot = await runInDurableObject(session, async (instance: SessionLogDO) =>
+      instance.checkpointSnapshot(0, 1),
+    );
+    expect(snapshot.context).toEqual(context);
+    const history = env.RUNS.get(env.RUNS.idFromName(key));
+    const pins = await runInDurableObject(history, (_instance: RunHistoryDO, state) =>
+      state.storage.sql
+        .exec<{ source_run_id: string }>("SELECT source_run_id FROM context_refs WHERE holder_run_id=?", id)
+        .toArray(),
+    );
+    expect(pins).toEqual([{ source_run_id: "source-root" }]);
   });
 });
