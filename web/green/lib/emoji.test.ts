@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, nextTick, ref } from "vue";
 import { mount } from "@vue/test-utils";
 import { textRendering, watchDisplayText } from "./emoji";
@@ -57,6 +57,28 @@ describe("Shared text rendering", () => {
     expect(page.get("h1").text()).toBe("Second");
     expect(page.get("p").text()).toBe("Ready Second now");
     expect(page.findAll("img").map((i) => i.attributes("alt"))).toEqual([":ship:", ":ship:", ":bird's-gift:"]);
+    stop();
+    page.unmount();
+  });
+
+  it("stays inert when the DOM global is gone, so a late update cannot throw", async () => {
+    const text = ref("First :ship:");
+    const page = mount(defineComponent({ render: () => h("h1", text.value) }), {
+      attachTo: document.body,
+      global: { plugins: [textRendering] },
+    });
+    const stop = watchDisplayText(page.element as HTMLElement, { ship: { path: "/assets/emoji/abc.gif" } });
+    await nextTick();
+    vi.stubGlobal("Node", undefined);
+    try {
+      text.value = "Second :ship:";
+      await nextTick();
+      text.value = "Third :ship:";
+      await nextTick();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(page.get("h1")).toBeTruthy();
     stop();
     page.unmount();
   });

@@ -16,11 +16,14 @@ function restore(root: Node) {
 export const textRendering = {
   install(app: App) {
     app.mixin({
+      // A component can still update after the environment's DOM globals are
+      // gone (a test environment tears down before pending work drains), so the
+      // hook guards the global before it dereferences it.
       beforeUpdate() {
-        if (this.$el instanceof Node) restore(this.$el);
+        if (typeof Node !== "undefined" && this.$el instanceof Node) restore(this.$el);
       },
       beforeUnmount() {
-        if (this.$el instanceof Node) restore(this.$el);
+        if (typeof Node !== "undefined" && this.$el instanceof Node) restore(this.$el);
       },
     });
   },
