@@ -1,3 +1,4 @@
+import { readUnitGroups, type UnitGroup } from "../coordinator/unitGroups.js";
 import { mapLimit } from "../mapLimit.js";
 import { HOME_PRIVATE_READ_CONCURRENCY } from "../budgets.js";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
@@ -22,6 +23,7 @@ export interface HomeInventory {
     order?: "key";
   }): Promise<{ items: CoordinatorInstance[]; cursor?: string; resumeCursor?: string }>;
   listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
+  listUnitsMany?(instanceIds: readonly string[]): Promise<UnitGroup[]>;
 }
 
 /** Attribution is supplied by the durable condition producer, never inferred
@@ -381,9 +383,13 @@ export function createHomeService(deps: HomeServiceDeps): {
     let status: HomeReadStatus = "complete";
     let live: ReadonlyMap<string, ReadonlySet<string>> = new Map();
     let failure: ReadFailurePhase | undefined;
-    const fail = (phase?: ReadFailurePhase) => {
+    let failureKind: "type_error" | "syntax_error" | "error" | "non_error" | undefined;
+    const fail = (phase?: ReadFailurePhase, kind?: typeof failureKind) => {
       status = "partial";
-      failure ??= phase;
+      if (!failure) {
+        failure = phase;
+        failureKind = kind;
+      }
     };
     if (input.visibleTo.kind === "none") return { unresolved, ended, moving, status };
     if (includeLive && deps.liveUnitRuns) {
@@ -420,9 +426,36 @@ export function createHomeService(deps: HomeServiceDeps): {
           channelVisibility: "unknown",
         });
       });
+      let batched: Map<string, CoordinatorUnit[]> | undefined;
+      if (candidates.length && deps.instances.listUnitsMany) {
+        try {
+          const ids = candidates.map((instance) => instance.id);
+          batched = new Map(
+            readUnitGroups(await deps.instances.listUnitsMany(ids), ids).map((group) => [
+              group.instanceId,
+              group.units,
+            ]),
+          );
+        } catch (error) {
+          fail(
+            "unit_list",
+            error instanceof TypeError
+              ? "type_error"
+              : error instanceof SyntaxError
+                ? "syntax_error"
+                : error instanceof Error
+                  ? "error"
+                  : "non_error",
+          );
+          batched = new Map();
+        }
+      }
       const groups = await mapLimit(candidates, HOME_PRIVATE_READ_CONCURRENCY, async (instance) => {
         try {
-          return { instance, units: await deps.instances.listUnits(instance.id) };
+          return {
+            instance,
+            units: batched ? (batched.get(instance.id) ?? []) : await deps.instances.listUnits(instance.id),
+          };
         } catch {
           fail("unit_list");
           return { instance, units: [] };
@@ -487,7 +520,14 @@ export function createHomeService(deps: HomeServiceDeps): {
     if (status !== "complete" && unresolved.length + ended.length === 0) status = "unavailable";
     if (failure) {
       try {
-        console.warn(JSON.stringify({ event: "home.read.degraded", phase: failure, reason: "unavailable_or_invalid" }));
+        console.warn(
+          JSON.stringify({
+            event: "home.read.degraded",
+            phase: failure,
+            reason: "unavailable_or_invalid",
+            ...(failureKind ? { errorKind: failureKind } : {}),
+          }),
+        );
       } catch {
         /* Diagnostics cannot change current read coverage. */
       }

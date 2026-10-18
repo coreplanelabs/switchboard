@@ -120,6 +120,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
   const status = ref<HomeSessionStatus>("loading");
   const scopeChanging = ref(false);
   const revocations = ref(0);
+  const contentRemovals = ref(0);
   // An invalidation identity only: no transcript, draft or composing capability.
   const recoveringPrivacy = ref<string | null>(null);
   const text = ref("");
@@ -529,7 +530,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     }
   }
   async function focus(thread: string) {
-    if (sending.value || status.value !== "ready") return false;
+    if (sending.value || removing.value || status.value !== "ready") return false;
     const route = activeRoute;
     offer.value = null;
     const requestGeneration = ++focusGeneration;
@@ -597,6 +598,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       !previous ||
       status.value !== "ready" ||
       sending.value ||
+      removing.value ||
       historyLoading.value ||
       ![previous.history?.previousUrl, previous.history?.latestUrl].includes(address)
     )
@@ -615,6 +617,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
         !session.value ||
         destinationKey(session.value) !== destination ||
         activePrivacy !== scope ||
+        removing.value ||
         disposed
       )
         return false;
@@ -663,7 +666,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       generation++;
       keepDraft();
       if (focused.value && broad) adopt(broad);
-      if (session.value && status.value === "ready") follow(session.value);
+      if (session.value && status.value === "ready" && !removing.value) follow(session.value);
       activeRoute = route;
     }
   }
@@ -695,12 +698,47 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       current.destination.kind !== "broad" ||
       !current.destination.canWrite ||
       !entry?.deleteUrl ||
-      removing.value
+      removing.value ||
+      sending.value ||
+      pendingSubmission.value
     )
       return false;
-    const ownGeneration = generation;
     const scope = privacyKey(current);
     removing.value = entryId;
+    const draft = text.value;
+    // Deletion advances the access epoch. Close the old stream before the
+    // request so its revocation cannot erase the acknowledged removal result.
+    source?.close();
+    source = null;
+    generation++;
+    loadGeneration++;
+    historyLoading.value = false;
+    const currentRemoval = () =>
+      !disposed &&
+      !scopeChanging.value &&
+      activePrivacy === scope &&
+      !!session.value &&
+      session.value.actor === current.actor &&
+      session.value.organization === current.organization &&
+      session.value.stream === current.stream &&
+      session.value.bindingRevision === current.bindingRevision;
+    const refresh = async (message: string) => {
+      if (!currentRemoval()) return false;
+      await load();
+      const fresh = session.value;
+      if (
+        !fresh ||
+        fresh.actor !== current.actor ||
+        fresh.organization !== current.organization ||
+        fresh.stream !== current.stream ||
+        fresh.bindingRevision !== current.bindingRevision
+      )
+        return false;
+      if (fresh.destination.canWrite) text.value = draft;
+      contentRemovals.value++;
+      notice.value = message;
+      return true;
+    };
     try {
       const response = await fetchFn(entry.deleteUrl, {
         method: "DELETE",
@@ -708,30 +746,28 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
         headers: { accept: "application/json" },
       });
       const receipt = (await response.json()) as { status?: string };
-      if (ownGeneration !== generation || activePrivacy !== scope || !session.value) return false;
+      if (!currentRemoval()) return false;
       if (!response.ok || receipt.status !== "ok") {
-        notice.value = "Content removal could not be confirmed. Pending cleanup remains with the original owner.";
+        await refresh("Content removal could not be confirmed. Current messages were loaded again.");
         return false;
       }
-      session.value = {
-        ...session.value,
-        entries: session.value.entries.filter((item) => item.deleteUrl !== entry.deleteUrl),
-      };
-      broad = session.value;
-      notice.value =
-        "Private request content removed. Its receipt remains. Existing runs and source messages are unchanged.";
-      return true;
+      return await refresh("Saved message text deleted. Existing runs and original messages are unchanged.");
     } catch {
-      if (ownGeneration === generation && activePrivacy === scope)
-        notice.value = "Content removal could not be confirmed.";
+      await refresh("Content removal could not be confirmed. Current messages were loaded again.");
       return false;
     } finally {
-      if (ownGeneration === generation && activePrivacy === scope) removing.value = null;
+      removing.value = null;
     }
   }
   async function send(input: { text: string } | { confirmation: HomeConfirmationChoice }, rawDraft?: string) {
     const s = session.value;
-    if (!s || status.value !== "ready" || (!s.destination.canWrite && !pendingSubmission.value) || sending.value)
+    if (
+      !s ||
+      status.value !== "ready" ||
+      (!s.destination.canWrite && !pendingSubmission.value) ||
+      sending.value ||
+      removing.value
+    )
       return;
     const payload = {
       ...input,
@@ -922,6 +958,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     resetPrivate,
     scopeChanging,
     revocations,
+    contentRemovals,
     recoveringPrivacy,
     beginInlineAnswer,
     preserveInlineAnswer,

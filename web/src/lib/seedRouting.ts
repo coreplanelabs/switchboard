@@ -17,6 +17,7 @@ export interface SeedRouting {
   seedAt(address: string): WebSeed | null;
   /** True while an in-app navigation waits for its seed (the progress cue). */
   loading: Ref<boolean>;
+  refresh?(address: string): Promise<boolean>;
 }
 
 export interface SeedRoutingDeps {
@@ -47,27 +48,43 @@ export function pageAddress(route: RouteLocationNormalized): string {
  * the in-app one.
  */
 export function installSeedRouting(router: Router, deps: SeedRoutingDeps): SeedRouting {
-  const current: ShallowRef<{ address: string; seed: WebSeed | null } | null> = shallowRef(null);
+  const current: ShallowRef<{ address: string; seed: WebSeed | null; accessRevision: number } | null> =
+    shallowRef(null);
   const loading = ref(false);
   let generation = 0;
+  const accessRevision = ref(0);
+  async function readFresh(address: string, mine: number) {
+    while (mine === generation) {
+      const revision = accessRevision.value;
+      try {
+        const seed = await deps.load(address);
+        if (mine !== generation) return null;
+        if (revision === accessRevision.value) return { seed, accessRevision: revision };
+      } catch (error) {
+        if (mine !== generation) return null;
+        if (revision === accessRevision.value) throw error;
+      }
+    }
+    return null;
+  }
   router.beforeResolve(async (to, from) => {
     const mine = ++generation;
     loading.value = false;
     const address = pageAddress(to);
     if (from === START_LOCATION) {
-      current.value = { address, seed: deps.island };
+      current.value = { address, seed: deps.island, accessRevision: accessRevision.value };
       return true;
     }
     if (address === pageAddress(from)) return true;
     loading.value = true;
     try {
-      const seed = await deps.load(address);
-      if (mine !== generation) return false;
-      if (seed === null) {
+      const result = await readFresh(address, mine);
+      if (!result) return false;
+      if (result.seed === null) {
         deps.leave(to.fullPath);
         return false;
       }
-      current.value = { address, seed };
+      current.value = { address, ...result };
       return true;
     } catch {
       if (mine !== generation) return false;
@@ -78,7 +95,28 @@ export function installSeedRouting(router: Router, deps: SeedRoutingDeps): SeedR
     }
   });
   return {
-    seedAt: (address) => (current.value?.address === address ? current.value.seed : null),
+    seedAt: (address) =>
+      current.value?.address === address && current.value.accessRevision === accessRevision.value
+        ? current.value.seed
+        : null,
     loading,
+    async refresh(address) {
+      // A pending user navigation keeps its destination, but must repeat its
+      // read after access changes. Old page bytes cannot become its new seed.
+      accessRevision.value++;
+      if (loading.value) return false;
+      const mine = ++generation;
+      loading.value = true;
+      try {
+        const result = await readFresh(address, mine);
+        if (!result || current.value?.address !== address || !result.seed) return false;
+        current.value = { address, ...result };
+        return true;
+      } catch {
+        return false;
+      } finally {
+        if (mine === generation) loading.value = false;
+      }
+    },
   };
 }

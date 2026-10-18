@@ -17,11 +17,22 @@ const controls = ref<HTMLElement | null>(null);
 const replyDisclosure = ref<HTMLButtonElement | null>(null);
 const primaryAction = computed(() => props.primaryAction ?? home?.session.value?.destination.primaryAction);
 const repositories = computed(() => home?.session.value?.repositories);
+const repositoryOpen = ref(false);
+async function fitText() {
+  await nextTick();
+  const element = composer.value;
+  if (!element) return;
+  element.style.height = "auto";
+  element.style.height = `${Math.min(element.scrollHeight || 72, 200)}px`;
+}
+watch(() => home?.text.value, fitText);
+onMounted(fitText);
 const selectedRepository = computed(() => home?.context.value.find((ref) => ref.kind === "repository")?.key ?? "");
 function chooseRepository(repo: string) {
   if (
     !home ||
     home.sending.value ||
+    home.removing.value ||
     home.pendingSubmission.value ||
     repositories.value?.status !== "complete" ||
     (repo && !repositories.value.repositories.some((row) => row.repo === repo))
@@ -118,7 +129,7 @@ watch(
 );
 onMounted(focusComposer);
 async function submitReply() {
-  if (!home || (questionChanged.value && !home.pendingSubmission.value)) return;
+  if (!home || home.removing.value || (questionChanged.value && !home.pendingSubmission.value)) return;
   const originalQuestion = home.pendingSubmission.value ? attemptedQuestion : questionIdentity.value;
   if (!home.pendingSubmission.value) attemptedQuestion = originalQuestion;
   await home.submit();
@@ -163,7 +174,7 @@ function keydown(event: KeyboardEvent) {
       v-if="home.offer.value && canSubmit && writableView"
       :key="home.offer.value?.id"
       :offer="home.offer.value"
-      :busy="home.sending.value"
+      :busy="home.sending.value || !!home.removing.value"
       :pending="home.pendingChoice.value"
       @choose="home.submitConfirmation"
     />
@@ -174,6 +185,7 @@ function keydown(event: KeyboardEvent) {
         class="green-button green-button-primary"
         :disabled="
           home.sending.value ||
+          !!home.removing.value ||
           answered ||
           ((questionChanged || home.draftStale.value) && !home.pendingSubmission.value)
         "
@@ -186,7 +198,7 @@ function keydown(event: KeyboardEvent) {
         type="button"
         class="green-button"
         :aria-expanded="editorVisible"
-        :disabled="home.sending.value || answered"
+        :disabled="home.sending.value || !!home.removing.value || answered"
         @click="openEditor"
       >
         {{ editorVisible ? "Hide reply" : retryOnly ? "Show saved reply" : "Type a reply" }}
@@ -202,33 +214,56 @@ function keydown(event: KeyboardEvent) {
       "
       class="mb-2 mt-3"
     >
-      <label for="green-repository" class="text-xs text-muted flex items-center gap-2"
-        ><UIcon name="i-lucide-folder-git-2" />Repository for coding work</label
+      <button
+        type="button"
+        class="green-repository-toggle"
+        :aria-expanded="repositoryOpen"
+        :disabled="home.sending.value || !!home.removing.value || !!home.pendingSubmission.value"
+        @click="repositoryOpen = !repositoryOpen"
       >
-      <select
-        id="green-repository"
-        class="green-input w-full mt-1"
-        aria-label="Repository for coding work"
-        :disabled="
-          home.sending.value ||
-          home.pendingSubmission.value ||
-          repositories.status !== 'complete' ||
-          !repositories.repositories.length
-        "
-        :value="selectedRepository"
-        @change="chooseRepository(($event.target as HTMLSelectElement).value)"
-      >
-        <option value="">
-          {{
-            repositories.status === "unavailable"
-              ? "Repository list unavailable"
-              : repositories.repositories.length
-                ? "Choose a repository"
-                : "No eligible repositories"
-          }}
-        </option>
-        <option v-for="repo in repositories.repositories" :key="repo.repo" :value="repo.repo">{{ repo.repo }}</option>
-      </select>
+        <UIcon name="i-lucide-folder-git-2" />{{ selectedRepository || "Repository (optional)"
+        }}<UIcon :name="repositoryOpen ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'" />
+      </button>
+      <div v-if="repositoryOpen">
+        <label for="green-repository" class="text-xs text-muted flex items-center gap-2"
+          ><UIcon name="i-lucide-folder-git-2" />Repository for coding work</label
+        >
+        <select
+          id="green-repository"
+          class="green-input w-full mt-1"
+          aria-label="Repository for coding work"
+          :disabled="
+            home.sending.value ||
+            home.pendingSubmission.value ||
+            repositories.status !== 'complete' ||
+            !repositories.repositories.length
+          "
+          :value="selectedRepository"
+          @change="chooseRepository(($event.target as HTMLSelectElement).value)"
+        >
+          <option value="">
+            {{
+              repositories.status === "unavailable"
+                ? "Repository list unavailable"
+                : repositories.repositories.length
+                  ? "Choose a repository"
+                  : "No eligible repositories"
+            }}
+          </option>
+          <option v-for="repo in repositories.repositories" :key="repo.repo" :value="repo.repo">{{ repo.repo }}</option>
+        </select>
+        <div v-if="repositories.status === 'unavailable'" class="green-notice text-xs mt-2" role="status">
+          <p>Repositories could not be loaded. You can still send a question.</p>
+          <button
+            type="button"
+            class="green-button mt-2"
+            :disabled="home.sending.value || !!home.removing.value || !!home.pendingSubmission.value"
+            @click="home.load()"
+          >
+            Retry repositories
+          </button>
+        </div>
+      </div>
     </div>
     <form v-if="canSubmit && writableView && editorVisible" class="green-composer-box" @submit.prevent="submitReply">
       <label for="green-message" class="sr-only">Message to {{ home.session.value.destination.label }}</label
@@ -236,12 +271,13 @@ function keydown(event: KeyboardEvent) {
         id="green-message"
         ref="composer"
         v-model="home.text.value"
-        rows="3"
-        :disabled="home.sending.value || (questionChanged && !home.pendingSubmission.value)"
+        rows="2"
+        :disabled="home.sending.value || !!home.removing.value || (questionChanged && !home.pendingSubmission.value)"
         :readonly="(buttonFirst || retryOnly) && home.pendingSubmission.value"
         placeholder="Ask Switchboard…"
         maxlength="32768"
         @keydown="keydown"
+        @input="fitText"
       />
       <div class="green-composer-actions">
         <span>Enter to send · Shift Enter for a new line</span
@@ -251,7 +287,10 @@ function keydown(event: KeyboardEvent) {
           type="submit"
           :aria-label="retryOnly ? 'Check saved reply' : 'Send message'"
           :disabled="
-            !home.text.value.trim() || home.sending.value || (questionChanged && !home.pendingSubmission.value)
+            !home.text.value.trim() ||
+            home.sending.value ||
+            !!home.removing.value ||
+            (questionChanged && !home.pendingSubmission.value)
           "
         >
           <span v-if="retryOnly">Check saved reply</span>
@@ -271,7 +310,7 @@ function keydown(event: KeyboardEvent) {
       <button
         class="green-button mt-2"
         type="button"
-        :disabled="home.sending.value || (questionChanged && !home.pendingSubmission.value)"
+        :disabled="home.sending.value || !!home.removing.value || (questionChanged && !home.pendingSubmission.value)"
         @click="home.reviewDraft()"
       >
         Use draft for current question
@@ -298,9 +337,10 @@ function keydown(event: KeyboardEvent) {
   width: 100%;
   border: 0;
   outline: 0;
-  resize: vertical;
-  max-height: 180px;
-  min-height: 60px;
+  resize: none;
+  overflow-y: auto;
+  max-height: min(200px, 30dvh);
+  min-height: 72px;
   font-size: 13px;
   background: transparent;
   color: var(--ui-text);
@@ -312,7 +352,7 @@ function keydown(event: KeyboardEvent) {
   gap: 8px;
 }
 .green-composer-actions span {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--ui-text-muted);
 }
 .green-send {
@@ -328,21 +368,18 @@ function keydown(event: KeyboardEvent) {
   width: auto;
   padding-inline: 10px;
 }
-@media (max-width: 1100px) {
-  .green-conversation-composer:not(.is-inline) .green-composer-box textarea {
-    min-height: 40px;
-    height: 40px;
-  }
-  .green-conversation-composer:not(.is-inline) .green-composer-actions > span {
-    display: none;
-  }
-  .green-conversation-composer:not(.is-inline) .green-composer-box {
-    display: flex;
-    gap: 8px;
-    align-items: flex-end;
-  }
-  .green-conversation-composer:not(.is-inline) .green-composer-actions {
-    flex: none;
-  }
+.green-send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.green-repository-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
 }
 </style>

@@ -632,6 +632,14 @@ export const runsStop = defineCommand({
     const result = unwrap(await runs.stopRun(args.id, options.mode ?? "hard", { kind: caller.kind, id: caller.id }));
     return asJson({ ...result, mode: options.mode ?? "stop" });
   },
+  render: (output) => {
+    if (output && typeof output === "object" && !Array.isArray(output)) {
+      if (output.state === "stopped") return "✅ Run stopped.";
+      if (output.state === "stopping") return "Stop requested. Shutdown is not confirmed.";
+      if (output.state === "withdrawn") return "✅ Queued request withdrawn.";
+    }
+    return renderCompact("runs.stop", output);
+  },
 });
 
 export const runsKill = defineCommand({

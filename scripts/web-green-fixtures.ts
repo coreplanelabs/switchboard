@@ -1,3 +1,4 @@
+import { homeOverview, HOME_VIEWS, type HomeView, type HomeOverview } from "../src/core/home/overview.js";
 import { reviewReportFixture, reviewComparisonFixture } from "./web-review-fixture.js";
 import { DAY_MS } from "../src/core/budgets.js";
 import { randomUUID } from "node:crypto";
@@ -93,6 +94,9 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
     bindingRevision: 0,
     accessEpoch: "fixture:current-source",
     revision,
+    ...(!thread
+      ? { repositories: { status: "complete" as const, repositories: [{ repo: "acme/api" }, { repo: "acme/web" }] } }
+      : {}),
     entries: transcripts.get(streamKey(thread)) ?? [],
     history: { cursor: transcripts.get(streamKey(thread))?.length ?? 0, hasMore: false, status: "complete" },
     destination: thread
@@ -185,6 +189,54 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
       ],
     };
   };
+  const dashboard = (url: URL): { snapshot: HomeSnapshot; overview?: HomeOverview } => {
+    const source = snapshot(url.searchParams.get("scale") === "1001");
+    if (url.searchParams.get("scale") === "backlog") {
+      source.waiting = Array.from({ length: 1040 }, (_, i) => {
+        const row = homeUnit(i + 17);
+        const id = `pipeline-${String(i % 1011).padStart(4, "0")}`;
+        row.instance = { ...row.instance, id };
+        row.unit = { ...row.unit, unit: `${id}:U${i + 17}`, instanceId: id };
+        return row;
+      });
+      const groups = new Map<string, HomeSnapshot["pipelines"][number]>();
+      for (const row of [...source.needsYou, ...source.moving, ...source.waiting]) {
+        const current = groups.get(row.instance.id) ?? {
+          instance: row.instance,
+          unresolved: 0,
+          needsYou: 0,
+          moving: 0,
+          waiting: 0,
+        };
+        current.unresolved++;
+        current.waiting++;
+        groups.set(row.instance.id, current);
+      }
+      source.pipelines = [...groups.values()];
+    }
+    // Compare the same local fixture with the previous unbounded page shape.
+    if (url.searchParams.get("unbounded") === "1") return { snapshot: source };
+    const raw = url.searchParams.get("view");
+    const view = HOME_VIEWS.includes(raw as HomeView) ? (raw as HomeView) : "attention";
+    const page = Number(url.searchParams.get("page") ?? 1);
+    return homeOverview(
+      source,
+      [
+        {
+          id: "live-1",
+          label: "Review the API change",
+          agent: "review",
+          repo: "acme/api",
+          startedAt: options.now - 60_000,
+          finished: false,
+          eventCount: 14,
+          liveState: { state: "working", since: options.now - 60_000, bound: options.now + 60_000 },
+        },
+      ],
+      { view, page: Number.isSafeInteger(page) && page > 0 ? page : 1 },
+      options.now,
+    );
+  };
   const marked = (page: PreviewPage): PreviewPage => ({
     ...page,
     seed: { ...page.seed, asUser: { id: ACTOR, name: "Your account" }, preview: GREEN_PREVIEW_NOTICE },
@@ -204,7 +256,7 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
               primaryAction: { label: "Merge", text: "merge" },
             },
           },
-          snapshot: snapshot(url.searchParams.get("scale") === "1001"),
+          ...dashboard(url),
         },
       });
     if (url.pathname === "/home/history") {
@@ -352,7 +404,8 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
       return true;
     }
     if (url.pathname === "/home/snapshot") {
-      json(response, 200, snapshot(url.searchParams.get("scale") === "1001"));
+      const current = dashboard(url);
+      json(response, 200, { ...current.snapshot, overview: current.overview });
       return true;
     }
     if (url.pathname === "/home/events") {

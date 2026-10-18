@@ -186,6 +186,7 @@ export const STORAGE_OPERATIONS = {
   "/runs/coordinator/units/claim-legacy-continuation": nonRun("coordinator"),
   "/runs/coordinator/units/effect-transition": nonRun("coordinator"),
   "/runs/coordinator/units/list": nonRun("coordinator"),
+  "/runs/coordinator/units/list-many": nonRun("coordinator"),
   "/runs/coordinator/units/list-active-recoveries": nonRun("coordinator"),
   "/runs/coordinator/units/put": nonRun("coordinator"),
   "/runs/coordinator/wake": nonRun("coordinator"),

@@ -475,7 +475,7 @@ describe("Green browser frontend", () => {
     await wrapper.find("textarea").setValue("Local draft");
     home.routeChanged("/home");
     await nextTick();
-    expect(wrapper.find(".green-destination").text()).toBe("Messages");
+    expect(wrapper.find(".green-destination").text()).toBe("Private messages · only you");
     expect(wrapper.find("textarea").element.value).toBe("Broad draft");
     home.dispose();
   });

@@ -343,3 +343,9 @@ An offer stores normalized arguments, requester, credential/connection, reposito
 | A configured current caller resolver refuses missing, foreign and invalid service proof before buffering a write body, without email fallback; a current read-only projection still reads | `[unit]` `src/channels/commandHttp.test.ts::createCommandHttpHandler — caller resolution::uses trusted current callers and refuses missing proof before body buffering without email fallback` |
 
 | Conformance Markdown keeps literal backslashes and pipes in prose cells, flattens row controls, and preserves CLI code bytes including backticks without splitting the table | `[unit]` `src/core/commandConformance.test.ts::command conformance — catalogue fences::renders literal backslashes, pipes and controls without changing table cells` |
+
+## Stop receipts
+
+| Criterion | Proof |
+| --- | --- |
+| Stop text shows a success check only for a confirmed stopped run or a withdrawn queued request. A stopping result says shutdown is not confirmed. JSON output and stop authority retain their existing behavior. | `[unit]` `src/core/commands/runs.test.ts::runs.stop::renders the confirmed …` |

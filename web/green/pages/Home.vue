@@ -1,7 +1,9 @@
 <script setup lang="ts">
 defineOptions({ name: "GreenHomePage" });
 import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import type { HomeSnapshot } from "@core/core/home/service.js";
+import type { HomeOverview, HomeView } from "@core/core/home/overview.js";
 import type { HomeUnit } from "@core/core/home/service.js";
 import type {
   HomeFleetSeed,
@@ -30,6 +32,16 @@ const historyHref = (() => {
 const home = useHomeSession();
 const viewingAs = useViewingAs();
 const refreshed = ref<HomeSnapshot | null>(null);
+const overview = ref<HomeOverview | undefined>(seed?.overview);
+const viewLabels: Record<HomeView, string> = {
+  attention: "Needs you",
+  moving: "Moving",
+  waiting: "Waiting",
+  investigation: "Needs investigation",
+  pipelines: "Active pipelines",
+};
+const route = useRoute();
+const viewHref = (view: HomeView, page = 1) => ({ path: "/home", query: { ...route.query, view, page } });
 const refreshNotice = ref("");
 type SavedAction = {
   action: HomeMergeAction;
@@ -93,6 +105,7 @@ watch(
 function hideWork() {
   workInvalidated.value = true;
   savedActions.value = {};
+  overview.value = undefined;
   const previous = refreshed.value ?? seed?.snapshot;
   if (previous)
     refreshed.value = { ...previous, status: "unavailable", needsYou: [], moving: [], waiting: [], pipelines: [] };
@@ -266,7 +279,11 @@ async function refreshWork(unit?: string) {
     actionScope.value === scope &&
     privacy() === source;
   try {
-    const response = await fetch(unit ? `/home/snapshot?observe=${encodeURIComponent(unit)}` : "/home/snapshot", {
+    const query = new URLSearchParams(
+      overview.value ? { view: overview.value.view, page: String(overview.value.page) } : {},
+    );
+    if (unit) query.set("observe", unit);
+    const response = await fetch(`/home/snapshot${query.size ? `?${query}` : ""}`, {
       credentials: "same-origin",
       headers: { accept: "application/json" },
     });
@@ -298,6 +315,7 @@ async function refreshWork(unit?: string) {
       return;
     }
     refreshed.value = value;
+    overview.value = value.overview;
     if (unit === undefined) {
       recoveredWork.value = true;
       recoveryHeld.value = false;
@@ -342,6 +360,7 @@ const pipelines = computed(() => {
     ...(snapshot.value?.needsYou ?? []),
     ...(snapshot.value?.moving ?? []),
     ...(snapshot.value?.waiting ?? []),
+    ...(overview.value?.pipelineUnits ?? []),
   ]) {
     const group = rows.get(row.instance.id) ?? [];
     group.push(row);
@@ -362,6 +381,9 @@ const replyThread = (row: HomeUnit) =>
       ><UIcon name="i-lucide-search" />Find a thread</RouterLink
     ></PageHeading
   >
+  <button v-if="overview && !workInvalidated" type="button" class="green-button mb-4" @click="refreshWork()">
+    Refresh work
+  </button>
   <p v-if="refreshNotice" class="green-notice" role="status">{{ refreshNotice }}</p>
   <p v-if="unprovedSavedActions" class="green-notice" role="status">
     Saved action result is unknown. Its work cannot be confirmed with current access.
@@ -381,6 +403,47 @@ const replyThread = (row: HomeUnit) =>
     </div>
   </section>
   <template v-if="snapshot">
+    <nav v-if="overview && !workInvalidated && !recoveryHeld" class="green-work-views" aria-label="Work views">
+      <RouterLink
+        v-for="(label, view) in viewLabels"
+        :key="view"
+        :to="viewHref(view)"
+        :aria-current="overview.view === view ? 'page' : undefined"
+      >
+        <span>{{ label }}</span
+        ><strong>{{ snapshot.status !== "complete" ? "At least " : "" }}{{ overview.counts[view] }}</strong>
+      </RouterLink>
+    </nav>
+    <p v-if="overview" class="text-sm text-muted mb-4">
+      {{
+        overview.view === "investigation"
+          ? "Unfinished work with a missing reason, an unknown owner, or a recorded failure. Age does not remove it."
+          : overview.view === "waiting"
+            ? "Unfinished work with a saved reason and next action. The saved reason does not confirm that its worker is still running."
+            : overview.view === "pipelines"
+              ? "Pipelines with current movement or a saved wait. Other unfinished pipelines remain in Needs investigation."
+              : "All unfinished work stays available in these views, regardless of age."
+      }}
+    </p>
+    <section
+      v-if="overview?.runs.length && !workInvalidated && !recoveryHeld"
+      class="green-section"
+      aria-label="Live runs"
+    >
+      <div class="green-section-heading">
+        <h2>
+          {{ overview.view === "investigation" ? "Run records" : "Live runs" }}
+          <span class="green-badge ml-2">{{ overview.runs.length }}</span>
+        </h2>
+        <RouterLink class="green-button" to="/runs">Run details</RouterLink>
+      </div>
+      <article v-for="run in overview.runs" :key="run.id" class="green-live-work">
+        <RouterLink class="green-unit-title" :to="run.viewPath ?? `/runs/${encodeURIComponent(run.id)}`">{{
+          run.label || run.agent || "Run"
+        }}</RouterLink>
+        <p class="text-xs text-muted mt-2">{{ run.repo }}<span v-if="run.repo"> · </span>{{ run.stateLabel }}</p>
+      </article>
+    </section>
     <p v-if="snapshot.status === 'partial'" class="green-notice green-warning" role="status">
       Some work could not be loaded. These rows do not prove that all work is accounted for.
     </p>
@@ -392,6 +455,8 @@ const replyThread = (row: HomeUnit) =>
     </p>
     <template v-if="count"
       ><UnitList
+        v-if="!overview || overview.view === 'attention'"
+        :page-only="!!overview"
         :rows="snapshot.needsYou"
         :answers="answerTargets"
         :actions="mergeActions"
@@ -404,23 +469,36 @@ const replyThread = (row: HomeUnit) =>
         @merged="refreshWork"
         @settled="settleAction"
         @unknown="saveAction" /><UnitList
+        v-if="!overview || overview.view === 'moving'"
+        :page-only="!!overview"
         :rows="snapshot.moving"
         label="Moving"
         :attention-recipient="seed?.attentionRecipient"
         :attention-recipients="seed?.attentionRecipients"
         activity="moving" /><UnitList
+        v-if="!overview || overview.view === 'waiting' || overview.view === 'investigation'"
+        :page-only="!!overview"
+        :investigation="overview?.view === 'investigation'"
         :rows="snapshot.waiting"
-        label="Other waits"
+        :label="overview?.view === 'investigation' ? 'Needs investigation' : 'Waiting'"
         :attention-recipient="seed?.attentionRecipient"
         :attention-recipients="seed?.attentionRecipients"
     /></template>
-    <section v-else-if="snapshot.status === 'complete'" class="green-section">
+    <section v-else-if="snapshot.status === 'complete' && !overview?.total" class="green-section">
       <EmptyState
-        :title="snapshot.access === 'filtered' ? 'No unresolved work in your view' : 'All caught up'"
+        :title="
+          overview
+            ? `No work in ${viewLabels[overview.view].toLowerCase()}`
+            : snapshot.access === 'filtered'
+              ? 'No unresolved work in your view'
+              : 'All caught up'
+        "
         :description="
-          snapshot.access === 'filtered'
-            ? 'No unresolved units are visible with your current access.'
-            : 'There are no unresolved units in the complete work projection.'
+          overview
+            ? 'Other work stays available in the work views above.'
+            : snapshot.access === 'filtered'
+              ? 'No unresolved units are visible with your current access.'
+              : 'There are no unresolved units in the complete work projection.'
         "
         icon="i-lucide-circle-check"
       />
@@ -445,7 +523,7 @@ const replyThread = (row: HomeUnit) =>
     <section v-if="snapshot.pipelines.length" class="green-section">
       <div class="green-section-heading">
         <div>
-          <h2>Pipelines</h2>
+          <h2>Active pipelines</h2>
           <p>Open a pipeline to see its work, next actions, threads, pull requests, and changes.</p>
         </div>
       </div>
@@ -464,7 +542,7 @@ const replyThread = (row: HomeUnit) =>
             ><span v-else>{{ pipeline.instance.repo }}</span>
           </p>
           <p class="text-xs mt-3">
-            {{ pipeline.needsYou }} needs you · {{ pipeline.moving }} moving · {{ pipeline.waiting }} waiting
+            {{ pipeline.needsYou }} needs you · {{ pipeline.moving }} moving · {{ pipeline.unresolved }} unfinished
           </p>
           <ul class="green-pipeline-work" aria-label="Pipeline work links">
             <li v-for="row in pipeline.rows.slice(0, 3)" :key="row.unit.unit">
@@ -521,6 +599,25 @@ const replyThread = (row: HomeUnit) =>
         </article>
       </div>
     </section>
+    <nav
+      v-if="overview && overview.pages > 1 && !workInvalidated && !recoveryHeld"
+      class="green-work-paging"
+      aria-label="Work pages"
+    >
+      <RouterLink v-if="overview.page > 1" class="green-button" :to="viewHref(overview.view, overview.page - 1)"
+        >Previous page</RouterLink
+      >
+      <span
+        >Page {{ overview.page }} of {{ overview.pages }} · {{ overview.total }}
+        {{ snapshot.status === "complete" ? "total" : "loaded" }}</span
+      >
+      <RouterLink
+        v-if="overview.page < overview.pages"
+        class="green-button"
+        :to="viewHref(overview.view, overview.page + 1)"
+        >Next page</RouterLink
+      >
+    </nav>
   </template>
   <EmptyState
     v-else
@@ -566,5 +663,42 @@ const replyThread = (row: HomeUnit) =>
   align-items: center;
   gap: 5px;
   overflow-wrap: anywhere;
+}
+</style>
+
+<style scoped>
+.green-work-views {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.green-work-views a {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 10px;
+  padding: 14px;
+  font-size: 13px;
+}
+.green-work-views a[aria-current="page"] {
+  border-color: var(--ui-primary);
+  background: var(--ui-bg-accented);
+}
+.green-work-views strong {
+  font-size: 22px;
+}
+.green-live-work {
+  padding: 16px;
+  border-top: 1px solid var(--ui-border);
+}
+.green-work-paging {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin-top: 16px;
 }
 </style>

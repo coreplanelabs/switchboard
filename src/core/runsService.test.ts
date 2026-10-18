@@ -1,3 +1,4 @@
+import { homeOverview } from "./home/overview.js";
 import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { UncertainStoreError } from "./storeFailure.js";
 import { storeRequestWitness } from "./storeResponse.js";
@@ -1511,6 +1512,46 @@ describe("RunsService with the run ledger — one registry across generations (r
       { type: "tool_call", tool: "bash", summary: "$ make", at: NOW - 4_000, seq: 2 },
     ]);
   }
+
+  it("keeps a saved execution pause in Home investigation before its working bound expires", async () => {
+    const { svc, ledger } = ledgerSetup();
+    for (const id of ["paused", "working"]) {
+      await farRun(ledger, id);
+      for (const [expectedSeq, eventSeq, state] of [
+        [0, 3, "admitted"],
+        [3, 4, "working"],
+      ] as const)
+        expect(
+          (
+            await ledger.assignLiveState(id, "g-OTHER", {
+              expectedSeq,
+              eventSeq,
+              at: NOW,
+              state,
+              bound: NOW + 10_000,
+            })
+          ).ok,
+        ).toBe(true);
+    }
+    expect(await ledger.handoff("g-OTHER", ["paused"], { pausedForRetry: true })).toEqual({ marked: ["paused"] });
+    const { runs } = await svc.listRuns({ visibleTo: ALL, status: "active" });
+    expect(runs.find((run) => run.id === "paused")).toMatchObject({ pausedForRetry: true });
+    const source = {
+      organizationId: "org",
+      status: "complete" as const,
+      access: "authorized" as const,
+      needsYou: [],
+      moving: [],
+      waiting: [],
+      pipelines: [],
+    };
+    const investigation = homeOverview(source, runs, { view: "investigation", page: 1 }, NOW).overview;
+    expect(investigation.counts).toEqual({ attention: 0, moving: 1, waiting: 0, investigation: 1, pipelines: 0 });
+    expect(investigation.runs).toEqual([expect.objectContaining({ id: "paused", stateLabel: "Run paused" })]);
+    expect(homeOverview(source, runs, { view: "moving", page: 1 }, NOW).overview.runs.map((run) => run.id)).toEqual([
+      "working",
+    ]);
+  });
 
   it("hides a private worker live on another generation's ledger while preserving an internal read", async () => {
     const { svc, ledger } = ledgerSetup();

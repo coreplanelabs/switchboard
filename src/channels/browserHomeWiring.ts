@@ -154,9 +154,7 @@ export interface BrowserHomeWiringOptions {
 /** Durable/native readiness is separate from HTTP health readiness. */
 export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
   const org = options.config.config.organization;
-  const repositoryChoices = options.core.githubApi
-    ? createHomeRepositories({ config: options.config, github: options.core.githubApi })
-    : undefined;
+  const repositoryChoices = createHomeRepositories({ config: options.config, github: options.core.githubApi });
   const emoji = createSlackEmojiCache({ store: new FileEmojiStore(options.emojiDirectory) });
   let installation: ReturnType<typeof createBrowserHomeInstallation> | undefined;
   let native: ReturnType<typeof createOrganizationNativeSources> | undefined;

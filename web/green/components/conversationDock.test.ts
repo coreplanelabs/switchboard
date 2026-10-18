@@ -32,6 +32,101 @@ function session(thread: string | null): HomeSession {
   };
 }
 describe("Conversation dock scroll", () => {
+  it("blocks older and latest history during deletion and rejects a pre-deletion history response", async () => {
+    const initial = {
+      ...session(null),
+      history: {
+        cursor: 4,
+        hasMore: true,
+        status: "partial" as const,
+        previousUrl: "/home/session?before=4",
+        latestUrl: "/home/session",
+      },
+      entries: [
+        { id: "own", role: "user" as const, isViewer: true, content: "Saved text", deleteUrl: "/home/messages/own" },
+      ],
+    };
+    let finishHistory!: (value: Response) => void,
+      finishDelete!: (value: Response) => void,
+      finishRefresh!: (value: Response) => void;
+    const history = new Promise<Response>((resolve) => {
+      finishHistory = resolve;
+    });
+    const deletion = new Promise<Response>((resolve) => {
+      finishDelete = resolve;
+    });
+    const refresh = new Promise<Response>((resolve) => {
+      finishRefresh = resolve;
+    });
+    let deleting = false;
+    const streams = fakeEventSourceFactory();
+    const fetcher = vi.fn(async (url: string) => {
+      if (url === "/home/session?before=4") return history;
+      if (url === "/home/messages/own") {
+        deleting = true;
+        return deletion;
+      }
+      return deleting ? (await refresh).clone() : Response.json(initial);
+    });
+    const home = createHomeSession(fetcher as typeof fetch, streams.factory);
+    await home.load();
+    const page = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
+    home.text.value = "Keep unsent draft";
+    const oldRead = home.loadHistory("/home/session?before=4");
+    const removal = home.removePrivate("own");
+    finishDelete(Response.json({ status: "ok" }));
+    await flushPromises();
+    finishHistory(Response.json(initial));
+    expect(await oldRead).toBe(false);
+    await flushPromises();
+    for (const button of page.findAll('[aria-label="Conversation history controls"] button'))
+      expect(button.attributes("disabled")).toBeDefined();
+    expect(await home.loadHistory("/home/session")).toBe(false);
+    expect(streams.created.filter((source) => !source.closed)).toHaveLength(0);
+    finishRefresh(Response.json({ ...initial, entries: [], accessEpoch: "fresh-after-delete" }));
+    expect(await removal).toBe(true);
+    await flushPromises();
+    expect(home.historyLoading.value).toBe(false);
+    for (const button of page.findAll('[aria-label="Conversation history controls"] button'))
+      expect(button.attributes("disabled")).toBeUndefined();
+    expect(await home.loadHistory("/home/session")).toBe(true);
+    expect(home.text.value).toBe("Keep unsent draft");
+    expect(home.session.value?.accessEpoch).toBe("fresh-after-delete");
+    home.dispose();
+  });
+  it("holds sending during deletion and recovers on the current route without repeating DELETE", async () => {
+    const initial = {
+      ...session(null),
+      entries: [
+        { id: "own", role: "user" as const, isViewer: true, content: "Old text", deleteUrl: "/home/messages/own" },
+      ],
+    };
+    let finish!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    let deleting = false;
+    const fetcher = vi.fn(async (url: string) => {
+      if (url === "/home/messages/own") {
+        deleting = true;
+        return pending;
+      }
+      return Response.json(deleting ? { ...session(null), accessEpoch: "fresh-after-delete" } : initial);
+    });
+    const home = createHomeSession(fetcher as typeof fetch, fakeEventSourceFactory().factory);
+    await home.load();
+    home.text.value = "Keep draft";
+    const removal = home.removePrivate("own");
+    await home.submit();
+    home.routeChanged("/home?view=investigation");
+    finish(Response.json({ status: "ok" }));
+    expect(await removal).toBe(true);
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual(["/home/session", "/home/messages/own", "/home/session"]);
+    expect(home.status.value).toBe("ready");
+    expect(home.session.value?.accessEpoch).toBe("fresh-after-delete");
+    expect(home.text.value).toBe("Keep draft");
+    home.dispose();
+  });
   it.each([
     "unit SSE",
     "thread SSE",
@@ -386,38 +481,46 @@ describe("Conversation dock scroll", () => {
     expect(wrapper.findAll("button").map((button) => button.text())).toContain("Latest messages");
     home.dispose();
   });
-  it("removes only an offered owned private request through its real button", async () => {
-    const initial = {
-      ...session(null),
-      entries: [
-        {
-          id: "own",
-          role: "user",
-          content: "Private request",
-          isViewer: true,
-          deleteUrl: "/home/messages/receipt%3A1",
-        },
-        { id: "other", role: "user", content: "Other source request", isViewer: false },
-      ],
+  it("deletes saved text only after confirmation, refreshes its session and rejects the old stream", async () => {
+    const own = {
+      id: "own",
+      role: "user" as const,
+      content: "Private request",
+      isViewer: true,
+      deleteUrl: "/home/messages/receipt%3A1",
     };
-    const fetcher = vi.fn(
-      async (address: string, _init?: RequestInit) =>
-        new Response(JSON.stringify(address === "/home/session" ? initial : { status: "ok" }), {
-          headers: { "content-type": "application/json" },
-        }),
-    );
-    const home = createHomeSession(fetcher as typeof fetch, fakeEventSourceFactory().factory);
+    const other = { id: "other", role: "user" as const, content: "Other source request", isViewer: false };
+    const initial = { ...session(null), entries: [own, other] };
+    const fresh = { ...session(null), accessEpoch: "after-deletion", revision: 2, entries: [other] };
+    let removed = false;
+    const fetcher = vi.fn(async (address: string) => {
+      if (address === "/home/session") return new Response(JSON.stringify(removed ? fresh : initial));
+      removed = true;
+      return new Response(JSON.stringify({ status: "ok" }));
+    });
+    const stream = fakeEventSourceFactory();
+    const home = createHomeSession(fetcher as typeof fetch, stream.factory);
     await home.load();
+    const oldStream = stream.created[0];
     const wrapper = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
-    expect(wrapper.findAll('[aria-label="Remove private request content"]')).toHaveLength(1);
+    await wrapper.get("textarea").setValue("Keep this draft");
     await wrapper.get('[aria-label="Remove private request content"]').trigger("click");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(wrapper.get('[aria-label="Delete saved text confirmation"]').text()).toContain("This cannot be undone");
+    await wrapper.get('[aria-label="Delete saved text confirmation"]').findAll("button")[0]!.trigger("click");
     await flushPromises();
-    expect(fetcher.mock.calls[1]).toMatchObject([
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "/home/session",
       "/home/messages/receipt%3A1",
-      { method: "DELETE", credentials: "same-origin" },
+      "/home/session",
     ]);
     expect(wrapper.get(".green-dock-transcript").text()).not.toContain("Private request");
     expect(wrapper.text()).toContain("Other source request");
+    expect(wrapper.get("textarea").element.value).toBe("Keep this draft");
+    expect(home.contentRemovals.value).toBe(1);
+    oldStream?.emitMessage(initial);
+    expect(home.session.value?.accessEpoch).toBe("after-deletion");
+    expect(wrapper.text()).not.toContain("Private request");
     home.dispose();
   });
   it("requires a visible review action before sending a draft for a changed question", async () => {

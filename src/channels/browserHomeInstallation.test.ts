@@ -1539,7 +1539,9 @@ describe("browser installation", () => {
     expect(live.control.hardSignal.aborted).toBe(false);
     const resumed = await rpc("approval_resume", { id });
     expect(resumed.body).toMatchObject({
-      result: { content: [{ type: "text", text: expect.stringContaining("state: stopping") }] },
+      result: {
+        content: [{ type: "text", text: expect.stringContaining("Stop requested. Shutdown is not confirmed.") }],
+      },
     });
     expect(live.control.hardSignal.aborted).toBe(true);
     expect(await s.confirmations.get(id)).toBeUndefined();

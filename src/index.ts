@@ -1824,6 +1824,14 @@ export async function runBot(): Promise<void> {
         homeLiveUnitRuns({ registry: defaultRunRegistry, ledger: ledgerClient, now: systemClock }, visibleTo),
     });
     const homeView = createHomeViewHandler(homeService, greenPage, config.config.organization, {
+      liveRuns: (visibleTo) => runsService.listRuns({ status: "active", visibleTo, limit: 200 }),
+      liveTokens: () =>
+        new Map(
+          defaultRunRegistry
+            .listActive()
+            .filter((run) => !run.finished)
+            .map((run) => [run.id, run.token]),
+        ),
       thread: async (context, key) =>
         context.home ? browserWiring?.current()?.readThread(context.home, key) : undefined,
       privateUnit: async (context, instance, unit) =>

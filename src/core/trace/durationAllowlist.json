@@ -8,6 +8,7 @@
   "deploy/cloudflare/worker.ts": 1,
   "scripts/load.ts": 6,
   "scripts/native-scope-qualify.mjs": 2,
+  "scripts/web-green-fixtures.ts": 3,
   "scripts/web-preview.ts": 82,
   "src/agents/registry.ts": 1,
   "src/artifacts/config.ts": 1,

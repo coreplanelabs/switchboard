@@ -1,3 +1,6 @@
+import { homeOverview, HOME_VIEWS, type HomeView, type HomeOverview } from "../core/home/overview.js";
+import type { RunsService } from "../core/runsService.js";
+import type { Predicate } from "../core/authz/types.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Actor } from "../core/authz/types.js";
 import { predicateFor } from "../core/authz/predicate.js";
@@ -63,6 +66,8 @@ export function createHomeViewHandler(
   organizationId: string,
   options: {
     now?: () => number;
+    liveRuns?: (visibleTo: Predicate) => ReturnType<RunsService["listRuns"]>;
+    liveTokens?: () => ReadonlyMap<string, string>;
     privateUnit?: (context: HomeViewContext, ...unit: Parameters<PrivateUnitReader>) => Promise<boolean>;
     privateEpoch?: (context: HomeViewContext) => Promise<string | undefined>;
     privateRead?: (context: HomeViewContext) => HomePrivateReadGuard | undefined;
@@ -293,19 +298,57 @@ export function createHomeViewHandler(
         }
         snapshot = await service.snapshot(reader);
       }
+      const disclosedUnitKeys = [...snapshot.needsYou, ...snapshot.moving, ...snapshot.waiting].map(
+        (row) => row.unit.unit,
+      );
+      let overview: HomeOverview | undefined;
+      if (options.liveRuns) {
+        const listed = await options.liveRuns(reader.visibleTo).catch(() => {
+          console.warn(JSON.stringify({ event: "home.runs.unavailable", reason: "read_failed" }));
+          return { runs: [], ledgerUnavailable: true };
+        });
+        const requested = url.searchParams.get("view");
+        const requestedView = HOME_VIEWS.includes(requested as HomeView) ? (requested as HomeView) : undefined;
+        const rawPage = Number(url.searchParams.get("page") ?? 1);
+        const pageNumber = Number.isSafeInteger(rawPage) && rawPage > 0 ? rawPage : 1;
+        if (listed.runs.length >= 200) console.warn(JSON.stringify({ event: "home.runs.limit_reached", limit: 200 }));
+        if (listed.ledgerUnavailable || listed.runs.length >= 200)
+          snapshot = { ...snapshot, status: snapshot.status === "unavailable" ? "unavailable" : "partial" };
+        const now = (options.now ?? systemClock)();
+        let paged = homeOverview(snapshot, listed.runs, { view: requestedView ?? "attention", page: pageNumber }, now);
+        if (!requestedView && !paged.overview.counts.attention) {
+          const view = paged.overview.counts.moving
+            ? "moving"
+            : paged.overview.counts.waiting
+              ? "waiting"
+              : "investigation";
+          paged = homeOverview(snapshot, listed.runs, { view, page: pageNumber }, now);
+        }
+        snapshot = paged.snapshot;
+        overview = {
+          ...paged.overview,
+          ...(listed.ledgerUnavailable || listed.runs.length >= 200 ? { runsPartial: true as const } : {}),
+        };
+        const tokens = options.liveTokens?.();
+        overview.runs = overview.runs.map((run) => {
+          const token = tokens?.get(run.id);
+          return {
+            ...run,
+            viewPath: `/runs/${encodeURIComponent(run.id)}${token === undefined ? "" : `?t=${encodeURIComponent(token)}`}`,
+          };
+        });
+      }
       if (snapshot.organizationId !== organizationId) {
         plain(res, 404, "not found");
         return;
       }
       if (selected.kind === "snapshot") {
-        if (
-          !(await canEmit([...snapshot.needsYou, ...snapshot.moving, ...snapshot.waiting].map((row) => row.unit.unit)))
-        )
-          return;
+        if (!(await canEmit(disclosedUnitKeys))) return;
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
         res.end(
           JSON.stringify({
             ...snapshot,
+            ...(overview ? { overview } : {}),
             attentionRecipient: reader.actorId,
             attentionRecipients: reader.attentionRecipients,
             ...(observation ? { observation } : {}),
@@ -320,13 +363,11 @@ export function createHomeViewHandler(
           options.actions && !actor.viewingAs && scope.mode !== "person"
             ? await options.actions(context, snapshot)
             : undefined;
-        if (
-          !(await canEmit([...snapshot.needsYou, ...snapshot.moving, ...snapshot.waiting].map((row) => row.unit.unit)))
-        )
-          return;
+        if (!(await canEmit(disclosedUnitKeys))) return;
         page(req, res, 200, actor, "Home", {
           page: "fleetHome",
           snapshot,
+          ...(overview ? { overview } : {}),
           attentionRecipient: reader.actorId,
           attentionRecipients: [...reader.attentionRecipients],
           ...(answers ? { answers } : {}),

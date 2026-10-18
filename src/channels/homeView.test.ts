@@ -51,6 +51,173 @@ const request = (url: string, method = "GET") =>
   ({ url, method, headers: { accept: "application/json" } }) as IncomingMessage;
 
 describe("authorized Home pages", () => {
+  it.each([
+    { count: 199, status: "complete", partial: undefined, notices: [] },
+    { count: 200, status: "partial", partial: true, notices: [{ event: "home.runs.limit_reached", limit: 200 }] },
+  ])("reports a run-list limit only when reached at $count rows", async ({ count, status, partial, notices }) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const read = createHomeViewHandler(
+        createHomeService({ organizationId: "installation-a", instances: new InMemoryCoordinatorInstanceStore() }),
+        makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+        "installation-a",
+        {
+          now: () => 2,
+          liveRuns: async () => ({
+            runs: Array.from({ length: count }, (_, index) => ({
+              id: `private-run-${index}`,
+              agent: "review",
+              label: "Private run label",
+              startedAt: 1,
+              finished: false,
+              eventCount: 0,
+              liveState: { state: "working" as const, since: 1, bound: 1000 },
+            })),
+          }),
+        },
+      );
+      const out = response();
+      read(request("/home/snapshot?view=moving"), out.res, { actor: viewer, organization: "installation-a" });
+      await out.ended;
+      expect(out.value().status).toBe(200);
+      const body = JSON.parse(out.value().body);
+      expect(body.status).toBe(status);
+      expect(body.overview.runsPartial).toBe(partial);
+      expect(body.overview.counts.moving).toBe(count);
+      expect(body.overview.runs).toHaveLength(50);
+      expect(warn.mock.calls.map(([line]) => JSON.parse(line))).toEqual(notices);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  it("keeps failed live-run reads partial and reports no private error details", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const read = createHomeViewHandler(
+        createHomeService({ organizationId: "installation-a", instances: new InMemoryCoordinatorInstanceStore() }),
+        makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+        "installation-a",
+        {
+          liveRuns: async () => {
+            throw new Error("PRIVATE_RUN_DETAIL");
+          },
+        },
+      );
+      const out = response();
+      read(request("/home/snapshot"), out.res, { actor: viewer, organization: "installation-a" });
+      await out.ended;
+      expect(out.value().status).toBe(200);
+      expect(JSON.parse(out.value().body)).toMatchObject({
+        status: "partial",
+        overview: { runsPartial: true, runs: [] },
+      });
+      expect(warn.mock.calls).toEqual([[JSON.stringify({ event: "home.runs.unavailable", reason: "read_failed" })]]);
+      expect(out.value().body).not.toContain("PRIVATE_RUN_DETAIL");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  it("serves bounded work pages with full unknown-work counts and permission-filtered standalone reviews", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put({
+      id: "backlog",
+      kind: "ship",
+      userId: viewer.id,
+      channelId: "mcp:default",
+      threadKey: "mcp:default:one",
+      repo: "sample/api",
+      branch: "work",
+      createdAt: 1,
+    });
+    await instances.putUnits(
+      Array.from({ length: 55 }, (_, i) => ({
+        instanceId: "backlog",
+        unit: `U${i}`,
+        slug: `u${i}`,
+        branch: "work",
+        dependsOn: [],
+        rounds: [],
+      })),
+    );
+    const liveRuns = vi.fn(async (_visibleTo: import("../core/authz/types.js").Predicate) => ({
+      runs: [
+        {
+          id: "review",
+          agent: "review",
+          label: "Review current work",
+          startedAt: 1,
+          finished: false,
+          eventCount: 0,
+          liveState: { state: "working" as const, since: 1, bound: 1000 },
+        },
+      ],
+    }));
+    let fenced = false;
+    let local = true;
+    let included: readonly string[] = [];
+    const read = createHomeViewHandler(
+      createHomeService({ organizationId: "installation-a", instances }),
+      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+      "installation-a",
+      {
+        liveRuns,
+        liveTokens: () =>
+          new Map(
+            local
+              ? [
+                  ["review", "local-token"],
+                  ["foreign", "foreign-token"],
+                ]
+              : [],
+          ),
+        now: () => 2,
+        privateRead: () => ({
+          begin: async () => true,
+          readMany: async () => new Map(),
+          include: (keys) => {
+            included = keys;
+          },
+          canEmit: async () => !fenced,
+        }),
+      },
+    );
+    const get = async (url: string) => {
+      const out = response();
+      read(request(url), out.res, { actor: viewer, organization: "installation-a" });
+      await out.ended;
+      return JSON.parse(out.value().body);
+    };
+    const first = await get("/home/snapshot?view=investigation");
+    expect(first.waiting).toHaveLength(50);
+    expect(included).toHaveLength(55);
+    expect(first.overview).toMatchObject({
+      counts: { moving: 1, waiting: 0, investigation: 55, pipelines: 0 },
+      page: 1,
+      pages: 2,
+    });
+    expect((await get("/home/snapshot?view=investigation&page=2")).waiting).toHaveLength(5);
+    const active = await get("/home/snapshot?view=moving");
+    expect(active.overview.runs).toEqual([
+      {
+        id: "review",
+        agent: "review",
+        label: "Review current work",
+        startedAt: 1,
+        liveState: { state: "working", since: 1, bound: 1000 },
+        stateLabel: "working",
+        viewPath: "/runs/review?t=local-token",
+      },
+    ]);
+    expect(liveRuns.mock.calls[0]).toEqual([{ kind: "user-is", userId: "access:alice" }]);
+    expect(JSON.stringify(active)).not.toContain("foreign-token");
+    local = false;
+    expect((await get("/home/snapshot?view=moving")).overview.runs[0].viewPath).toBe("/runs/review");
+    fenced = true;
+    const denied = response();
+    read(request("/home/snapshot?view=moving"), denied.res, { actor: viewer, organization: "installation-a" });
+    await denied.ended;
+    expect(denied.value()).toEqual({ status: 404, body: "not found" });
+  });
   it("observes a known registry merge through the existing targeted snapshot before direct History navigation", async () => {
     const now = Date.parse("1970-01-10T12:00:00Z"),
       head = "a".repeat(40);
