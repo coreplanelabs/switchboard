@@ -1,4 +1,5 @@
 import { finishAdmission, failedAdmission } from "../core/organization/admissionTrace.js";
+import { agentMaintenanceRefusal } from "../core/maintenance.js";
 import { personalTokenApprovalMatchesPin, type PersonalTokenApprovalPin } from "../core/personalToken.js";
 import type { OrganizationNativeEvidence } from "./organizationAuthentication.js";
 import type { OrganizationAdmissionInput } from "../core/organization/service.js";
@@ -490,6 +491,8 @@ async function route(
       );
       const keyError = ingressThreadKeyError(incoming.threadKey);
       if (keyError) return err(id, INVALID_PARAMS, keyError);
+      const maintenance = await agentMaintenanceRefusal(deps.maintenance);
+      if (maintenance) return err(id, -32004, maintenance, { code: "unavailable" });
       // The request's root (docs/reference/specs/tracing.md), once the caller is known.
       const trace = startRequestRoot(deps, {
         channel: "mcp",

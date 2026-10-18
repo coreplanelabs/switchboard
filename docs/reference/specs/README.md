@@ -6,6 +6,8 @@ The behavioral contract of Switchboard, versioned with the code. Every file in t
 
 ## The rules
 
+The [maintenance contract](maintenance.md) covers scoped access holds, notices, and explicit activation.
+
 1. **Same-PR updates.** A PR that changes behavior updates the matching feature file in that PR — new criteria for new behavior, edits for changed behavior, deletions for removed behavior. A feature file that describes code that no longer exists is a bug.
 2. **TDD from the spec.** New behavior starts as validation criteria here, then failing tests, then implementation to green. Unit tests are the preferred proof; each criterion names its test (`file::test name`).
 3. **Agent-runnable validation for the rest.** Criteria that genuinely can't be unit-tested (live Slack flows, sandbox infrastructure, deploy-gated behavior) carry explicit `[agent]` instructions an agent can execute — the exact commands/messages to run and the expected observable result. The instructions are timeless: they say *how* to prove it, never *when it was last proven*.

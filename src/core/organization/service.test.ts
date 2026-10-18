@@ -39,6 +39,31 @@ const input = (key = "event-1"): OrganizationAdmissionInput => ({
   content: "A private request",
   context: [],
 });
+
+describe("maintenance admission", () => {
+  it("refuses new native receipts while access is held and admits after explicit release", async () => {
+    const store = new InMemoryOrganizationStore(() => 1);
+    let available = false;
+    const service = new OrganizationService({
+      store,
+      directory: store.directory,
+      mappings,
+      limits,
+      authorize: async () => true,
+      admissionAvailable: async () => available,
+    });
+    const machine: OrganizationAuthentication = {
+      source: "mcp",
+      identity: { issuer: "token:test", tenant: null, subject: "operator" },
+      kind: "service",
+      organizations: ["org:test"],
+    };
+    expect(await service.admit(machine, input())).toEqual({ status: "unavailable" });
+    expect(await service.issue(browser, 30)).toEqual({ status: "unavailable" });
+    available = true;
+    expect(await service.admit(machine, input())).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+  });
+});
 function setup(
   authorize: (request: OrganizationAuthorization) => Promise<boolean> = async () => true,
   suppliedMappings = mappings,

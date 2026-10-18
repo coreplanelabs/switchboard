@@ -587,6 +587,18 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
   ...commandRow("help:read", "help.show", [A.chatUser, A.browser, A.admin], [A.dispatchOnly, A.noGrants, A.token]),
   ...commandRow("status:read", "status.show", [A.chatUser, A.browser, A.admin], [A.dispatchOnly, A.noGrants, A.token]),
   ...commandRow(
+    "maintenance:read",
+    "maintenance.status",
+    [A.browser, A.admin],
+    [A.chatUser, A.dispatchOnly, A.noGrants, A.token],
+  ),
+  ...commandRow(
+    "maintenance:write",
+    "maintenance.start",
+    [A.admin],
+    [A.browser, A.chatUser, A.dispatchOnly, A.noGrants, A.token],
+  ),
+  ...commandRow(
     "delivery:read",
     "delivery.report",
     [A.browser, A.admin, A.operator],

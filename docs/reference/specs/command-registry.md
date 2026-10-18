@@ -111,6 +111,11 @@ Every registered command, rendered from the registry by `npm run docs:gen` and h
 
 | Command | Derived form | Action | Resource | Effect | Blast radius | Surfaces | Description |
 |---|---|---|---|---|---|---|---|
+| `maintenance.status` | `maintenance status` | `maintenance:read` | `command` | read | read | chat, cli, http, mcp | Read the durable maintenance episode, notice result, and work in flight. Does not prove resident idleness. |
+| `maintenance.announce` | `maintenance announce [--scopes <string>] [--reason <string>] [--channel <string>] [--starts-at <string>] [--timing <string>]` | `maintenance:write` | `command` | write | write | chat, cli, http, mcp | Announce scoped maintenance in Slack and return the exact activation call for the client's scheduler. Installs no timer. |
+| `maintenance.start` | `maintenance start [--id <string>] [--scopes <string>] [--reason <string>] [--channel <string>]` | `maintenance:write` | `command` | write | write | chat, cli, http, mcp | Close access for new requests for an announced episode by ID, or start immediate maintenance. Existing work is not killed. No automatic expiry. |
+| `maintenance.end` | `maintenance end --id <string> [--without-notice]` | `maintenance:write` | `command` | write | write | chat, cli, http, mcp | Restore access for exactly one maintenance episode, or cancel its announcement, and post in its notice thread. |
+| `maintenance.update` | `maintenance update --id <string> --message <string>` | `maintenance:write` | `command` | write | write | chat, cli, http, mcp | Post one explicit update in the verified maintenance thread. A repeat posts another update; do not retry an unknown delivery. |
 | `identity.challenge` | `identity challenge` | `identity:exec` | `identity` | write | exec | http | Complete challenge through fresh two-sided account verification. |
 | `identity.list` | `identity list` | `identity:read` | `identity` | read | read | http | Read your verified identity operation. |
 | `identity.link` | `identity link` | `identity:exec` | `identity` | write | exec | http | Complete link through fresh two-sided account verification. |

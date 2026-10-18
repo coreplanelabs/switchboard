@@ -103,6 +103,7 @@ export class OrganizationService {
       mappings: readonly OrganizationMapping[];
       limits: OrganizationLimits;
       authorize: (input: OrganizationAuthorization) => Promise<boolean>;
+      admissionAvailable?: () => Promise<boolean>;
       currentIdentityRead?: (
         identity: ExternalIdentity,
         reference?: OrganizationSourceReference,
@@ -171,6 +172,7 @@ export class OrganizationService {
     return { organization, actor };
   }
   async issue(authentication: OrganizationAuthentication, ttlMs: number): Promise<OrganizationResult> {
+    if (this.options.admissionAvailable && !(await this.options.admissionAvailable())) return { status: "unavailable" };
     const resolved = await this.resolve(authentication);
     if (
       !resolved ||
@@ -190,6 +192,7 @@ export class OrganizationService {
     authentication: OrganizationAuthentication,
     input: OrganizationAdmissionInput,
   ): Promise<OrganizationResult> {
+    if (this.options.admissionAvailable && !(await this.options.admissionAvailable())) return { status: "unavailable" };
     const resolved = await this.resolve(authentication);
     if (!resolved) return { status: "not_found" };
     // Reserved fleet reconciliation comes from the internal owner, never an ingress payload.

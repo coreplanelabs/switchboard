@@ -5,6 +5,14 @@ import { createRunCheck } from "./execution/runCheck.js";
 import { readImageConfigConsumerIdentity, type ConfigConsumerIdentity } from "./configConsumer.js";
 import "./loadEnv.js";
 import { createServer } from "node:http";
+import {
+  buildMaintenanceStore,
+  MaintenanceService,
+  maintenanceGate,
+  type MaintenanceNotice,
+  type MaintenanceEpisode,
+} from "./core/maintenance.js";
+import { slackMaintenancePoster } from "./channels/maintenance.js";
 import { join } from "node:path";
 import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
@@ -391,6 +399,15 @@ export async function runBot(): Promise<void> {
   let slackNameLookup: ((userId: string) => Promise<string | undefined>) | undefined;
   /** A plain line into a Slack channel by its bare id — the costs snapshot alert's poster, bound once the app exists. */
   let slackPost: ((channel: string, text: string) => Promise<void>) | undefined;
+  let maintenancePost: ((notice: MaintenanceNotice) => Promise<NonNullable<MaintenanceEpisode["thread"]>>) | undefined;
+  const maintenanceStore = buildMaintenanceStore(config.config, processSecrets);
+  const maintenanceService = maintenanceStore
+    ? new MaintenanceService({
+        store: maintenanceStore,
+        post: (notice) =>
+          maintenancePost ? maintenancePost(notice) : Promise.reject(new Error("Slack is unavailable.")),
+      })
+    : undefined;
   let slackPersonByEmail: PersonLookup | undefined;
   const personByEmail: PersonLookup = (email) =>
     slackPersonByEmail ? slackPersonByEmail(email) : Promise.resolve(undefined);
@@ -685,6 +702,7 @@ export async function runBot(): Promise<void> {
   // and the dispatcher's unit nudge go through the same door.
   const workflowSender = shimWorkflowSender(processShimOptions());
   const deps: CoreDeps = {
+    maintenance: maintenanceStore,
     config,
     completions,
     // The providers catalogue behind the loop's `provider_models` read tool
@@ -953,6 +971,9 @@ export async function runBot(): Promise<void> {
     },
   };
   const commands = buildCoreCommands(config, runStore, {
+    ...(maintenanceStore && maintenanceService
+      ? { maintenance: { store: maintenanceStore, service: maintenanceService, inFlight: () => inFlight() } }
+      : {}),
     credentialInspection: (runId, expected) => inspectLiveCredentials(harnesses, runId, expected),
     registry: defaultRunRegistry,
     secrets: processSecrets,
@@ -1196,6 +1217,7 @@ export async function runBot(): Promise<void> {
   slackPost = async (channel, text) => {
     await app.client.chat.postMessage({ channel, text: mdToMrkdwn(text) });
   };
+  maintenancePost = slackMaintenancePoster(app.client);
   // The dashboard link (record 0042): a browser session's Access email names
   // its Slack person, resolved once per gate pass through a cached reverse
   // lookup — identity, never authority.
@@ -2063,8 +2085,27 @@ export async function runBot(): Promise<void> {
     // Logged once per process — the fact, never any token material.
     let serviceTokenRefusalLogged = false;
 
-    createServer((req, res) => {
+    createServer(async (req, res) => {
       const path = (req.url ?? "/").split("?")[0];
+      if (
+        !req.url?.startsWith("/") ||
+        !["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"].includes(req.method ?? "GET")
+      ) {
+        res.writeHead(400).end();
+        return;
+      }
+      const held = await maintenanceGate(
+        new Request(`http://maintenance.internal${req.url ?? "/"}`, {
+          method: req.method,
+          headers: { accept: String(req.headers.accept ?? "") },
+        }),
+        maintenanceStore,
+      );
+      if (held) {
+        res.writeHead(held.status, Object.fromEntries(held.headers));
+        res.end(Buffer.from(await held.arrayBuffer()));
+        return;
+      }
       const host = req.headers.host;
       let doorRoute: "door" | "other" | "refuse" = "refuse";
       try {

@@ -1,4 +1,5 @@
 import { registerIdentityCommands, type IdentityCommandDeps } from "./identity.js";
+import { registerMaintenanceCommands, type MaintenanceCommandDeps } from "./maintenance.js";
 import { registerCredentialsCommands, type CredentialsCommandDeps } from "./credentials.js";
 import { CommandRegistry } from "../commandRegistry.js";
 import { registerArtifactsCommands, type ArtifactsCommandDeps } from "./artifacts.js";
@@ -34,6 +35,7 @@ import { registerStatusCommands, type StatusCommandDeps } from "./status.js";
 // call below; no adapter changes.
 
 export type CoreCommandDeps = IdentityCommandDeps &
+  MaintenanceCommandDeps &
   HelpCommandDeps &
   ConfigCommandDeps &
   CredentialsCommandDeps &
@@ -60,6 +62,7 @@ export type CoreCommandDeps = IdentityCommandDeps &
   SteerCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
+  registerMaintenanceCommands(registry);
   registerIdentityCommands(registry);
   registerHelpCommands(registry);
   registerStatusCommands(registry);

@@ -5,12 +5,13 @@ import { InMemoryOrganizationStore } from "../core/organization/memory.js";
 import { OrganizationService } from "../core/organization/service.js";
 import { handleMcpRequest, type McpOptions } from "./mcp.js";
 import { createOrganizationAuthentication } from "./organizationAuthentication.js";
+import { InMemoryMaintenanceStore, MaintenanceService, type MaintenanceStore } from "../core/maintenance.js";
 
 const deps = {
   build: { commit: "a".repeat(40), version: "fixture" },
   config: { grantsFor: () => ALL_GRANTS, config: {} },
 } as unknown as CoreDeps;
-function setup() {
+function setup(maintenance?: MaintenanceStore) {
   const store = new InMemoryOrganizationStore(() => 1);
   let allowed = true;
   const service = new OrganizationService({
@@ -75,7 +76,7 @@ function setup() {
           params: { name: "dispatch", arguments: args },
         }),
       },
-      deps,
+      { ...deps, maintenance },
       chosenOptions,
     );
   return {
@@ -90,6 +91,22 @@ function setup() {
 }
 
 describe("MCP organization admission", () => {
+  it("returns a maintenance error before native admission and accepts after explicit release", async () => {
+    const maintenance = new InMemoryMaintenanceStore();
+    const service = new MaintenanceService({ store: maintenance });
+    const started = await service.start({ scopes: ["residents"] }, "cli:local");
+    const f = setup(maintenance);
+    const refused = await f.send({ text: "review this PR", async: true });
+    expect(refused.body).toMatchObject({
+      error: { code: -32004, message: expect.stringContaining("Down for maintenance"), data: { code: "unavailable" } },
+    });
+    expect(f.sources).toEqual([]);
+    await service.end(started.episode!.id, "cli:local");
+    expect((await f.send({ text: "review this PR", async: true })).body).toMatchObject({
+      result: { content: [{ text: "Request admitted. Execution and completion are recorded separately." }] },
+    });
+    expect(f.sources).toHaveLength(1);
+  });
   it.each(["Bearer credential-one", "bearer credential-one", "  bEaReR\t   credential-one  "])(
     "retains the exact configured credential and native admission for an accepted header: %s",
     async (authorization) => {

@@ -1,4 +1,6 @@
 import { NativeMediaHeldError } from "./harness/nativeMedia.js";
+import type { MaintenanceStore } from "./maintenance.js";
+import { agentMaintenanceRefusal } from "./maintenance.js";
 import { bindConversationRead } from "./dispatch/conversationRead.js";
 import { wrapUntrusted } from "./untrusted.js";
 import { isResearchBrief, renderResearchBrief } from "./research/brief.js";
@@ -357,6 +359,7 @@ export interface CoreDeps
     RecordDeps,
     ReferenceDeps,
     ShipDeps {
+  maintenance?: MaintenanceStore;
   /** The MCP tool source required for provisioning every run. */
   mcp: McpToolSource;
   /** Canonical context storage and current source authorization. */
@@ -1372,6 +1375,24 @@ export async function dispatch(
           await checkpointRequesterMessageTarget(deps.runLedger, msg.threadKey, msg.userId, msg.text);
       } catch {
         // An inherited write still requires a readable checkpoint at the door.
+      }
+    }
+    if (deps.maintenance) {
+      const maintenance = await agentMaintenanceRefusal(deps.maintenance);
+      if (maintenance) {
+        // A text exception must finish on the deterministic command path.
+        // Saved agent proposals and owned work cannot become a new command.
+        if (
+          !opts.redispatch &&
+          !resume &&
+          !restart &&
+          !opts.parent &&
+          !opts.coordinator &&
+          (await answerChatCommand(deps, { msg, io, ending, trace, ingressRunId: opts.ingressRunId }))
+        )
+          return ended;
+        await refuse(refusalOf("maintenance", maintenance));
+        return ended;
       }
     }
     // The operator (record 0057; routing-and-config item 29): under

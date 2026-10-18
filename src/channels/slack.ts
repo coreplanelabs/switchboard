@@ -1,5 +1,6 @@
 import type { AudienceCheck } from "../core/audienceDecision.js";
 import { randomUUID } from "node:crypto";
+import { agentMaintenanceRefusal } from "../core/maintenance.js";
 import {
   App,
   SocketModeReceiver,
@@ -349,7 +350,7 @@ export function createSlackApp(
           onMissed: async (m) => {
             const act = await actOnMissedMessage(m, {
               botUserId: id,
-              ...(intake ? { intake } : {}),
+              ...(intake && !(await agentMaintenanceRefusal(deps.maintenance)) ? { intake } : {}),
               reply: async (text) => {
                 await new SlackIO(app.client, {
                   channel: m.channel,
@@ -777,6 +778,7 @@ async function handle(
   // `request` span_start carries `queuedBeforeMs` (the page's queued caption).
   const trace = startRequestRoot(deps, { channel: "slack", receivedAt, originAt: tsMs(ev.ts) });
   try {
+    const activeIntake = (await agentMaintenanceRefusal(deps.maintenance)) ? undefined : intake;
     const received = await trace.root.span("slack.receive", (span) =>
       receiveSlackMessage(
         client,
@@ -789,7 +791,7 @@ async function handle(
           verbosityFor: (channelId, userId, request) => deps.config.verbosityFor(channelId, userId, request),
         },
         relayAppsOf(deps),
-        intake,
+        activeIntake,
       ),
     );
     if (!received) {

@@ -1,4 +1,5 @@
 import { depotCiAuthorization, handleDepotCi } from "./depotCi.ts";
+import { maintenanceGate, WorkerMaintenanceStore } from "../../src/core/maintenance.ts";
 import { DEPOT_CI_AUTHORIZATION_PATH, DEPOT_CI_PATH } from "../../src/core/depotCi.ts";
 import { githubDoorEdgeRoute } from "../../src/channels/githubDoorPaths.ts";
 // Cloudflare Containers shim: runs the unchanged Switchboard image as a single
@@ -508,6 +509,11 @@ export default {
     const pathname = requestUrl.pathname;
     if (githubDoorEdgeRoute(requestUrl, request.method, env.PUBLIC_GIT_BASE_URL) === "refuse")
       return new Response("not found", { status: 404 });
+    const maintenanceStore = env.STATE_WORKER_URL
+      ? new WorkerMaintenanceStore({ baseUrl: env.STATE_WORKER_URL, token: env.MEMORY_TOKEN ?? "" })
+      : undefined;
+    const maintenance = await maintenanceGate(request, maintenanceStore);
+    if (maintenance) return maintenance;
     // Permits can only be consumed through the Worker's fixed container
     // binding. The public edge must never proxy this callback path.
     if (pathname === DEPOT_CI_AUTHORIZATION_PATH) return new Response("not found", { status: 404 });

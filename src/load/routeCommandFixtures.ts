@@ -46,6 +46,48 @@ const f = (
 ): RouteCommandFixture => ({ id, kind, text, command, input, ...(threadRepo ? { threadRepo } : {}) });
 
 export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
+  f("maintenance-status-h", "happy", "Show the maintenance state", "maintenance.status"),
+  f("maintenance-status-p", "paraphrase", "Is a maintenance hold active?", "maintenance.status"),
+  f(
+    "maintenance-announce-h",
+    "happy",
+    "Announce maintenance for resident work in a few minutes",
+    "maintenance.announce",
+    { options: { scopes: "residents", timing: "in a few minutes" } },
+  ),
+  f("maintenance-announce-p", "paraphrase", "Tell users agent work will be unavailable soon", "maintenance.announce", {
+    options: { scopes: "agents", timing: "soon" },
+  }),
+  f("maintenance-start-h", "happy", "Start maintenance for all access now", "maintenance.start", {
+    options: { scopes: "all" },
+  }),
+  f("maintenance-start-p", "paraphrase", "Close new resident work for maintenance immediately", "maintenance.start", {
+    options: { scopes: "residents" },
+  }),
+  f("maintenance-end-h", "happy", "End maintenance episode 12345678-1234-4234-8234-123456789abc", "maintenance.end", {
+    options: { id: "12345678-1234-4234-8234-123456789abc" },
+  }),
+  f(
+    "maintenance-end-p",
+    "paraphrase",
+    "Restore access for maintenance 12345678-1234-4234-8234-123456789abc",
+    "maintenance.end",
+    { options: { id: "12345678-1234-4234-8234-123456789abc" } },
+  ),
+  f(
+    "maintenance-update-h",
+    "happy",
+    "Post Work is in progress to maintenance episode 12345678-1234-4234-8234-123456789abc",
+    "maintenance.update",
+    { options: { id: "12345678-1234-4234-8234-123456789abc", message: "Work is in progress" } },
+  ),
+  f(
+    "maintenance-update-p",
+    "paraphrase",
+    "Tell the maintenance thread for 12345678-1234-4234-8234-123456789abc that Checks are in progress",
+    "maintenance.update",
+    { options: { id: "12345678-1234-4234-8234-123456789abc", message: "Checks are in progress" } },
+  ),
   f(
     "c44h",
     "happy",
@@ -305,6 +347,12 @@ const d = (id: string, text: string, command: string, allow?: readonly string[])
 });
 
 export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
+  ...["status", "announce", "start", "end", "update"].map((verb) => ({
+    id: `maintenance-${verb}-d`,
+    kind: "decoy" as const,
+    text: `Explain how the maintenance ${verb} command is designed`,
+    command: `maintenance.${verb}`,
+  })),
   d("c01d", "help me fix this bug", "help.show"),
   // Two production replies that bound `help.show` in one pipeline thread: a
   // person asking for the delivered work's screenshots.

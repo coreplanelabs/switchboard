@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigStore } from "./config.js";
 import { buildCoreCommands } from "./core/commandCatalogue.js";
+import { InMemoryMaintenanceStore, MaintenanceService } from "./core/maintenance.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./core/commands/all.js";
 import type { AffectedReport } from "./deploy/affected.js";
 
@@ -479,6 +480,40 @@ describe("runCommand", () => {
 });
 
 describe("buildCoreCommands — the one catalogue every in-process binding shares (index.ts, cli.ts)", () => {
+  it("loads the same durable maintenance hold for local CLI commands without bot-only wiring", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-cli-maintenance-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(
+      cfg,
+      "organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\ndefaults:\n  agent: general\n  models:\n    general: anthropic/m\nrunHistory:\n  store: worker\n  worker:\n    baseUrl: https://state.example.test\n",
+    );
+    const state = new InMemoryMaintenanceStore();
+    await new MaintenanceService({ store: state }).start({ scopes: ["residents"] }, "cli:local");
+    const fetchBefore = globalThis.fetch;
+    globalThis.fetch = async () => {
+      const saved = await state.read();
+      return Response.json({ document: { episode: saved.episode }, version: saved.version });
+    };
+    try {
+      const commands = buildCoreCommands(new ConfigStore(cfg, join(dir, "overrides.json")), null, {
+        registry: new RunRegistry(),
+        secrets: secretsFrom({ MEMORY_TOKEN: "fixture" }),
+        dataDir: dir,
+        warn: () => {},
+      });
+      expect(await commands.invoke("repo.test", { args: ["acme/api"] }, CLI_CALLER)).toMatchObject({
+        ok: false,
+        status: 503,
+        message: expect.stringContaining("Down for maintenance"),
+      });
+      expect(await commands.invoke("maintenance.status", {}, CLI_CALLER)).toMatchObject({
+        ok: true,
+        value: { episode: { phase: "active", scopes: ["residents"] } },
+      });
+    } finally {
+      globalThis.fetch = fetchBefore;
+    }
+  });
   it("registers the full catalogue and serves runs.list from the given store", async () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-cli-"));
     const cfg = join(dir, "config.yaml");
