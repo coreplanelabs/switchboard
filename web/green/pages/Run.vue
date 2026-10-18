@@ -543,7 +543,10 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
 
 <template>
   <div class="green-run-evidence">
-    <PageHeading title="Run details" description="Inspect the request, response, tools, and delivery evidence." />
+    <PageHeading
+      :title="state.title ?? seed?.runTitle ?? 'Run details'"
+      description="Inspect the request, response, tools, and delivery evidence."
+    />
     <div class="green-evidence-toolbar">
       <RouterLink class="back text-sm text-primary no-underline hover:underline" to="/runs">← All runs</RouterLink>
     </div>

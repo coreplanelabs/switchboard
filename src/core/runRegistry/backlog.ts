@@ -2,6 +2,8 @@ import { pipelineStandingOf, summaryOfStanding } from "../pipelineStanding.js";
 import { isHeadMaterial, serializedOnce, type RunEvent } from "../runEvents.js";
 import { capEvent, MAX_EVENT_BYTES, protectedProviderFailureNoteIndices, utf8ByteLength } from "../runRecord.js";
 import { activityOf } from "./activity.js";
+import { RUN_PROMPT_MAX, boundedRunTitle } from "../runDisplay.js";
+import { redactAndCap } from "../redact.js";
 import type { RunState } from "./state.js";
 
 // The per-run backlog: the newest events a run keeps while it is live, bounded
@@ -52,6 +54,8 @@ export type BacklogState = Pick<
   | "headLen"
   | "headBytes"
   | "activity"
+  | "prompt"
+  | "title"
   | "instanceId"
   | "pipelineEvents"
   | "pipeline"
@@ -63,6 +67,8 @@ export type BacklogState = Pick<
  *  the trim then drops the oldest event AFTER the head, never the head, and
  *  always keeps the newest. */
 export function appendToBacklog(run: BacklogState, bounds: BacklogBounds, published: RunEvent): void {
+  if (published.type === "input" && run.prompt === undefined) run.prompt = redactAndCap(published.text, RUN_PROMPT_MAX);
+  if (published.type === "run_title") run.title = boundedRunTitle(published.title);
   const headEligible =
     run.backlog.length === run.headLen && isHeadMaterial(published) && run.headBytes < HEAD_BUDGET_BYTES;
   // A head event is capped at publish (docs/reference/specs/tracing.md): the cap is the

@@ -62,7 +62,7 @@ import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import { ownPrOf, type OperationTarget, type RepoContext } from "../repoContext.js";
 import { redactSecrets, type AgentSource, type RunEvent } from "../runEvents.js";
-import { RunEventLane } from "../runEventLane.js";
+import type { RunEventLane } from "../runEventLane.js";
 import { oneLine } from "../redact.js";
 import type { ControlDecision, ModelCard } from "../modelCard.js";
 import { MAX_EVENT_BYTES, utf8ByteLength, type RunSeed } from "../runRecord.js";
@@ -536,6 +536,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     {
       agent: agent.name,
       ...(ctx.ingressRunId ? { organizationIngressRunId: ctx.ingressRunId } : {}),
+      ...(!privateMain
+        ? { prompt: isMrkdwnChannel(msg.channelId) ? humanizeMessageText(directives.text) : directives.text }
+        : {}),
       ...(ctx.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
       ...(privateMain ? { privateConversation: true as const } : {}),
       model: resolved.modelRef,
@@ -578,7 +581,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   ctx.afterCreate?.({ runId, channelVisibility });
   // The replacement is ONE line on the transcript (item 54), in user words,
   // between the replayed segment and the turn the restart publishes next.
-  const events = new RunEventLane((event) => registry.publish(run.id, event));
+  const events = registry.eventLane(run.id);
   if (ctx.restartCarried)
     events.publish({ type: "run_note", kind: "resumed", summary: ctx.restartCarried.note, at: clock() });
   // With no PUBLIC_BASE_URL the link is simply omitted — the feature

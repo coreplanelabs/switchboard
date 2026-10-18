@@ -866,6 +866,7 @@ export function createLiveViewHandler(
             mode: "live",
             id: route.id,
             ...(summary?.threadKey !== undefined ? { threadKey: summary.threadKey } : {}),
+            ...(summary?.title !== undefined ? { runTitle: summary.title } : {}),
             ...(children.length > 0 ? { children } : {}),
             ...(parentId !== undefined
               ? {
@@ -1159,6 +1160,7 @@ export function createLiveViewHandler(
             mode: "live",
             id: route.id,
             threadKey: view.threadKey,
+            ...(view.title !== undefined ? { runTitle: view.title } : {}),
             serverNow: now(),
             startedAt: view.startedAt,
             ...(view.receivedAt !== undefined ? { receivedAt: view.receivedAt } : {}),
@@ -1174,6 +1176,7 @@ export function createLiveViewHandler(
         deps.page(req, res, 200, ctx.actor, "Run", {
           page: "run",
           mode: "history",
+          ...(view.title !== undefined ? { runTitle: view.title } : {}),
           id: route.id,
           ...(view.threadKey !== undefined ? { threadKey: view.threadKey } : {}),
           ...(children.length > 0 ? { children: children.map((c) => withLiveToken(c, tokens)) } : {}),

@@ -36,6 +36,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 <!-- generated:cli-commands · npm run docs:gen — generated from the code, do not edit by hand -->
 
+### `emoji`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `emoji sync` | Download the workspace's full custom Slack emoji catalog and aliases on demand. Replaces the local catalog, preserves verified cached images on partial failure, and reports name and file counts. No scheduled polling. | CLI · HTTP · MCP |
+
 ### `maintenance`
 
 | Command | What it does | Surfaces |

@@ -7,6 +7,14 @@ import { parseRunEventLines } from "./runEventLines.js";
 // > run.sse` is directly analyzable.
 
 describe("parseRunEventLines", () => {
+  it("retains a generated title across an event capture and rejects a malformed title", () => {
+    expect(
+      parseRunEventLines('{"type":"run_title","title":"Inspect deployment"}\n{"type":"run_title","title":7}'),
+    ).toEqual({
+      events: [{ type: "run_title", title: "Inspect deployment" }],
+      skipped: 1,
+    });
+  });
   it("keeps call-linked argument updates and rejects incomplete update frames", () => {
     const event = { type: "tool_input", callId: "c1", input: '{"path":"src/file.ts"}', at: 1 };
     expect(

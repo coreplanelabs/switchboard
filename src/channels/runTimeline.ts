@@ -76,6 +76,7 @@ export interface TimelineStep {
 }
 
 export type TimelineChange =
+  | { kind: "title"; title: string }
   | { kind: "input"; text: string; messageId: string; source?: TimelineSource; at?: number }
   | { kind: "step"; step: TimelineStep }
   | { kind: "call"; step: TimelineStep; call: TimelineCall }
@@ -371,6 +372,8 @@ export function createRunTimeline(): RunTimeline {
         const text = `**${str(e.unit)} · ${str(e.state)}**${detail ? "\n\n" + detail : ""}`;
         return [{ kind: "step", step: openStep({ text, at: num(e.at) }) }];
       }
+      case "run_title":
+        return str(e.title) ? [{ kind: "title", title: str(e.title) }] : [];
       case "run_meta": {
         // Optional fields ride only when present (and well-typed) — the page
         // shows exactly what was resolved, never an empty slot.

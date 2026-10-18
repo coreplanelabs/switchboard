@@ -722,6 +722,19 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "config:write",
+    "args": [],
+    "effect": "write",
+    "id": "emoji.sync",
+    "options": [],
+    "resource": "config-scope/org",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "env:write",
     "args": [],
     "effect": "write",

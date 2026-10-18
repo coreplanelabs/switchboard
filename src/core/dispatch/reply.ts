@@ -282,6 +282,8 @@ const ASSISTANT_TRACE_CAP = 80;
  */
 export function activityLine(e: RunEvent): string {
   switch (e.type) {
+    case "run_title":
+      return "Title saved";
     case "tool_call":
       return `→ ${e.summary}`;
     case "tool_input":

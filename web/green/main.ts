@@ -5,6 +5,7 @@ import { browser, routeNavigationInApp } from "../src/lib/browser";
 import { fetchSeed, readSeed } from "../src/lib/seed";
 import { installSeedRouting, SeedRoutingKey } from "../src/lib/seedRouting";
 import App from "./App.vue";
+import { textRendering } from "./lib/emoji";
 import { routes } from "./routes";
 import "@fontsource-variable/dm-sans/wght.css";
 import "@fontsource-variable/jetbrains-mono/wght.css";
@@ -23,4 +24,4 @@ const router = createRouter({
 });
 const routing = installSeedRouting(router, { island: readSeed(), load: fetchSeed, leave: browser.leave });
 routeNavigationInApp((href) => void router.push(href));
-createApp(App).provide(SeedRoutingKey, routing).use(router).use(ui).mount("#app");
+createApp(App).provide(SeedRoutingKey, routing).use(router).use(ui).use(textRendering).mount("#app");

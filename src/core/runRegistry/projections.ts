@@ -31,6 +31,8 @@ export interface RunStopStatus {
  * `create()`, so callers can sort/label without reaching into run internals.
  */
 export interface RunSummary {
+  prompt?: string;
+  title?: string;
   authoritativeHistory?: true;
   id: string;
   token: string;
@@ -130,6 +132,8 @@ export interface RunSummary {
 /** What `snapshot`/`snapshotById` return: a COPY of the retained backlog plus the
  *  two record fields not derivable from the events. */
 export interface RunSnapshot {
+  prompt?: string;
+  title?: string;
   privateConversation?: true;
   authoritativeHistory?: true;
   organizationIngressRunId?: string;
@@ -175,6 +179,8 @@ export function summaryOf(run: RunState, now: number): RunSummary {
   return {
     id: run.id,
     token: run.token,
+    ...(run.prompt !== undefined ? { prompt: run.prompt } : {}),
+    ...(run.title !== undefined ? { title: run.title } : {}),
     ...(run.label !== undefined ? { label: run.label } : {}),
     ...(m?.agent !== undefined ? { agent: m.agent } : {}),
     ...(m?.model !== undefined ? { model: m.model } : {}),
@@ -234,6 +240,8 @@ export function summaryOf(run: RunState, now: number): RunSummary {
  *  derivable from it. `truncated` says the bounded backlog dropped events. */
 export function snapshotOf(run: RunState): RunSnapshot {
   return {
+    ...(run.prompt !== undefined ? { prompt: run.prompt } : {}),
+    ...(run.title !== undefined ? { title: run.title } : {}),
     ...(run.meta?.privateConversation ? { privateConversation: true as const } : {}),
     ...(run.meta?.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
     ...(run.meta?.organizationIngressRunId !== undefined

@@ -170,6 +170,9 @@ providers:
 #     limits: { maxMinutes: 90, maxTokens: 64000 }
 #   operator: { profile: light }
 #   intake: { profile: light }
+#   title: { model: openai/gpt-6-luna, modelSettings: { reasoning: { effort: low } } }
+# Run titles use this small model independently of the run's model. One bounded
+# call starts with the prompt. A failed call leaves the prompt as the row text.
 #   memory: { profile: standard }
 
 defaults:

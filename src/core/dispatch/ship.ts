@@ -480,6 +480,7 @@ export async function runShipBranch(
       ...(ctx.ingressRunId ? { organizationIngressRunId: ctx.ingressRunId } : {}),
       ...(ctx.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
       hosted: true,
+      prompt: isMrkdwnChannel(msg.channelId) ? humanizeMessageText(directives.text) : directives.text,
       agent: agent.name,
       model: ctx.modelRef,
       channelId: msg.channelId,
@@ -495,6 +496,7 @@ export async function runShipBranch(
     },
     ctx.ingressRunId ? { id: ctx.ingressRunId } : {},
   );
+  const events = registry.eventLane(run.id);
   let ledgerRun: LedgerRun | undefined;
   let outcome: HandOffOutcome | undefined;
   let shipDiagnosis: FrictionDiagnosis | undefined;
@@ -518,10 +520,7 @@ export async function runShipBranch(
     ) => {
       const redacted = redactSecrets(text);
       const body = { text: redacted, ...(source ? { source } : {}), at: clock() };
-      registry.publish(
-        run.id,
-        type === "input" ? { type, messageId: messageIdOf(msg, run.id), ...body } : { type, ...body },
-      );
+      events.publish(type === "input" ? { type, messageId: messageIdOf(msg, run.id), ...body } : { type, ...body });
       console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
     };
     const humanize = isMrkdwnChannel(msg.channelId);
@@ -537,7 +536,7 @@ export async function runShipBranch(
       attachments ? `${request} ${attachments}` : request,
       Object.keys(source).length > 0 ? source : undefined,
     );
-    registry.publish(run.id, {
+    events.publish({
       type: "run_meta",
       agent: agent.name,
       agentSource: ctx.agentSource,
@@ -547,10 +546,10 @@ export async function runShipBranch(
       ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
       at: clock(),
     });
-    if (ctx.route) registry.publish(run.id, { type: "route", ...ctx.route, at: clock() });
-    if (ctx.operator) registry.publish(run.id, { type: "operator", ...ctx.operator, at: clock() });
+    if (ctx.route) events.publish({ type: "route", ...ctx.route, at: clock() });
+    if (ctx.operator) events.publish({ type: "operator", ...ctx.operator, at: clock() });
     if (originalOrganizationDispatchOf(msg)?.contextMode === "request")
-      registry.publish(run.id, {
+      events.publish({
         type: "run_note",
         kind: "seed",
         summary: "This Ship review uses your current request and GitHub. Earlier conversation context is not included.",
@@ -653,34 +652,36 @@ export async function runShipBranch(
         ...REPLAY_EVERYTHING,
       });
     }
-    const admittedAt = clock();
-    const admittedEventSeq = (registry.getById(run.id)?.eventCount ?? 0) + 1;
-    const admittedAssignment = {
-      expectedSeq: 0,
-      eventSeq: admittedEventSeq,
-      at: admittedAt,
-      state: "admitted" as const,
-      bound: admittedAt + minutesToMs(profile.minutes),
-      detail: "waiting for the pipeline to start",
-    };
-    if (ledgerRun) {
-      const committed = await ledgerRun.assignLiveState(admittedAssignment);
-      if (!committed.ok || !registry.commitLiveState(run.id, committed))
-        throw new RefusalError(
-          refusalOf(
-            "setup_failed",
-            `hosted live state start was not committed (${committed.ok ? "registry sequence" : committed.reason})`,
-          ),
-        );
-    } else {
-      const local = assignRunLiveState(undefined, 0, admittedAssignment);
-      if (local.ok && local.event)
-        registry.commitLiveState(run.id, {
-          ...local,
-          event: { ...local.event, seq: admittedEventSeq },
-          liveStateSeq: admittedEventSeq,
-        });
-    }
+    await events.write(async () => {
+      const admittedAt = clock();
+      const admittedEventSeq = (registry.getById(run.id)?.eventCount ?? 0) + 1;
+      const admittedAssignment = {
+        expectedSeq: 0,
+        eventSeq: admittedEventSeq,
+        at: admittedAt,
+        state: "admitted" as const,
+        bound: admittedAt + minutesToMs(profile.minutes),
+        detail: "waiting for the pipeline to start",
+      };
+      if (ledgerRun) {
+        const committed = await ledgerRun.assignLiveState(admittedAssignment);
+        if (!committed.ok || !registry.commitLiveState(run.id, committed))
+          throw new RefusalError(
+            refusalOf(
+              "setup_failed",
+              `hosted live state start was not committed (${committed.ok ? "registry sequence" : committed.reason})`,
+            ),
+          );
+      } else {
+        const local = assignRunLiveState(undefined, 0, admittedAssignment);
+        if (local.ok && local.event)
+          registry.commitLiveState(run.id, {
+            ...local,
+            event: { ...local.event, seq: admittedEventSeq },
+            liveStateSeq: admittedEventSeq,
+          });
+      }
+    });
     // One pipeline per thread (record 0060; agent-ship item 16): the host key's
     // claim answering `thread-live` means another pipeline is hosted in this
     // thread right now — refused by name, never run untracked beside it. Every
@@ -690,7 +691,7 @@ export async function runShipBranch(
     const liveUrl = liveViewLink(run.id, run.token);
     ctx.live.runId = run.id;
     if (liveUrl) ctx.live.runLink = liveUrl;
-    trace.bindRun(run.id, (e) => registry.publish(run.id, e));
+    trace.bindRun(run.id, (e) => events.publish(e));
 
     console.log(
       `[run] ${msg.threadKey} user=${msg.userId} agent=ship model=${ctx.modelRef} entry=${entry.resume ? `resume ${entry.repo}#${entry.resume.pr}` : `round0 ${entry.branch}`}`,
@@ -811,7 +812,7 @@ export async function runShipBranch(
     if (outcome.admissionDiagnostic) {
       const diagnostic = { event: "ship_admission_refused", runId: run.id, ...outcome.admissionDiagnostic };
       console.log(JSON.stringify(diagnostic));
-      registry.publish(run.id, {
+      events.publish({
         type: "run_note",
         kind: "ship_admission",
         summary: JSON.stringify(diagnostic),
@@ -822,7 +823,7 @@ export async function runShipBranch(
     // 0051 R2), including when the create reply is lost. The thread's owner
     // rule finds this same runner identity from the ship run.
     if (outcome.instanceId !== undefined) {
-      registry.publish(run.id, { type: "ship_handoff", instanceId: outcome.instanceId, at: clock() });
+      events.publish({ type: "ship_handoff", instanceId: outcome.instanceId, at: clock() });
       if ((outcome.status === "completed" || outcome.status === "pending") && ledgerRun?.tracked() === true) {
         // Admission succeeded or remains unresolved, and the ledger mirrors
         // this run: the parent stays live, hosting the saved instance. Its state carries the instance and
@@ -836,24 +837,27 @@ export async function runShipBranch(
           instanceId: outcome.instanceId,
           until: clock() + minutesToMs(caps.maxMinutes + HOSTED_DEADLINE_MARGIN_MINUTES),
         };
-        const summary = registry.getById(run.id);
-        const committed = await ledgerRun.assignLiveState({
-          expectedSeq: summary?.liveStateSeq ?? 0,
-          eventSeq: (summary?.eventCount ?? 0) + 1,
-          at: clock(),
-          state: "working",
-          bound: hosting.until,
-          detail: HOSTED_PIPELINE_STARTING_DETAIL,
-          statePatch: { hosting },
+        const tracked = ledgerRun;
+        await events.write(async () => {
+          const summary = registry.getById(run.id);
+          const committed = await tracked.assignLiveState({
+            expectedSeq: summary?.liveStateSeq ?? 0,
+            eventSeq: (summary?.eventCount ?? 0) + 1,
+            at: clock(),
+            state: "working",
+            bound: hosting.until,
+            detail: HOSTED_PIPELINE_STARTING_DETAIL,
+            statePatch: { hosting },
+          });
+          if (!committed.ok || !registry.commitLiveState(run.id, committed))
+            throw new RefusalError(
+              refusalOf(
+                "setup_failed",
+                `hosted live state transition was not committed (${committed.ok ? "registry sequence" : committed.reason})`,
+              ),
+            );
         });
-        if (!committed.ok || !registry.commitLiveState(run.id, committed))
-          throw new RefusalError(
-            refusalOf(
-              "setup_failed",
-              `hosted live state transition was not committed (${committed.ok ? "registry sequence" : committed.reason})`,
-            ),
-          );
-        registry.publish(run.id, {
+        events.publish({
           type: "run_meta",
           agent: agent.name,
           agentSource: ctx.agentSource,
@@ -881,6 +885,7 @@ export async function runShipBranch(
     // `completed` — the refusal lives in the reply and the card close below.
     if (!hostedLive && !terminalHeld) {
       const status: RunStatus = outcome === undefined ? "failed" : "completed";
+      await events.drain();
       registry.finish(run.id, status);
       const snap = registry.snapshot(run.id, run.token);
       const finishedAt = snap?.finishedAt ?? clock();

@@ -38,6 +38,7 @@ declare module 'vue' {
     RunRow: typeof import('./src/components/runs/RunRow.vue')['default']
     RunTimeline: typeof import('./src/components/run/RunTimeline.vue')['default']
     RunUnitsBlock: typeof import('./src/components/run/RunUnitsBlock.vue')['default']
+    ScrollingText: typeof import('./src/components/ScrollingText.vue')['default']
     SeedScope: typeof import('./src/components/SeedScope.vue')['default']
     SettingSelect: typeof import('./src/components/SettingSelect.vue')['default']
     ShipSpendChart: typeof import('./src/components/costs/ShipSpendChart.vue')['default']

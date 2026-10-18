@@ -82,6 +82,7 @@ import { httpJwksFetcher, JwksCache, parseAccessConfig, type VerifyDeps } from "
 import type { AccessIdentity } from "./channels/accessAuth.js";
 import { buildDashboardVerifier } from "./channels/dashboardAuth.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
+import { runTitleGenerator } from "./runTitles.js";
 import { BundledSkillStore, DEFAULT_SKILLS_DIR } from "./skills/index.js";
 import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
@@ -382,6 +383,7 @@ export async function runBot(): Promise<void> {
   // outside a run — the router's and reflection's (docs/reference/specs/harness-pi.md
   // item 13); a run's own calls go through the model proxy below.
   const completions = new PiAiProviders(config.config.providers);
+  defaultRunRegistry.configureTitles(runTitleGenerator(config.config, completions));
   // Bundled skills (docs/reference/specs/skills.md): loaded once from the seeded `skills/` dir and shared
   // across all channels via CoreDeps, so review/coding get their scoped skill
   // list in-prompt and can load bodies on demand with use_skill.
@@ -971,6 +973,10 @@ export async function runBot(): Promise<void> {
     },
   };
   const commands = buildCoreCommands(config, runStore, {
+    emojiSync: async () => {
+      if (!browserWiring) throw new Error("Emoji cache is unavailable.");
+      return browserWiring.emoji.refresh(app.client);
+    },
     ...(maintenanceStore && maintenanceService
       ? { maintenance: { store: maintenanceStore, service: maintenanceService, inFlight: () => inFlight() } }
       : {}),

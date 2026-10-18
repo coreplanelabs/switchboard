@@ -12,6 +12,7 @@ import { formatDuration } from "../time/formatDuration.js";
 import type { PlaneService, PlaneStopReport } from "../planeService.js";
 import type { PlanePullRequestRow, PlaneRunRow, PlaneTable, PlaneUnitRow } from "../plane/table.js";
 import { runDurationMs } from "../runDuration.js";
+import { runMetadata } from "../runDisplay.js";
 
 // `plane show` (docs/reference/specs/orchestration-plane.md item 4; docs/decisions/0064,
 // "The table"): what is happening — every live and recently ended run, every
@@ -114,7 +115,10 @@ export const planeShow = defineCommand({
   handler: async ({ caller, deps }) => {
     const service = await deps.plane.service();
     const table = await service.table(predicateFor(caller.actor, "runs:read", "run"));
-    return table as unknown as JsonObject;
+    return {
+      ...table,
+      runs: table.runs.map((row) => ({ ...row, run: runMetadata(row.run) })),
+    } as unknown as JsonObject;
   },
 });
 

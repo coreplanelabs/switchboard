@@ -96,6 +96,7 @@ import {
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { TITLE_GATE_REPOSITORY } from "./prDescription.js";
 import { defaultRunRegistry, RunRegistry } from "./runRegistry.js";
+import { RunEventLane } from "./runEventLane.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
 import { activityText } from "./statusCardFrame.js";
 import type { IndexEvent } from "./runRegistry/indexFeed.js";
@@ -10664,6 +10665,15 @@ const answerOf = (events: readonly RunEvent[]) => events.find((e) => e.type === 
 /** Preserve the original created identity in projection-only spy fixtures. */
 function withOriginalRegistryIdentity(spy: RunRegistry): RunRegistry {
   const identity = new RunRegistry();
+  const lanes = new Map<string, RunEventLane>();
+  spy.eventLane = (id) => {
+    let lane = lanes.get(id);
+    if (!lane) {
+      lane = new RunEventLane((event) => spy.publish(id, event));
+      lanes.set(id, lane);
+    }
+    return lane;
+  };
   const create = spy.create.bind(spy);
   spy.create = (label, meta, options) => {
     const run = create(label, meta, options);
@@ -10672,6 +10682,7 @@ function withOriginalRegistryIdentity(spy: RunRegistry): RunRegistry {
   };
   spy.has = identity.has.bind(identity);
   spy.snapshot = identity.snapshot.bind(identity);
+  spy.listActive = identity.listActive.bind(identity);
   return spy;
 }
 
@@ -11237,7 +11248,7 @@ describe("closed-card checklist and review verdict run link", () => {
       size: () => 1,
     } as unknown as RunRegistry;
     const deps = reviewRunDeps(capturingProvider());
-    deps.runRegistry = spy;
+    deps.runRegistry = withOriginalRegistryIdentity(spy);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     expect(replies).toContainEqual(
@@ -16685,6 +16696,46 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     };
     return { io, replies };
   }
+
+  it.each(["wrapping_up", "ended"] as const)(
+    "retains matching final states and title when the title completes during %s storage",
+    async (boundary) => {
+      const { deps, registry, ledger, writer } = wired(capturingProvider("Finished checking the release"));
+      let titleReady!: (title: string) => void;
+      registry.configureTitles(() => new Promise((resolve) => (titleReady = resolve)));
+      const assign = ledger.assignLiveState.bind(ledger);
+      vi.spyOn(ledger, "assignLiveState").mockImplementation(async (id, gen, assignment) => {
+        if (assignment.state === boundary) {
+          titleReady("Check the release");
+          // Let the completed background call reach its publication queue
+          // while this real durable boundary still owns its reserved sequence.
+          for (let tick = 0; tick < 8; tick++) await Promise.resolve();
+        }
+        return assign(id, gen, assignment);
+      });
+      await dispatch(deps, msg("Check the release"), ioWithCard().io);
+      await writer.settled();
+      const live = registry.snapshotById("run-l")!;
+      const saved = ledger.finished.get("run-l")!;
+      expect(registry.getById("run-l")).toMatchObject({
+        title: "Check the release",
+        liveState: { state: "ended" },
+        status: "completed",
+        replyOk: true,
+      });
+      expect(saved).toMatchObject({ title: "Check the release", status: "completed" });
+      const boundaries = (events: RunEvent[]) =>
+        events.filter((event) => event.type === "run_state" || event.type === "run_title");
+      expect(boundaries(saved.events)).toEqual(boundaries(live.events));
+      expect(
+        saved.events
+          .filter((event) => event.type === "run_state")
+          .slice(-2)
+          .map((event) => event.state),
+      ).toEqual(["wrapping_up", "ended"]);
+      expect(saved.events.filter((event) => event.type === "run_title")).toHaveLength(1);
+    },
+  );
 
   it.each(["acknowledged", "pending_old", "pending_saved", "confirmed_old", "missing"] as const)(
     "restores research eligibility and original source closure when finishing a reclaimed run (%s)",

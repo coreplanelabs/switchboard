@@ -8,6 +8,7 @@ import type { PageSeed, WebSeed } from "@core/channels/webSeed.js";
 import type { Capabilities } from "@core/core/capabilities.js";
 import { SeedKey } from "../lib/seed";
 import { EventSourceKey, type EventSourceFactory } from "../lib/eventSource";
+import { textRendering } from "../../green/lib/emoji";
 
 // The one mount helper for component tests: everything is hosted inside
 // <UApp> (tooltip/toast/overlay providers), with the Nuxt UI plugin, a memory
@@ -57,7 +58,7 @@ export function mountApp(component: Component, options: MountAppOptions = {}) {
     history: createMemoryHistory(),
     routes: [{ path: "/:pathMatch(.*)*", component: defineComponent({ render: () => h("div") }) }],
   });
-  return mount(host, { attachTo: document.body, global: { plugins: [router, ui] } });
+  return mount(host, { attachTo: document.body, global: { plugins: [router, ui, textRendering] } });
 }
 
 /** The styled select that carries this id (`#mcp-scope`): a `SettingSelect`, found by its `id`

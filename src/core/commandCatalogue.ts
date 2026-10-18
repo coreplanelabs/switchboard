@@ -1,4 +1,5 @@
 import { commandConfirmationMessage } from "./commandConfirmations.js";
+import { unavailableEmojiSync, type EmojiCommandDeps } from "./commands/emoji.js";
 import { buildMaintenanceStore, MaintenanceService, MAINTENANCE_UNAVAILABLE } from "./maintenance.js";
 import { commandMaintenanceRefusal, maintenanceRecoveryCommand } from "./maintenanceAdmission.js";
 import type { MaintenanceCommandDeps } from "./commands/maintenance.js";
@@ -107,6 +108,7 @@ import { channelVisibilityOf } from "./dispatch/record.js";
 
 /** How an in-process binding reaches the catalogue's deps. */
 export interface CoreCommandWiring {
+  emojiSync?: EmojiCommandDeps["emoji"]["sync"];
   maintenance?: MaintenanceCommandDeps["maintenance"];
   credentialInspection?: CredentialsCommandDeps["credentials"]["inspect"];
   /** The live registry — `defaultRunRegistry` in every real process, so the
@@ -556,6 +558,7 @@ export function buildCoreCommands(
     },
     env: { bootstrap: bootstrapOnHost },
     status: { snapshot: () => (wiring.status ?? unstampedStatus)() },
+    emoji: { sync: wiring.emojiSync ?? unavailableEmojiSync },
     // `setup init` writes the operator's working directory — the one the CLI runs in.
     setup: hostSetupIO(),
     // `contract render` reads the paths the CLI caller names (CLI-only).

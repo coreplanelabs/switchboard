@@ -202,7 +202,7 @@ import { reviewPostOptedOut } from "../reviewPost.js";
 import { startReviewReadingDiff } from "../readingDiff.js";
 import { startReviewDescription } from "../reviewDescription.js";
 import { isSpanRecord, redactAndCap, type RunEvent } from "../runEvents.js";
-import { RunEventLane } from "../runEventLane.js";
+import type { RunEventLane } from "../runEventLane.js";
 import { oneLine } from "../redact.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
@@ -541,7 +541,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // answer. Keep every card frame free of model text for the whole DM run.
   const privateRun = privateAudienceRequired(msg) || slackContext !== undefined;
   const privateAudienceLatch = sharedPrivateAudienceLatch ?? { revoked: false };
-  const events = ctx.events ?? new RunEventLane((event) => registry.publish(run.id, event));
+  const events = ctx.events ?? registry.eventLane(run.id);
   // The def the runner and the post-run turns read: the preset with the
   // EFFECTIVE budget (its deadline, wrap-up warning and budget label read
   // `maxMinutes`) — a copy, never the shared registry entry.
@@ -5410,9 +5410,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             liveStateSeq: eventSeq,
           });
         };
-        const at = clock();
-        await commitBoundary("wrapping_up", at);
-        await commitBoundary("ended", clock());
+        await events.write(() => commitBoundary("wrapping_up", clock()));
+        await events.write(() => commitBoundary("ended", clock()));
       }
       // Close the live-view stream and start the TTL, handing the registry the
       // terminal status so every summary projects it (the index, `runs list`)

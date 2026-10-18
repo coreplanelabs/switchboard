@@ -1175,6 +1175,7 @@ describe("RunsService.listRuns — read merge", () => {
         label: "coding · acme/x",
         startedAt: NOW,
         stepCount: 1,
+        prompt: "go",
         schema: 2, // as the record writer stamps it; the live row carries the same
         events: [{ type: "input", messageId: "m1", text: "go", seq: 1 }],
       }),
@@ -1201,12 +1202,13 @@ describe("RunsService.listRuns — read merge", () => {
     );
     expect(liveRow.value).toMatchObject({
       label: "coding · acme/x",
+      prompt: "go",
       ...meta,
       finished: true,
       persisted: true,
       eventCount: 1,
     });
-    expect(persistedRow.value).toMatchObject({ status: "completed", finishedAt: NOW + 1 });
+    expect(persistedRow.value).toMatchObject({ status: "completed", finishedAt: NOW + 1, prompt: "go" });
   });
 
   it("a live→persisted afterSeq cursor addresses the same events: the record keeps the registry seq, not positions", async () => {

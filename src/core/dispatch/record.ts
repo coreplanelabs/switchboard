@@ -1,3 +1,4 @@
+import { runDisplayOf } from "../runDisplay.js";
 import { organizationPrivateAudienceOf } from "./privateDestination.js";
 import { answerOutcomeOf, type AnswerOutcome } from "../answerOutcome.js";
 import { runSetupOf, type RunSetup } from "../runSetup.js";
@@ -598,6 +599,9 @@ export function assembleRunRecord(input: {
       ? { orchestratorDecisions: structuredClone(input.orchestratorDecisions) }
       : {}),
     ...(run.label !== undefined ? { label: run.label } : {}),
+    ...runDisplayOf(events),
+    ...(snap?.prompt !== undefined ? { prompt: snap.prompt } : {}),
+    ...(snap?.title !== undefined ? { title: snap.title } : {}),
     ...(input.agent !== undefined ? { agent: input.agent } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
     channelId: msg.channelId,

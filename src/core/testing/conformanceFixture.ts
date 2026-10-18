@@ -817,6 +817,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       },
       inFlight: () => 1,
     },
+    emoji: { sync: async () => ({ status: "complete", total: 0, available: 0, downloaded: 0, failed: 0 }) },
     status: {
       snapshot: () => ({
         version: "0.0.0-test",

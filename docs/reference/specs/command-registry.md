@@ -111,6 +111,7 @@ Every registered command, rendered from the registry by `npm run docs:gen` and h
 
 | Command | Derived form | Action | Resource | Effect | Blast radius | Surfaces | Description |
 |---|---|---|---|---|---|---|---|
+| `emoji.sync` | `emoji sync` | `config:write` | `config-scope` (org) | write | write | cli, http, mcp | Download the workspace's full custom Slack emoji catalog and aliases on demand. Replaces the local catalog, preserves verified cached images on partial failure, and reports name and file counts. No scheduled polling. |
 | `maintenance.status` | `maintenance status` | `maintenance:read` | `command` | read | read | chat, cli, http, mcp | Read the durable maintenance episode, notice result, and work in flight. Does not prove resident idleness. |
 | `maintenance.announce` | `maintenance announce [--scopes <string>] [--reason <string>] [--channel <string>] [--starts-at <string>] [--timing <string>]` | `maintenance:write` | `command` | write | write | chat, cli, http, mcp | Announce scoped maintenance in Slack and return the exact activation call for the client's scheduler. Installs no timer. |
 | `maintenance.start` | `maintenance start [--id <string>] [--scopes <string>] [--reason <string>] [--channel <string>]` | `maintenance:write` | `command` | write | write | chat, cli, http, mcp | Close access for new requests for an announced episode by ID, or start immediate maintenance. Existing work is not killed. No automatic expiry. |

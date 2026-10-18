@@ -33,6 +33,8 @@ oauth_config:
       - groups:history
       - files:read
     bot:
+      # Import custom emoji and aliases for dashboard text on manual refresh.
+      - emoji:read
       # Receive mentions; post and edit messages (the status card edits itself in place).
       - app_mentions:read
       - chat:write

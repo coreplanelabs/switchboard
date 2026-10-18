@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import StatusDot from "../StatusDot.vue";
 import SourceMark from "./SourceMark.vue";
+import ScrollingText from "../ScrollingText.vue";
 import { browser } from "../../lib/browser";
 import { durationTone, heatStyle } from "../../lib/durationTone";
 import { formatDateTime, formatLocalIso, formatRelative, splitRunLabel } from "../../lib/format";
@@ -63,7 +64,7 @@ const parts = computed(() => {
   return {
     ...label,
     agent: label.agent ?? props.run.agent,
-    snippet: label.snippet ?? props.run.activity,
+    snippet: props.run.title ?? props.run.prompt ?? label.snippet ?? props.run.activity,
   };
 });
 const repo = computed(() => repoOf(props.run, parts.value.scope));
@@ -236,10 +237,13 @@ function onRowClick(ev: MouseEvent): void {
       </span>
       <div class="min-w-0">
         <div class="primary flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <span
-            class="snippet min-w-0 text-sm leading-6 text-highlighted [overflow-wrap:anywhere] max-sm:line-clamp-2 sm:truncate"
-            >{{ parts.snippet ?? (repo ? repo.slice(repo.indexOf("/") + 1) : parts.scope) }}</span
-          >
+          <ScrollingText
+            class="snippet min-w-0 max-w-full overflow-x-auto whitespace-nowrap text-sm leading-6 text-highlighted pointer-events-auto"
+            :text="parts.snippet ?? (repo ? repo.slice(repo.indexOf('/') + 1) : parts.scope)"
+            :title="run.prompt ?? parts.snippet"
+            tabindex="0"
+            @keydown.enter="browser.navigate(href)"
+          />
           <span
             v-if="outcome"
             class="outcome shrink-0 rounded border px-1.5 text-[0.7rem]"

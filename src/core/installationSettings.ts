@@ -345,7 +345,7 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
     );
     for (const name of AGENT_CONFIG_NAMES) {
       const effective = settingsForAgent(config, name);
-      const internal = ["operator", "intake", "memory"].includes(name);
+      const internal = ["operator", "intake", "memory", "title"].includes(name);
       canonical.push(
         row(
           `agents.${name}.profile`,

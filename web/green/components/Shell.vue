@@ -8,7 +8,7 @@ import logoDark from "../../src/assets/logo-dark.svg";
 import ThemeToggle from "../../src/components/ThemeToggle.vue";
 import { SeedKey } from "../../src/lib/seed";
 import { useHomeSession } from "../lib/homeSession";
-import { watchSlackEmoji } from "../lib/emoji";
+import { watchDisplayText } from "../lib/emoji";
 import UserMenu from "./UserMenu.vue";
 import { primaryNavigation, pageTitle } from "../lib/navigation";
 
@@ -64,7 +64,7 @@ watch(wide, (value) => {
 });
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
-  if (shell.value && seed?.emoji) stopEmoji = watchSlackEmoji(shell.value, seed.emoji);
+  if (shell.value) stopEmoji = watchDisplayText(document.body, seed?.emoji ?? {});
 });
 onBeforeUnmount(() => {
   stopEmoji?.();
