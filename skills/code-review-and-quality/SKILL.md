@@ -24,7 +24,7 @@ Switchboard's explicit spec, test-guard, and unit-contract checks remain applica
 
 ## Report
 
-Use [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) for all client-authored prose: chat replies, progress updates, PR titles and descriptions, review comments, issue text, commit messages, documentation and reports. Use short, direct sentences, active voice and concrete terms. Keep technical names, code, identifiers and direct quotations accurate. Explain the affected product task, the input or state that causes the failure, and what the user observes. Define internal terms before relying on them.
+Follow the shared writing rules supplied by `use_skill`. Explain the affected product task, the input or state that causes the failure, and what the user observes. Define internal terms before relying on them.
 
 The human explanation must answer five questions: What observable result is wrong? What real action or state causes it? Why does it need a change? What fact establishes the claim, and what remains unproved? What is the smallest sufficient correction? The `humanFindings` tool fields carry those answers. The public comment leads with the problem, then **Why it matters**, **Evidence**, and **Change**. Follow the field guidance and examples in the submission tool.
 
