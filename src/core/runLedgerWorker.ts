@@ -1,3 +1,4 @@
+import { liveEventSnapshotOf, sameLiveEventSnapshot, type LiveEventSnapshot } from "./runLedger/eventPage.js";
 import { prepareInboxDelivery, inboxDeliveryResultOf, type InboxDeliveryResult } from "./runLedger/inboxDelivery.js";
 import { EXECUTION_PROTOCOL_HEADER, NATIVE_REVIEW_STOP_HEADER } from "./runLedger/types.js";
 import {
@@ -1812,8 +1813,54 @@ export class WorkerRunLedger implements RunLedger {
 
   async readEvents(runId: string): Promise<AppendableEvent[]> {
     this.checkIds(runId);
-    const r = await this.read("/runs/live-events", { storeKey: this.opts.storeKey, runId });
-    return Array.isArray(r.data.events) ? (r.data.events as AppendableEvent[]) : [];
+    const events: AppendableEvent[] = [];
+    let afterSeq = 0;
+    let snapshot: LiveEventSnapshot | undefined;
+    for (;;) {
+      const r = await this.read("/runs/live-events", {
+        storeKey: this.opts.storeKey,
+        runId,
+        afterSeq,
+        ...(snapshot ? { snapshot } : {}),
+      });
+      const current = liveEventSnapshotOf(r.data.snapshot);
+      const page = r.data.events;
+      const next = r.data.nextAfterSeq;
+      const readThrough = r.data.readThrough;
+      if (
+        !Number.isSafeInteger(readThrough) ||
+        Number(readThrough) < afterSeq ||
+        !current ||
+        Number(readThrough) > current.through ||
+        (next === undefined && readThrough !== current.through) ||
+        (snapshot && !sameLiveEventSnapshot(snapshot, current)) ||
+        !Array.isArray(page) ||
+        page.some(
+          (event) =>
+            !event ||
+            typeof event !== "object" ||
+            typeof event.type !== "string" ||
+            !Number.isSafeInteger(event.seq) ||
+            event.seq <= afterSeq ||
+            event.seq > current.through,
+        ) ||
+        page.some((event, index) => index > 0 && event.seq <= page[index - 1].seq) ||
+        (next !== undefined &&
+          (!Number.isSafeInteger(next) ||
+            Number(next) <= afterSeq ||
+            Number(next) >= current.through ||
+            next !== readThrough ||
+            page.some((event) => event.seq > Number(next))))
+      ) {
+        const error = new PermanentStoreError("run ledger /runs/live-events returned an incomplete or malformed page");
+        this.reportFailure(r.request, "read", "acknowledgement", error);
+        throw error;
+      }
+      snapshot ??= current;
+      events.push(...(page as AppendableEvent[]));
+      if (next === undefined) return events;
+      afterSeq = Number(next);
+    }
   }
 
   async recordIntake(key: string, receipt: IntakeReceipt): Promise<IntakeWriteResult> {

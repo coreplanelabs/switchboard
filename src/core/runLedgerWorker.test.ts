@@ -1,3 +1,4 @@
+import { originalStorageFailure, type StorageFailureNotice } from "./storageFailureDiagnostic.js";
 import { planContextCheckpoint } from "./references/contextCheckpoint.js";
 import { createHash } from "node:crypto";
 import { contextDependenciesHash } from "./references/contextDependencies.js";
@@ -1661,5 +1662,130 @@ describe("source relevance client", () => {
       kind: "refused",
       reason: "invalid-request",
     });
+  });
+});
+
+describe("bounded live event reads", () => {
+  it("assembles pages only in the client and keeps the first snapshot", async () => {
+    const snapshot = { version: 0, through: 2, ownerGen: "g1", phase: "live", startedAt: 1000 };
+    const first = { type: "assistant", text: "first", seq: 1 };
+    const second = { type: "assistant", text: "second", seq: 2 };
+    const w = stubWorker((_path, body) => ({
+      status: 200,
+      data:
+        body.afterSeq === 0
+          ? { events: [first], snapshot, readThrough: 1, nextAfterSeq: 1 }
+          : { events: [second], snapshot, readThrough: 2 },
+    }));
+    expect(await w.ledger.readEvents("r1")).toEqual([first, second]);
+    expect(w.calls.map((call) => call.body)).toEqual([
+      { storeKey: "runs:default", runId: "r1", afterSeq: 0 },
+      { storeKey: "runs:default", runId: "r1", afterSeq: 1, snapshot },
+    ]);
+  });
+
+  it("reports a malformed successful page once on the original permanent error with exact request identity", async () => {
+    const requestId = "11111111-1111-4111-a111-111111111111";
+    const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValue(requestId);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const notices: StorageFailureNotice[] = [];
+    let sentRequestId: string | null = null;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "tok",
+      storeKey: "runs:default",
+      onFailure: (notice) => notices.push(notice),
+      fetch: async (_url, init) => {
+        sentRequestId = new Headers(init?.headers).get("x-switchboard-storage-request-id");
+        return Response.json({ events: "malformed page" });
+      },
+    });
+    try {
+      const failure: unknown = await wire.readEvents("r1").catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(PermanentStoreError);
+      expect((failure as Error).message).toBe("run ledger /runs/live-events returned an incomplete or malformed page");
+      expect(sentRequestId).toBe(requestId);
+      expect(
+        notices.map(({ runIds, diagnostic }) => ({
+          runIds,
+          operation: diagnostic.operation,
+          requestDigest: diagnostic.requestDigest,
+          requestId: diagnostic.requestId,
+          kind: diagnostic.kind,
+          phase: diagnostic.phase,
+        })),
+      ).toEqual([
+        {
+          runIds: ["r1"],
+          operation: "/runs/live-events",
+          requestDigest: "f8618e4e66c5bf0d07b5b52dbb61cda78ec051131d8c8bf873bc2f131f6d76b8",
+          requestId: "11111111-1111-4111-a111-111111111111",
+          kind: "read",
+          phase: "acknowledgement",
+        },
+      ]);
+      // The caught object itself retains this report; no replacement error
+      // may discard the original request's correlation.
+      expect(originalStorageFailure(failure)).toMatchObject({
+        operation: "/runs/live-events",
+        requestDigest: "f8618e4e66c5bf0d07b5b52dbb61cda78ec051131d8c8bf873bc2f131f6d76b8",
+        requestId: "11111111-1111-4111-a111-111111111111",
+        kind: "read",
+        phase: "acknowledgement",
+      });
+    } finally {
+      uuid.mockRestore();
+      warning.mockRestore();
+    }
+  });
+
+  it("refuses a malformed page instead of reporting an empty complete history", async () => {
+    const w = stubWorker(() => ({ status: 200, data: { events: "missing" } }));
+    await expect(w.ledger.readEvents("r1")).rejects.toThrow();
+  });
+});
+
+describe("live event page consistency", () => {
+  const snapshot = { version: 0, through: 2, ownerGen: "g1", phase: "live", startedAt: 1000 };
+  it.each([
+    { events: [], snapshot, readThrough: 0 },
+    { events: [], snapshot, readThrough: 0, nextAfterSeq: 0 },
+    {
+      events: [
+        { type: "assistant", text: "wrong order", seq: 2 },
+        { type: "assistant", text: "older", seq: 1 },
+      ],
+      snapshot,
+      readThrough: 2,
+    },
+  ])("rejects incomplete or regressing page %#", async (page) => {
+    await expect(stubWorker(() => ({ status: 200, data: page })).ledger.readEvents("r1")).rejects.toThrow();
+  });
+  it("rejects a changed snapshot or a failed continuation without returning its first page", async () => {
+    for (const change of ["owner", "transport"] as const) {
+      const w = stubWorker((_path, body) =>
+        body.afterSeq === 0
+          ? {
+              status: 200,
+              data: {
+                events: [{ type: "assistant", text: "first", seq: 1 }],
+                snapshot,
+                readThrough: 1,
+                nextAfterSeq: 1,
+              },
+            }
+          : change === "transport"
+            ? { status: 503, data: { error: "unavailable" } }
+            : {
+                status: 200,
+                data: {
+                  events: [{ type: "assistant", text: "second", seq: 2 }],
+                  snapshot: { ...snapshot, ownerGen: "g2" },
+                  readThrough: 2,
+                },
+              },
+      );
+      await expect(w.ledger.readEvents("r1")).rejects.toThrow();
+    }
   });
 });
