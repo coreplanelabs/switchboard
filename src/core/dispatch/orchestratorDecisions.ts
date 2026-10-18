@@ -1,5 +1,6 @@
 import { ORCHESTRATOR_DECISION_BYTES_MAX, ORCHESTRATOR_DECISIONS_MAX } from "../budgets.js";
-import { sourceEventReceiptOf, type SourceEventReceipt } from "../runLedger/sourceEvents.js";
+import { sourceEventReceiptOf, sourceSnapshot, type SourceEventReceipt } from "../runLedger/sourceEvents.js";
+import type { LiveRunRow } from "../runLedger/types.js";
 import { sourceHash } from "../references/receipts.js";
 import type { IncomingMessage } from "../types.js";
 
@@ -52,6 +53,60 @@ export interface OrchestratorSourceFoldDecision {
   inputHash: string;
   contextHash: string;
 }
+/** Versioned run-target data, not a permission grant. The store must load
+ * the canonical row and compare it again at append. Generation, lease and
+ * transcript offsets do not change the selected task or consumer attempt. */
+export function sourceFoldRunTarget(row: LiveRunRow) {
+  const meta = row.meta,
+    handoff = meta.childHandoff;
+  const projection = {
+    version: 1 as const,
+    kind: "run" as const,
+    runId: row.runId,
+    recipient: {
+      agent: meta.agent ?? null,
+      requester: meta.userId,
+      channelId: meta.channelId,
+      threadKey: meta.threadKey,
+      authenticatedAs: meta.authenticatedAs ?? null,
+      postedBy: meta.postedBy ?? null,
+      readonly: meta.readonly ?? null,
+      identity: meta.profile?.identity ?? null,
+      privateConversation: meta.privateConversation ?? null,
+      mainAudienceChecked: meta.mainAudienceChecked ?? null,
+      channelVisibility: meta.channelVisibility ?? null,
+      directAudience: meta.directAudience ?? null,
+    },
+    parent: {
+      runId: meta.parentRunId ?? null,
+      instanceId: meta.parentInstanceId ?? null,
+      unit: meta.coordinatorUnit ?? null,
+      attempt: meta.coordinatorAttempt ?? null,
+      idempotencyKey: meta.idempotencyKey ?? null,
+    },
+    handoff: handoff
+      ? {
+          source: handoff.source,
+          owner: handoff.orchestratorOwner ?? null,
+          sessionKey: handoff.session?.key ?? null,
+          consumer: handoff.consumer ?? null,
+        }
+      : null,
+    task: {
+      repo: meta.repo ?? null,
+      ref: meta.ref ?? null,
+      baseRef: meta.baseRef ?? null,
+      headSha: meta.headSha ?? null,
+      pr: meta.pr ?? null,
+      operationTarget: meta.operationTarget ?? null,
+      githubSource: meta.githubSource ?? null,
+      recordTaskKey: meta.recordTaskKey ?? null,
+    },
+  };
+  sourceSnapshot(projection);
+  return structuredClone(projection);
+}
+
 export type OrchestratorDecision =
   OrchestratorCommandDecision | OrchestratorWorkDecision | OrchestratorSourceFoldDecision;
 

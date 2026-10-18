@@ -302,9 +302,8 @@ import {
 } from "../../src/core/references/contextDependencies.js";
 import { contextReferencesOf, type ContextReference } from "../../src/core/runLedger/contextRetention.js";
 import {
-  sourceEvidenceOwnerMatches,
+  sourceEvidenceAppendRefusal,
   prepareSourceEvidenceAppend,
-  sourceEvidenceRecordMatches,
   type PreparedSourceEvidenceAppend,
 } from "../../src/core/runLedger/sourceEvidence.js";
 import { isChildHandoff, type ChildHandoff } from "../../src/core/dispatch/handoff.js";
@@ -8222,7 +8221,11 @@ export class RunHistoryDO extends DurableObject<Env> {
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
     const sourceInput = message.kind === "source-evidence" && message.version === 2;
     const source = sourceInput
-      ? await prepareSourceEvidenceAppend(message, (key) => this.sourceInboxRecord(key))
+      ? await prepareSourceEvidenceAppend(
+          message,
+          (key) => this.sourceInboxRecord(key),
+          () => this.liveRow(runId),
+        )
       : undefined;
     if (sourceInput && !source) {
       console.warn("[runs/inbox] source evidence refused", {
@@ -8230,6 +8233,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         kind: "source-evidence",
         version: 2,
         phase: "prepare",
+        reason: "source-proof",
       });
       return { ok: false, reason: "invalid-message" };
     }
@@ -8246,7 +8250,11 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!input || !runId || runId.length > 512) return { kind: "refused", reason: "invalid-delivery" };
     const source =
       input.message.kind === "source-evidence" && input.message.version === 2
-        ? await prepareSourceEvidenceAppend(input.message, (key) => this.sourceInboxRecord(key))
+        ? await prepareSourceEvidenceAppend(
+            input.message,
+            (key) => this.sourceInboxRecord(key),
+            () => this.liveRow(runId),
+          )
         : undefined;
     let out: InboxDeliveryResult = { kind: "refused", reason: "not-live" };
     this.ctx.storage.transactionSync(() => {
@@ -8313,18 +8321,20 @@ export class RunHistoryDO extends DurableObject<Env> {
   ): InboxPushResult {
     const owner = this.liveRow(runId);
     if (!owner) return { ok: false, reason: "not-live" };
-    if (!sourceEvidenceOwnerMatches(message, owner, (id) => this.liveRow(id)))
-      return { ok: false, reason: "invalid-message" };
-    if (
-      message.kind === "source-evidence" &&
-      message.version === 2 &&
-      !sourceEvidenceRecordMatches(source, (key) => this.sourceInboxRecord(key))
-    ) {
+    const reason = sourceEvidenceAppendRefusal(
+      message,
+      owner,
+      (id) => this.liveRow(id),
+      (key) => this.sourceInboxRecord(key),
+      source,
+    );
+    if (reason) {
       console.warn("[runs/inbox] source evidence refused", {
         runId,
         kind: "source-evidence",
         version: 2,
         phase: "append",
+        reason,
       });
       return { ok: false, reason: "invalid-message" };
     }

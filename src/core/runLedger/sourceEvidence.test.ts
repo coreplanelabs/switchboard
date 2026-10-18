@@ -3,6 +3,8 @@ import { prepareSourceEvidenceMessage, sourceEvidenceMessageFromRecord } from ".
 import { bindInboxCustody, messageFromInbox } from "./inboxMessage.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import { LEASE_MS } from "./types.js";
+import { sourceHash } from "../references/receipts.js";
+import { sourceSnapshot } from "./sourceEvents.js";
 
 const destination = {
   runId: "child-one",
@@ -459,15 +461,77 @@ describe("source notice and fold messages", () => {
       },
     });
     const folded = { ...message, routing: { kind: "fold", owner, decision: { runId: owner.runId, id: decision.id } } };
+    const target = {
+      version: 1,
+      kind: "run",
+      runId: "child",
+      recipient: {
+        agent: "coding",
+        requester: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:child",
+        authenticatedAs: null,
+        postedBy: null,
+        readonly: null,
+        identity: null,
+        privateConversation: null,
+        mainAudienceChecked: null,
+        channelVisibility: null,
+        directAudience: null,
+      },
+      parent: { runId: "orchestrator-one", instanceId: null, unit: null, attempt: null, idempotencyKey: null },
+      handoff: { source: childHandoff.source, owner, sessionKey: rootSession, consumer: childHandoff.consumer },
+      task: {
+        repo: null,
+        ref: null,
+        baseRef: null,
+        headSha: null,
+        pr: null,
+        operationTarget: null,
+        githubSource: null,
+        recordTaskKey: null,
+      },
+    };
+    decision.target.hash = await sourceHash(sourceSnapshot(target));
+    decision.inputHash = await sourceHash(sourceSnapshot(folded));
     const deliver = () => ledger.deliverInbox("child", { version: 1, key: "fold-owner", message: folded });
     expect(await deliver()).toEqual({ kind: "refused", reason: "invalid-delivery" });
+    for (const changed of [
+      { ...decision, inputHash: "d".repeat(64) },
+      { ...decision, target: { ...decision.target, hash: "e".repeat(64) } },
+    ]) {
+      expect(await ledger.setState(owner.runId, "g1", { orchestratorDecisions: [changed] })).toEqual({ ok: true });
+      expect(await deliver()).toEqual({ kind: "refused", reason: "invalid-delivery" });
+      expect(await ledger.readInbox("child", 0)).toEqual([]);
+    }
     expect(await ledger.setState(owner.runId, "g1", { orchestratorDecisions: [decision] })).toEqual({ ok: true });
     ledger.live.get(owner.runId)!.meta.agent = "review";
     expect(await deliver()).toEqual({ kind: "refused", reason: "invalid-delivery" });
     ledger.live.get(owner.runId)!.meta.agent = "orchestrator";
+    await ledger.handoff("g1", ["child"]);
+    await ledger.reclaim("g2", 2000, LEASE_MS);
     expect(await deliver()).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
     expect((await ledger.readInbox("child", 0))[0].message.routing).toEqual(folded.routing);
     const child = ledger.live.get("child")!;
+    const originalMeta = structuredClone(child.meta);
+    for (const changed of [
+      { headSha: "d".repeat(40) },
+      { repo: "other/repository" },
+      { authenticatedAs: "access:other" },
+      { childHandoff: { ...childHandoff, consumer: { ...childHandoff.consumer, attempt: "second" } } },
+    ]) {
+      const pending = ledger.pushInbox("child", folded);
+      child.meta = { ...originalMeta, ...changed };
+      expect(await pending).toEqual({ ok: false, reason: "invalid-message" });
+      child.meta = structuredClone(originalMeta);
+    }
+    const changedDecision = ledger.pushInbox("child", folded);
+    ledger.live.get(owner.runId)!.state.orchestratorDecisions = [{ ...decision, inputHash: "f".repeat(64) }];
+    expect(await changedDecision).toEqual({ ok: false, reason: "invalid-message" });
+    ledger.live.get(owner.runId)!.state.orchestratorDecisions = [decision];
+    child.phase = "finishing";
+    expect(await ledger.pushInbox("child", folded)).toEqual({ ok: false, reason: "invalid-message" });
+    child.phase = "live";
     child.meta.parentRunId = "another-parent";
     expect(await ledger.deliverInbox("child", { version: 1, key: "parent-changed", message: folded })).toEqual({
       kind: "refused",

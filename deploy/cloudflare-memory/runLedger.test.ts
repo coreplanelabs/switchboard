@@ -4,6 +4,8 @@ import { cancellationRecordMatches } from "../../src/core/runLedger/cancellation
 import { isRunRecord } from "../../src/core/runRecord.ts";
 import { reclaimedRunRecord } from "../../src/core/dispatch/record.ts";
 import { sourceHash, mergeSessionSources } from "../../src/core/references/receipts.ts";
+import { sourceFoldRunTarget, orchestratorDecisionsOf } from "../../src/core/dispatch/orchestratorDecisions.ts";
+import { sourceSnapshot } from "../../src/core/runLedger/sourceEvents.ts";
 import { inboxDeliveryWitness } from "../../src/core/runLedger/inboxDelivery.ts";
 import {
   prepareSourceEvidenceMessage,
@@ -17726,6 +17728,129 @@ describe("typed SQLite source evidence", () => {
       routing,
       content: { kind: "facts", facts: { state: "closed", nested: { value: null } } },
     });
+    if (kind === "fold") {
+      const live = (await post("/runs/live", { storeKey: key })).data.runs as LiveRunRow[];
+      const root = live.find((row) => row.runId === rootId)!;
+      const child = live.find((row) => row.runId === "r1")!;
+      const saved = orchestratorDecisionsOf(root.state.orchestratorDecisions, owner)?.[0];
+      if (saved?.version !== 2) throw new Error("expected saved source fold");
+      const decision = {
+        ...saved,
+        target: { ...saved.target, hash: await sourceHash(sourceSnapshot(sourceFoldRunTarget(child))) },
+        inputHash: await sourceHash(sourceSnapshot(message)),
+      };
+      for (const [changed, reason] of [
+        [{ ...decision, inputHash: "d".repeat(64) }, "fold-input"],
+        [{ ...decision, target: { ...decision.target, hash: "e".repeat(64) } }, "fold-target"],
+        [undefined, "fold-decision"],
+      ] as const) {
+        expect(
+          (
+            await post("/runs/state", {
+              storeKey: key,
+              runId: rootId,
+              gen: "g1",
+              state: { orchestratorDecisions: changed ? [changed] : [] },
+            })
+          ).data.ok,
+        ).toBe(true);
+        expect(
+          (
+            await post("/runs/inbox/deliver", {
+              storeKey: key,
+              runId: "r1",
+              delivery: { version: 1, key: "input-two", message },
+            })
+          ).data,
+        ).toEqual({ kind: "refused", reason: "invalid-delivery" });
+        const observed = await runInDurableObject(
+          env.RUNS.get(env.RUNS.idFromName(key)),
+          async (instance: RunHistoryDO) => {
+            const logs: unknown[][] = [];
+            const warn = console.warn;
+            console.warn = (...fields: unknown[]) => {
+              logs.push(fields);
+            };
+            try {
+              return { result: await instance.pushInbox("r1", { ...message! }), logs };
+            } finally {
+              console.warn = warn;
+            }
+          },
+        );
+        expect(observed).toEqual({
+          result: { ok: false, reason: "invalid-message" },
+          logs: [
+            [
+              "[runs/inbox] source evidence refused",
+              {
+                runId: "r1",
+                kind: "source-evidence",
+                version: 2,
+                phase: "append",
+                reason,
+              },
+            ],
+          ],
+        });
+        expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1" })).data.items).toEqual([]);
+      }
+      expect(
+        (
+          await post("/runs/state", {
+            storeKey: key,
+            runId: rootId,
+            gen: "g1",
+            state: { orchestratorDecisions: [decision] },
+          })
+        ).data.ok,
+      ).toBe(true);
+      const targetRace = await runInDurableObject(
+        env.RUNS.get(env.RUNS.idFromName(key)),
+        async (instance: RunHistoryDO, state) => {
+          const stored = state.storage.sql
+            .exec<{ meta_json: string }>("SELECT meta_json FROM live_runs WHERE run_id=?", "r1")
+            .one().meta_json;
+          const logs: unknown[][] = [];
+          const warn = console.warn;
+          console.warn = (...fields: unknown[]) => {
+            logs.push(fields);
+          };
+          try {
+            const result = [];
+            for (const meta of [
+              { ...JSON.parse(stored), headSha: "d".repeat(40) },
+              { ...JSON.parse(stored), parentRunId: "PRIVATE-foreign-parent" },
+            ]) {
+              const pending = instance.pushInbox("r1", { ...message! });
+              state.storage.sql.exec("UPDATE live_runs SET meta_json=? WHERE run_id=?", JSON.stringify(meta), "r1");
+              result.push(await pending);
+              state.storage.sql.exec("UPDATE live_runs SET meta_json=? WHERE run_id=?", stored, "r1");
+            }
+            return { result, logs };
+          } finally {
+            console.warn = warn;
+            state.storage.sql.exec("UPDATE live_runs SET meta_json=? WHERE run_id=?", stored, "r1");
+          }
+        },
+      );
+      expect(targetRace).toEqual({
+        result: [
+          { ok: false, reason: "invalid-message" },
+          { ok: false, reason: "invalid-message" },
+        ],
+        logs: ["fold-target", "fold-destination"].map((reason) => [
+          "[runs/inbox] source evidence refused",
+          {
+            runId: "r1",
+            kind: "source-evidence",
+            version: 2,
+            phase: "append",
+            reason,
+          },
+        ]),
+      });
+    }
     for (const changed of [
       { ...message!, content: { kind: "facts", facts: { state: "open" } } },
       { ...message!, source: { ...message!.source, authorId: "fixture:other" } },
@@ -17781,9 +17906,12 @@ describe("typed SQLite source evidence", () => {
       logs: [
         [
           "[runs/inbox] source evidence refused",
-          { runId: "r1", kind: "source-evidence", version: 2, phase: "prepare" },
+          { runId: "r1", kind: "source-evidence", version: 2, phase: "prepare", reason: "source-proof" },
         ],
-        ["[runs/inbox] source evidence refused", { runId: "r1", kind: "source-evidence", version: 2, phase: "append" }],
+        [
+          "[runs/inbox] source evidence refused",
+          { runId: "r1", kind: "source-evidence", version: 2, phase: "append", reason: "source-record" },
+        ],
       ],
     });
     if (kind === "fold") {
@@ -17829,6 +17957,21 @@ describe("typed SQLite source evidence", () => {
         })
       ).data,
     ).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+    const unreadableTargetReplay = await runInDurableObject(
+      env.RUNS.get(env.RUNS.idFromName(key)),
+      async (instance: RunHistoryDO, state) => {
+        const stored = state.storage.sql
+          .exec<{ meta_json: string }>("SELECT meta_json FROM live_runs WHERE run_id=?", "r1")
+          .one().meta_json;
+        try {
+          state.storage.sql.exec("UPDATE live_runs SET meta_json=? WHERE run_id=?", "{bad-json", "r1");
+          return await instance.deliverInbox("r1", { version: 1, key: "input-two", message });
+        } finally {
+          state.storage.sql.exec("UPDATE live_runs SET meta_json=? WHERE run_id=?", stored, "r1");
+        }
+      },
+    );
+    expect(unreadableTargetReplay).toMatchObject({ kind: "duplicate", receipt: { seq: 1 } });
     const missingSource = await runInDurableObject(
       env.RUNS.get(env.RUNS.idFromName(key)),
       async (instance: RunHistoryDO, state) => {
