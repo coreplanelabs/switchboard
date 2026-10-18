@@ -1,5 +1,6 @@
 import { postCommand, getCommand } from "./settingsApi";
 import { reactive } from "vue";
+import { unwrapUntrusted } from "@core/core/untrusted.js";
 import type { AbridgeControl, AbridgeState } from "../modules/pr-review/types";
 
 // The host's half of the panel's "Abridge with meat" control
@@ -26,6 +27,7 @@ export const MAX_POLLS = 200;
 export const MAX_PAGES = 50;
 
 export interface ReviewAbridge extends AbridgeControl {
+  refresh(): void;
   /** Stop polling — the page is going away. */
   dispose(): void;
 }
@@ -35,7 +37,7 @@ const defaultDeps: ReviewAbridgeDeps = {
   delay: (ms) => new Promise((r) => setTimeout(r, ms)),
 };
 
-type Answer = { state?: unknown; reason?: unknown; error?: unknown };
+type Answer = { state?: unknown; reason?: unknown; error?: unknown; progress?: unknown };
 
 export function createReviewAbridge(
   runId: string,
@@ -43,13 +45,21 @@ export function createReviewAbridge(
   deps: Partial<ReviewAbridgeDeps> = {},
 ): ReviewAbridge {
   const { fetch, delay } = { ...defaultDeps, ...deps };
-  const control = reactive<{ state: AbridgeState }>({ state: { state: "absent" } });
+  const control = reactive<{ state: AbridgeState; progress: string[] }>({ state: { state: "absent" }, progress: [] });
   let disposed = false;
+  let busy = false;
   /** The last failure was the SERVER's `failed` state — a stored one, which
    *  the command only recomputes on `force`. A transport or page-side failure
    *  is retried without it: the command's idempotency answers a stored
    *  artifact rather than spending a new model call. */
   let serverFailed = false;
+  function keepProgress(answer: Answer) {
+    if (Array.isArray(answer.progress))
+      control.progress = answer.progress
+        .filter((line): line is string => typeof line === "string")
+        .slice(-32)
+        .map((line) => unwrapUntrusted(line).slice(0, 512));
+  }
 
   async function post(force: boolean): Promise<Answer> {
     const answer = await postCommand(fetch, "review.abridge", { id: runId, ...(force ? { force: true } : {}) });
@@ -82,9 +92,18 @@ export function createReviewAbridge(
     return "stuck";
   }
 
-  async function run(force: boolean): Promise<void> {
+  async function status(): Promise<Answer> {
+    const answer = await getCommand(fetch, "review.status", { id: runId });
+    if (!answer.ok) throw new Error(answer.failure.message);
+    return (answer.value ?? {}) as Answer;
+  }
+
+  async function run(first: () => Promise<Answer>, reading = false): Promise<void> {
     try {
-      let answer = await post(force);
+      let answer = await first();
+      if (disposed) return;
+      keepProgress(answer);
+      if (answer.state === "running") control.state = { state: "running" };
       for (let polls = 0; answer.state === "running"; polls++) {
         if (polls >= MAX_POLLS) {
           serverFailed = false;
@@ -93,9 +112,9 @@ export function createReviewAbridge(
         }
         await delay(POLL_INTERVAL_MS);
         if (disposed) return;
-        const status = await getCommand(fetch, "review.status", { id: runId });
-        if (!status.ok) throw new Error(status.failure.message);
-        answer = (status.value ?? {}) as Answer;
+        answer = await status();
+        if (disposed) return;
+        keepProgress(answer);
       }
       if (disposed) return;
       if (answer.state === "failed") {
@@ -118,14 +137,25 @@ export function createReviewAbridge(
                     ? "the run's record did not page to its end"
                     : "the abridged diff did not appear on the run's record",
               };
+      } else if (reading && answer.state === "absent") {
+        serverFailed = false;
+        control.state = { state: "absent" };
       } else {
         serverFailed = false;
-        control.state = { state: "failed", reason: `unexpected answer: ${String(answer.state)}` };
+        control.state = {
+          state: reading ? "unavailable" : "failed",
+          reason: `unexpected answer: ${String(answer.state)}`,
+        };
       }
     } catch (err) {
       if (disposed) return;
       serverFailed = false;
-      control.state = { state: "failed", reason: err instanceof Error ? err.message : String(err) };
+      control.state = {
+        state: reading ? "unavailable" : "failed",
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    } finally {
+      busy = false;
     }
   }
 
@@ -133,11 +163,21 @@ export function createReviewAbridge(
     get state() {
       return control.state;
     },
+    get progress() {
+      return control.progress;
+    },
     start() {
-      if (control.state.state === "running" || disposed) return;
+      if (busy || control.state.state === "running" || control.state.state === "unavailable" || disposed) return;
       const force = control.state.state === "failed" && serverFailed;
       control.state = { state: "running" };
-      void run(force);
+      busy = true;
+      void run(() => post(force));
+    },
+    refresh() {
+      if (busy || disposed) return;
+      control.state = { state: "checking" };
+      busy = true;
+      void run(status, true);
     },
     dispose() {
       disposed = true;

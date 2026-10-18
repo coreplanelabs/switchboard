@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import StatusDot from "../StatusDot.vue";
 import SourceMark from "./SourceMark.vue";
+import RunPullRequestLink from "./RunPullRequestLink.vue";
 import ScrollingText from "../ScrollingText.vue";
 import { browser } from "../../lib/browser";
 import { durationTone, heatStyle } from "../../lib/durationTone";
@@ -279,6 +280,7 @@ function onRowClick(ev: MouseEvent): void {
           >
           <span class="inline-flex min-w-0 max-w-full items-center gap-1.5">
             <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
+            <RunPullRequestLink :run="run" />
             <UTooltip v-if="who" :text="who">
               <span class="who pointer-events-auto min-w-0 truncate" :data-user-id="run.userId" :data-surface="src.kind"
                 ><span class="name">{{ who }}</span></span

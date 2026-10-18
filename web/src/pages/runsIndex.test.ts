@@ -233,6 +233,23 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
 });
 
 describe("RunsIndexPage — the live feed", () => {
+  it.each([
+    { pr: { number: 42, url: "https://github.com/acme/api/pull/42" } },
+    { reviewPost: { posted: true as const, target: { repo: "acme/api", number: 42 }, head: "abc1234" } },
+  ])("keeps a saved PR link through summary replay and registry eviction: %j", async (target) => {
+    const { wrapper, es } = mountIndex(
+      seed([done("saved", { repo: "acme/api", persisted: true, ...target })], { all: true }),
+    );
+    expect(wrapper.get("a.run-pr").attributes("href")).toBe("https://github.com/acme/api/pull/42");
+    es().emitMessage({ type: "upsert", run: done("saved", { eventCount: 9 }) });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("a.run-pr").attributes("href")).toBe("https://github.com/acme/api/pull/42");
+    expect(wrapper.get(".count").text()).toBe("9 events");
+    es().emitMessage({ type: "removed", id: "saved" });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get("a.run-pr").attributes("href")).toBe("https://github.com/acme/api/pull/42");
+    wrapper.unmount();
+  });
   it("reconciles the actual seeded rows when Kill falls before feed attachment", async () => {
     const { wrapper, es } = mountIndex(
       seed([live("keep"), live("deleted", { finished: true, persisted: true })], { all: true }),

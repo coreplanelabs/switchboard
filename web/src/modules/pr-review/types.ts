@@ -58,18 +58,27 @@ export interface PrReviewData {
   description?: PrDescriptionData;
 }
 
-/** The abridging of the full diff, when the host can ask for one: `absent`
+/** The abridging of the full diff: `checking` reads saved status; `unavailable`
+ *  offers a read-only status check. `absent`
  *  offers the button, `running` shows the wait, `failed` names the reason and
  *  offers a retry; `done` renders nothing — the abridged diff has arrived in
  *  `readingDiffs` by then and its tab takes over. The host owns the request
- *  and the polling; the panel only renders the state and calls `start`. */
+ *  and the polling; the panel renders the state, checks it on mount and calls `start` only on a click. */
 export type AbridgeState =
-  { state: "absent" } | { state: "running" } | { state: "done" } | { state: "failed"; reason: string };
+  | { state: "checking" }
+  | { state: "absent" }
+  | { state: "running" }
+  | { state: "done" }
+  | { state: "failed" | "unavailable"; reason: string };
 
 export interface AbridgeControl {
   readonly state: AbridgeState;
+  /** Bounded plain-text progress supplied by the host, retained after completion. */
+  readonly progress?: readonly string[];
   /** Start the abridging — or retry it after a failure. */
   start(): void;
+  /** Recheck status without starting or retrying model work. */
+  refresh?(): void;
 }
 
 /** The header's title text: the PR's own title, else its reference. */

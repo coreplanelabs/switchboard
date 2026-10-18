@@ -20,8 +20,6 @@ describe("popupLayers — the one z-index for every floating layer", () => {
     const layers = popupLayers();
     expect(Object.keys(layers).sort()).toEqual([...POPUP_COMPONENTS].sort());
     for (const c of POPUP_COMPONENTS) expect(layers[c]).toEqual({ slots: { content: POPUP_LAYER } });
-    // Above the shell's sticky header (z-20), not above the slideover (z-30 overlay + content).
-    expect(POPUP_LAYER).toBe("z-30");
   });
 });
 

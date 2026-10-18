@@ -1,17 +1,8 @@
-// The dashboard's stacking order for Nuxt UI's floating layers (live-view.md
-// item 20). Every menu, combobox list, tooltip and popover is portaled to the
-// body with no z-index of its own, so it paints in DOM order among the page's
-// positioned elements — and loses to anything the page raises: a run row's
-// body (`z-[1]` over its stretched link), the shell's sticky header (`z-20`),
-// the chat's composer dock (`z-10`). The view-as picker's list was drawn
-// under the rows it dropped over. One layer for every popup, above the header
-// and level with the slideover's overlay and content (`z-30`, RunPage): among
-// equal z-indices DOM order decides, and a popup opened from inside the
-// slideover is portaled after it, so it wins. The theme sets the layer once
-// here and the Vite plugin hands it to each component's `content` slot.
+// Floating controls share the PR slideout's layer. Both paint above the
+// navigation (z-40); a popup opened inside the slideout comes later in the
+// portal and stays above it.
 
-/** The class every popup's content paints at: above the shell header (`z-20`). */
-export const POPUP_LAYER = "z-30";
+export const POPUP_LAYER = "z-50";
 
 /** The Nuxt UI components that float a `content` slot over the page. */
 export const POPUP_COMPONENTS = [

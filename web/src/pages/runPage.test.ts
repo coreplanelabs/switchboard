@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import RunPage from "../../green/pages/Run.vue";
+import { wrapUntrusted } from "@core/core/untrusted.js";
 import { enableAutoUnmount, flushPromises } from "@vue/test-utils";
 import { ALL_ON, mountApp, type MountAppOptions } from "../testing/mount";
 import { loadDiffs } from "../modules/pr-review/diffsLibrary";
@@ -2024,8 +2025,8 @@ describe("PR-review panel wiring", { timeout: PANEL_BUDGET_MS }, () => {
     // slideover keeps from its `title`, which `aria-labelledby` points at.
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).not.toBeNull();
-    // Above the shell's sticky header (z-20), which would otherwise paint over the panel's title row.
-    expect(dialog!.className).toContain("z-30");
+    // Above the navigation (z-40), which must not cover the shared slideout.
+    expect(dialog!.className).toContain("z-50");
     const labelledBy = dialog!.getAttribute("aria-labelledby");
     expect(labelledBy).toBeTruthy();
     expect(document.getElementById(labelledBy!)?.textContent).toContain("acme/api#42");
@@ -2094,12 +2095,17 @@ describe("PR-review panel wiring", { timeout: PANEL_BUDGET_MS }, () => {
   const withAbridge = (on: boolean): Capabilities => ({ ...ALL_ON, readingDiffAbridge: on });
 
   it("the abridge control: with the capability on and only the git diff the panel offers Abridge with meat, and a click POSTs /api/review.abridge for this run; off → nothing", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ state: "absent" }),
+    });
     const on = mountPage({
       ...historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "ok", at: 9 }]),
       capabilities: withAbridge(true),
     });
     await on.find('[data-testid="reading-diff-button"]').trigger("click");
-    await on.vm.$nextTick();
+    await flushPromises();
     const button = document.querySelector<HTMLButtonElement>('[data-testid="abridge-button"]');
     expect(button).not.toBeNull();
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -2113,7 +2119,7 @@ describe("PR-review panel wiring", { timeout: PANEL_BUDGET_MS }, () => {
       "/api/review.abridge",
       expect.objectContaining({ method: "POST", credentials: "same-origin" }),
     );
-    expect(JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body)).toEqual({ id: "run-1" });
+    expect(JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body)).toEqual({ id: "run-1" });
     expect(document.querySelector('[data-testid="abridge-running"]')).not.toBeNull();
     on.unmount(); // the off half reads document.body for the absence of any abridge control
 
@@ -2124,6 +2130,48 @@ describe("PR-review panel wiring", { timeout: PANEL_BUDGET_MS }, () => {
     await off.find('[data-testid="reading-diff-button"]').trigger("click");
     await off.vm.$nextTick();
     expect(document.querySelector('[data-testid^="abridge"]')).toBeNull();
+  });
+
+  it.each([
+    { state: "failed", recorded: false },
+    { state: "running", recorded: false },
+    { state: "failed", recorded: true },
+    { state: "running", recorded: true },
+    { state: "done", recorded: true },
+  ])("opening a fresh panel loads the saved job without a POST: %j", async ({ state, recorded }) => {
+    const calls: { url: string; method: string }[] = [];
+    const meat = { ...artifact, poweredBy: "meat" as const };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, method: init?.method ?? "GET" });
+        if (url.startsWith("/api/runs.events")) return Response.json({ events: [meat] });
+        return Response.json({
+          state,
+          reason: "meat did not finish within 240s",
+          progress: [wrapUntrusted("Saved attempt progress")],
+        });
+      }),
+    );
+    const wrapper = mountPage({
+      ...historySeed([inputFrame, runMeta, artifact, ...(recorded ? [meat] : [])]),
+      capabilities: withAbridge(true),
+    });
+    await wrapper.find('[data-testid="reading-diff-button"]').trigger("click");
+    await flushPromises();
+    if (state !== "done")
+      expect(document.querySelector(`[data-testid="abridge-${state}"]`)?.textContent).toContain(
+        state === "failed" ? "meat did not finish within 240s" : "Abridging…",
+      );
+    expect(document.querySelector('[data-testid="abridge-progress"]')?.textContent).toContain("Saved attempt progress");
+    expect(document.querySelector('[data-testid="abridge-progress"]')?.textContent).not.toContain("UNTRUSTED CONTENT");
+    expect(calls).toEqual([
+      { url: "/api/review.status?id=run-1", method: "GET" },
+      ...(state === "done" ? [{ url: "/api/runs.events?id=run-1", method: "GET" }] : []),
+    ]);
+    expect(document.querySelector('[data-testid="abridge-button"]')).toBeNull();
+    if (state === "failed") expect(document.querySelector('[data-testid="abridge-retry"]')?.textContent).toBe("Retry");
+    wrapper.unmount();
   });
 });
 

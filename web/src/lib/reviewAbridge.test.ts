@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { createReviewAbridge, MAX_PAGES, MAX_POLLS } from "./reviewAbridge";
+import { wrapUntrusted } from "@core/core/untrusted.js";
 
 // Feature: docs/reference/specs/reading-diff.md item 12 — the host's half of the panel's
 // "Abridge with meat" control: one POST starts (or resumes) the abridging, the
-// same POST is the poll, and `done` is read off the run's record, whose
+// read-only GET checks saved status and polls, and `done` is read off the run's record, whose
 // review_artifact frames go to the collector like any other frame.
 
 type Reply = { status: number; body: unknown };
@@ -34,6 +35,121 @@ const meatArtifact = {
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("createReviewAbridge", () => {
+  it("decodes machine progress before applying display limits and accepts legacy text", async () => {
+    const { fetch } = fakeFetch([
+      json({
+        state: "failed",
+        reason: "provider request failed",
+        progress: [wrapUntrusted("Turn 1: inspect changes"), "Legacy progress", wrapUntrusted("x".repeat(600))],
+      }),
+    ]);
+    const a = createReviewAbridge("run-1", vi.fn(), { fetch });
+    a.refresh();
+    await flush();
+    expect(a.progress).toEqual(["Turn 1: inspect changes", "Legacy progress", "x".repeat(512)]);
+    expect(a.state).toEqual({ state: "failed", reason: "provider request failed" });
+  });
+  it("preserves progress through read-only polls and a terminal failure", async () => {
+    const { fetch } = fakeFetch([
+      json({ state: "running", progress: ["Fetching PR diff", "Starting meat"] }),
+      json({ state: "failed", reason: "provider request failed" }),
+    ]);
+    let next!: () => void;
+    const a = createReviewAbridge("run-1", vi.fn(), {
+      fetch,
+      delay: () =>
+        new Promise<void>((resolve) => {
+          next = resolve;
+        }),
+    });
+    a.refresh();
+    await flush();
+    expect(a.progress).toEqual(["Fetching PR diff", "Starting meat"]);
+    next();
+    await flush();
+    expect(a.state).toEqual({ state: "failed", reason: "provider request failed" });
+    expect(a.progress).toEqual(["Fetching PR diff", "Starting meat"]);
+  });
+
+  it("keeps bounded plain progress from a completed job while reading its artifact", async () => {
+    const { fetch } = fakeFetch([
+      json({ state: "done", progress: [null, ...Array.from({ length: 40 }, (_, i) => `Turn ${i}`), "x".repeat(600)] }),
+      json({ events: [meatArtifact] }),
+    ]);
+    const a = createReviewAbridge("run-1", vi.fn(), { fetch });
+    a.refresh();
+    await flush();
+    expect(a.state).toEqual({ state: "done" });
+    expect(a.progress?.[0]).toBe("Turn 9");
+    expect(a.progress?.length).toBe(32);
+    expect(a.progress?.[31]).toBe("x".repeat(512));
+  });
+  it("loads a saved failure without starting work and sends force only after explicit Retry", async () => {
+    const { fetch, calls } = fakeFetch([
+      json({ state: "failed", reason: "meat did not finish within 240s" }),
+      json({ state: "running" }),
+    ]);
+    const a = createReviewAbridge("run-1", vi.fn(), { fetch, delay: () => new Promise(() => {}) });
+    a.refresh();
+    await flush();
+    expect(a.state).toEqual({ state: "failed", reason: "meat did not finish within 240s" });
+    expect(calls.map(({ url, init }) => [url, init?.method ?? "GET"])).toEqual([
+      ["/api/review.status?id=run-1", "GET"],
+    ]);
+    a.start();
+    await flush();
+    expect(a.state).toEqual({ state: "running" });
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ id: "run-1", force: true });
+    a.dispose();
+  });
+
+  it("loads an active job and resumes read-only polling through its recorded result", async () => {
+    const { fetch, calls } = fakeFetch([
+      json({ state: "running" }),
+      json({ state: "done" }),
+      json({ events: [meatArtifact] }),
+    ]);
+    const sink = vi.fn();
+    const a = createReviewAbridge("run-1", sink, { fetch, delay: async () => {} });
+    a.refresh();
+    await flush();
+    expect(a.state).toEqual({ state: "done" });
+    expect(calls.map(({ url, init }) => [url, init?.method ?? "GET"])).toEqual([
+      ["/api/review.status?id=run-1", "GET"],
+      ["/api/review.status?id=run-1", "GET"],
+      ["/api/runs.events?id=run-1", "GET"],
+    ]);
+    expect(sink.mock.calls.map(([event]) => event)).toEqual([meatArtifact]);
+  });
+
+  it("keeps a failed status read separate from an absent job and rechecks without a POST", async () => {
+    const { fetch, calls } = fakeFetch([json(null, 503), json({ state: "absent" })]);
+    const a = createReviewAbridge("run-1", vi.fn(), { fetch });
+    a.refresh();
+    a.start();
+    await flush();
+    expect(a.state).toEqual({ state: "unavailable", reason: "HTTP 503" });
+    a.start();
+    a.refresh();
+    await flush();
+    expect(a.state).toEqual({ state: "absent" });
+    expect(calls.map(({ url, init }) => [url, init?.method ?? "GET"])).toEqual([
+      ["/api/review.status?id=run-1", "GET"],
+      ["/api/review.status?id=run-1", "GET"],
+    ]);
+  });
+
+  it("treats malformed saved status as unavailable instead of offering model work", async () => {
+    const { fetch, calls } = fakeFetch([json({ state: "sideways" })]);
+    const a = createReviewAbridge("run-1", vi.fn(), { fetch });
+    a.refresh();
+    await flush();
+    a.start();
+    expect(a.state).toEqual({ state: "unavailable", reason: "unexpected answer: sideways" });
+    expect(calls.map(({ url, init }) => [url, init?.method ?? "GET"])).toEqual([
+      ["/api/review.status?id=run-1", "GET"],
+    ]);
+  });
   it("start: POSTs the run id as JSON same-origin, reads running, polls read-only status after a delay, and on done pages the record and hands every event to the sink", async () => {
     const { fetch, calls } = fakeFetch([
       json({ id: "run-1", state: "running", startedAt: 1 }),
