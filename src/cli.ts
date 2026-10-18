@@ -95,6 +95,7 @@ import {
   type GrammarRejection,
 } from "./core/commandSurface.js";
 import { dispatch, type CoreDeps } from "./core/dispatcher.js";
+import { loadEngineeringRules } from "./engineeringBundle.js";
 import { startRequestRoot } from "./core/requestTrace.js";
 import { systemClock } from "./core/trace/clock.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
@@ -831,6 +832,7 @@ async function main(): Promise<void> {
   // loopback proxy below.
   const completions = new PiAiProviders(config.config.providers);
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
+  const engineeringRules = loadEngineeringRules();
   // What is on in this process (src/core/capabilities.ts): the CLI's `ask`
   // resolves it once from the same config the bot would, so a run started here
   // carries the same prompt blocks and card notes as one started in Slack.
@@ -898,6 +900,7 @@ async function main(): Promise<void> {
     // The CLI's own identity for the About block: its package version, no stamp.
     build: (({ version, commit }) => ({ version, commit }))(unstampedStatus()),
     skills,
+    engineeringRules,
     mcp,
     memory,
     runHistoryWriter,

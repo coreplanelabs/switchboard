@@ -274,7 +274,8 @@ export function planForPaths(paths, { fixtureRegistrationOnly: fixtureRootOnly =
       plan.package = true;
       plan.botTests = true;
       images.add("deploy/cloudflare");
-    } else if (path.startsWith("skills/")) {
+    } else if (path.startsWith("skills/") || path.startsWith("engineering/")) {
+      if (path.startsWith("engineering/")) plan.package = true;
       plan.botTests = true;
       images.add("deploy/cloudflare");
     } else {

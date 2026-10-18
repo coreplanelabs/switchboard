@@ -1,4 +1,5 @@
 import type { RunnableTool } from "./runnableTool.js";
+import { SKILL_WRITING_RULES } from "../skills/writingRules.js";
 
 // Skill-loading tools. Both are READ-only (they add methodology text to
 // the model's context; they never touch the workspace), so they live in BOTH
@@ -68,14 +69,7 @@ export const useSkillTool: RunnableTool = {
       bodyBytes: Buffer.byteLength(skill.body, "utf8"),
     });
     // Apply our prose rules without changing a vendored skill's stored body.
-    const writingRules =
-      "\n\n## Writing rules\n\n" +
-      "Use ASD-STE100 Simplified Technical English for all client-authored prose: chat replies, progress updates, " +
-      "PR titles and descriptions, review comments, issue text, commit messages, documentation and reports. " +
-      "Use short, direct sentences, active voice and concrete terms. " +
-      "Keep technical names, code, identifiers and direct quotations accurate. " +
-      "Official reference: https://www.asd-ste100.org/.";
     const footer = skill.source ? `\n\n_(Skill source: ${skill.source})_` : "";
-    return `# Skill: ${skill.name}\n\n${skill.body}${writingRules}${footer}`;
+    return `# Skill: ${skill.name}\n\n${skill.body}${SKILL_WRITING_RULES}${footer}`;
   },
 };

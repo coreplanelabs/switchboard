@@ -1,4 +1,5 @@
 import { gitInCheckout } from "../execution/workspaceAdvance.js";
+import { engineeringRulesBlock, engineeringRulesFor, type EngineeringRules } from "../engineering.js";
 import type { ExistingPrPublicationBinding } from "./coordinator/contract.js";
 // Per-round review + workspace machinery, extracted from dispatch() as
 // callable units (zero behavior change): everything a
@@ -435,6 +436,7 @@ export interface HeadPin {
  */
 export function makeSystemComposer(input: {
   agent: AgentDef;
+  engineeringRules?: EngineeringRules;
   /** True on the resident path: swaps in the agent's resident system variant. */
   resident: boolean;
   /** The resolved target repo, named by the resident variant. */
@@ -475,6 +477,7 @@ export function makeSystemComposer(input: {
   };
 }): (head: HeadPin) => string {
   const { agent, resident, workspace, prTarget, blocks, seeded } = input;
+  const engineering = engineeringRulesFor(input.engineeringRules, agent.name);
   const residentSystem =
     resident && agent.residentSystem
       ? `${agent.residentSystem}\n\nTarget repository: ${input.repo}. ` +
@@ -512,6 +515,7 @@ export function makeSystemComposer(input: {
     // memory block up front.
     return [
       residentSystem ?? seededSystem ?? agent.system,
+      ...(engineering ? [engineeringRulesBlock(engineering)] : []),
       ...(!resident && !seeded && input.cold
         ? [
             `COLD CHECKOUT TARGET: ${input.repo} on branch \`${input.cold.ref}\` is already cloned and verified at \`${input.cold.workspace}\`. Work in that checkout; do not clone again or switch to the repository's default branch. This checkout preparation overrides any initial clone instruction above. This checkout does not promise installed dependencies. Confirm the branch with \`git -C ${input.cold.workspace} branch --show-current\` before work.`,

@@ -830,6 +830,8 @@ export type RunEvent =
   | {
       type: "run_meta";
       agent: string;
+      /** Exact portable policy supplied to coding/review prompts; absence means unknown. */
+      engineeringRules?: { files: readonly string[]; sha256: string };
       maintenanceActionId?: string;
       /** How `agent` was chosen (`AgentSource`); absent on a command run and on records written before it existed. */
       agentSource?: AgentSource;

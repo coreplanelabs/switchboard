@@ -182,6 +182,7 @@ import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps } from "./core/dispatcher.js";
+import { loadEngineeringRules } from "./engineeringBundle.js";
 import {
   createAdminCoordinatorHandler,
   reconcileCoordinatorReport,
@@ -388,6 +389,8 @@ export async function runBot(): Promise<void> {
   // across all channels via CoreDeps, so review/coding get their scoped skill
   // list in-prompt and can load bodies on demand with use_skill.
   const skills = new BundledSkillStore(DEFAULT_SKILLS_DIR);
+  const engineeringRules = loadEngineeringRules();
+  console.log(`[engineering] ${engineeringRules.files.join(", ")} sha256=${engineeringRules.sha256}`);
   // External MCP servers as tools (docs/reference/specs/mcp-tools.md): the static
   // `mcp.servers` list, validated loudly here (a bad URL or a missing bearer
   // env var stops startup), served per run by ONE source whose clients ride
@@ -733,6 +736,7 @@ export async function runBot(): Promise<void> {
     // What this process is, for the About block: the package version and the image's stamp.
     build: { version: packageVersion(), commit: build.commit },
     skills,
+    engineeringRules,
     mcp,
     memory,
     ...(artifacts ? { artifacts } : {}),

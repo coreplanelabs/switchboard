@@ -126,6 +126,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0107 | [Retain exact review feedback with the publication owner](../decisions/0107-retain-exact-review-feedback-with-the-publication-owner.md) | Transactional receipt and replaceable snapshot | accepted | 2026-10-14 |
 | 0108 | [Staging successors preserve consumed episodes](../decisions/0108-staging-successors-preserve-consumed-episodes.md) | Compare-and-swap episode pointer and immutable receipts | proposed | 2026-10-15 |
 | 0109 | [Follow-ups keep a continuation checkpoint](../decisions/0109-follow-ups-keep-a-continuation-checkpoint.md) | Snapshot and bounded log projection | proposed | 2026-10-16 |
+| 0110 | [Engineering rules compose before work](../decisions/0110-engineering-rules-compose-before-work.md) | Composition and ports and adapters | proposed | 2026-10-18 |
 
 <!-- /generated:decision-records -->
 

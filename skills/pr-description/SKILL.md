@@ -10,7 +10,7 @@ The description is the `PrDescription` object you submit through `submit_pr_desc
 
 ## Language and product context
 
-Use [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) for all client-authored prose: chat replies, progress updates, PR titles and descriptions, review comments, issue text, commit messages, documentation and reports. Use short, direct sentences, active voice and concrete terms. Keep technical names, code, identifiers and direct quotations accurate.
+Follow the shared writing rules supplied by `use_skill`.
 
 Assume the reader has no context about the product, system, repository or prior discussion. Start with what the product lets a person do. Name the affected user task and explain the result before and after this change. Use the product in the target repository, including when Switchboard writes a PR for another product. Include only the product context needed to understand this change.
 

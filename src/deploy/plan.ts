@@ -237,7 +237,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
     dir: WORKER_DIRS.bot,
     entry: "deploy/cloudflare/worker.ts",
     // The Worker shim's dir, plus everything the root Dockerfile COPYs into the
-    // image (src/, web/, skills/, the package files, the tsconfigs — never
+    // image (src/, web/, skills/, engineering/, the package files, the tsconfigs — never
     // config/: the bot reads its config from the state Worker, not the image)
     // and the two files that decide what it copies. The lockfile counts for
     // the root package and web INCLUDING devDependencies (the Dockerfile's
@@ -255,6 +255,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
         "src/",
         "web/",
         "skills/",
+        "engineering/",
       ],
       lockfile: [
         { workspace: "", includeDev: true },

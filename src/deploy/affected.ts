@@ -27,8 +27,8 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   { rule: "tests", test: /(^|\/)__snapshots__\// },
   { rule: "docs", test: /^docs\// },
   { rule: "specs", test: /^features\// },
-  // Not under skills/: the bot image COPYs skills/ and loads every SKILL.md at startup.
-  { rule: "markdown", test: /^(?!skills\/).*\.md$/ },
+  // Skills and engineering rules are runtime image inputs, including their Markdown.
+  { rule: "markdown", test: /^(?!(?:skills|engineering)\/).*\.md$/ },
   { rule: "ci", test: /^\.github\// },
   { rule: "ci", test: /^\.depot\/workflows\// },
   { rule: "scripts", test: /^scripts\// },
