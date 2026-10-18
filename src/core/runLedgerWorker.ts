@@ -223,15 +223,19 @@ import {
 } from "./runLedger/types.js";
 import type { Secrets } from "../secrets.js";
 import { systemClock } from "./trace/clock.js";
+import { storageTransport } from "./storageTransport.js";
+import type { StorageOperation, StorageOperationBody } from "./storageRequestContext.js";
 import { STORE_RETRY_BACKOFFS_MS } from "./budgets.js";
 import { UncertainStoreError, type StoreRequestWitness } from "./storeFailure.js";
-import { readStoreResponse, storeRequestWitness, type StoreOperationKind } from "./storeResponse.js";
+import { readStoreResponse, prepareStorageRequest, type StoreOperationKind } from "./storeResponse.js";
 import {
   STORAGE_FAILURE_DIAGNOSTIC_HEADER,
   STORAGE_REQUEST_ID_HEADER,
   storageFailureNotice,
-  emitStorageFailure,
-  rememberStorageFailure,
+  storageResponseMetadata,
+  type StorageResponseMetadata,
+  reportStorageFailure,
+  inheritStorageFailure,
   isStorageDiagnosticAppend,
   type StorageFailureDiagnostic,
   type StorageFailureNotice,
@@ -317,7 +321,13 @@ export class WorkerRunLedger implements RunLedger {
   // evidence on the original request without retaining completed payloads.
   private readonly requestObservations = new WeakMap<
     StoreRequestWitness,
-    { requestId: string; startedAt: number; signal: AbortSignal }
+    {
+      requestId: string | undefined;
+      startedAt: number;
+      signal: AbortSignal;
+      kind: StoreOperationKind;
+      http?: { httpStatus: number; rayId?: string; response: StorageResponseMetadata };
+    }
   >();
 
   constructor(private readonly opts: WorkerRunLedgerOptions) {
@@ -337,31 +347,31 @@ export class WorkerRunLedger implements RunLedger {
     const result = await this.read("/runs/session/read", { key, observation: { from, through } });
     return structuredClone(result.data) as unknown as import("./runLedger/seedVerification.js").SourceSeedSnapshot;
   }
-  private async post(
-    path: string,
-    body: Record<string, unknown>,
+  private async post<O extends StorageOperation>(
+    path: O,
+    body: StorageOperationBody<NoInfer<O>>,
     acceptBadRequest = false,
     kind: StoreOperationKind = "write",
     encodedBody?: string,
     expectedSeedHeader?: string,
     signal = AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
   ): Promise<{ status: number; data: Record<string, unknown>; request: StoreRequestWitness }> {
-    const payload = encodedBody ?? JSON.stringify(body);
-    const request = await storeRequestWitness(path, payload);
-    const requestId = crypto.randomUUID();
+    const request = await prepareStorageRequest(path, body, encodedBody);
+    const payload = request.payload;
+    const requestId = request.requestId;
     const ordinaryHeaders = {
       "content-type": "application/json",
       [EXECUTION_PROTOCOL_HEADER]: "native-v1",
       [NATIVE_REVIEW_STOP_HEADER]: "1",
       authorization: `Bearer ${this.opts.token}`,
-      [STORAGE_REQUEST_ID_HEADER]: requestId,
+      ...(requestId ? { [STORAGE_REQUEST_ID_HEADER]: requestId } : {}),
     };
     const headers = new Headers(ordinaryHeaders);
     if (expectedSeedHeader !== undefined) {
       headers.set(EXPECTED_SEED_HEADER, expectedSeedHeader);
       // Include the runtime's normal sized-body and host headers in the existing transport budget.
       const sized = new Headers(headers);
-      sized.set("content-length", String(new TextEncoder().encode(encodedBody ?? JSON.stringify(body)).byteLength));
+      sized.set("content-length", String(new TextEncoder().encode(payload).byteLength));
       sized.set("host", new URL(this.baseUrl).host);
       if (requestHeaderBytes(sized) > WORKER_REQUEST_HEADER_BYTES)
         throw new PermanentStoreError("run ledger: request headers exceed the platform limit");
@@ -370,15 +380,22 @@ export class WorkerRunLedger implements RunLedger {
     let phase: StorageFailureDiagnostic["phase"] = "transport";
     let server: StateWriteFailure | undefined;
     const startedAt = systemClock();
-    this.requestObservations.set(request, { requestId, startedAt, signal });
+    this.requestObservations.set(request, { requestId, startedAt, signal, kind });
     try {
       try {
-        res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-          method: "POST",
-          headers: expectedSeedHeader === undefined ? ordinaryHeaders : headers,
-          body: payload,
-          signal,
-        });
+        res = await storageTransport(
+          request,
+          {
+            url: `${this.baseUrl}${path}`,
+            headers: expectedSeedHeader === undefined ? ordinaryHeaders : headers,
+            signal,
+            timeoutMs: RUN_STORE_TIMEOUT_MS,
+            fetch: this.fetchImpl,
+            kind,
+            reportFailure: false,
+          },
+          async (response) => response,
+        );
       } catch (err) {
         if (kind === "write")
           throw new UncertainStoreError(`run ledger ${path}: transport outcome unknown`, request, {
@@ -413,6 +430,13 @@ export class WorkerRunLedger implements RunLedger {
         throw new PermanentStoreError(`run ledger ${path}: HTTP ${res.status}`);
       phase = "response";
       const data = await readStoreResponse(res, kind, request);
+      const observed = this.requestObservations.get(request);
+      if (observed)
+        observed.http = {
+          httpStatus: res.status,
+          response: storageResponseMetadata(res),
+          ...(res.headers.get("cf-ray") ? { rayId: res.headers.get("cf-ray")! } : {}),
+        };
       const askedRun =
         typeof body.runId === "string"
           ? body.runId
@@ -467,24 +491,32 @@ export class WorkerRunLedger implements RunLedger {
     response?: Response,
     server?: StateWriteFailure,
   ): void {
-    try {
-      const transport = this.requestObservations.get(request);
-      const observation = transport
-        ? {
-            requestId: transport.requestId,
-            timing: {
-              elapsedMs: Math.max(0, systemClock() - transport.startedAt),
-              timeoutMs: RUN_STORE_TIMEOUT_MS,
-              deadlineExceeded: transport.signal.aborted,
-            },
-          }
-        : undefined;
-      const notice = storageFailureNotice(request, kind, phase, error, response, server, observation);
-      rememberStorageFailure(error, notice.diagnostic);
-      emitStorageFailure(notice, isStorageDiagnosticAppend(request) ? undefined : this.opts.onFailure);
-    } catch {
-      // Telemetry must never replace the original exception or change retries.
-    }
+    reportStorageFailure(
+      error,
+      () => {
+        const transport = this.requestObservations.get(request);
+        const observation = transport
+          ? {
+              requestId: transport.requestId,
+              ...(!response ? transport.http : {}),
+              timing: {
+                elapsedMs: Math.max(0, systemClock() - transport.startedAt),
+                timeoutMs: RUN_STORE_TIMEOUT_MS,
+                deadlineExceeded: transport.signal.aborted,
+              },
+            }
+          : undefined;
+        return storageFailureNotice(request, kind, phase, error, response, server, observation);
+      },
+      isStorageDiagnosticAppend(request) ? undefined : this.opts.onFailure,
+      request,
+    );
+  }
+
+  private invalidResult<T extends Error>(error: T, result: { request: StoreRequestWitness; status: number }): T {
+    const observed = this.requestObservations.get(result.request);
+    this.reportFailure(result.request, observed?.kind ?? "write", "acknowledgement", error);
+    return error;
   }
 
   private unknownAcknowledgement(message: string, request: StoreRequestWitness, status?: number): UncertainStoreError {
@@ -497,7 +529,7 @@ export class WorkerRunLedger implements RunLedger {
     return error;
   }
 
-  private async read(path: string, body: Record<string, unknown>) {
+  private async read<O extends StorageOperation>(path: O, body: StorageOperationBody<NoInfer<O>>) {
     const payload = JSON.stringify(body);
     const signal = AbortSignal.timeout(RUN_STORE_TIMEOUT_MS);
     for (let attempt = 0; ; attempt++) {
@@ -547,7 +579,7 @@ export class WorkerRunLedger implements RunLedger {
     const r = await this.post("/runs/resident-claim", { storeKey: this.opts.storeKey, runId, gen, threadKey });
     if (r.status === 409) return { ok: false, reason: r.data.reason === "unknown-run" ? "unknown-run" : "fenced" };
     if (!Number.isSafeInteger(r.data.fence) || (r.data.fence as number) <= 0)
-      throw new PermanentStoreError("run ledger resident claim: invalid fence");
+      throw this.invalidResult(new PermanentStoreError("run ledger resident claim: invalid fence"), r);
     return { ok: true, fence: r.data.fence as number };
   }
 
@@ -609,7 +641,7 @@ export class WorkerRunLedger implements RunLedger {
       return;
     const value = workspaceSettlementOf(r.data.settlement);
     if (r.data.kind !== "terminal" || !value || workspaceOwnerKey(value.owner) !== workspaceOwnerKey(owner))
-      throw new PermanentStoreError("run ledger: invalid workspace settlement");
+      throw this.invalidResult(new PermanentStoreError("run ledger: invalid workspace settlement"), r);
     return value;
   }
 
@@ -625,7 +657,7 @@ export class WorkerRunLedger implements RunLedger {
       (reason === "owner-live" || reason === "stale" || reason === "unverified")
     )
       return { ok: false, reason };
-    throw new PermanentStoreError("run ledger: invalid workspace acknowledgment response");
+    throw this.invalidResult(new PermanentStoreError("run ledger: invalid workspace acknowledgment response"), r);
   }
 
   async claim(req: ClaimRequest, originalBodyJson?: string): Promise<ClaimResult> {
@@ -663,12 +695,18 @@ export class WorkerRunLedger implements RunLedger {
       if (
         (req.meta.workspaceAllocation !== undefined || originalBodyJson !== undefined) &&
         !(error instanceof RouteMissingError)
-      )
-        throw new UnknownAllocationClaimError(error);
+      ) {
+        const unknown = new UnknownAllocationClaimError(error);
+        inheritStorageFailure(unknown, error);
+        throw unknown;
+      }
       throw error;
     }
     if (r.status === 400)
-      throw new PermanentStoreError(`run ledger /runs/claim: HTTP 400 ${String(r.data?.error ?? "")}`.trim());
+      throw this.invalidResult(
+        new PermanentStoreError(`run ledger /runs/claim: HTTP 400 ${String(r.data?.error ?? "")}`.trim()),
+        r,
+      );
     if (r.status === 409) {
       const live = (r.data.live ?? {}) as {
         runId?: string;
@@ -691,12 +729,13 @@ export class WorkerRunLedger implements RunLedger {
     // caller knows the log's tail; a run's own transcript object is never
     // owned any more (rows claimed before the log existed keep theirs).
     if (req.meta.workspaceAllocation !== undefined && (!r.data || r.data.ok !== true))
-      throw new UnknownAllocationClaimError("contradictory claim response");
+      throw this.invalidResult(new UnknownAllocationClaimError("contradictory claim response"), r);
     const allocationAck = r.data?.ok === true ? allocationAckOf(r.data.allocationAck, req) : undefined;
     const promotionCommit = promotionCommitReceiptOf(r.data?.promotionCommit);
     if (r.data?.promotionCommit !== undefined) {
       const sentBody = originalBodyJson ?? JSON.stringify({ storeKey: this.opts.storeKey, run: req });
-      if (!promotionCommit) throw new UnknownAllocationClaimError("original commit acknowledgment is unreadable");
+      if (!promotionCommit)
+        throw this.invalidResult(new UnknownAllocationClaimError("original commit acknowledgment is unreadable"), r);
       const { phase: _phase, ...identity } = promotionCommit;
       if (
         !allocationAck ||
@@ -708,13 +747,16 @@ export class WorkerRunLedger implements RunLedger {
         }) ||
         promotionCommit.bodySha256 !== (await promotionBodyHash(sentBody))
       )
-        throw new UnknownAllocationClaimError("original commit acknowledgment does not match its actual request");
+        throw this.invalidResult(
+          new UnknownAllocationClaimError("original commit acknowledgment does not match its actual request"),
+          r,
+        );
     }
     if (
       prepared &&
       (!promotionCommit || !promotionCommitMatchesPreparation(promotionCommit, prepared) || !allocationAck)
     )
-      throw new UnknownAllocationClaimError("original commit acknowledgment unavailable");
+      throw this.invalidResult(new UnknownAllocationClaimError("original commit acknowledgment unavailable"), r);
     return { ok: true, ...(allocationAck ? { allocationAck } : {}), ...(promotionCommit ? { promotionCommit } : {}) };
   }
 
@@ -741,7 +783,7 @@ export class WorkerRunLedger implements RunLedger {
     return this.expectedSeedSource("/runs/session/expected-seed/verify", key, ref, true);
   }
   private async expectedSeedSource(
-    path: string,
+    path: "/runs/session/expected-seed/verify" | "/runs/session/expected-seed/read",
     key: string,
     input: SourceSeedReference,
     release = false,
@@ -802,7 +844,7 @@ export class WorkerRunLedger implements RunLedger {
     try {
       const result = await this.post(
         "/runs/promotion/prepare",
-        {},
+        { storeKey: this.opts.storeKey, run: request },
         true,
         "write",
         bodyJson,
@@ -890,9 +932,9 @@ export class WorkerRunLedger implements RunLedger {
   /** The write route and its body for a run's rows: the session log when the
    *  run has one, the run's own transcript object otherwise. */
   private target(runId: string, gen: string, session: string | undefined) {
-    if (session === undefined) return { path: "/runs/transcript/write", body: { runId, gen } };
+    if (session === undefined) return { path: "/runs/transcript/write" as const, body: { runId, gen } };
     this.checkSessionKey(session);
-    return { path: "/runs/session/write", body: { key: session, runId, gen } };
+    return { path: "/runs/session/write" as const, body: { key: session, runId, gen } };
   }
 
   private async writeTurns(
@@ -931,7 +973,10 @@ export class WorkerRunLedger implements RunLedger {
         throw new RequiredTranscriptError("write exceeds existing request budget");
       const result = await this.post(path, payload);
       if (internal && result.data.ok === true && result.data.transcriptCodec !== 1)
-        throw new UncertainStoreError("run ledger: transcript codec acknowledgement missing", result.request);
+        throw this.invalidResult(
+          new UncertainStoreError("run ledger: transcript codec acknowledgement missing", result.request),
+          result,
+        );
       return this.fenceResult(result);
     };
     // Attachments travel one per request (each is under the fence by the ref
@@ -1147,7 +1192,7 @@ export class WorkerRunLedger implements RunLedger {
     const from = typeof r.data.from === "number" ? r.data.from : 0;
     const checkpoint = r.data.checkpoint;
     if (checkpoint !== undefined && !isSessionCheckpoint(checkpoint))
-      throw new RequiredTranscriptError("the session checkpoint is malformed");
+      throw this.invalidResult(new RequiredTranscriptError("the session checkpoint is malformed"), r);
     return {
       from,
       ...(checkpoint !== undefined ? { checkpoint } : {}),
@@ -1179,7 +1224,8 @@ export class WorkerRunLedger implements RunLedger {
   async checkpointRequesterTarget(key: string, actor: string, target: RequesterTarget): Promise<RequesterTarget> {
     this.checkSessionKey(key);
     const r = await this.post("/runs/session/requester-target/write", { key, actor, target });
-    if (!r.data.target) throw new PermanentStoreError("run ledger: requester target checkpoint missing");
+    if (!r.data.target)
+      throw this.invalidResult(new PermanentStoreError("run ledger: requester target checkpoint missing"), r);
     return r.data.target as RequesterTarget;
   }
 
@@ -1248,7 +1294,10 @@ export class WorkerRunLedger implements RunLedger {
       ...(reconciliation ? { reconciliation } : {}),
     });
     if (reconciliation !== undefined && (response.status !== 200 || response.data.ok !== true))
-      throw new TransientStoreError("run ledger: reconciliation acknowledgement unconfirmed");
+      throw this.invalidResult(
+        new TransientStoreError("run ledger: reconciliation acknowledgement unconfirmed"),
+        response,
+      );
   }
 
   async planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer> {
@@ -1501,7 +1550,7 @@ export class WorkerRunLedger implements RunLedger {
         );
       })
     )
-      throw new PermanentStoreError("run ledger /runs/inbox/read: invalid observational inbox");
+      throw this.invalidResult(new PermanentStoreError("run ledger /runs/inbox/read: invalid observational inbox"), r);
     return r.data.items as InboxItem[];
   }
 
@@ -1522,11 +1571,12 @@ export class WorkerRunLedger implements RunLedger {
       typeof boundary !== "object" ||
       Array.isArray(boundary)
     )
-      throw new PermanentStoreError("run ledger /runs/inbox/read: missing owner-bound peek");
+      throw this.invalidResult(new PermanentStoreError("run ledger /runs/inbox/read: missing owner-bound peek"), r);
     const items: Array<InboxItem & { witness: import("./runLedger/types.js").InboxRowWitness }> = [];
     let previous = afterSeq;
     for (const raw of r.data.items) {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new PermanentStoreError("invalid inbox item");
+      if (!raw || typeof raw !== "object" || Array.isArray(raw))
+        throw this.invalidResult(new PermanentStoreError("invalid inbox item"), r);
       const item = raw as Record<string, unknown>,
         witness = item.witness;
       if (
@@ -1539,7 +1589,7 @@ export class WorkerRunLedger implements RunLedger {
         typeof witness !== "object" ||
         Array.isArray(witness)
       )
-        throw new PermanentStoreError("invalid inbox witness");
+        throw this.invalidResult(new PermanentStoreError("invalid inbox witness"), r);
       const proof = witness as Record<string, unknown>;
       if (
         proof.version !== 1 ||
@@ -1548,7 +1598,7 @@ export class WorkerRunLedger implements RunLedger {
         typeof proof.digest !== "string" ||
         proof.digest !== (await sourceHash(item.message))
       )
-        throw new PermanentStoreError("inbox witness mismatch");
+        throw this.invalidResult(new PermanentStoreError("inbox witness mismatch"), r);
       previous = Number(item.seq);
       items.push({
         seq: previous,
@@ -1558,7 +1608,7 @@ export class WorkerRunLedger implements RunLedger {
     }
     const observed = boundary as Record<string, unknown>;
     if (!Object.hasOwn(observed, "state") || !Object.hasOwn(observed, "lastStep"))
-      throw new PermanentStoreError("incomplete inbox boundary");
+      throw this.invalidResult(new PermanentStoreError("incomplete inbox boundary"), r);
     return {
       ok: true,
       version: 1,
@@ -1632,7 +1682,7 @@ export class WorkerRunLedger implements RunLedger {
       ...(opts?.destructive ? { destructive: true } : {}),
     });
     if (opts?.destructive && r.data.ok === true && r.data.destructive !== true)
-      throw new PermanentStoreError("The history service did not confirm the Kill request.");
+      throw this.invalidResult(new PermanentStoreError("The history service did not confirm the Kill request."), r);
     return {
       ok: r.data.ok === true,
       ...(typeof r.data.ownerLive === "boolean" ? { ownerLive: r.data.ownerLive } : {}),
@@ -1712,7 +1762,7 @@ export class WorkerRunLedger implements RunLedger {
     const result = await this.read("/runs/claim-observations/list", { storeKey: this.opts.storeKey, query });
     const rows = result.data.observations;
     if (result.data.coverage !== "recorded-only" || !Array.isArray(rows) || rows.length > (query.limit ?? 50))
-      throw new PermanentStoreError("unreadable claim observations");
+      throw this.invalidResult(new PermanentStoreError("unreadable claim observations"), result);
     const observations: NativeClaimObservation[] = [];
     let previous = query.after ?? "";
     for (const raw of rows) {
@@ -1723,13 +1773,13 @@ export class WorkerRunLedger implements RunLedger {
         (query.ordinaryOnly && row.threadKey.startsWith("worker:")) ||
         claimObservationKey(row) <= previous
       )
-        throw new PermanentStoreError("unreadable claim observations");
+        throw this.invalidResult(new PermanentStoreError("unreadable claim observations"), result);
       observations.push(row);
       previous = claimObservationKey(row);
     }
     const cursor = result.data.nextAfter;
     if (cursor !== undefined && (typeof cursor !== "string" || observations.length === 0 || cursor !== previous))
-      throw new PermanentStoreError("unreadable claim observation cursor");
+      throw this.invalidResult(new PermanentStoreError("unreadable claim observation cursor"), result);
     return { coverage: "recorded-only", observations, ...(typeof cursor === "string" ? { nextAfter: cursor } : {}) };
   }
 
@@ -1753,7 +1803,10 @@ export class WorkerRunLedger implements RunLedger {
       ) ||
       new Set(rows.map((row: LiveRunRow) => row.runId)).size !== rows.length
     )
-      throw new PermanentStoreError("run ledger /runs/live returned incomplete or malformed rows");
+      throw this.invalidResult(
+        new PermanentStoreError("run ledger /runs/live returned incomplete or malformed rows"),
+        r,
+      );
     return rows as LiveRunRow[];
   }
 
@@ -1808,7 +1861,7 @@ export class WorkerRunLedger implements RunLedger {
       const record = await sourceEventRecordOf(response.data.record);
       if (record?.receipt.key === key) return record;
     }
-    throw new PermanentStoreError("run ledger: source event read is unreadable");
+    throw this.invalidResult(new PermanentStoreError("run ledger: source event read is unreadable"), response);
   }
 
   async claimSourceEvents(value: unknown): Promise<SourceJobClaimResult> {

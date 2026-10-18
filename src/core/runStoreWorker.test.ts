@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { analyzeRunFriction } from "./runFriction.js";
 import { recordingSink } from "./testing/recordingSink.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "./trace/internalHosts.js";
@@ -7,6 +7,8 @@ import { createTracer } from "./trace/tracer.js";
 import type { RunEvent } from "./runEvents.js";
 import { DEFAULT_RETENTION_POLICY, type RunRecord } from "./runRecord.js";
 import { dayOf } from "./runUsage.js";
+import { originalStorageFailure, storageFailureWasReported } from "./storageFailureDiagnostic.js";
+import { UncertainStoreError } from "./storeFailure.js";
 import { pointOf } from "./runMetrics.js";
 import {
   describeError,
@@ -21,6 +23,161 @@ import {
 // Worker's RunHistoryDO (POST /runs/put|get|list|events|delete).
 
 const NOW = 1_800_000_000_000;
+it("keeps the original HTTP failure and bounded request identity when full diagnostic capture fails", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const clone = vi.spyOn(globalThis, "structuredClone");
+  let requestId: string | null = null;
+  const store = new WorkerRunStore({
+    baseUrl: "https://storage.invalid",
+    token: "private-token",
+    storeKey: "runs:fixture",
+    fetch: async (_url, init) => {
+      requestId = new Headers(init?.headers).get("x-switchboard-storage-request-id");
+      const response = Response.json({ error: "unavailable" }, { status: 500 });
+      clone.mockImplementationOnce(() => {
+        throw new Error("private diagnostic capture failure");
+      });
+      return response;
+    },
+  });
+  try {
+    const error = await store.delete("original").catch((value) => value);
+    expect(error).toMatchObject({
+      name: "UncertainStoreError",
+      request: {
+        operation: "/runs/delete",
+        requestId,
+        digest: "5eb76c3b61a6dc15d736a7e8c16920ab96ac445d98e45ebda222cb166ee17cc9",
+        context: { scope: "runs", runIds: ["original"] },
+      },
+    });
+    expect(storageFailureWasReported(error)).toBe(false);
+    expect(originalStorageFailure(error)).toBeUndefined();
+    expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+      {
+        event: "storage.request.failure.unavailable",
+        side: "client",
+        operation: "/runs/delete",
+        requestId,
+        requestDigest: "5eb76c3b61a6dc15d736a7e8c16920ab96ac445d98e45ebda222cb166ee17cc9",
+        runIds: ["original"],
+        targetCounts: { total: 1, emitted: 1, omitted: 0 },
+      },
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/private-token|private diagnostic capture failure/);
+  } finally {
+    clone.mockRestore();
+    warn.mockRestore();
+  }
+});
+it.each([true, false])("retains an HTTP failure when primary operator logging succeeds: %s", async (logSucceeds) => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  if (!logSucceeds)
+    warn.mockImplementationOnce(() => {
+      throw new Error("log unavailable");
+    });
+  const notices: Array<{ runIds: readonly string[]; diagnostic: unknown }> = [];
+  const store = new WorkerRunStore({
+    baseUrl: "https://storage.invalid",
+    token: "fixture",
+    storeKey: "runs:fixture",
+    onFailure: (notice) => {
+      notices.push(notice);
+      throw new Error("observer unavailable");
+    },
+    fetch: async () => Response.json({ error: "unavailable" }, { status: 500 }),
+  });
+  try {
+    const error = await store.delete("original").catch((value) => value);
+    expect(error).toMatchObject({ name: "UncertainStoreError" });
+    expect(storageFailureWasReported(error)).toBe(logSucceeds);
+    expect(originalStorageFailure(error)).toMatchObject({
+      operation: "/runs/delete",
+      phase: "http",
+      httpStatus: 500,
+      kind: "write",
+    });
+    expect(notices).toMatchObject([
+      { runIds: ["original"], diagnostic: { operation: "/runs/delete", httpStatus: 500 } },
+    ]);
+  } finally {
+    warn.mockRestore();
+  }
+});
+it("retains the original public deletion acknowledgement failure after an HTTP success", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  let requestId: string | null = null;
+  const store = new WorkerRunStore({
+    baseUrl: "https://storage.invalid",
+    token: "fixture",
+    storeKey: "runs:fixture",
+    fetch: async (_url, init) => {
+      requestId = new Headers(init?.headers).get("x-switchboard-storage-request-id");
+      return Response.json({ ok: true });
+    },
+  });
+  try {
+    const error = await store.delete("original", { destructive: true }).catch((value) => value);
+    expect(error).toMatchObject({
+      name: "PermanentStoreError",
+      message: "The history service did not confirm the Kill deletion fence.",
+    });
+    expect(originalStorageFailure(error)).toMatchObject({
+      operation: "/runs/delete",
+      phase: "response",
+      httpStatus: 200,
+      requestId,
+      kind: "write",
+      timing: { timeoutMs: 10000, deadlineExceeded: false },
+      response: { contentType: "json", bodyKind: "json" },
+    });
+    expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toMatchObject([
+      { runIds: ["original"], diagnostic: { requestId, httpStatus: 200 } },
+    ]);
+  } finally {
+    warn.mockRestore();
+  }
+});
+it("reports original deletion targets and request identity when transport fails before Worker entry", async () => {
+  const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+  let sentRequestId: string | null = null;
+  const store = new WorkerRunStore({
+    baseUrl: "https://storage.invalid",
+    token: "fixture",
+    storeKey: "runs:fixture",
+    fetch: async (_url, init) => {
+      sentRequestId = new Headers(init?.headers).get("x-switchboard-storage-request-id");
+      throw new TypeError("offline");
+    },
+  });
+  try {
+    const failure = await store.delete("original").catch((error) => error);
+    expect(failure).toMatchObject({ name: "UncertainStoreError" });
+    const evidence = warned.mock.calls.map(([line]) => JSON.parse(String(line)));
+    expect(evidence).toMatchObject([
+      {
+        event: "storage.request.failure",
+        runIds: ["original"],
+        context: { scope: "runs" },
+        diagnostic: { operation: "/runs/delete", phase: "transport", requestId: sentRequestId },
+      },
+    ]);
+    expect(typeof sentRequestId).toBe("string");
+    expect(originalStorageFailure(failure)).toEqual({
+      version: 1,
+      operation: "/runs/delete",
+      requestId: sentRequestId,
+      requestDigest: (failure as UncertainStoreError).request.digest,
+      kind: "write",
+      phase: "transport",
+      timing: { elapsedMs: expect.any(Number), timeoutMs: 10000, deadlineExceeded: false },
+    });
+    expect((failure as UncertainStoreError).request.context).toEqual({ scope: "runs", runIds: ["original"] });
+    expect(JSON.stringify(evidence)).not.toContain('"token":"fixture"');
+  } finally {
+    warned.mockRestore();
+  }
+});
 function events(n: number, size = 20): RunEvent[] {
   return Array.from({ length: n }, (_, i) => ({
     type: "tool_call",

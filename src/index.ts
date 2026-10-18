@@ -1,5 +1,5 @@
 import { logOwnerFailure } from "./core/organization/ownerFailure.js";
-import { storageFailureNote } from "./core/storageFailureDiagnostic.js";
+import { storageFailureNote, type StorageFailureNotice } from "./core/storageFailureDiagnostic.js";
 import { createRunStop } from "./execution/runStop.js";
 import { createRunCheck } from "./execution/runCheck.js";
 import { readImageConfigConsumerIdentity, type ConfigConsumerIdentity } from "./configConsumer.js";
@@ -481,9 +481,14 @@ export async function runBot(): Promise<void> {
   // ledger's metrics points (run-metrics.md), `RunsService` and the costs
   // service below all read the same table.
   const costsCfg = parseCostsConfig(config.config.costs);
+  const onStorageFailure = ({ runIds, diagnostic }: StorageFailureNotice) => {
+    for (const runId of runIds)
+      defaultRunRegistry.publish(runId, { ...storageFailureNote(diagnostic), at: systemClock() });
+  };
   const runStore =
     buildRunStore(runHistoryCfg, processSecrets, {
       dataDir: DATA_DIR,
+      onFailure: onStorageFailure,
       warn: (m) => console.warn(`[run-history] ${m}`),
       ...(costsCfg?.prices ? { prices: costsCfg.prices } : {}),
     }) ?? new NullRunStore();
@@ -543,10 +548,7 @@ export async function runBot(): Promise<void> {
     : undefined;
   const ledgerClient = capabilities.runLedger
     ? buildRunLedger(runHistoryCfg, processSecrets, {
-        onFailure: ({ runIds, diagnostic }) => {
-          for (const runId of runIds)
-            defaultRunRegistry.publish(runId, { ...storageFailureNote(diagnostic), at: systemClock() });
-        },
+        onFailure: onStorageFailure,
         ...(costsCfg?.prices ? { prices: costsCfg.prices } : {}),
       })
     : null;

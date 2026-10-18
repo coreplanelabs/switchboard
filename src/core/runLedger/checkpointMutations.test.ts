@@ -40,7 +40,9 @@ function deferred() {
 }
 async function world() {
   const inner = new InMemoryRunLedger(() => 100);
-  let intercept: ((path: string, body: FixtureBody, payload: string) => Promise<Response | undefined>) | undefined;
+  let intercept:
+    | ((path: string, body: FixtureBody, payload: string, requestId: string) => Promise<Response | undefined>)
+    | undefined;
   const wire = new WorkerRunLedger({
     baseUrl: "https://state.invalid",
     token: "fixture",
@@ -49,8 +51,11 @@ async function world() {
       const path = new URL(String(url)).pathname;
       const payload = String(init?.body),
         body = JSON.parse(payload) as FixtureBody;
+      const requestId = new Headers(init?.headers).get("x-switchboard-storage-request-id");
+      expect(requestId).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
+      if (!requestId) throw new Error("original request ID required");
       expect(body.storeKey).toBe("runs:fixture");
-      const intercepted = await intercept?.(path, body, payload);
+      const intercepted = await intercept?.(path, body, payload, requestId);
       if (intercepted) return intercepted;
       if (path === "/runs/state") {
         const result = await inner.setState(body.runId, body.gen, body.state);
@@ -135,10 +140,10 @@ describe("adjacent canonical mutation closure", () => {
       let original: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
       let didCommit = false,
         requests = 0;
-      w.intercept(async (path, body, payload) => {
+      w.intercept(async (path, body, payload, requestId) => {
         if (path !== "/runs/live-state") return;
         requests++;
-        original = await storeRequestWitness(path, payload);
+        original = await storeRequestWitness(path, payload, body, requestId);
         if (committed) didCommit = (await w.inner.assignLiveState(body.runId, body.gen, body.assignment)).ok;
         return new Response("reply unavailable", { status: 500 });
       });
@@ -206,10 +211,10 @@ describe("adjacent canonical mutation closure", () => {
       let original: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
       let didCommit = false;
       let requests = 0;
-      w.intercept(async (path, body, payload) => {
+      w.intercept(async (path, body, payload, requestId) => {
         if (path !== "/runs/session/checkpoint") return;
         requests++;
-        original = await storeRequestWitness(path, payload);
+        original = await storeRequestWitness(path, payload, body, requestId);
         if (committed) didCommit = (await w.inner.normalizeContextOrigins(body)).ok;
         return new Response("reply unavailable", { status: 500 });
       });
@@ -253,9 +258,9 @@ describe("adjacent canonical mutation closure", () => {
     async (caseName) => {
       const w = await world();
       let original: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
-      w.intercept(async (path, body, payload) => {
+      w.intercept(async (path, body, payload, requestId) => {
         if (path !== "/runs/session/checkpoint") return;
-        original = await storeRequestWitness(path, payload);
+        original = await storeRequestWitness(path, payload, body, requestId);
         await w.inner.normalizeContextOrigins(body);
         return new Response("reply unavailable", { status: 500 });
       });

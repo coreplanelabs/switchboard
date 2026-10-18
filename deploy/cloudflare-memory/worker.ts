@@ -1,3 +1,4 @@
+import type { StorageOperation } from "../../src/core/storageRequestContext.js";
 import {
   nativeRetirementTargetSchema,
   nativeRetirementTargetKey,
@@ -53,6 +54,7 @@ import {
   STORAGE_FAILURE_DIAGNOSTIC_HEADER,
   STORAGE_REQUEST_ID_HEADER,
   storageFailureNotice,
+  storageFailureLog,
   storageRequestIdOf,
 } from "../../src/core/storageFailureDiagnostic.ts";
 import { hasConfirmationConsent, type ConfirmationConsentSource } from "../../src/core/confirmationConsent.ts";
@@ -12028,12 +12030,13 @@ function logStorageRequestFailure(
   try {
     // POST alone cannot classify the client-owned read/write operation kind.
     const notice = storageFailureNotice(request, undefined, "http", error, undefined, failure);
+    const projected = storageFailureLog(notice);
     console.log(
       JSON.stringify({
         event: "storage.request.failure",
         side: "worker",
-        ...notice,
-        diagnostic: { ...notice.diagnostic, httpStatus },
+        ...projected,
+        diagnostic: { ...projected.diagnostic, httpStatus },
         build: BUILD,
       }),
     );
@@ -13624,7 +13627,7 @@ export class SessionLogDO extends DurableObject<Env> {
   }
 }
 
-const LEDGER_ROUTES = new Set([
+const LEDGER_ROUTES = new Set<string>([
   "/runs/source-events/receive",
   "/runs/source-events/read",
   "/runs/source-events/claim",
@@ -13726,12 +13729,12 @@ const LEDGER_ROUTES = new Set([
   "/runs/session/requester-target/write",
   "/runs/session/notepad",
   "/runs/session/notepad/write",
-]);
+] satisfies StorageOperation[]);
 
 /** The plane's routes (record 0064; orchestration-plane items 7 and 8):
  *  outcomes, effect delivery fencing and acknowledgements land on the ledger
  *  object of the given store key, like every `/runs/*` route. */
-const PLANE_ROUTES = new Set([
+const PLANE_ROUTES = new Set<string>([
   "/plane/outcome",
   "/plane/ack",
   "/plane/steer/fence",
@@ -13743,7 +13746,7 @@ const PLANE_ROUTES = new Set([
   "/plane/observe",
   "/plane/park",
   "/plane/reclaimed",
-]);
+] satisfies StorageOperation[]);
 
 const PLANE_RECLAIM_WORDS = new Set(["resume", "restart", "rehost", "closed"]);
 
@@ -14596,7 +14599,7 @@ async function handleLedger(
   }
   const stateWitness =
     pathname === "/runs/state" && originalBody !== undefined
-      ? await storeRequestWitness(pathname, originalBody)
+      ? await storeRequestWitness(pathname, originalBody, b, requestId)
       : undefined;
   let rpcWitness = stateWitness;
   const observeRpc = async <T>(
@@ -14607,7 +14610,7 @@ async function handleLedger(
     if (originalBody === undefined || !["/runs/state", "/runs/heartbeat", "/runs/append"].includes(pathname))
       return call();
     try {
-      rpcWitness ??= await storeRequestWitness(pathname, originalBody);
+      rpcWitness ??= await storeRequestWitness(pathname, originalBody, b, requestId);
     } catch (error) {
       logStorageTelemetryFailure(pathname, "request-witness", error);
       return call();
@@ -15362,7 +15365,7 @@ async function handleLedger(
       let stage: StorageTelemetryStage = "request-witness";
       let digest: string | undefined;
       try {
-        const request = await storeRequestWitness(pathname, originalBody);
+        const request = await storeRequestWitness(pathname, originalBody, b, requestId);
         digest = request.digest;
         stage = "diagnostic-header";
         const failure = { stage: "request" as const, errorKind: "rejection" as const, reason };
@@ -15735,7 +15738,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
   const organizationResponse = await organizationRoute(request, env.ORGANIZATIONS);
   if (organizationResponse) return organizationResponse;
   let body: unknown;
-  if (url.pathname.startsWith("/runs/")) {
+  if (url.pathname.startsWith("/runs/") || PLANE_ROUTES.has(url.pathname)) {
     const needsSeed = url.pathname === "/runs/promotion/prepare" || url.pathname === "/runs/claim";
     const seedHeader = needsSeed ? request.headers.get(EXPECTED_SEED_HEADER) : null;
     const expectedSeed = seedHeader === null ? undefined : decodeExpectedSeedHeader(seedHeader);
@@ -15754,34 +15757,45 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
       return json({ error: "body must be valid JSON" }, 400);
     }
     try {
-      return await (needsSeed || ["/runs/state", "/runs/append", "/runs/heartbeat"].includes(url.pathname)
-        ? handleLedger(
-            url.pathname,
-            body,
-            env,
-            originalBody,
-            expectedSeed,
-            storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
-            request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
-            request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
-          )
-        : handleRuns(
-            url.pathname,
-            body,
-            env,
-            request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
-            request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
-            storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
-          ));
+      return await (PLANE_ROUTES.has(url.pathname)
+        ? handlePlane(url.pathname, body, env)
+        : needsSeed || ["/runs/state", "/runs/append", "/runs/heartbeat"].includes(url.pathname)
+          ? handleLedger(
+              url.pathname,
+              body,
+              env,
+              originalBody,
+              expectedSeed,
+              storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
+              request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
+              request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
+            )
+          : handleRuns(
+              url.pathname,
+              body,
+              env,
+              request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
+              request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
+              storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
+            ));
     } catch (error) {
       if (error instanceof Error && error.name === "RunDeletedError") throw error;
       if (error instanceof PromotionPendingError) throw error;
-      const request = await storeRequestWitness(url.pathname, originalBody);
+      const failedRequest = await storeRequestWitness(
+        url.pathname,
+        originalBody,
+        body,
+        storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
+      );
       const diagnostic =
         error instanceof StateWriteBoundaryError
           ? error.diagnostic
-          : { version: 1 as const, requestDigest: request.digest, failure: stateWriteException("request", error) };
-      logStorageRequestFailure(request, diagnostic.failure, 500, error);
+          : {
+              version: 1 as const,
+              requestDigest: failedRequest.digest,
+              failure: stateWriteException("request", error),
+            };
+      logStorageRequestFailure(failedRequest, diagnostic.failure, 500, error);
       throw error instanceof StateWriteBoundaryError ? error : new StateWriteBoundaryError(diagnostic, error);
     }
   }

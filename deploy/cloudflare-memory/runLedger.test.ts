@@ -70,6 +70,7 @@ import type { WorkspaceAllocation } from "../../src/core/runLedger/workspaceDura
 import type { ClaimRequest } from "../../src/core/runLedger/types.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
 import { WorkerRunLedger } from "../../src/core/runLedgerWorker.ts";
+import { WorkerRunStore } from "../../src/core/runStoreWorker.ts";
 import { nativeClaimObservationOf } from "../../src/core/runLedger/claimObservation.ts";
 import { createCheckExecution } from "../../src/core/checkExecution.ts";
 import type { StoredWorkspaceCustody } from "../../src/core/runLedger/workspaceDurability.ts";
@@ -14938,6 +14939,76 @@ describe("state-write holds across Durable Object RPC", () => {
       },
     });
   }
+  it("joins deletion and batch-query failure records to the original client request", async () => {
+    const key = "runs:correlated-deletion";
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    const routed = routedEnv(stub, (name) =>
+      name === "deleted" || name === "delete" || name === "planeOutcome"
+        ? async () => {
+            throw new Error("storage unavailable");
+          }
+        : undefined,
+    );
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    const warn = vi.spyOn(console, "warn").mockImplementation((line) => logs.push(String(line)));
+    const wire = new WorkerRunStore({
+      baseUrl: "https://memory.test",
+      token: "test-token",
+      storeKey: key,
+      fetch: async (url, init) => {
+        const headers = new Headers(init?.headers);
+        headers.set("content-length", String(new TextEncoder().encode(String(init?.body)).length));
+        return memoryWorker.fetch(new Request(String(url), { ...init, headers }), routed);
+      },
+    });
+    try {
+      await expect(wire.deleted([id, "other"])).rejects.toMatchObject({ name: "TransientStoreError" });
+      await expect(wire.delete(id)).rejects.toMatchObject({ name: "UncertainStoreError" });
+      const plane = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey: key,
+        fetch: async (url, init) => {
+          const headers = new Headers(init?.headers);
+          headers.set("content-length", String(new TextEncoder().encode(String(init?.body)).length));
+          return memoryWorker.fetch(new Request(String(url), { ...init, headers }), routed);
+        },
+      });
+      await expect(
+        plane.planeOutcome({
+          runId: id,
+          threadKey: "mcp:fixture",
+          requester: "mcp:fixture",
+          stage: "admission",
+          outcome: "proceeded",
+        }),
+      ).rejects.toMatchObject({ name: "UncertainStoreError" });
+      const failures = logs
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .filter((value) => value.event === "storage.request.failure");
+      for (const [operation, expected] of [
+        ["/runs/deleted", [id, "other"]],
+        ["/runs/delete", [id]],
+        ["/plane/outcome", [id]],
+      ] as const) {
+        const records = failures.filter((value) => value.diagnostic.operation === operation);
+        expect(
+          records.map((value) => ({ side: value.side, targets: value.runIds, scope: value.context.scope })),
+        ).toEqual([
+          { side: "worker", targets: expected, scope: "runs" },
+          { side: "client", targets: expected, scope: "runs" },
+        ]);
+        expect(records[0].diagnostic.requestId).toMatch(/^[a-f0-9-]{36}$/);
+        expect(records[1].diagnostic.requestId).toBe(records[0].diagnostic.requestId);
+        expect(records[1].diagnostic.requestDigest).toBe(records[0].diagnostic.requestDigest);
+      }
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+  });
   it("keeps corrupt retained inbox bytes out of HTTP diagnostics and preserves the original SQLite row", async () => {
     const key = "runs:decoder-private-inbox";
     const stub = env.RUNS.get(env.RUNS.idFromName(key));

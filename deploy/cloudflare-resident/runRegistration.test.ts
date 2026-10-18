@@ -1,3 +1,5 @@
+import { prepareStorageRequest } from "../../src/core/storeResponse.js";
+import { storageTransport } from "../../src/core/storageTransport.js";
 import { RESTORE_BACKUP_EXPIRY_BUFFER_MS } from "../../src/core/budgets.js";
 import {
   archiveControlAnswer,
@@ -1174,6 +1176,8 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
       reserveUid,
       provisionUidCommand,
       crypto: webcrypto,
+      prepareStorageRequest,
+      storageTransport,
       NativeOperationJournal,
       NativeRunScopes,
       RecordedCheckOperation,
@@ -1547,6 +1551,8 @@ function workloadResident(
     reserveUid,
     provisionUidCommand,
     crypto: webcrypto,
+    prepareStorageRequest,
+    storageTransport,
     NativeOperationJournal,
     archiveControlAnswer,
     archiveCapabilitySchema,

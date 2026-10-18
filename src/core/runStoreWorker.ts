@@ -1,8 +1,10 @@
 import { PermanentStoreError, RouteMissingError, TransientStoreError, UncertainStoreError } from "./storeFailure.js";
 export { PermanentStoreError, RouteMissingError, TransientStoreError, UncertainStoreError } from "./storeFailure.js";
-import { readStoreResponse, storeRequestWitness, type StoreOperationKind } from "./storeResponse.js";
+import { readStoreResponse, prepareStorageRequest, type StoreOperationKind } from "./storeResponse.js";
 import { errorSuffix } from "./workerError.js";
-import { tracedFetch } from "./trace/tracedFetch.js";
+import { storageTransport } from "./storageTransport.js";
+import type { StorageFailureNotice } from "./storageFailureDiagnostic.js";
+import type { StorageOperation, StorageOperationBody } from "./storageRequestContext.js";
 import type { Span, TraceOptions } from "./trace/types.js";
 import {
   isRunListItem,
@@ -102,6 +104,7 @@ export interface WorkerRunStoreOptions {
   prices?: ModelPriceTable;
   /** Injectable for tests; defaults to global fetch. */
   fetch?: typeof fetch;
+  onFailure?: (notice: StorageFailureNotice) => void;
 }
 
 /** The Worker's routes, as a span names them. */
@@ -131,7 +134,7 @@ export class WorkerRunStore implements RunStore {
   async put(record: RunRecord, trace?: TraceOptions): Promise<PutResult> {
     if (!RUN_ID_PATTERN.test(record.id))
       throw new PermanentStoreError(`run store: refusing to put malformed id ${JSON.stringify(record.id)}`);
-    const body: Record<string, unknown> = { storeKey: this.opts.storeKey, record };
+    const body: { record: RunRecord } & Record<string, unknown> = { storeKey: this.opts.storeKey, record };
     // The record's metrics point rides beside it (run-metrics.md): computed for
     // every final record, absent for a provisional one — the object decides
     // whether the row turned final and whether to write it.
@@ -141,7 +144,7 @@ export class WorkerRunStore implements RunStore {
       body.policy = this.opts.policy;
       if (this.opts.policyUpdatedAt !== undefined) body.policyUpdatedAt = this.opts.policyUpdatedAt;
     }
-    const data = await this.post(
+    return await this.post(
       "/runs/put",
       body,
       trace?.span,
@@ -152,162 +155,200 @@ export class WorkerRunStore implements RunStore {
         Number(value.retained) >= 0 &&
         typeof value.stored === "boolean" &&
         typeof value.rewritten === "boolean",
+      async (data): Promise<PutResult> => {
+        if (
+          data.ok !== true ||
+          typeof data.retained !== "number" ||
+          typeof data.stored !== "boolean" ||
+          typeof data.rewritten !== "boolean"
+        ) {
+          throw new PermanentStoreError("run store /runs/put returned a malformed result");
+        }
+        return { ok: true, retained: data.retained, stored: data.stored, rewritten: data.rewritten };
+      },
     );
-    if (
-      data.ok !== true ||
-      typeof data.retained !== "number" ||
-      typeof data.stored !== "boolean" ||
-      typeof data.rewritten !== "boolean"
-    ) {
-      throw new PermanentStoreError("run store /runs/put returned a malformed result");
-    }
-    return { ok: true, retained: data.retained, stored: data.stored, rewritten: data.rewritten };
   }
 
   async confirmRuntimeShutdown(original: RunRecord, trace?: TraceOptions): Promise<boolean> {
-    const result = await this.post(
+    return await this.post(
       "/runs/shutdown",
       { storeKey: this.opts.storeKey, record: original },
       trace?.span,
       "write",
       (value) => value.ok === true && typeof value.confirmed === "boolean",
+      async (result): Promise<boolean> => {
+        return result.confirmed === true;
+      },
     );
-    return result.confirmed === true;
   }
 
   async get(id: string): Promise<RunRecord | null> {
     if (!RUN_ID_PATTERN.test(id)) return null;
-    const data = await this.read("/runs/get", { storeKey: this.opts.storeKey, id });
-    if (data.record === null || data.record === undefined) return null;
-    if (!isRunRecord(data.record) || data.record.id !== id)
-      throw new PermanentStoreError("run store /runs/get returned a malformed record");
-    return normalizeStored(data.record);
+    return await this.read(
+      "/runs/get",
+      { storeKey: this.opts.storeKey, id },
+      async (data): Promise<RunRecord | null> => {
+        if (data.record === null || data.record === undefined) return null;
+        if (!isRunRecord(data.record) || data.record.id !== id)
+          throw new PermanentStoreError("run store /runs/get returned a malformed record");
+        return normalizeStored(data.record);
+      },
+    );
   }
 
   async getSummary(id: string): Promise<RunListItem | null> {
     if (!RUN_ID_PATTERN.test(id)) return null;
-    const data = await this.read("/runs/summary", { storeKey: this.opts.storeKey, id });
-    if (data.summary === null || data.summary === undefined) return null;
-    if (!isRunListItem(data.summary) || data.summary.id !== id)
-      throw new PermanentStoreError("run store /runs/summary returned a malformed summary");
-    return normalizeStored(data.summary);
+    return await this.read(
+      "/runs/summary",
+      { storeKey: this.opts.storeKey, id },
+      async (data): Promise<RunListItem | null> => {
+        if (data.summary === null || data.summary === undefined) return null;
+        if (!isRunListItem(data.summary) || data.summary.id !== id)
+          throw new PermanentStoreError("run store /runs/summary returned a malformed summary");
+        return normalizeStored(data.summary);
+      },
+    );
   }
 
   async list(opts: RunListOptions): Promise<RunListItem[]> {
-    const data = await this.read("/runs/list", { storeKey: this.opts.storeKey, ...compact(opts) });
-    if (!Array.isArray(data.items)) throw new PermanentStoreError("run store /runs/list returned no items array");
-    if (
-      opts.recoveryEvidence !== undefined &&
-      (data.evidenceComplete !== true ||
-        data.nextBefore !== undefined ||
-        data.items.length >= clampListLimit(opts.limit) ||
-        data.items.some((item) => !isRunListItem(item) || !matchesRecoveryEvidence(item, opts.recoveryEvidence!)) ||
-        new Set(data.items.map((item) => (item as RunListItem).id)).size !== data.items.length)
-    )
-      throw new PermanentStoreError("run store /runs/list recovery evidence incomplete");
-    return data.items.filter(isRunListItem).map(normalizeStored);
+    return await this.read(
+      "/runs/list",
+      { storeKey: this.opts.storeKey, ...compact(opts) },
+      async (data): Promise<RunListItem[]> => {
+        if (!Array.isArray(data.items)) throw new PermanentStoreError("run store /runs/list returned no items array");
+        if (
+          opts.recoveryEvidence !== undefined &&
+          (data.evidenceComplete !== true ||
+            data.nextBefore !== undefined ||
+            data.items.length >= clampListLimit(opts.limit) ||
+            data.items.some((item) => !isRunListItem(item) || !matchesRecoveryEvidence(item, opts.recoveryEvidence!)) ||
+            new Set(data.items.map((item) => (item as RunListItem).id)).size !== data.items.length)
+        )
+          throw new PermanentStoreError("run store /runs/list recovery evidence incomplete");
+        return data.items.filter(isRunListItem).map(normalizeStored);
+      },
+    );
   }
 
   async events(id: string, opts: RunEventsOptions): Promise<RunEventsPage | null> {
     if (!RUN_ID_PATTERN.test(id)) return null;
-    const data = await this.read("/runs/events", { storeKey: this.opts.storeKey, id, ...compact(opts) });
-    if (data.events === null) return null; // the DO's not-found: no such run, or hidden by retention
-    if (!Array.isArray(data.events)) throw new PermanentStoreError("run store /runs/events returned no events array");
-    const events = data.events.filter(
-      (e): e is StoredRunEvent =>
-        typeof e === "object" &&
-        e !== null &&
-        typeof (e as StoredRunEvent).type === "string" &&
-        typeof (e as StoredRunEvent).seq === "number",
+    return await this.read(
+      "/runs/events",
+      { storeKey: this.opts.storeKey, id, ...compact(opts) },
+      async (data): Promise<RunEventsPage | null> => {
+        if (data.events === null) return null;
+        if (!Array.isArray(data.events))
+          throw new PermanentStoreError("run store /runs/events returned no events array");
+        const events = data.events.filter(
+          (e): e is StoredRunEvent =>
+            typeof e === "object" &&
+            e !== null &&
+            typeof (e as StoredRunEvent).type === "string" &&
+            typeof (e as StoredRunEvent).seq === "number",
+        );
+        const out: RunEventsPage = { events };
+        if (typeof data.nextAfterSeq === "number") out.nextAfterSeq = data.nextAfterSeq;
+        return out;
+      },
     );
-    const out: RunEventsPage = { events };
-    if (typeof data.nextAfterSeq === "number") out.nextAfterSeq = data.nextAfterSeq;
-    return out;
   }
 
   async deleted(ids: readonly string[]): Promise<string[]> {
     if (ids.length === 0) return [];
-    const data = await this.read("/runs/deleted", { storeKey: this.opts.storeKey, ids });
-    if (!Array.isArray(data.ids) || data.ids.some((id) => typeof id !== "string" || !ids.includes(id)))
-      throw new PermanentStoreError("run store /runs/deleted returned a malformed result");
-    return data.ids as string[];
+    return await this.read("/runs/deleted", { storeKey: this.opts.storeKey, ids }, async (data): Promise<string[]> => {
+      if (!Array.isArray(data.ids) || data.ids.some((id) => typeof id !== "string" || !ids.includes(id)))
+        throw new PermanentStoreError("run store /runs/deleted returned a malformed result");
+      return data.ids as string[];
+    });
   }
 
   async delete(id: string, opts?: { destructive: true }): Promise<void> {
     if (!RUN_ID_PATTERN.test(id)) return;
-    const result = await this.post("/runs/delete", {
-      storeKey: this.opts.storeKey,
-      id,
-      ...(opts?.destructive ? { destructive: true } : {}),
-    });
-    if (opts?.destructive && result.destructive !== true)
-      throw new PermanentStoreError("The history service did not confirm the Kill deletion fence.");
+    return await this.post(
+      "/runs/delete",
+      {
+        storeKey: this.opts.storeKey,
+        id,
+        ...(opts?.destructive ? { destructive: true } : {}),
+      },
+      undefined,
+      "write",
+      undefined,
+      async (result): Promise<void> => {
+        if (opts?.destructive && result.destructive !== true)
+          throw new PermanentStoreError("The history service did not confirm the Kill deletion fence.");
+      },
+    );
   }
 
   /** One row per run from the Worker, folded into the cells here: the arithmetic
    *  is the bot's, the Worker only reads its rows and the parents outside them. */
   async usage(query: RunUsageQuery): Promise<RunUsageReport> {
-    const data = await this.read("/runs/usage", {
-      storeKey: this.opts.storeKey,
-      sinceMs: query.sinceMs,
-      untilMs: query.untilMs,
-    });
-    if (!isRunUsageRows(data)) throw new PermanentStoreError("run store /runs/usage returned malformed usage rows");
-    return reportOfUsageRows(data);
+    return await this.read(
+      "/runs/usage",
+      {
+        storeKey: this.opts.storeKey,
+        sinceMs: query.sinceMs,
+        untilMs: query.untilMs,
+      },
+      async (data): Promise<RunUsageReport> => {
+        if (!isRunUsageRows(data)) throw new PermanentStoreError("run store /runs/usage returned malformed usage rows");
+        return reportOfUsageRows(data);
+      },
+    );
   }
 
-  private read(path: RunStoreRoute, payload: unknown) {
-    return this.post(path, payload, undefined, "read");
+  private read<O extends RunStoreRoute, T>(
+    path: O,
+    payload: StorageOperationBody<O>,
+    receive: (data: Record<string, unknown>) => Promise<T>,
+  ) {
+    return this.post(path, payload, undefined, "read", undefined, receive);
   }
 
   /** POST a JSON body and classify the outcome. The body is a STRING; the
    *  runtime sets its numeric Content-Length (never hand-set — see header). */
-  private async post(
-    path: RunStoreRoute,
-    payload: unknown,
-    span?: Span,
-    kind: StoreOperationKind = "write",
-    acknowledgement?: (data: Record<string, unknown>) => boolean,
-  ): Promise<Record<string, unknown>> {
-    const body = JSON.stringify(payload);
-    const request = await storeRequestWitness(path, body);
-    let res: Response;
-    try {
-      // One `http.client` span under `span` when the caller has one (the
-      // history writer's; docs/reference/specs/tracing.md item 24), the route being the
-      // path literal; the plain fetch otherwise.
-      res = await tracedFetch(
+  private async post<O extends StorageOperation, T>(
+    path: O,
+    payload: StorageOperationBody<NoInfer<O>>,
+    span: Span | undefined,
+    kind: StoreOperationKind,
+    acknowledgement: ((data: Record<string, unknown>) => boolean) | undefined,
+    receive: (data: Record<string, unknown>) => Promise<T>,
+  ): Promise<T> {
+    const request = await prepareStorageRequest(path, payload);
+    return storageTransport(
+      request,
+      {
+        url: `${this.baseUrl}${path}`,
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
+        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+        timeoutMs: RUN_STORE_TIMEOUT_MS,
+        fetch: this.fetchImpl,
         span,
-        `${this.baseUrl}${path}`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${this.opts.token}`,
-          },
-          body,
-          signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
-        },
-        { route: path, fetchImpl: this.fetchImpl },
-      );
-    } catch (err) {
-      if (kind === "write")
-        throw new UncertainStoreError(`run store ${path}: transport outcome unknown`, request, { cause: err });
-      throw new TransientStoreError(`run store ${path}: ${describeError(err)}`);
-    }
-    if (!res.ok) {
-      const message = `run store ${path} HTTP ${res.status}${await errorSuffix(res)}`;
-      if (res.status === 404) throw new RouteMissingError(message);
-      if (res.status >= 500 || res.status === 408 || res.status === 429) {
-        if (kind === "write") throw new UncertainStoreError(message, request);
-        throw new TransientStoreError(message);
-      }
-      throw new PermanentStoreError(message);
-    }
-    const data = await readStoreResponse(res, kind, request);
-    if (acknowledgement && !acknowledgement(data))
-      throw new UncertainStoreError(`run store ${path}: invalid acknowledgement`, request);
-    return data;
+        kind,
+        onFailure: this.opts.onFailure,
+        transportError: (err) =>
+          kind === "write"
+            ? new UncertainStoreError(`run store ${path}: transport outcome unknown`, request, { cause: err })
+            : new TransientStoreError(`run store ${path}: ${describeError(err)}`),
+      },
+      async (res) => {
+        if (!res.ok) {
+          const message = `run store ${path} HTTP ${res.status}${await errorSuffix(res)}`;
+          if (res.status === 404) throw new RouteMissingError(message);
+          if (res.status >= 500 || res.status === 408 || res.status === 429) {
+            if (kind === "write") throw new UncertainStoreError(message, request);
+            throw new TransientStoreError(message);
+          }
+          throw new PermanentStoreError(message);
+        }
+        const data = await readStoreResponse(res, kind, request);
+        if (acknowledgement && !acknowledgement(data))
+          throw new UncertainStoreError(`run store ${path}: invalid acknowledgement`, request);
+        return receive(data);
+      },
+    );
   }
 }
 

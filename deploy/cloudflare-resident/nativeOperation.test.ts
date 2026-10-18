@@ -1,3 +1,5 @@
+import { prepareStorageRequest } from "../../src/core/storeResponse.js";
+import { storageTransport } from "../../src/core/storageTransport.js";
 import {
   nativeRetirementTargetSchema,
   nativeRetirementPermitSchema,
@@ -1536,6 +1538,8 @@ function httpFixture(
     workspaceOwnerKey,
     RUN_STORE_KEY: "runs:default",
     RUN_STORE_TIMEOUT_MS: 10000,
+    prepareStorageRequest,
+    storageTransport,
     fetch: async (_input: unknown, init: RequestInit) => {
       memoryRequests.push(JSON.parse(String(init.body)));
       return new Response(

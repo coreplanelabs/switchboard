@@ -1,3 +1,5 @@
+import { prepareStorageRequest } from "../storeResponse.js";
+import { storageTransport } from "../storageTransport.js";
 import { residentRouteOf } from "../../execution/residentRoute.js";
 import { RUN_STORE_TIMEOUT_MS } from "../runStoreConstants.js";
 import type { LiveRunRow } from "./types.js";
@@ -361,18 +363,30 @@ export async function readCancellationPreparation(
 ): Promise<{ prepared: true } | ReturnType<typeof cancellationFailure>> {
   if (!url || !token) return cancellationFailure(cancellation, "prepare", "state-unconfigured");
   try {
-    const response = await fetchImpl(new URL("/runs/cancellation/read", url), {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ storeKey: "runs:default", cancellation, binding }),
-      signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+    const request = await prepareStorageRequest("/runs/cancellation/read", {
+      storeKey: "runs:default",
+      cancellation,
+      binding,
     });
-    if (!response.ok) return cancellationFailure(cancellation, "prepare", "state-http-refusal");
-    const result = (await response.json()) as Record<string, unknown>;
-    if (result.prepared !== true) return cancellationFailure(cancellation, "prepare", "state-not-prepared");
-    if (result.cancellationId !== cancellation.id)
-      return cancellationFailure(cancellation, "prepare", "ticket-mismatch");
-    return { prepared: true };
+    return await storageTransport(
+      request,
+      {
+        url: new URL("/runs/cancellation/read", url),
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+        timeoutMs: RUN_STORE_TIMEOUT_MS,
+        fetch: fetchImpl,
+        exceptionDetails: false,
+      },
+      async (response) => {
+        if (!response.ok) return cancellationFailure(cancellation, "prepare", "state-http-refusal");
+        const result = (await response.json()) as Record<string, unknown>;
+        if (result.prepared !== true) return cancellationFailure(cancellation, "prepare", "state-not-prepared");
+        if (result.cancellationId !== cancellation.id)
+          return cancellationFailure(cancellation, "prepare", "ticket-mismatch");
+        return { prepared: true as const };
+      },
+    );
   } catch {
     return cancellationFailure(cancellation, "prepare", "state-unreachable");
   }

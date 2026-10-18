@@ -44,6 +44,7 @@ describe("config storage failure evidence", () => {
     expect(notices).toEqual([
       {
         runIds: [],
+        context: { scope: "config" },
         diagnostic: {
           version: 1,
           operation: "/config/get",

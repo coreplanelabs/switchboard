@@ -14,6 +14,8 @@ import ts from "typescript";
 import { readSource } from "./testing/sourceScan.js";
 import { sanitizeResidentBody } from "../../src/execution/residentText.js";
 import { RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "../../src/core/runStoreConstants.js";
+import { prepareStorageRequest } from "../../src/core/storeResponse.js";
+import { storageTransport } from "../../src/core/storageTransport.js";
 
 const context: CheckOperationContext = {
   threadKey: "t1",
@@ -897,6 +899,8 @@ function inspectionHttpFixture(reads: unknown[], data = fixture()) {
     RecordedCheckOperation,
     RUN_STORE_KEY,
     RUN_STORE_TIMEOUT_MS,
+    prepareStorageRequest,
+    storageTransport,
     RESOURCE_KEY: "resident:resource",
     sanitizeResidentBody,
     STREAMED_ROUTES: new Set(),

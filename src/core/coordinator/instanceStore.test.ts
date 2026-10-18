@@ -804,7 +804,11 @@ describe("main-agent task claims", () => {
         ),
       ]);
       expect(raced.filter((result) => result.ok && result.created)).toHaveLength(1);
-      expect(await store.getMainTask({ ...key, actId: "act-race" })).toMatchObject({ instanceId: "ship_race_a" });
+      expect(await store.getMainTask({ ...key, actId: "act-race" })).toEqual({
+        instanceId: raced[0]!.ok && raced[0]!.created ? "ship_race_a" : "ship_race_b",
+        unit: firstUnit,
+        authority,
+      });
       expect(
         await store.claimMainTask(
           key,

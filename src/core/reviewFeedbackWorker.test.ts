@@ -34,7 +34,16 @@ describe("durable feedback client", () => {
       { storeKey: "runs:main", sinceMs: 0, untilMs: 2000 },
       { storeKey: "runs:main", sinceMs: 0, untilMs: 2000, after: "a" },
     ]);
-    expect(headers).toEqual(Array(2).fill({ authorization: "Bearer test", "content-type": "application/json" }));
+    expect(headers).toEqual(
+      Array(2).fill({
+        authorization: "Bearer test",
+        "content-type": "application/json",
+        "x-switchboard-storage-request-id": expect.stringMatching(/^[a-f0-9-]{36}$/),
+      }),
+    );
+    expect(
+      new Set(headers.map((value) => new Headers(value as HeadersInit).get("x-switchboard-storage-request-id"))).size,
+    ).toBe(2);
   });
   it("refuses incomplete, malformed and looping responses instead of reporting empty feedback", async () => {
     for (const result of [
