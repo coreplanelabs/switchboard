@@ -90,6 +90,12 @@ describe("the tarball", () => {
         "bin/switchboard.js",
         "dist/cli.js",
         "dist/assets/project.json",
+        "dist/assets/engineering/manifest.json",
+        "dist/assets/engineering/general.md",
+        "dist/assets/engineering/design.md",
+        "dist/assets/engineering/errors.md",
+        "dist/assets/engineering/observability.md",
+        "dist/assets/engineering/verification.md",
         "dist/assets/.env.example",
         "dist/assets/config/config.example.yaml",
         "dist/assets/deploy/profile.example.json",
@@ -240,6 +246,8 @@ describe("the installed CLI", () => {
     const count = (needle: string) => stdout.split("\n").filter((l) => l.includes(needle)).length;
     expect(count("[build] "), stdout).toBe(1);
     expect(count("[capabilities] "), stdout).toBe(1);
+    expect(count("[engineering] "), stdout).toBe(1);
+    expect(stdout).toMatch(/\[engineering\] [a-z0-9, .-]+ sha256=[0-9a-f]{64}\n/);
     expect(count(`http server on :${port} (`), stdout).toBe(1);
     expect(stderr).not.toContain("EADDRINUSE");
     expect(stderr).not.toContain("web app manifest not found");

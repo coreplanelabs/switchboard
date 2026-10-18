@@ -1,5 +1,7 @@
 # Agent: coding
 
+Every coding request receives the shared [engineering rules](engineering-rules.md) before its first model turn, including configured instructions and all workspace variants. Skills add task methods under this policy.
+
 Every coding workspace receives [task-directed coding-check guidance](coding-checks.md): select a useful bounded baseline from repository context and report the actual result. `run_check` provides typed receipts where the bound workspace, executor and ledger support them; known pre-execution capability limitations permit ordinary shell evidence without a receipt claim. Explicit legacy startup-smoke policies retain the separate [compatibility contract](first-coding-test.md).
 Takes a task from Slack, scopes fast, implements the change in its sandbox, pushes the branch, and submits a typed PR description — Switchboard renders the body and opens the PR itself ([pr-description.md](pr-description.md) item 5). Its unit of delivery is a pushed branch plus a validated `PrDescription`, not prose; the PR URL comes from code.
 

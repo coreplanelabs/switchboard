@@ -238,7 +238,7 @@ describe("classifyPath", () => {
     });
   });
 
-  it("a Worker's own directory, its wrangler config and Dockerfile are its inputs; the bot's image inputs are the root Dockerfile, .dockerignore, package files, tsconfigs, src/, web/ and skills/ — never config/, which the bot reads from the state Worker", () => {
+  it("a Worker's own directory, its wrangler config and Dockerfile are its inputs; the bot's image inputs are the root Dockerfile, .dockerignore, package files, tsconfigs, src/, web/, skills/ and engineering/ — never config/, which the bot reads from the state Worker", () => {
     expect(classifyPath("deploy/cloudflare-resident/worker.ts")).toEqual({ kind: "input", workers: ["resident"] });
     expect(classifyPath("deploy/cloudflare-resident/wrangler.jsonc")).toEqual({ kind: "input", workers: ["resident"] });
     expect(classifyPath("deploy/cloudflare-resident/Dockerfile")).toEqual({ kind: "input", workers: ["resident"] });
@@ -258,6 +258,8 @@ describe("classifyPath", () => {
       "web/package.json",
       "web/src/App.vue",
       "skills/pr-description/SKILL.md",
+      "engineering/errors.md",
+      "engineering/manifest.json",
     ]) {
       expect(classifyPath(p), p).toEqual({ kind: "input", workers: ["bot"] });
     }

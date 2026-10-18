@@ -9,6 +9,18 @@ import { baseForEvent, fixtureRegistrationOnly, fullPlan, planForDiff, planForPa
 import { websiteMaintenanceEnabled } from "../scripts/website-maintenance.mjs";
 
 describe("selective CI", () => {
+  it.each(["engineering/manifest.json", "engineering/errors.md"])(
+    "verifies the shipped npm package for engineering-only changes: %s",
+    (path) => {
+      expect(planForPaths([path])).toMatchObject({
+        botTests: true,
+        package: true,
+        workers: ["none"],
+        images: ["deploy/cloudflare"],
+      });
+    },
+  );
+
   it("selects website work for a docs page only when enabled", () => {
     expect(planForPaths(["docs/how-to/example.md"])).toEqual({
       botChecks: ["check:consistency"],
@@ -51,6 +63,7 @@ describe("selective CI", () => {
       "deploy/cloudflare-resident/Dockerfile",
       "docs/.vitepress/og.mjs",
       "skills/pr-description/SKILL.md",
+      "engineering/errors.md",
       "packages/switchboard/build.mts",
       "project.json",
     ]) {

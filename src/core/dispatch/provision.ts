@@ -54,6 +54,7 @@ import type { RunBearerStore } from "../modelProxy/runBearers.js";
 import type { GitBindings } from "../modelProxy/gitBindings.js";
 import { parseModelRef, wireOf } from "../provider.js";
 import { skillGuidanceBlock, type SkillStore } from "../../skills/index.js";
+import { engineeringRulesFor, type EngineeringRules } from "../../engineering.js";
 import { mcpGuidanceBlock, type McpToolSource, type McpToolsForRun } from "../../mcp/source.js";
 import { configAwarenessBlock } from "../configAwareness.js";
 import { selfDescriptionBlock, type BuildFacts } from "../selfDescription.js";
@@ -152,6 +153,8 @@ export interface ProvisionDeps
    * src/cli.ts); the DO-backed upload store is PR2, behind this same interface.
    */
   skills?: SkillStore;
+  /** Required at service and CLI startup; synthetic callers can supply an in-memory bundle. */
+  engineeringRules?: EngineeringRules;
   /**
    * External MCP servers as tools (docs/reference/specs/mcp-tools.md). Asked once
    * per run, before the first model turn, for the servers scoped to the
@@ -674,6 +677,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // context as resolved NOW — so the page can head the record with linked
   // owner/repo · ref · #PR · sha. Straight after the request; published once
   // more if the attach adopts a moved PR head below (readers take the latest).
+  const engineeringRules = resume ? undefined : engineeringRulesFor(deps.engineeringRules, agent.name);
   const publishMeta = (repoCtx: RepoContext) =>
     events.publish({
       type: "run_meta",
@@ -682,6 +686,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
         : {}),
       agent: agent.name,
       agentSource,
+      ...(engineeringRules
+        ? { engineeringRules: { files: engineeringRules.files, sha256: engineeringRules.sha256 } }
+        : {}),
       model: resolved.modelRef,
       ...(decisionRecord !== undefined ? { record: decisionRecord } : {}),
       ...(decisionRecordTask !== undefined ? { recordTaskKey: decisionRecordTask } : {}),
@@ -1755,6 +1762,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
   const notesBlock = ctx.session ? sessionNotesBlock(ctx.session) : undefined;
   const composeSystem = makeSystemComposer({
     agent,
+    engineeringRules: deps.engineeringRules,
     resident: resident === true,
     repo: repoCtx.repo,
     workspace: binding?.workspace,

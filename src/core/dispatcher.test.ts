@@ -11633,6 +11633,24 @@ describe("skill loading / progressive disclosure", () => {
     vi.mocked(makeExecutor).mockClear();
   });
 
+  it("supplies engineering policy before the first review turn without skill use and records its identity", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.engineeringRules = { files: ["errors.md"], sha256: "a".repeat(64), text: "Propagate unexpected failures." };
+    deps.runRegistry = new RunRegistry({ genId: () => "policy-run", genToken: () => "policy-token" });
+    await dispatch(deps, msg("agent:review look at the code"), fakeIO().io);
+    expect(provider.requests[0].system).toContain(
+      "# Engineering rules\n\nApply these rules to code you write or review.",
+    );
+    expect(provider.requests[0].system).toContain("Propagate unexpected failures.");
+    const events = contentOf(deps.runRegistry.snapshot("policy-run", "policy-token")!.events);
+    expect(events.find((event) => event.type === "run_meta")).toMatchObject({
+      type: "run_meta",
+      agent: "review",
+      engineeringRules: { files: ["errors.md"], sha256: "a".repeat(64) },
+    });
+  });
+
   it("a review run's system prompt gains the review skill list, excluding coding skills", async () => {
     const provider = capturingProvider();
     const deps: CoreDeps = { ...makeDeps(YAML_FIXTURE, provider), skills: skillStore() };
@@ -21243,10 +21261,12 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     let stateAtFirstCall: unknown;
     let messagesAtFirstCall: ChatMessage[] | undefined;
+    let systemAtFirstCall: string | undefined;
     const provider: Provider = {
       name: "fake",
       async complete(req): Promise<CompletionResult> {
         messagesAtFirstCall ??= structuredClone(req.messages);
+        systemAtFirstCall ??= req.system;
         stateAtFirstCall ??= structuredClone(ledger.live.get("run-old")?.state);
         return { content: [{ type: "text", text: "resumed and done" }], stopReason: "end_turn" };
       },
@@ -21256,6 +21276,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       "    baseUrl: https://resident.example\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]",
     );
     const { deps, registry, writer } = wired(provider, { ledger, yaml: yamlWithNewPilot });
+    deps.engineeringRules = { files: ["errors.md"], sha256: "c".repeat(64), text: "Current policy" };
     deps.clock = () => 10_000;
     const instances = new InMemoryCoordinatorInstanceStore(ledger);
     seedCoordinatorUnit(instances, {
@@ -21293,6 +21314,15 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     });
     await writer.settled();
     expect(replies.at(-1)).toContain("resumed and done");
+    expect(systemAtFirstCall?.split("\n\n")[0]).toBe("sys");
+    expect(systemAtFirstCall).not.toContain("Current policy");
+    expect(
+      ledger.finished
+        .get("run-old")
+        ?.events.flatMap((event) =>
+          event.type === "run_meta" && event.engineeringRules ? [event.engineeringRules] : [],
+        ),
+    ).toEqual([]);
     expect(replies.at(-1)).toContain("No push was confirmed");
     const attaches = calls.filter((c) => c.path === "/status" || c.path === "/native/attach");
     expect(attaches.map((c) => c.path)).toEqual(["/status", "/native/attach"]);
@@ -21435,6 +21465,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
       const provider = capturingProvider("must not run");
       const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+      deps.engineeringRules = { files: ["errors.md"], sha256: "c".repeat(64), text: "Current policy" };
       deps.clock = () => 10_000;
       if (failure !== "projection-rejection") {
         const assign = ledger.assignLiveState.bind(ledger);
@@ -21602,6 +21633,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       });
     const provider = capturingProvider("must not run");
     const { deps, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    deps.engineeringRules = { files: ["errors.md"], sha256: "c".repeat(64), text: "Current policy" };
     deps.clock = () => 10_000;
     const plan = planResume({
       transcript: {

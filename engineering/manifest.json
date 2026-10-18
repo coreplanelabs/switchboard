@@ -1,0 +1,4 @@
+{
+  "schema": 1,
+  "files": ["general.md", "design.md", "errors.md", "observability.md", "verification.md"]
+}

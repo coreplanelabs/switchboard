@@ -130,6 +130,7 @@ COPY deploy/profile.example.json ./deploy/
 COPY deploy/secrets.manifest.json ./deploy/
 # Bundled skills (#100): loaded at startup by BundledSkillStore from /app/skills.
 COPY skills ./skills
+COPY engineering ./engineering
 RUN mkdir -p /app/data /app/workspaces && chown -R switchboard:switchboard /app
 USER switchboard
 

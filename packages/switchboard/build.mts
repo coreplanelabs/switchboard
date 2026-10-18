@@ -44,6 +44,7 @@ import { WEB_DIST_DIR } from "../../src/channels/webAssets.js";
 import { importClosure, INERT_RULES } from "../../src/deploy/affected.js";
 import { WORKER_SPECS } from "../../src/deploy/plan.js";
 import { PACKAGE_SOURCE_FILE, type PackageSource } from "../../src/packageRoot.js";
+import { loadEngineeringRules } from "../../src/engineeringBundle.js";
 
 const PACKAGE_DIR = import.meta.dirname;
 const REPO_ROOT = resolve(PACKAGE_DIR, "..", "..");
@@ -84,15 +85,16 @@ export function shippedDeployAssets(trackedDeployPaths: readonly string[]): stri
 /**
  * Pure: every path the build copies under dist/assets/, repository-relative —
  * the root assets, the deploy assets, the source files the Workers' `worker.ts`
- * import (`workerSourceFiles`) and the dashboard's built files (`webDistAssets`),
+ * import (`workerSourceFiles`) and the dashboard's built files (`webDistAssets`) plus the selected engineering rule files,
  * each once, sorted after the root list.
  */
 export function shippedAssets(
   trackedDeployPaths: readonly string[],
   workerSources: readonly string[] = [],
   webDist: readonly string[] = [],
+  engineering: readonly string[] = [],
 ): string[] {
-  const rest = new Set([...shippedDeployAssets(trackedDeployPaths), ...workerSources, ...webDist]);
+  const rest = new Set([...shippedDeployAssets(trackedDeployPaths), ...workerSources, ...webDist, ...engineering]);
   for (const root of ROOT_ASSETS) rest.delete(root);
   return [...ROOT_ASSETS, ...[...rest].sort()];
 }
@@ -268,7 +270,11 @@ async function main(): Promise<void> {
     const abs = join(REPO_ROOT, path);
     return existsSync(abs) ? readFileSync(abs, "utf8") : undefined;
   };
-  const assets = shippedAssets(trackedDeployPaths(), await workerSourceFiles(readTree), buildWebDist());
+  const rules = loadEngineeringRules(join(REPO_ROOT, "engineering"));
+  const assets = shippedAssets(trackedDeployPaths(), await workerSourceFiles(readTree), buildWebDist(), [
+    "engineering/manifest.json",
+    ...rules.files.map((file) => `engineering/${file}`),
+  ]);
   for (const rel of assets) {
     const to = join(ASSETS_DIR, rel);
     mkdirSync(dirname(to), { recursive: true });

@@ -404,6 +404,44 @@ describe("guardAttachedHead (before any model call)", () => {
 describe("makeSystemComposer (head-pinned composition with an explicit AgentDef)", () => {
   const blocks = { memory: undefined, config: undefined, instructions: undefined, skills: undefined };
 
+  it("delivers engineering rules once before work across workspace variants and configured prompts", () => {
+    const engineeringRules = { files: ["errors.md"], sha256: "a".repeat(64), text: "Propagate unexpected failures." };
+    for (const setup of [
+      { agent: AGENTS.coding, resident: false },
+      { agent: AGENTS.coding, resident: true },
+      { agent: AGENTS.coding, resident: false, seeded: { workspace: "/workspace/api" } },
+      {
+        agent: { ...AGENTS.coding, system: "CUSTOM CODING", residentSystem: undefined, seededSystem: undefined },
+        resident: true,
+      },
+      { agent: AGENTS.review, resident: false },
+    ]) {
+      const compose = makeSystemComposer({
+        ...setup,
+        repo: "acme/api",
+        workspace: "/workspace/api",
+        prTarget: undefined,
+        engineeringRules,
+        blocks: { ...blocks, skills: "SKILL LIST" },
+      });
+      const prompt = compose({ sha: undefined, verified: false });
+      expect(prompt.split("# Engineering rules")).toHaveLength(2);
+      expect(prompt).toContain("Propagate unexpected failures.");
+      expect(prompt.indexOf("Propagate unexpected failures.")).toBeLessThan(prompt.indexOf("SKILL LIST"));
+      expect(compose({ sha: OTHER, verified: false })).toBe(prompt);
+    }
+    const general = makeSystemComposer({
+      agent: AGENTS.general,
+      resident: false,
+      repo: undefined,
+      workspace: undefined,
+      prTarget: undefined,
+      engineeringRules,
+      blocks,
+    });
+    expect(general({ sha: undefined, verified: false })).toBe(AGENTS.general.system);
+  });
+
   it("no blocks, no resident, no PR target → the agent's own prompt, byte-identical", () => {
     const compose = makeSystemComposer({
       agent: AGENTS.general,

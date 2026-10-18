@@ -84,6 +84,11 @@ describe("shippedDeployAssets", () => {
       "web/dist/.vite/manifest.json",
       "web/dist/assets/main-A.js",
     ]);
+    expect(shippedAssets([], [], [], ["engineering/manifest.json", "engineering/errors.md"])).toEqual([
+      ...ROOT_ASSETS,
+      "engineering/errors.md",
+      "engineering/manifest.json",
+    ]);
   });
 
   it("the dashboard's files ship under web/dist, every one, sorted; a listing without the Vite manifest is not a build and is refused naming the command that makes one", () => {
