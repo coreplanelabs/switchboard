@@ -44,6 +44,42 @@ function setup(previous?: unknown) {
 }
 
 describe("recorded coding checks", () => {
+  it.each([124, 137, 143])(
+    "records exit %s as failed after original result inspection confirms its ending",
+    async (exitCode) => {
+      const s = setup();
+      const failed = { stdout: "partial check output", stderr: "interrupted check", exitCode, truncated: false };
+      s.execResult.mockReset().mockResolvedValueOnce(metadata).mockResolvedValueOnce(failed);
+      s.binding.executor = () => ({ execResult: s.execResult, inspectCheckResult: async () => failed });
+      const capability = s.capability();
+      const answer = await capability.run(input, "original-ended");
+      expect(answer).toMatchObject({
+        kind: "recorded",
+        receipt: {
+          outcome: {
+            kind: "completed",
+            stdout: "partial check output",
+            stderr: "interrupted check",
+            exitCode,
+            truncated: false,
+          },
+        },
+      });
+      expect(s.saved.at(-1)?.receipts[0]?.outcome).toEqual({
+        kind: "completed",
+        stdout: "partial check output",
+        stderr: "interrupted check",
+        exitCode,
+        truncated: false,
+      });
+      expect(await capability.run(input, "original-ended")).toMatchObject({
+        replayed: true,
+        receipt: { outcome: { kind: "completed", exitCode } },
+      });
+      expect(s.execResult.mock.calls).toHaveLength(2);
+    },
+  );
+
   it("holds a restored preflight when the checkout head or fingerprint may have changed at the same path", async () => {
     for (const changed of ["head", "fingerprint"]) {
       const original = setup();

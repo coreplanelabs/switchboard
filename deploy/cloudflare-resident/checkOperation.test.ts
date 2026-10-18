@@ -358,6 +358,47 @@ describe("original recorded check inspection", () => {
     return createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
   }
 
+  it("requires the original native ending before returning an interrupted live result", async () => {
+    const f = await pending();
+    const op = await operation();
+    const partial = { stdout: "partial check output", stderr: "check timed out", exitCode: 124, truncated: false };
+    f.data.set(f.aliasKey, { ...(f.data.get(f.aliasKey) as object), result: partial });
+    expect(await f.service.inspect(context, op, async () => true)).toEqual({ kind: "unknown" });
+    const endingHash = ending(f);
+    const before = structuredClone([...f.data]);
+    const answer = { kind: "completed", checkOperation: op, nativeKey: f.nativeKey, result: partial, endingHash };
+    expect(await f.service.inspect(context, op, async () => true)).toEqual(answer);
+    let effects = 0;
+    expect(
+      await f.service.execute(
+        context,
+        op,
+        request,
+        async () => true,
+        async () => {
+          effects++;
+          return result;
+        },
+      ),
+    ).toEqual(answer);
+    expect(effects).toBe(0);
+    expect([...f.data]).toEqual(before);
+    f.data.set(f.nativeKey, { version: 1, closed: false, pending: {} });
+    expect(await f.service.inspect(context, op, async () => true)).toEqual({ kind: "unknown" });
+    f.data.delete(f.nativeKey);
+    const receiptKey = `native-operation-receipt:${f.nativeKey}`;
+    const foreign = structuredClone(f.data.get(receiptKey)) as {
+      original: { ownerFence: number };
+      receipt: { recordHash: string };
+    };
+    foreign.original.ownerFence = 2;
+    foreign.receipt.recordHash = createHash("sha256").update(JSON.stringify(foreign.original)).digest("hex");
+    f.data.set(receiptKey, foreign);
+    expect(await f.service.inspect(context, op, async () => true)).toEqual({ kind: "unknown" });
+    ending(f);
+    expect(await f.service.inspect(context, op, async () => true)).toEqual(answer);
+  });
+
   it("reads exact native ending without writing and settles one alias without permitting a repeat", async () => {
     const f = await pending();
     const proofHash = ending(f);
@@ -483,15 +524,19 @@ describe("original recorded check inspection", () => {
     async (exitCode) => {
       const f = fixture();
       const partial = { stdout: "partial output", stderr: "interrupted", exitCode, truncated: false };
+      let nativeKey = "";
       const answer = await f.service.execute(
         context,
         await operation(),
         request,
         async () => true,
-        async () => partial,
+        async (key) => {
+          nativeKey = key;
+          return partial;
+        },
       );
-      if (answer.kind !== "completed") throw new Error("saved result required");
-      const held = { ...f, nativeKey: answer.nativeKey, aliasKey: [...f.data.keys()][0]! };
+      expect(answer).toEqual({ kind: "unknown" });
+      const held = { ...f, nativeKey, aliasKey: [...f.data.keys()][0]! };
       const selected = await source();
       const before = structuredClone(f.data.get(held.aliasKey));
       expect(await f.service.inspectRecorded(selected)).toEqual({ kind: "pending", reason: "native_ending_unproven" });

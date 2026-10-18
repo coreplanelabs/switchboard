@@ -50,7 +50,7 @@ export interface CheckOperationStorage extends Omit<NativeOperationStorage, "tra
 export type CheckOperationAnswer =
   | { kind: "unknown" }
   | { kind: "not_started"; reason: "capacity" }
-  | { kind: "completed"; checkOperation: CheckOperation; nativeKey: string; result: ExecResult };
+  | { kind: "completed"; checkOperation: CheckOperation; nativeKey: string; result: ExecResult; endingHash?: string };
 const unknown = (): CheckOperationAnswer => ({ kind: "unknown" });
 // These exits carry only partial output, matching the core check recorder.
 const interruptedResult = (result: ExecResult): boolean => [124, 137, 143].includes(result.exitCode);
@@ -196,7 +196,19 @@ export class RecordedCheckOperation {
         !record.result
       )
         return unknown();
-      return { kind: "completed", checkOperation: operation, nativeKey: record.nativeKey, result: record.result };
+      let endingHash: string | undefined;
+      if (interruptedResult(record.result)) {
+        const ending = await new NativeOperationJournal(this.storage).readEnding(record.nativeKey, rows);
+        endingHash = await this.originalEndingProof(record, ending, rows);
+        if (!endingHash) return unknown();
+      }
+      return {
+        kind: "completed",
+        checkOperation: operation,
+        nativeKey: record.nativeKey,
+        result: record.result,
+        ...(endingHash ? { endingHash } : {}),
+      };
     });
   }
 

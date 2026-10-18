@@ -171,7 +171,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
   ): Promise<boolean> {
     if (!receipt.checkOperation) return false;
     const result = await inspectResult(receipt.checkOperation, signal, control);
-    if (!result || [124, 137, 143].includes(result.exitCode)) return false;
+    if (!result) return false;
     receipt.outcome = { kind: "completed", ...result };
     receipt.completedAt = binding.clock();
     return true;
@@ -452,7 +452,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
               };
       }
     }
-    if (receipt.outcome.kind === "unknown" && !receipt.outcome.result) await inspect(receipt, signal, control);
+    if (receipt.outcome.kind === "unknown") await inspect(receipt, signal, control);
     receipt.completedAt = binding.clock();
     if (!(await persist())) return unavailable("persistence_failed");
     return {

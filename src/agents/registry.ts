@@ -499,6 +499,7 @@ const REVIEW_UNIT_CONTRACT = `   3b. UNIT CONTRACT, when this prompt carries a \
 // states its own totals, so a short read is recognizable — and the post-step
 // refuses a verdict whose digest covered less than the PR.
 const REVIEW_WHOLE_CHANGE = `   - READ THE WHOLE CHANGE: the REVIEW TARGET block states the PR's size as GitHub reports it (files, +/−) and \`diff_digest\` states the totals of what it covered. They must agree, and every file the digest lists must be in the diff you read. Prefer \`review_read\` with \`kind: "diff"\` when available and permitted by the request. Use its default page size and continue with each returned nextOffset and sourceHash until eof. Do not request tiny pages or use repeated shell slices to read a diff.
+   - For a large change, retain sourceHash, nextOffset, reviewed paths and unresolved candidates in the existing notes before continuing. Follow the same pinned source to EOF across context continuations. Do not replace source pages with custom character-by-character or token sequence comparisons of large generated files. Inspect the generator and relevant source when judging generated changes, but keep complete generated-source coverage. If time or context prevents completion, state the unreviewed scope instead of claiming a complete review.
    - When the request requires \`run_check\` for source collection, or no source reader is available, save the complete read-only diff ONCE under \`$TMPDIR\`, for example \`git diff origin/<base>...HEAD > "$TMPDIR/review.diff"\`. Read that saved file with \`read\` at its normal page size. Follow its continuation offsets to the end. Do not spend recorded checks on \`head\`, \`tail\`, \`sed\` or \`dd\` slices of saved output. Keep \`run_check\` for the required HEAD check and relevant repository checks. Do not repeat a check merely to recover output or bypass an unknown outcome.
    - A tool output ending in \`...[truncated N chars]\`, a receipt with \`truncated: true\`, or a reader that has not reached EOF is partial evidence. Recover the missing source through the permitted reader. If complete source is unavailable, report the gap and leave the review incomplete. Never judge from a partial diff: Switchboard does not post a verdict whose digest covered less than the PR.`;
 
@@ -514,7 +515,7 @@ ${THREAD_REPLY_POLICY}
 
 You have bash and read_file tools in a workspace directory. ${SANDBOX_TOOLCHAIN} Do not modify code, commit, or push — you are read-only by convention. Do not run the project's tests or build either: CI runs them as the verify gate and reports on the PR, so running them here only duplicates that and slows the review. Your job is to read the code.
 
-Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your context window is large enough to hold the entire change. Speed matters: a review should take minutes, not an hour.
+Strategy — GATHER ONCE, THEN ANALYZE WITH BOUNDED CONTEXT. Gather the pinned change across its source pages. Keep coverage progress and unresolved candidates in the existing notes and recall facilities as context fills. Do not assume the whole change fits in one model context or collect the same source again.
 
 1. GATHER in a small batch, with complete source pages as needed:
    - read PR metadata with \`github_pull_get\` or \`gh pr view <ref> --json title,body,url,baseRefName\`; collect the diff with the source-reading method below
@@ -522,7 +523,7 @@ Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your c
 ${REVIEW_WHOLE_CHANGE}
    - read the changed source files with \`read\`, or \`review_read\` with \`kind: "file"\` for pinned source. Batch independent reads. Use normal page sizes and follow the returned continuation rather than repeated small shell reads
    - if the PR is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
-2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
+2. ANALYZE the complete pinned change across bounded context continuations: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
 ${REVIEW_HISTORY_INSTRUCTION}
 ${REVIEW_SIGNAL_POLICY}
 ${REVIEW_SPEC_CHECK}
@@ -554,7 +555,7 @@ ${THREAD_REPLY_POLICY}
 
 You have bash and read_file tools inside a resident repository environment: a ready git worktree of the target repository, already checked out on this thread's bound branch — the PR head named in the REVIEW TARGET block below — with dependencies installed. Do not modify code, commit, or push — you are read-only by convention. Do not run the project's tests or build either: CI runs them as the verify gate and reports on the PR, so running them here only duplicates that and slows the review. Your job is to read the code. THE WORKSPACE IS READY — do not clone repositories, do not install anything, do not survey other repos. The \`gh\` CLI is NOT installed here; use git directly (and the GitHub REST API via curl for PR metadata if you need it — it works unauthenticated for public repos). ${RESIDENT_TOOLCHAIN}
 
-Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your context window is large enough to hold the entire change. Speed matters: a review should take minutes, not an hour.
+Strategy — GATHER ONCE, THEN ANALYZE WITH BOUNDED CONTEXT. Gather the pinned change across its source pages. Keep coverage progress and unresolved candidates in the existing notes and recall facilities as context fills. Do not assume the whole change fits in one model context or collect the same source again.
 
 1. GATHER in a small batch, with complete source pages as needed:
    - \`origin/<base>\` (the PR's base branch, named in the REVIEW TARGET block) is already present in the clone. No fetch is needed or allowed. Read PR metadata with \`github_pull_get\`; collect the diff with the source-reading method below
@@ -562,7 +563,7 @@ Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your c
 ${REVIEW_WHOLE_CHANGE}
    - read the changed source files with \`read\`, or \`review_read\` with \`kind: "file"\` for pinned source. Batch independent reads. Use normal page sizes and follow the returned continuation rather than repeated small shell reads
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
-2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
+2. ANALYZE the complete pinned change across bounded context continuations: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
 ${REVIEW_HISTORY_INSTRUCTION}
 ${REVIEW_SIGNAL_POLICY}
 ${REVIEW_SPEC_CHECK}
@@ -595,7 +596,7 @@ ${THREAD_REPLY_POLICY}
 
 You have bash and read_file tools in a dedicated sandbox. ${SANDBOX_TOOLCHAIN} Do not modify code, commit, or push — you are read-only by convention. Do not run the project's tests or build either: CI runs them as the verify gate and reports on the PR, so running them here only duplicates that and slows the review. Your job is to read the code. THE REPOSITORY IS ALREADY CLONED at \`/workspace/checkout\` — seeded from the resident's snapshot and checked out at the PR head named in the REVIEW TARGET block below, dependencies installed: do not clone it again, do not install anything, do not survey other repos. \`gh\` is available for the pull request's metadata.
 
-Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your context window is large enough to hold the entire change. Speed matters: a review should take minutes, not an hour.
+Strategy — GATHER ONCE, THEN ANALYZE WITH BOUNDED CONTEXT. Gather the pinned change across its source pages. Keep coverage progress and unresolved candidates in the existing notes and recall facilities as context fills. Do not assume the whole change fits in one model context or collect the same source again.
 
 1. GATHER in a small batch, with complete source pages as needed:
    - from \`/workspace/checkout\`, read PR metadata with \`github_pull_get\` or \`gh pr view <ref> --json title,body,url,baseRefName\`. The PR's base branch \`origin/<base>\` is already present. Collect the diff with the source-reading method below
@@ -603,7 +604,7 @@ Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your c
 ${REVIEW_WHOLE_CHANGE}
    - read the changed source files with \`read\`, or \`review_read\` with \`kind: "file"\` for pinned source. Batch independent reads. Use normal page sizes and follow the returned continuation rather than repeated small shell reads
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
-2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
+2. ANALYZE the complete pinned change across bounded context continuations: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
 ${REVIEW_HISTORY_INSTRUCTION}
 ${REVIEW_SIGNAL_POLICY}
 ${REVIEW_SPEC_CHECK}

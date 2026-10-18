@@ -2175,6 +2175,13 @@ export class ResidentExecutor implements Executor {
       typeof result.truncated !== "boolean"
     )
       return unavailable("result_invalid");
+    // Older receivers can return an interrupted result before its original
+    // native ending is proved. Their reply must remain unknown across a roll.
+    if (
+      [124, 137, 143].includes(result.exitCode) &&
+      (typeof data.endingHash !== "string" || !/^[a-f0-9]{64}$/.test(data.endingHash))
+    )
+      return unavailable("result_ending_unproven");
     return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, truncated: result.truncated };
   }
 

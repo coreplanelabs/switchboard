@@ -16941,6 +16941,7 @@ async function handlePrepareDeployFence(
       phase: "fence-acquisition-withdrawal",
       id,
       workerVersion: versionId,
+      acquisitionDisposition: disposition?.phase === "abandoned" ? disposition.disposition : "unverified",
       commit: disposition ? "acknowledged" : "unverified",
       nativeOutcome: "unverified",
     });
@@ -16981,6 +16982,11 @@ async function handlePrepareDeployFence(
   request.signal.addEventListener("abort", onAbort, { once: true });
   try {
     if (request.signal.aborted) return await refused(503);
+    // Ordinary drain leaves existing runs able to finish. Do not close their
+    // per-call gate just to discover that those same runs are still active.
+    const preliminary = await observe();
+    if (request.signal.aborted || preliminary.activeAdmissions > 0 || !residentDeployViewsReady(preliminary.residents))
+      return await refused(200, preliminary);
     const prepared = fenceAcquisitionOf(await registry.prepareDeployFenceAcquisition(id, versionId, BUILD_ID));
     if (!prepared || prepared.id !== id || prepared.phase !== "preparing")
       return json({ error: "deploy-fence-acquisition-refused", fenceReady: false }, 409);

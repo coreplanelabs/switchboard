@@ -25,6 +25,7 @@ export type CheckResultFailure =
   | "lookup_refused"
   | "result_not_completed"
   | "result_identity_mismatch"
+  | "result_ending_unproven"
   | "result_invalid";
 
 /** Log only the controller's bounded identity and a closed failure code.
