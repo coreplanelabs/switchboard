@@ -54,6 +54,28 @@ export interface OrchestratorSourceFoldDecision {
   inputHash: string;
   contextHash: string;
 }
+/** Shared task data for source input checks, never permission or a target grant. */
+export function sourceRunTask(meta: {
+  repo?: unknown;
+  ref?: unknown;
+  baseRef?: unknown;
+  headSha?: unknown;
+  pr?: unknown;
+  operationTarget?: unknown;
+  githubSource?: unknown;
+  recordTaskKey?: unknown;
+}) {
+  return {
+    repo: meta.repo ?? null,
+    ref: meta.ref ?? null,
+    baseRef: meta.baseRef ?? null,
+    headSha: meta.headSha ?? null,
+    pr: meta.pr ?? null,
+    operationTarget: meta.operationTarget ?? null,
+    githubSource: meta.githubSource ?? null,
+    recordTaskKey: meta.recordTaskKey ?? null,
+  };
+}
 /** Versioned run-target data, not a permission grant. The store must load
  * the canonical row and compare it again at append. Generation, lease and
  * transcript offsets do not change the selected task or consumer attempt. */
@@ -93,16 +115,7 @@ export function sourceFoldRunTarget(row: LiveRunRow) {
           consumer: handoff.consumer ?? null,
         }
       : null,
-    task: {
-      repo: meta.repo ?? null,
-      ref: meta.ref ?? null,
-      baseRef: meta.baseRef ?? null,
-      headSha: meta.headSha ?? null,
-      pr: meta.pr ?? null,
-      operationTarget: meta.operationTarget ?? null,
-      githubSource: meta.githubSource ?? null,
-      recordTaskKey: meta.recordTaskKey ?? null,
-    },
+    task: sourceRunTask(meta),
   };
   sourceSnapshot(projection);
   return structuredClone(projection);
