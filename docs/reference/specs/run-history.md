@@ -1,6 +1,6 @@
 # Run history
 
-- **Code**: `src/core/runLedger/sourceEvidence.ts`
+- **Code**: `src/channels/githubActivityAccess.ts` (current GitHub source identity and requester read policy); `src/core/runLedger/sourceEvidence.ts`
 - **Tests**: `src/core/runLedger/sourceEvidence.test.ts`
 - **Tests**: `src/core/coordinator/managedPrSourceContract.test.ts`
 
@@ -1049,6 +1049,7 @@ The inactive GitHub converters emit version 2. Human and bot comments, inline re
 | Human and bot PR comment surfaces supply the same common text. Native comment/ref/access facts, revisions and source metadata retain their existing proofs after the normalized fields move. | `[unit]` `src/channels/githubActivity.test.ts::GitHub comment normalization::supplies common text for human and bot comments across every PR comment surface`; `src/channels/githubActivity.test.ts::*::*`; `src/channels/githubInstallationActivity.test.ts::GitHub installation activity normalization::*` |
 | Repository lifecycle activity uses common facts and retains native identity, unknown state, actor data and original snapshots | `[unit]` `src/channels/githubActivity.test.ts::GitHub repository activity normalization::*` |
 | The inactive GitHub task matcher validates a complete source record and the existing typed native PR context. Direct PR comments, reviews, inline threads and PR lifecycle activity are candidates only under the same host, App, installation, numeric repository and PR number; a supplied native PR ID must agree. Names, author type, text and selected-head changes do not supply task identity or authority. Conflicting identities and legacy content stay held. Unsupported commit/ref/repository/check/installation relationships stay held within the matching source and repository scope. Inputs are captured before asynchronous receipt validation. Candidate matching proves neither canonical storage origin, relevance, current access, root ownership nor a delivery target. | `[unit]` `src/channels/githubActivity.test.ts::GitHub activity task candidates::*` |
+| The inactive GitHub access adapter resolves the current repository by numeric ID, verifies the current App/installation and PR identity, and uses the existing requester/audience-scoped read policy before and after a PR read. Missing, ambiguous, changed or unavailable proof holds input without exposing private errors. A repository rename or a new PR head alone does not change its source identity or grant action permission. Queued relevance and correction attempts recheck this adapter when supplied as the existing validator. Canonical source/task ownership, cumulative source dependencies and delivery remain separate gates; the adapter activates no producer. | `[unit]` `src/channels/githubActivityAccess.test.ts::current GitHub activity access::*` |
 | Handler capability gates and common relevance consume the new projection before delivery is enabled | `[gap]` The converters remain inactive. Source ingress, source processing and delivery are not enabled. |
 
 ## Destructive run removal
