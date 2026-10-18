@@ -2483,6 +2483,47 @@ describe("global deploy admission evidence", () => {
     return { ...fixture({ rows: new Map<string, unknown>([["drain", original]]) }), original };
   }
 
+  it.each(["executing", "unknown"])("keeps original observations admitted while %s work drains", async (kind) => {
+    const h = ordinaryPreparation();
+    h.setRecoveryView({
+      state: "warm",
+      executingRuns: kind === "executing" ? 1 : 0,
+      unknownRuns: kind === "unknown" ? 1 : 0,
+    });
+    const list = h.api.list.bind(h.api);
+    let observation: string | null = null;
+    h.api.list = async () => {
+      observation = await h.api.beginDeployAdmission(origin, identity);
+      if (observation) await h.api.endDeployAdmission(identity.id, identity.requestHash);
+      return list();
+    };
+    const response = await h.http("POST", "/prepare-deploy-fence", { id: acquisitionId });
+    expect(observation).toBe(identity.id);
+    expect(await response.json()).toMatchObject({
+      fenceReady: false,
+      acquisition: { id: acquisitionId, phase: "abandoned", disposition: "cancelled-before-install" },
+    });
+    expect(h.rows.get("drain")).toEqual(h.original);
+    expect(await h.api.readDeployAdmissionReceipt(identity)).toMatchObject({ state: "released", ...identity });
+  });
+
+  it("rejects activity found after an idle preliminary read instead of sealing its stale zero", async () => {
+    const h = ordinaryPreparation();
+    const list = h.api.list.bind(h.api);
+    let reads = 0;
+    h.api.list = async () => {
+      if (++reads === 2) h.setRecoveryView({ state: "warm", executingRuns: 0, unknownRuns: 1 });
+      return list();
+    };
+    const response = await h.http("POST", "/prepare-deploy-fence", { id: acquisitionId });
+    expect(await response.json()).toMatchObject({
+      fenceReady: false,
+      acquisition: { id: acquisitionId, phase: "abandoned", disposition: "fence-withdrawn" },
+      residents: [{ live: { unknownRuns: 1 } }],
+    });
+    expect(h.rows.get("drain")).toEqual(h.original);
+  });
+
   it("seals one original ordinary fence before returning upload readiness", async () => {
     const h = ordinaryPreparation();
     const id = acquisitionId;
@@ -2546,6 +2587,12 @@ describe("global deploy admission evidence", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ fenceReady: false, acquisition: null });
     expect([...h.rows]).toEqual([["drain", h.original]]);
+    expect(h.events.at(-1)).toMatchObject({
+      phase: "fence-acquisition-withdrawal",
+      id: acquisitionId,
+      commit: "unverified",
+      acquisitionDisposition: "unverified",
+    });
     const neighbor = fixture({ rows: h.rows });
     expect(
       await (await neighbor.http("POST", "/prepare-deploy-fence", { id: neighboringAcquisitionId })).json(),
@@ -2675,42 +2722,62 @@ describe("global deploy admission evidence", () => {
     expect(h.rows.get(FENCE_ACQUISITION_PREFIX + acquisitionId)).toMatchObject({ phase: "abandoned" });
   });
 
-  it("cancels a stalled preparation and cannot seal or clear a later neighboring acquisition", async () => {
-    const h = ordinaryPreparation();
-    let entered!: () => void;
-    let release!: (value: { resource: string }[]) => void;
-    const reading = new Promise<void>((resolve) => (entered = resolve));
-    const blocked = new Promise<{ resource: string }[]>((resolve) => (release = resolve));
-    h.api.list = async () => {
-      entered();
-      return blocked;
-    };
-    const controller = new AbortController();
-    const request = h.http(
-      "POST",
-      "/prepare-deploy-fence",
-      { id: acquisitionId },
-      undefined,
-      "drain-fixture",
-      controller.signal,
-    );
-    await reading;
-    controller.abort();
-    await h.background();
-    expect(h.rows.get("drain")).toEqual(h.original);
-    expect(h.rows.get(FENCE_ACQUISITION_PREFIX + acquisitionId)).toMatchObject({ phase: "abandoned" });
-    release([{ resource: "repo:acme/api" }]);
-    expect(await (await request).json()).toMatchObject({ fenceReady: false, acquisition: { phase: "abandoned" } });
-    const neighbor = await h.http("POST", "/prepare-deploy-fence", { id: neighboringAcquisitionId });
-    expect(await neighbor.json()).toMatchObject({
-      fenceReady: true,
-      acquisition: { id: neighboringAcquisitionId, phase: "sealed" },
-    });
-    await h.api.clearDeployFence(h.original.since, h.original.until, acquisitionVersion);
-    expect(await h.api.verifyDeployFence(h.original.since, h.original.until, acquisitionVersion)).toBe(false);
-    expect(await h.api.sealDeployFenceAcquisition(acquisitionId, acquisitionVersion, acquisitionBuild)).toBeNull();
-    expect(h.rows.get("drain")).toMatchObject({ swapAcquisitionId: neighboringAcquisitionId, swapFence: true });
-  });
+  it.each(["preliminary", "fenced"])(
+    "cancels a stalled %s read and cannot seal or clear a later neighboring acquisition",
+    async (phase) => {
+      const h = ordinaryPreparation();
+      let entered!: () => void;
+      let release!: (value: { resource: string }[]) => void;
+      const reading = new Promise<void>((resolve) => (entered = resolve));
+      const blocked = new Promise<{ resource: string }[]>((resolve) => (release = resolve));
+      const list = h.api.list.bind(h.api);
+      let reads = 0;
+      h.api.list = async () => {
+        if (++reads === (phase === "preliminary" ? 1 : 2)) {
+          entered();
+          return blocked;
+        }
+        return list();
+      };
+      const controller = new AbortController();
+      const request = h.http(
+        "POST",
+        "/prepare-deploy-fence",
+        { id: acquisitionId },
+        undefined,
+        "drain-fixture",
+        controller.signal,
+      );
+      await reading;
+      if (phase === "fenced")
+        expect(h.rows.get("drain")).toMatchObject({ swapFence: true, swapAcquisitionId: acquisitionId });
+      else expect(h.rows.get("drain")).toEqual(h.original);
+      controller.abort();
+      await h.background();
+      expect(h.rows.get("drain")).toEqual(h.original);
+      expect(h.rows.get(FENCE_ACQUISITION_PREFIX + acquisitionId)).toMatchObject({
+        phase: "abandoned",
+        disposition: phase === "fenced" ? "fence-withdrawn" : "cancelled-before-install",
+      });
+      release([{ resource: "repo:acme/api" }]);
+      expect(await (await request).json()).toMatchObject({ fenceReady: false, acquisition: { phase: "abandoned" } });
+      expect(h.events.at(-1)).toMatchObject({
+        phase: "fence-acquisition-withdrawal",
+        id: acquisitionId,
+        commit: "acknowledged",
+        acquisitionDisposition: phase === "fenced" ? "fence-withdrawn" : "cancelled-before-install",
+      });
+      const neighbor = await h.http("POST", "/prepare-deploy-fence", { id: neighboringAcquisitionId });
+      expect(await neighbor.json()).toMatchObject({
+        fenceReady: true,
+        acquisition: { id: neighboringAcquisitionId, phase: "sealed" },
+      });
+      await h.api.clearDeployFence(h.original.since, h.original.until, acquisitionVersion);
+      expect(await h.api.verifyDeployFence(h.original.since, h.original.until, acquisitionVersion)).toBe(false);
+      expect(await h.api.sealDeployFenceAcquisition(acquisitionId, acquisitionVersion, acquisitionBuild)).toBeNull();
+      expect(h.rows.get("drain")).toMatchObject({ swapAcquisitionId: neighboringAcquisitionId, swapFence: true });
+    },
+  );
 
   it("retains a cancellation tombstone that arrives before its delayed preparation", async () => {
     const h = ordinaryPreparation();
@@ -2754,7 +2821,7 @@ describe("global deploy admission evidence", () => {
     expect(h.rows.get("drain")).toEqual(fence);
   });
 
-  it.each(["busy", "read-error"])("withdraws a known pre-seal %s before returning refusal", async (fault) => {
+  it.each(["busy", "read-error"])("cancels a known pre-install %s before returning refusal", async (fault) => {
     const h = ordinaryPreparation();
     if (fault === "busy") h.setRecoveryView({ state: "warm", executingRuns: 1, unknownRuns: 0 });
     else
@@ -2766,7 +2833,7 @@ describe("global deploy admission evidence", () => {
     const body = await response.json();
     expect(body).toMatchObject({
       fenceReady: false,
-      acquisition: { phase: "abandoned", disposition: "fence-withdrawn" },
+      acquisition: { phase: "abandoned", disposition: "cancelled-before-install" },
     });
     expect(JSON.stringify(body)).not.toContain("PRIVATE_ACTIVITY_FAILURE");
     expect(h.rows.get("drain")).toEqual(h.original);
@@ -2801,7 +2868,7 @@ describe("global deploy admission evidence", () => {
     expect(await response.json()).toMatchObject({
       fenceReady: false,
       activeAdmissions: 1,
-      acquisition: { id: acquisitionId, phase: "abandoned", disposition: "fence-withdrawn" },
+      acquisition: { id: acquisitionId, phase: "abandoned", disposition: "cancelled-before-install" },
     });
     expect(h.rows.get("drain")).toEqual(h.original);
     expect(await h.api.readDeployAdmissionReceipt(identity)).toMatchObject({ state: "released", ...identity });

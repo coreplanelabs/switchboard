@@ -66,11 +66,13 @@ export interface Executor {
    *  cancel the underlying command does so and returns/throws promptly; one that
    *  cannot simply ignores it — the runner stops waiting on it either way. */
   exec(command: string, opts?: ExecOptions): Promise<string>;
+  /** Read only the original saved check result. Interrupted results require
+   * original process-ending proof; an exit code alone is not enough. Missing
+   * evidence never permits execution. */
+  inspectCheckResult?(operation: CheckOperation, opts?: ExecOptions): Promise<ExecResult | undefined>;
   /** Structured command outcome for runner decisions. Human-readable `exec`
    * output is presentation, never an authority or success signal. Backends
    * without this result cannot perform effects that require it. */
-  /** Read only the original saved check result. Missing evidence never permits execution. */
-  inspectCheckResult?(operation: CheckOperation, opts?: ExecOptions): Promise<ExecResult | undefined>;
   execResult?(command: string, opts?: ExecOptions): Promise<ExecResult>;
   /** Optional trusted Git transport. Implementations must keep `bearer` out
    * of the model shell's UID, process environment and writable repository

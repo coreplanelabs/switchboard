@@ -229,6 +229,43 @@ describe("ResidentExecutor.attach over a heartbeat stream (item 59: an attach th
   });
 });
 
+describe("ResidentExecutor.inspectCheckResult", () => {
+  it.each([124, 137, 143])(
+    "keeps exit %s unknown from an older receiver without original ending proof",
+    async (exitCode) => {
+      const checkOperation = { key: "a".repeat(64), commandHash: "b".repeat(64) };
+      const result = { stdout: "partial output", stderr: "interrupted", exitCode, truncated: false };
+      const answer = { kind: "completed", checkOperation, nativeKey: "original-native-key", result };
+      const fetch = stubFetch(
+        { body: answer },
+        { body: { ...answer, endingHash: "invalid" } },
+        { body: { ...answer, endingHash: "c".repeat(64) } },
+        {
+          body: {
+            ...answer,
+            endingHash: "c".repeat(64),
+            checkOperation: { ...checkOperation, commandHash: "d".repeat(64) },
+          },
+        },
+        { body: { ...answer, result: { ...result, exitCode: 5 } } },
+      );
+      const ex = new ResidentExecutor(OPTS);
+      expect(await ex.inspectCheckResult(checkOperation)).toBeUndefined();
+      expect(await ex.inspectCheckResult(checkOperation)).toBeUndefined();
+      expect(await ex.inspectCheckResult(checkOperation)).toEqual(result);
+      expect(await ex.inspectCheckResult(checkOperation)).toBeUndefined();
+      expect(await ex.inspectCheckResult(checkOperation)).toEqual({ ...result, exitCode: 5 });
+      expect(fetch.calls.map(route)).toEqual([
+        "/exec-result",
+        "/exec-result",
+        "/exec-result",
+        "/exec-result",
+        "/exec-result",
+      ]);
+    },
+  );
+});
+
 describe("ResidentExecutor.exec", () => {
   it("parses the streamed body: leading heartbeat whitespace then one JSON document", async () => {
     const { calls } = stubFetch({

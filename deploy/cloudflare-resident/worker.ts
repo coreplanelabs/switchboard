@@ -16941,6 +16941,7 @@ async function handlePrepareDeployFence(
       phase: "fence-acquisition-withdrawal",
       id,
       workerVersion: versionId,
+      acquisitionDisposition: disposition?.phase === "abandoned" ? disposition.disposition : "unverified",
       commit: disposition ? "acknowledged" : "unverified",
       nativeOutcome: "unverified",
     });
@@ -16964,12 +16965,7 @@ async function handlePrepareDeployFence(
       disposition ? status : 503,
     );
   };
-  request.signal.addEventListener("abort", onAbort, { once: true });
-  try {
-    if (request.signal.aborted) return await refused(503);
-    const prepared = fenceAcquisitionOf(await registry.prepareDeployFenceAcquisition(id, versionId, BUILD_ID));
-    if (!prepared || prepared.id !== id || prepared.phase !== "preparing")
-      return json({ error: "deploy-fence-acquisition-refused", fenceReady: false }, 409);
+  const observe = async () => {
     const residents = await registry.list();
     const settled = await Promise.allSettled(
       residents.map((record) => residentStub(env, residentAddress(record)).getResidentDeployInfo()),
@@ -16981,7 +16977,21 @@ async function handlePrepareDeployFence(
     const admissionReadback = await registry.getDeployAdmissionReadback().catch(() => null);
     const activeAdmissions = await registry.activeDeployAdmissions();
     const stagingMaintenance = await registry.getStagingMaintenanceReadback();
-    const observations = { residents: enriched, admissionReadback, activeAdmissions, stagingMaintenance };
+    return { residents: enriched, admissionReadback, activeAdmissions, stagingMaintenance };
+  };
+  request.signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    if (request.signal.aborted) return await refused(503);
+    // Ordinary drain leaves existing runs able to finish. Do not close their
+    // per-call gate just to discover that those same runs are still active.
+    const preliminary = await observe();
+    if (request.signal.aborted || preliminary.activeAdmissions > 0 || !residentDeployViewsReady(preliminary.residents))
+      return await refused(200, preliminary);
+    const prepared = fenceAcquisitionOf(await registry.prepareDeployFenceAcquisition(id, versionId, BUILD_ID));
+    if (!prepared || prepared.id !== id || prepared.phase !== "preparing")
+      return json({ error: "deploy-fence-acquisition-refused", fenceReady: false }, 409);
+    const observations = await observe();
+    const { residents: enriched, admissionReadback, activeAdmissions } = observations;
     if (request.signal.aborted || activeAdmissions > 0 || !residentDeployViewsReady(enriched))
       return await refused(200, observations);
     const sealed = fenceAcquisitionOf(await registry.sealDeployFenceAcquisition(id, versionId, BUILD_ID));

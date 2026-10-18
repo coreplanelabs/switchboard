@@ -50,7 +50,7 @@ export interface CheckOperationStorage extends Omit<NativeOperationStorage, "tra
 export type CheckOperationAnswer =
   | { kind: "unknown" }
   | { kind: "not_started"; reason: "capacity" }
-  | { kind: "completed"; checkOperation: CheckOperation; nativeKey: string; result: ExecResult };
+  | { kind: "completed"; checkOperation: CheckOperation; nativeKey: string; result: ExecResult; endingHash?: string };
 const unknown = (): CheckOperationAnswer => ({ kind: "unknown" });
 // These exits carry only partial output, matching the core check recorder.
 const interruptedResult = (result: ExecResult): boolean => [124, 137, 143].includes(result.exitCode);
@@ -89,6 +89,25 @@ export class RecordedCheckOperation {
 
   private async key(context: CheckOperationContext, operation: CheckOperation): Promise<string> {
     return `${await this.prefix(context.threadKey)}${await checkCommandHash(JSON.stringify([context.runId, context.ownerGen, context.ownerFence, operation.key]))}`;
+  }
+
+  private async originalEndingProof(
+    record: z.infer<typeof recordSchema>,
+    ending: Awaited<ReturnType<NativeOperationJournal["readEnding"]>>,
+    rows: NativeOperationRows,
+  ): Promise<string | undefined> {
+    if (
+      ending.kind !== "ended" ||
+      !("runId" in ending.original) ||
+      ending.original.runId !== record.context.runId ||
+      ending.original.ownerGen !== record.context.ownerGen ||
+      ending.original.ownerFence !== record.context.ownerFence ||
+      ending.original.native.threadKey !== record.context.threadKey ||
+      (await rows.get(record.nativeKey)) !== undefined
+    )
+      return undefined;
+    const proofHash = await checkCommandHash(JSON.stringify(ending.receipt));
+    return record.endingHash === undefined || record.endingHash === proofHash ? proofHash : undefined;
   }
 
   /** The receiver supplies a canonical Memory read, never a caller's owner or key.
@@ -132,19 +151,8 @@ export class RecordedCheckOperation {
           ? { kind: "unavailable", reason: "proof" }
           : { kind: "pending", reason: "native_ending_unproven" };
       }
-      if (
-        ending.kind !== "ended" ||
-        !("runId" in ending.original) ||
-        ending.original.runId !== record.context.runId ||
-        ending.original.ownerGen !== record.context.ownerGen ||
-        ending.original.ownerFence !== record.context.ownerFence ||
-        ending.original.native.threadKey !== record.context.threadKey ||
-        (await rows.get(record.nativeKey)) !== undefined
-      )
-        return { kind: "unavailable", reason: "proof" };
-      const proofHash = await checkCommandHash(JSON.stringify(ending.receipt));
-      if (record.endingHash !== undefined && record.endingHash !== proofHash)
-        return { kind: "unavailable", reason: "proof" };
+      const proofHash = await this.originalEndingProof(record, ending, rows);
+      if (!proofHash) return { kind: "unavailable", reason: "proof" };
       if (readback && record.endingHash !== proofHash) return { kind: "unavailable", reason: "backend" };
       if (write && record.endingHash === undefined) {
         await rows.put(key, { ...record, retired: true, endingHash: proofHash });
@@ -188,7 +196,19 @@ export class RecordedCheckOperation {
         !record.result
       )
         return unknown();
-      return { kind: "completed", checkOperation: operation, nativeKey: record.nativeKey, result: record.result };
+      let endingHash: string | undefined;
+      if (interruptedResult(record.result)) {
+        const ending = await new NativeOperationJournal(this.storage).readEnding(record.nativeKey, rows);
+        endingHash = await this.originalEndingProof(record, ending, rows);
+        if (!endingHash) return unknown();
+      }
+      return {
+        kind: "completed",
+        checkOperation: operation,
+        nativeKey: record.nativeKey,
+        result: record.result,
+        ...(endingHash ? { endingHash } : {}),
+      };
     });
   }
 

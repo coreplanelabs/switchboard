@@ -1039,7 +1039,9 @@ describe("review prompts: the spec contradiction check (agent-review item 14)", 
       expect(sys).toMatch(/no `docs\/reference\/specs\/`.*skip this step/i);
       expect(sys).toMatch(/GATHER ONCE/);
       // the check is a step between the diff and the verdict, not a second exploration loop
-      expect(sys.indexOf("SPEC CONTRADICTION CHECK")).toBeGreaterThan(sys.indexOf("ANALYZE in a single pass"));
+      const analysis = sys.indexOf("\n2. ANALYZE ");
+      expect(analysis).toBeGreaterThanOrEqual(0);
+      expect(sys.indexOf("SPEC CONTRADICTION CHECK")).toBeGreaterThan(analysis);
       expect(sys.indexOf("SPEC CONTRADICTION CHECK")).toBeLessThan(sys.indexOf("VERDICT:"));
     }
   });
