@@ -10,6 +10,12 @@ import {
   type NativeScopeTransport,
 } from "./nativeScope.js";
 import type { NativeOperationStorage } from "./nativeOperation.js";
+import {
+  nativeScopeRefSchema,
+  nativeOperatorScopeRefSchema,
+  nativeExecutionScopeRefSchema,
+} from "../../src/execution/nativeScope.js";
+import { nativeRetirementTargetSchema } from "../../src/execution/nativeRetirement.js";
 
 const BOOT = "4b15c6de-2eb6-4ef1-9b6c-e36ebf389807";
 const owner = { runId: "run-a", ownerGen: "gen-a", ownerFence: 1 };
@@ -37,7 +43,7 @@ function fixture(request?: NativeScopeTransport["request"]) {
       if (request) return request(value, timeout);
       const data =
         value.mode === "inspect"
-          ? { version: 1, boot: BOOT }
+          ? { version: 1, boot: BOOT, ...(value.operator === true ? { operatorScopes: 1 } : {}) }
           : {
               ref: value.ref,
               closed: value.mode === "close" || value.mode === "view",
@@ -46,7 +52,7 @@ function fixture(request?: NativeScopeTransport["request"]) {
       return { stdout: JSON.stringify(data), stderr: "", exitCode: 0, timedOut: false };
     },
   };
-  return { rows, calls, scopes: new NativeRunScopes(storage, native) };
+  return { rows, calls, storage, scopes: new NativeRunScopes(storage, native) };
 }
 const scopeRows = (h: ReturnType<typeof fixture>) =>
   [...h.rows].filter(([key]) => key.startsWith("native-scope:")).map(([, value]) => value);
@@ -63,6 +69,84 @@ const allowed = async () => {};
 const output = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "", exitCode: 0, timedOut: false });
 
 describe("native run scope reservations", () => {
+  it("keeps operator references separate from run and terminal-run authority", async () => {
+    const h = fixture();
+    const operator = await h.scopes.ensureOperator({ opOwner: "op:scope-a" }, allowed);
+    const run = await ensure(h, "thread-a", owner, allowed);
+    expect(nativeExecutionScopeRefSchema.safeParse(operator).success).toBe(true);
+    expect(nativeScopeRefSchema.safeParse(run).success).toBe(true);
+    expect(nativeScopeRefSchema.safeParse(operator).success).toBe(false);
+    expect(nativeOperatorScopeRefSchema.safeParse(run).success).toBe(false);
+    expect(nativeExecutionScopeRefSchema.safeParse({ ...operator, threadKey: "fake-run" }).success).toBe(false);
+    expect(
+      nativeRetirementTargetSchema.safeParse({
+        resource: "repo:acme/api",
+        key: "native-operation:op:scope-a",
+        recordHash: "a".repeat(64),
+        scope: operator,
+      }).success,
+    ).toBe(false);
+  });
+  it("reserves an operator's own namespace before bootstrap without a synthetic run", async () => {
+    const h = fixture();
+    const operator = { opOwner: "op:background" };
+    await h.scopes.reserveOperator(operator);
+    expect([...h.rows]).toEqual([
+      [
+        "native-operator-scope:op%3Abackground",
+        {
+          id: expect.any(String),
+          kind: "operation",
+          owner: { opOwner: "op:background" },
+          boot: null,
+          closing: false,
+          closed: false,
+          bootstrap: "reserved",
+        },
+      ],
+    ]);
+    const ref = await h.scopes.ensureOperator(operator, allowed);
+    expect(ref).toEqual({
+      version: 1,
+      kind: "operation",
+      id: expect.any(String),
+      boot: BOOT,
+      owner: { opOwner: "op:background" },
+    });
+    expect(h.calls.map((call) => call.mode)).toEqual(["inspect", "bootstrap"]);
+  });
+
+  it("refuses an old operator capability before binding a boot or submitting payload work", async () => {
+    const h = fixture(async () => output({ version: 1, boot: BOOT }));
+    const operator = { opOwner: "op:old-image" };
+    await expect(h.scopes.ensureOperator(operator, allowed)).rejects.toThrow("operator scope unsupported");
+    expect([...h.rows.values()]).toMatchObject([
+      { kind: "operation", owner: operator, boot: null, bootstrap: "reserved" },
+    ]);
+    expect(h.calls).toEqual([{ mode: "inspect", operator: true }]);
+    expect(await h.scopes.closeOperator(operator)).toBe("unstarted");
+    expect([...h.rows.values()]).toMatchObject([{ closing: true, closed: true, boot: null }]);
+  });
+
+  it("qualifies the exact committed operator close after its storage acknowledgement is lost", async () => {
+    const h = fixture();
+    const owner = { opOwner: "op:close-ack" };
+    const ref = await h.scopes.ensureOperator(owner, allowed);
+    const transaction = h.storage.transaction.bind(h.storage);
+    let lost = false;
+    h.storage.transaction = async (action) => {
+      const result = await transaction(action);
+      if (!lost && [...h.rows.values()].some((row) => (row as { closed?: boolean }).closed)) {
+        lost = true;
+        throw new Error("lost-close-ack");
+      }
+      return result;
+    };
+    expect(await h.scopes.closeOperator(owner, ref)).toEqual(ref);
+    expect([...h.rows.values()]).toMatchObject([{ closing: true, closed: true, closedBoot: BOOT }]);
+    expect(h.calls.filter((call) => call.mode === "close")).toEqual([{ mode: "close", ref }]);
+  });
+
   it("refuses a changed expected scope before native control or closing the original", async () => {
     const h = fixture();
     const ref = await ensure(h, "thread-a", owner, allowed);
@@ -340,7 +424,7 @@ describe("shared hydration consumers", () => {
       CLEANUP_PENDING_KEY: "cleanup",
     });
     const instance = new Constructor();
-    const threads = new AsyncLocalStorage<string>();
+    const threads = new AsyncLocalStorage<{ owner: { runId: string } }>();
     let release!: () => void;
     const shared = new Promise<void>((resolve) => {
       release = resolve;
@@ -356,8 +440,9 @@ describe("shared hydration consumers", () => {
       nextHolder: () => "fixture",
       recordInFlight: async () => {},
       clearInFlight: async () => {},
+      withDeployAdmission: async (_producer: string, _context: unknown, fn: () => Promise<unknown>) => fn(),
       assertThreadOperationAllowed: async () => {
-        if (cancelled.has(threads.getStore() ?? "")) throw new Error("run cancelled");
+        if (cancelled.has(threads.getStore()?.owner.runId ?? "")) throw new Error("run cancelled");
       },
       withOpNativeOperation: async (_owner: string, fn: () => Promise<void>) => {
         expect(threads.getStore()).toBeUndefined();
@@ -368,10 +453,10 @@ describe("shared hydration consumers", () => {
         await shared;
       },
     });
-    const a = threads.run("a", () => instance.ensureHydrated());
+    const a = threads.run({ owner: { runId: "a" } }, () => instance.ensureHydrated());
     const rejected = expect(a).rejects.toThrow("run cancelled");
     for (let n = 0; n < 20 && starts === 0; n++) await Promise.resolve();
-    const b = threads.run("b", () => instance.ensureHydrated());
+    const b = threads.run({ owner: { runId: "b" } }, () => instance.ensureHydrated());
     cancelled.add("a");
     release();
     await rejected;

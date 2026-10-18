@@ -58,7 +58,7 @@ const bodies = methods.map((name) => {
 });
 const compiled = ts.transpileModule(
   `class PreservationUnderTest {
-  async withDeployAdmission(fn: () => Promise<unknown>) { return fn(); }
+  async withDeployAdmission(_producer: string, _context: unknown, fn: () => Promise<unknown>) { return fn(); }
   ${bodies.join("\n")}
 }`,
   {

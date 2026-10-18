@@ -5,7 +5,12 @@ import {
 } from "../../src/execution/credentialInspection.js";
 import { RecordedCheckOperation } from "./checkOperation.js";
 import { checkCommandHash, reportCheckResultFailure } from "../../src/execution/checkOperation.js";
-import { NativeOperationJournal, unstartedNativeThread, unstartedNativeOperator } from "./nativeOperation.js";
+import {
+  NativeOperationJournal,
+  nativeOperationOriginSchema,
+  unstartedNativeThread,
+  unstartedNativeOperator,
+} from "./nativeOperation.js";
 import { NativeRunScopes, nativeScopeRetirementKey } from "./nativeScope.js";
 import { isResidentPoolUser } from "../../src/execution/residentPoolSpends.js";
 import { releasePoolBinding, claimPoolBinding } from "../../src/execution/residentPoolSpends";
@@ -70,6 +75,7 @@ const names = [
   "withNativeOperationScope",
   "withSharedNativeOperation",
   "withOpNativeOperation",
+  "operationOrigin",
   "inspectThreadCredentials",
   "assertThreadOperationAllowed",
   "beginThreadNativeOperation",
@@ -279,6 +285,9 @@ function harness(
     AsyncLocalStorage,
     crypto: webcrypto,
     NativeOperationJournal,
+    nativeOperationOriginSchema,
+    BUILD_ID: "fixture-build",
+    workerVersionId: () => null,
     unstartedNativeThread,
     NativeRunScopes,
     inspectResidentCredentials,
@@ -411,7 +420,11 @@ function harness(
         }
         if (request.mode === "inspect")
           return {
-            stdout: JSON.stringify({ version: 1, boot: "4b15c6de-2eb6-4ef1-9b6c-e36ebf389807" }),
+            stdout: JSON.stringify({
+              version: 1,
+              boot: "4b15c6de-2eb6-4ef1-9b6c-e36ebf389807",
+              ...(request.operator === true ? { operatorScopes: 1 } : {}),
+            }),
             stderr: "",
             exitCode: 0,
             timedOut: false,
@@ -440,6 +453,7 @@ function harness(
     },
     threadOperationScope: new AsyncLocalStorage(),
     opOperationScope: new AsyncLocalStorage(),
+    activeOperatorRequests: new Set(),
     clearRuntimeUnreachable: async () => {},
     noteRuntimeUnreachable: async () => ({ count: 1 }),
     threadWrites: new KeyedAsyncLock(),
@@ -451,7 +465,7 @@ function harness(
     threadOpsInFlight: new Map(),
     opUsersInUse: new Map(),
     workspaceExclusiveOpsInFlight: new Set(),
-    withDeployAdmission: async (fn: () => Promise<unknown>) => fn(),
+    withDeployAdmission: async (_producer: string, _context: unknown, fn: () => Promise<unknown>) => fn(),
     poolUserOwnerMatches: async () => true,
     waitForThreadDrain: async () => instance.threadOpsInFlight.get(threadKey) ?? 0,
     execThreadImpl: async () => ({ stdout: "ran", stderr: "", exitCode: 0, truncated: false }),
@@ -1110,7 +1124,7 @@ describe("resident cancellation admission", () => {
       release = r;
     });
     let calls = 0;
-    h.instance.withDeployAdmission = async (fn: () => Promise<unknown>) => {
+    h.instance.withDeployAdmission = async (_producer: string, _context: unknown, fn: () => Promise<unknown>) => {
       if (++calls === 1) {
         enter();
         await pending;
@@ -1926,7 +1940,7 @@ describe("resident run cancellation", () => {
       actor: { kind: "chat", id: "slack:operator" },
     };
     Object.assign(h.instance, {
-      withDeployAdmission: async (fn: () => Promise<unknown>) => fn(),
+      withDeployAdmission: async (_producer: string, _context: unknown, fn: () => Promise<unknown>) => fn(),
       poolUserOwnerMatches: async (user: string, claimant: string) =>
         user === "worker2" && claimant === "thread:" + threadKey,
       workspaceExclusiveOpsInFlight: new Set(),
@@ -1993,7 +2007,7 @@ describe("resident run cancellation", () => {
       actor: { kind: "chat", id: "slack:operator" },
     };
     Object.assign(h.instance, {
-      withDeployAdmission: async (fn: () => Promise<unknown>) => fn(),
+      withDeployAdmission: async (_producer: string, _context: unknown, fn: () => Promise<unknown>) => fn(),
       poolUserOwnerMatches: async () => true,
       workspaceExclusiveOpsInFlight: new Set(),
       waitForThreadDrain: async () => 0,
@@ -2835,6 +2849,37 @@ describe("Resident recorded check result lookup", () => {
 });
 
 describe("shared maintenance ownership", () => {
+  it("runs background user commands with the existing confined writable user home", async () => {
+    const h = harness();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    h.instance.processSandbox = {
+      exec: async () => ({ output: async () => ({ stdout: "cached", stderr: "", exitCode: 0, timedOut: false }) }),
+    };
+    const transport = h.instance.nativeScopeTransport();
+    const submitted: unknown[] = [];
+    h.instance.nativeScopeTransport = () => ({
+      request: async (value: unknown, timeout: number) => {
+        submitted.push(value);
+        return transport.request(value, timeout);
+      },
+    });
+    expect(
+      await h.instance.withSharedNativeOperation(
+        "deps-materialize",
+        () => h.instance.threadRun("worker1", "/workspace/cache", "npm install", 1000),
+        "cache-a",
+      ),
+    ).toEqual({ stdout: "cached", stderr: "", exitCode: 0, timedOut: false });
+    expect(submitted).toContainEqual(
+      expect.objectContaining({
+        mode: "launch",
+        role: "user",
+        user: "worker1",
+        argv: ["/bin/bash", "-c", "cd /workspace/cache && npm install"],
+      }),
+    );
+  });
+
   it("keeps shared native work outside its cancelled consumer's gate and retains its own unknown result", async () => {
     const h = harness();
     h.instance.run = Object.getPrototypeOf(h.instance).run;
@@ -2842,23 +2887,33 @@ describe("shared maintenance ownership", () => {
     const wait = new Promise<void>((resolve) => {
       release = resolve;
     });
-    let entered = false;
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
     h.instance.processSandbox = {
       exec: async () => ({
         status: async () => ({ id: "shared-original", pid: 42, startedAt: "2026-10-14T00:00:00.000Z" }),
         output: async () => {
-          entered = true;
+          enter();
           await wait;
           throw new Error("shared output lost");
         },
       }),
     };
     const shared = h.instance.withOwnedNativeOperation(threadKey, owner, () =>
-      h.instance.withSharedNativeOperation(() => h.instance.run(["echo", "shared"])),
+      h.instance.withSharedNativeOperation("git-setup", () => h.instance.run(["echo", "shared"])),
     );
-    const rejected = expect(shared).rejects.toThrow("shared output lost");
-    for (let n = 0; n < 80 && !entered; n++) await Promise.resolve();
-    expect(entered).toBe(true);
+    const outcome = shared.then(
+      () => ({ error: null }),
+      (error: Error) => ({ error }),
+    );
+    await Promise.race([
+      entered,
+      outcome.then(({ error }) => {
+        throw error ?? new Error("shared work ended before submission");
+      }),
+    ]);
     const active = await new NativeOperationJournal(h.instance.ctx.storage).unresolved();
     expect([...active.values()]).toEqual(
       expect.arrayContaining([
@@ -2868,10 +2923,24 @@ describe("shared maintenance ownership", () => {
     );
     h.rows.set(`cancelled:${threadKey}:${owner.runId}`, { cancellation: { runId: owner.runId } });
     release();
-    await rejected;
+    expect((await outcome).error?.message).toBe("shared output lost");
     const remaining = await new NativeOperationJournal(h.instance.ctx.storage).unresolved();
-    expect([...remaining.values()]).toMatchObject([
-      { opOwner: expect.stringMatching(/^op:/), native: { closed: true } },
+    expect([...remaining.values()]).toEqual([]);
+    const endings = [...h.rows].filter(([key]) => key.startsWith("native-operation-ending:"));
+    expect(endings.map(([, value]) => value)).toMatchObject([
+      {
+        original: {
+          opOwner: expect.stringMatching(/^op:/),
+          origin: { producer: "git-setup" },
+          native: { closed: true },
+        },
+        receipt: {
+          purpose: "operator-scope-ending",
+          callback: "threw",
+          originalOperationOutcome: "unknown",
+          scope: { kind: "operation" },
+        },
+      },
     ]);
   });
 });

@@ -1,3 +1,4 @@
+import { NativeOperationJournal, nativeOperationRecordSchema } from "./nativeOperation.js";
 import { selectedResidentMember } from "../../src/execution/residentMembers";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -199,13 +200,17 @@ describe("full rebuild backup cleanup", () => {
   ] as const)(
     "retains failed %s cleanup across restart until the original backups are deleted",
     async (failedId, remaining) => {
+      const originalUnknown = {
+        opOwner: "op:legacy",
+        native: { version: 1, closed: true, pending: { original: { kind: "opaque" } } },
+      };
       const rows = new Map<string, any>([
         ["snapshot", { mirror: { id: "s1" }, checkout: { id: "s2" } }],
         ["retired", { mirror: { id: "r1" }, checkout: { id: "r2" } }],
         ["deps:entry", { key: "entry", backup: { id: "d1" } }],
         ["state", "warm"],
         ["resource", resource],
-        ["native-operation:old", "original-outcome-unknown"],
+        ["native-operation:old", originalUnknown],
       ]);
       const objects = new Set(["s1", "s2", "r1", "r2", "d1"]);
       let failing: string | undefined = failedId;
@@ -228,6 +233,8 @@ describe("full rebuild backup cleanup", () => {
         compilerOptions: { target: ts.ScriptTarget.ES2022 },
       }).outputText;
       const Resident = runInNewContext(`${compiled}\nResident`, {
+        NativeOperationJournal,
+        nativeOperationRecordSchema,
         SNAPSHOT_KEY: "snapshot",
         RESOURCE_KEY: "resource",
         CLEANUP_PENDING_KEY: "cleanup",
@@ -292,7 +299,7 @@ describe("full rebuild backup cleanup", () => {
         return resident;
       };
       expect(await create().teardown()).toMatchObject({ containerStopped: true, storageCleared: false });
-      expect(rows.get("native-operation:old")).toBe("original-outcome-unknown");
+      expect(rows.get("native-operation:old")).toEqual(originalUnknown);
       expect(await create().rebuild(resource, "release", 300000, false)).toEqual({
         error: "rebuild-refused: full rebuild cleanup is still incomplete",
         status: 409,
@@ -305,6 +312,88 @@ describe("full rebuild backup cleanup", () => {
       expect(rows.get("cleanup")).toBe(resource);
       await create().confirmCleanup(resource);
       expect([...rows]).toEqual([]);
+    },
+  );
+});
+
+describe("archive teardown exclusion", () => {
+  it.each(["pending", "receipt", "invalid"])(
+    "retains %s archive evidence before any destruction or cleanup",
+    async (kind) => {
+      const ref = {
+        version: 1,
+        kind: "operation",
+        id: "33333333-3333-4333-8333-333333333333",
+        boot: "11111111-1111-4111-8111-111111111111",
+        owner: { opOwner: "op:archive" },
+      };
+      const attempt = "55555555-5555-4555-8555-555555555555";
+      const identity = {
+        version: 1,
+        ref,
+        attempt,
+        backupId: "44444444-4444-4444-8444-444444444444",
+        target: "/workspace/mirror",
+        sizeBytes: 3,
+        etag: "a".repeat(32),
+      };
+      const original =
+        kind === "invalid"
+          ? "unreadable-original-evidence"
+          : {
+              opOwner: "op:archive",
+              native: {
+                version: 1,
+                closed: true,
+                scope: ref,
+                pending: kind === "pending" ? { [attempt]: { kind: "opaque", restore: identity } } : {},
+                ...(kind === "receipt"
+                  ? {
+                      restoreReceipts: {
+                        [attempt]: {
+                          receipt: { identity, outcome: "committed", cleanup: "complete" },
+                          hash: "a".repeat(64),
+                        },
+                      },
+                    }
+                  : {}),
+              },
+            };
+      const rows = new Map<string, unknown>([
+        ["resource", resource],
+        ["native-operation:op:archive", original],
+      ]);
+      const effects: string[] = [];
+      const compiled = ts.transpileModule(`class Resident { ${methodOf(source, "teardown")} }`, {
+        compilerOptions: { target: ts.ScriptTarget.ES2022 },
+      }).outputText;
+      const Resident = runInNewContext(`${compiled}\nResident`, {
+        NativeOperationJournal,
+        nativeOperationRecordSchema,
+        CLEANUP_PENDING_KEY: "cleanup",
+        RESOURCE_KEY: "resource",
+      });
+      const instance = new Resident();
+      instance.ctx = {
+        storage: {
+          get: async (key: string) => rows.get(key),
+          list: async ({ prefix }: { prefix: string }) => new Map([...rows].filter(([key]) => key.startsWith(prefix))),
+          put: async () => {
+            effects.push("write");
+          },
+          delete: async () => {
+            effects.push("delete");
+          },
+        },
+      };
+      instance.destroyConfirmed = async () => {
+        effects.push("destroy");
+      };
+      await expect(instance.teardown()).rejects.toThrow(
+        "resident-cleanup-refused: original archive restore is unresolved",
+      );
+      expect(effects).toEqual([]);
+      expect(rows.get("native-operation:op:archive")).toEqual(original);
     },
   );
 });

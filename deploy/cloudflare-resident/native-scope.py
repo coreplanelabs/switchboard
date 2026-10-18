@@ -1,6 +1,10 @@
 #!/usr/bin/python3
 """Trusted entry point. Requests arrive on stdin, never through a guest RPC."""
 import ctypes
+import base64
+import errno
+import shutil
+import urllib.parse
 import fcntl
 import hashlib
 import json
@@ -78,19 +82,29 @@ def identifier(value):
 
 
 def reference(value):
-    if not isinstance(value, dict) or set(value) != {'version', 'id', 'boot', 'threadKey', 'owner'}:
+    if not isinstance(value, dict):
+        raise ValueError('invalid native reference')
+    operator = value.get('kind') == 'operation'
+    fields = {'version', 'kind', 'id', 'boot', 'owner'} if operator else {'version', 'id', 'boot', 'threadKey', 'owner'}
+    if set(value) != fields:
         raise ValueError('invalid native reference')
     if value['version'] != 1 or value['boot'] != BOOT.read_text().strip():
         raise ValueError('original kernel is unavailable')
     identifier(value['id'])
     owner = value['owner']
-    if (not isinstance(owner, dict) or set(owner) != {'runId', 'ownerGen', 'ownerFence'}
-            or not isinstance(owner['ownerFence'], int) or isinstance(owner['ownerFence'], bool)
-            or owner['ownerFence'] <= 0):
-        raise ValueError('invalid native owner')
-    for text in (value['threadKey'], owner['runId'], owner['ownerGen']):
-        if not isinstance(text, str) or not text or len(text) > 256 or '\x00' in text:
+    if operator:
+        if (not isinstance(owner, dict) or set(owner) != {'opOwner'}
+                or not isinstance(owner['opOwner'], str)
+                or not re.fullmatch(r'op:[A-Za-z0-9_.:-]{1,124}', owner['opOwner'])):
+            raise ValueError('invalid native operator')
+    else:
+        if (not isinstance(owner, dict) or set(owner) != {'runId', 'ownerGen', 'ownerFence'}
+                or not isinstance(owner['ownerFence'], int) or isinstance(owner['ownerFence'], bool)
+                or owner['ownerFence'] <= 0):
             raise ValueError('invalid native owner')
+        for text in (value['threadKey'], owner['runId'], owner['ownerGen']):
+            if not isinstance(text, str) or not text or len(text) > 256 or '\x00' in text:
+                raise ValueError('invalid native owner')
     return value
 
 
@@ -215,7 +229,7 @@ def mount_command(*args):
     subprocess.run(['/usr/bin/mount', *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def prepare_view(ref, role, user):
+def prepare_view(ref, role, user, archive=None):
     # No payload keeps a path or descriptor to the controller's writable
     # roots. The selected workspace remains the existing shared disk.
     libc = ctypes.CDLL(None, use_errno=True)
@@ -223,14 +237,26 @@ def prepare_view(ref, role, user):
         raise OSError(ctypes.get_errno(), 'private mount view refused')
     # Harness control files outlive individual exec views and generations.
     # A run gets its own sticky /var/tmp, never the host's shared directory.
-    key = hashlib.sha256(json.dumps([ref['threadKey'], ref['owner']['runId']]).encode()).hexdigest()
+    identity = ['operator', ref['owner']['opOwner']] if ref.get('kind') == 'operation' else [ref['threadKey'], ref['owner']['runId']]
+    key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
     harness = ROOT / ('harness-' + key)
     harness.mkdir(mode=0o1777, exist_ok=True)
     os.chmod(harness, 0o1777)
     mount_command('--make-rprivate', '/')
     mount_command('--rbind', '/', '/')
     mount_command('-o', 'remount,bind,ro', '/')
-    allowed = ['/workspace']
+    if archive is not None:
+        # Bind each existing workspace mount read-only in this private view.
+        # Workloads have no mount capability. This uses the image's supported
+        # mount API instead of requiring the newer mount_setattr syscall.
+        mounts = {'/workspace'}
+        for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines():
+            path = re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), line.split()[4])
+            if path.startswith('/workspace/'): mounts.add(path)
+        for path in sorted(mounts, key=len, reverse=True):
+            mount_command('--bind', path, path)
+            mount_command('-o', 'remount,bind,ro', path)
+    allowed = [str(archive)] if archive is not None else ['/workspace']
     if user is not None:
         allowed.append(user.pw_dir)
     for path in allowed:
@@ -281,16 +307,312 @@ def provision_account(name):
     return 0
 
 
+def archive_identity(request):
+    ref = reference(request['ref'])
+    attempt = identifier(request['attempt'])
+    identity = request['identity']
+    fields = {'version', 'ref', 'attempt', 'backupId', 'target', 'sizeBytes', 'etag'}
+    if (ref.get('kind') != 'operation' or not isinstance(identity, dict) or set(identity) != fields
+            or type(identity['version']) is not int or identity['version'] != 1
+            or identity['ref'] != ref or identity['attempt'] != attempt):
+        raise ValueError('invalid archive identity')
+    identifier(identity['backupId'])
+    target = identity['target']
+    if target not in ('/workspace/mirror', '/workspace/checkout'):
+        prefix = '/workspace/deps/.scratch-'
+        if not isinstance(target, str) or not target.startswith(prefix):
+            raise ValueError('invalid archive target')
+        identifier(target[len(prefix):])
+    if (type(identity['sizeBytes']) is not int or not 0 < identity['sizeBytes'] <= 9007199254740991
+            or not isinstance(identity['etag'], str)
+            or not re.fullmatch(r'[a-fA-F0-9]{32}(?:-[1-9][0-9]*)?', identity['etag'])):
+        raise ValueError('invalid archive descriptor')
+    return identity
+
+
+def archive_directory(identity):
+    return pathlib.Path('/workspace/.native-restore-' + identity['ref']['id'] + '-' + identity['attempt'])
+
+
+def archive_paths(identity):
+    ref = identity['ref']
+    return (ROOT / (ref['id'] + '.json'), ROOT / (ref['id'] + '.lock'),
+            CGROUP / ref['id'] / identity['attempt'],
+            ROOT / (ref['id'] + '.' + identity['attempt'] + '.archive.json'))
+
+
+def archive_parent(identity):
+    workspace = os.open('/workspace', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    selected = workspace
+    try:
+        for fd in [workspace]:
+            info = os.fstat(fd)
+            if info.st_uid != 0 or info.st_mode & 0o022 or 'system.posix_acl_access' in os.listxattr(fd):
+                raise ValueError('archive parent ownership is unverified')
+        if identity['target'].startswith('/workspace/deps/'):
+            selected = os.open('deps', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=workspace)
+            info = os.fstat(selected)
+            if info.st_uid != 0 or info.st_mode & 0o022 or 'system.posix_acl_access' in os.listxattr(selected):
+                raise ValueError('archive parent ownership is unverified')
+        return selected, pathlib.PurePosixPath(identity['target']).name
+    except Exception:
+        if selected != workspace: os.close(selected)
+        else: os.close(workspace)
+        raise
+    finally:
+        if selected != workspace: os.close(workspace)
+
+
+def archive_load(path, identity):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_size > 8192:
+            raise ValueError('archive record ownership changed')
+        saved = json.load(stream)
+    if saved.get('identity') != identity:
+        raise ValueError('archive record identity changed')
+    return saved
+
+
+def archive_owned_directory(saved):
+    path = archive_directory(saved['identity'])
+    info = path.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077
+            or saved.get('directory') != {'dev': info.st_dev, 'ino': info.st_ino}):
+        raise ValueError('archive directory ownership changed')
+    return path
+
+
+def archive_snapshot(saved):
+    return {'identity': saved['identity'], 'phase': saved['phase'],
+            'receivedBytes': saved.get('offset', 0),
+            **({'append': saved['append']} if saved.get('append') else {}),
+            **({'receipt': saved['receipt']} if saved.get('receipt') else {})}
+
+
+def archive_prepare(request):
+    identity = archive_identity(request)
+    state, lock, child, record = archive_paths(identity)
+    with locked(lock):
+        scope = original(state, identity['ref'])
+        if record.exists(): return archive_snapshot(archive_load(record, identity))
+        if scope['closed'] or frozen(child.parent): raise ValueError('native scope is closed')
+        parent, _ = archive_parent(identity)
+        os.close(parent)
+        child.mkdir(mode=0o700)
+        child.joinpath('cgroup.procs').write_text(str(os.getpid()))
+        saved = {'identity': identity, 'phase': 'reserving', 'offset': 0}
+        write_state(record, saved)
+        disk = os.statvfs('/workspace')
+        if disk.f_bavail * disk.f_frsize < identity['sizeBytes'] + 128 * 1024 * 1024:
+            return archive_finish(record, saved, 'aborted', 'disk-full')
+    directory = archive_directory(identity)
+    directory.mkdir(mode=0o700)
+    info = directory.lstat()
+    saved['directory'] = {'dev': info.st_dev, 'ino': info.st_ino}
+    fd = os.open(directory / 'archive.sqsh', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+    with locked(lock):
+        if original(state, identity['ref'])['closed'] or frozen(child):
+            raise ValueError('archive attempt is closed')
+        saved['phase'] = 'receiving'
+        write_state(record, saved)
+    return archive_snapshot(saved)
+
+
+def archive_append(request):
+    identity = archive_identity(request)
+    state, lock, child, record = archive_paths(identity)
+    data = base64.b64decode(request['data'], validate=True)
+    offset = request['offset']
+    digest = request['hash']
+    append = identifier(request['appendId'])
+    if (not 0 < len(data) <= 65536 or type(offset) is not int or offset < 0
+            or offset + len(data) > identity['sizeBytes'] or hashlib.sha256(data).hexdigest() != digest):
+        raise ValueError('invalid archive chunk')
+    with locked(lock):
+        saved = archive_load(record, identity)
+        if original(state, identity['ref'])['closed'] or frozen(child): raise ValueError('archive attempt is closed')
+        if saved['phase'] != 'receiving' or saved['offset'] != offset:
+            raise ValueError('archive chunk admission changed')
+        child.joinpath('cgroup.procs').write_text(str(os.getpid()))
+        directory = archive_owned_directory(saved)
+        saved['phase'] = 'appending'
+        write_state(record, saved)
+    fd = os.open(directory / 'archive.sqsh', os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_size != offset:
+            raise ValueError('archive chunk target changed')
+        os.lseek(fd, offset, os.SEEK_SET)
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0: raise ValueError('archive write incomplete')
+            view = view[written:]
+        os.fsync(fd)
+    finally: os.close(fd)
+    with locked(lock):
+        if original(state, identity['ref'])['closed'] or frozen(child): raise ValueError('archive attempt is closed')
+        saved['offset'] = offset + len(data)
+        saved['append'] = {'id': append, 'offset': offset, 'size': len(data), 'hash': digest}
+        saved['phase'] = 'receiving'
+        write_state(record, saved)
+    return archive_snapshot(saved)
+
+
+def archive_remove(saved):
+    directory = archive_owned_directory(saved)
+    if not shutil.rmtree.avoids_symlink_attacks: raise ValueError('safe archive cleanup is unavailable')
+    shutil.rmtree(directory)
+    if directory.exists() or directory.is_symlink(): raise ValueError('archive cleanup is incomplete')
+
+
+def archive_finish(record, saved, outcome, reason=None):
+    receipt = {'identity': saved['identity'], 'outcome': outcome, 'cleanup': 'complete'}
+    if reason: receipt['reason'] = reason
+    if len(json.dumps(receipt, separators=(',', ':')).encode()) > 1024:
+        raise ValueError('archive receipt is too large')
+    saved['receipt'] = receipt
+    saved['phase'] = 'done'
+    write_state(record, saved)
+    return archive_snapshot(saved)
+
+
+def archive_read(request):
+    identity = archive_identity(request)
+    state, lock, child, record = archive_paths(identity)
+    with locked(lock):
+        original(state, identity['ref'])
+        saved = archive_load(record, identity)
+        result = archive_snapshot(saved)
+        if saved['phase'] == 'running':
+            directory = archive_owned_directory(saved)
+            try: result['receivedBytes'] = (directory / 'archive.sqsh').stat().st_size
+            except FileNotFoundError: pass
+        return result
+
+
+def archive_clean(request):
+    identity = archive_identity(request)
+    state, lock, child, record = archive_paths(identity)
+    with locked(lock):
+        original(state, identity['ref'])
+        if not child.is_dir() or not (frozen(child) or original(state, identity['ref'])['closed']) or populated(child):
+            raise ValueError('original archive attempt has not ended')
+        if not record.exists():
+            # Preparation records intent before it can create any workspace
+            # resource. A closed original attempt cannot later cross that point.
+            return archive_finish(record, {'identity': identity, 'offset': 0}, 'aborted', 'cancelled')
+        saved = archive_load(record, identity)
+        if saved['phase'] == 'done': return archive_snapshot(saved)
+        if saved['phase'] in ('reserving', 'installing', 'cleaning'):
+            raise ValueError('original archive effect is unverified')
+        saved['phase'] = 'cleaning'
+        write_state(record, saved)
+    archive_remove(saved)
+    with locked(lock):
+        return archive_finish(record, saved, 'aborted', 'cancelled')
+
+
+def archive_payload(request):
+    identity = archive_identity(request)
+    directory = archive_directory(identity)
+    archive = directory / 'archive.sqsh'
+    url = request.get('url')
+    if url is not None:
+        parsed = urllib.parse.urlsplit(url)
+        if (not isinstance(url, str) or len(url) > 8192 or parsed.scheme != 'https'
+                or not parsed.hostname or parsed.username or parsed.password or parsed.fragment):
+            raise ValueError('archive URL refused')
+        config = 'url = ' + json.dumps(url) + '\noutput = ' + json.dumps(str(archive)) + '\nheader = ' + json.dumps('If-Match: "' + identity['etag'] + '"') + '\n'
+        result = subprocess.run(['/usr/bin/curl', '-q', '--proto', '=https', '--fail', '--silent', '--max-filesize', str(identity['sizeBytes']), '--write-out', '%{http_code}', '--config', '-'],
+                                input=config, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        if result.stdout == '412': return 3
+        if result.returncode != 0: return 1
+    if archive.stat().st_size != identity['sizeBytes']: return 2
+    result = subprocess.run(['/usr/bin/unsquashfs', '-n', '-no-xattrs', '-no-progress', '-processors', '1', '-d', str(directory / 'tree'), str(archive)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if result.returncode != 0: return 2
+    archive.unlink()
+    fd = os.open(directory / 'extracted.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        json.dump({'identity': identity, 'extracted': True}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    return 0
+
+
+def archive_run(request):
+    identity = archive_identity(request)
+    state, lock, child, record = archive_paths(identity)
+    with locked(lock):
+        saved = archive_load(record, identity)
+        if saved['phase'] == 'done': return archive_snapshot(saved)
+        if original(state, identity['ref'])['closed'] or frozen(child): raise ValueError('archive attempt is closed')
+        if saved['phase'] != 'receiving' or (request.get('url') is None and saved['offset'] != identity['sizeBytes']):
+            raise ValueError('archive transfer is incomplete')
+        archive_owned_directory(saved)
+        child.joinpath('cgroup.procs').write_text(str(os.getpid()))
+        saved['phase'] = 'running'
+        write_state(record, saved)
+    parent, name = archive_parent(identity)
+    work = os.open(archive_owned_directory(saved), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        code = launch({**request, 'role': 'archive'})
+        directory = archive_owned_directory(saved)
+        if code != 0:
+            reason = 'source-changed' if code == 3 else 'download-failed' if code == 1 else 'archive-invalid'
+            if os.statvfs(directory).f_bavail * os.statvfs(directory).f_frsize < 128 * 1024 * 1024:
+                reason = 'disk-full'
+            archive_remove(saved)
+            with locked(lock): return archive_finish(record, saved, 'aborted', reason)
+        proof = json.loads((directory / 'extracted.json').read_text())
+        if proof != {'identity': identity, 'extracted': True} or (directory / 'archive.sqsh').exists():
+            raise ValueError('archive extraction receipt changed')
+        tree = os.open('tree', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=work)
+        os.close(tree)
+        with locked(lock):
+            if original(state, identity['ref'])['closed'] or frozen(child): raise ValueError('archive attempt is closed')
+            saved['phase'] = 'installing'
+            write_state(record, saved)
+        try: os.rmdir(name, dir_fd=parent)
+        except FileNotFoundError: pass
+        except OSError as error:
+            if error.errno not in (errno.ENOTEMPTY, errno.EEXIST): raise
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.renameat2(work, b'tree', parent, os.fsencode(name), 1) != 0:
+            failure = ctypes.get_errno()
+            if failure != errno.EEXIST: raise OSError(failure, 'archive installation is unverified')
+            archive_remove(saved)
+            with locked(lock): return archive_finish(record, saved, 'aborted', 'target-occupied')
+        os.fsync(parent)
+        (directory / 'extracted.json').unlink()
+        directory.rmdir()
+        with locked(lock): return archive_finish(record, saved, 'committed')
+    finally:
+        os.close(work)
+        os.close(parent)
+
+
+def archive_dispatch(request):
+    return {'archive-prepare': archive_prepare, 'archive-append': archive_append,
+            'archive-run': archive_run, 'archive-read': archive_read, 'archive-clean': archive_clean}[request['mode']](request)
+
+
 def payload(request, demoted=False):
     ref = request['ref']
     role = request.get('role')
-    if role not in ('user', 'trusted', 'write'):
+    if role not in ('user', 'trusted', 'write', 'archive'):
+
         raise ValueError('invalid native role')
     user = pwd.getpwnam(request['user']) if role == 'user' else None
     if user is not None and user.pw_uid < 2001:
         raise ValueError('invalid workload account')
     if not demoted:
-        prepare_view(ref, role, user)
+        prepare_view(ref, role, user, archive_directory(archive_identity(request)) if role == 'archive' else None)
         # The setpriv loader receives only a trusted environment. Guest loader
         # and interpreter variables are applied by the already-demoted second
         # stage, with private data on stdin rather than argv or environment.
@@ -327,6 +649,8 @@ def payload(request, demoted=False):
         raise ValueError('trusted startup input refused')
     env.update(extra)
     argv = []
+    if role == 'archive':
+        return archive_payload(request)
     if role == 'write':
         content = request.get('content')
         path = request.get('path')
@@ -376,10 +700,24 @@ def payload(request, demoted=False):
     os.execvpe(argv[0], argv, env)
 
 
+def refuse_mounted_mutation(paths):
+    if (not isinstance(paths, list) or not 0 < len(paths) <= 16 or any(
+            not isinstance(path, str) or len(path) > 512 or not path.startswith('/workspace/')
+            or any(part in ('', '.', '..') for part in path.split('/')[1:])
+            or re.search(r'[\x00-\x1f\x7f]', path) for path in paths)):
+        raise ValueError('invalid workspace mutation')
+    for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines():
+        mounted = re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), line.split()[4])
+        if any(mounted == path or mounted.startswith(path + '/') for path in paths):
+            raise ValueError('selected workspace mutation contains an inherited mount')
+
+
 def launch(request):
     ref = reference(request['ref'])
     state, lock, group = paths(ref)
     attempt = identifier(request['attempt'])
+    if request.get('workspacePaths') is not None:
+        refuse_mounted_mutation(request['workspacePaths'])
     scratch = ROOT / (ref['id'] + '.tmp')
     scratch.mkdir(mode=0o1777, exist_ok=True)
     os.chmod(scratch, 0o1777)
@@ -387,20 +725,27 @@ def launch(request):
         if original(state, ref)['closed'] or frozen(group):
             raise ValueError('native scope is closed')
         child = group / attempt
-        child.mkdir(mode=0o700)
-        child.joinpath('cgroup.procs').write_text(str(os.getpid()))
+        if request.get('role') != 'archive':
+            child.mkdir(mode=0o700)
+            child.joinpath('cgroup.procs').write_text(str(os.getpid()))
+        elif not child.is_dir() or frozen(child):
+            raise ValueError('archive attempt is closed')
     # A root command receives signal/PID separation. Ordinary user commands
     # retain their supported detached-child lifetime in the enclosing cgroup.
     if request.get('role') == 'provision':
         return provision_account(request['user'])
     if request.get('role') == 'inventory':
-        user = request['user']
-        if not isinstance(user, str) or not re.fullmatch(r'worker[1-9]\d*', user):
-            raise ValueError('invalid inventory account')
-        # Fixed observation in the original PID namespace, before payload
-        # isolation. No caller command or environment enters this operation.
-        return subprocess.run(['/usr/bin/pgrep', '-u', user],
-                              env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'}).returncode
+        # Fixed observations in the original PID namespace. Caller argv and
+        # environment cannot turn an inventory request into a host command.
+        inventory = request.get('inventory')
+        if inventory in ('users', 'pid-users'):
+            argv = ['/usr/bin/ps', '-eo', 'user=' if inventory == 'users' else 'pid=,user=']
+        else:
+            user = request.get('user')
+            if inventory is not None or not isinstance(user, str) or not re.fullmatch(r'worker[1-9]\d*', user):
+                raise ValueError('invalid inventory account')
+            argv = ['/usr/bin/pgrep', '-u', user]
+        return subprocess.run(argv, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'}).returncode
     if request.get('role') != 'user':
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.unshare(0x20000000 | 0x00020000) != 0:  # CLONE_NEWPID | CLONE_NEWNS
@@ -419,8 +764,7 @@ def main():
     if sys.argv[1:] == ['--payload']:
         raw = sys.stdin.buffer.read(MAX_INPUT + 1)
         if len(raw) > MAX_INPUT: raise ValueError('native input is too large')
-        payload(json.loads(raw), demoted=True)
-        return 0
+        return payload(json.loads(raw), demoted=True)
     if os.geteuid() != 0:
         raise ValueError('native controller authority required')
     raw = sys.stdin.buffer.read(MAX_INPUT + 1)
@@ -429,9 +773,15 @@ def main():
     request = json.loads(raw)
     mode = request.get('mode')
     if mode == 'inspect':
-        print(json.dumps({'version': 1, 'boot': BOOT.read_text().strip()}))
+        result = {'version': 1, 'boot': BOOT.read_text().strip()}
+        if request.get('operator') is True: result['operatorScopes'] = 1
+        if request.get('archive') is True: result['archiveRestores'] = 1
+        print(json.dumps(result))
         return 0
     ref = reference(request['ref'])
+    if mode in ('archive-prepare', 'archive-append', 'archive-run', 'archive-read', 'archive-clean'):
+        print(json.dumps(archive_dispatch(request)))
+        return 0
     if mode == 'bootstrap':
         result = bootstrap(ref)
     elif mode == 'close':
@@ -441,6 +791,7 @@ def main():
     elif mode == 'view':
         result = view(ref)
     elif mode == 'launch':
+        if request.get('role') == 'archive': raise ValueError('archive requires its original handle')
         return launch(request)
     else:
         raise ValueError('unknown native operation')

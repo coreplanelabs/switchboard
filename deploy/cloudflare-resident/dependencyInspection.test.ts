@@ -96,7 +96,7 @@ function fixture() {
     opUsersInUse: new Set(),
     workspaceExclusiveOpsInFlight: new Set(),
     threadAttaches: { run: async (_key: string, work: () => Promise<unknown>) => work() },
-    withDeployAdmission: async (work: () => Promise<unknown>) => work(),
+    withDeployAdmission: async (_producer: string, _context: unknown, work: () => Promise<unknown>) => work(),
     poolUserOwnerMatches: async () => true,
     observeRunForEviction: async () => ({
       kind: "terminal",
@@ -288,7 +288,7 @@ ${methodOf(source, "cancellationPending")}
       workspaceExclusiveOpsInFlight: new Set(),
       opUsersInUse: new Map(),
       threadAttaches: { run: async (_key: string, fn: () => Promise<unknown>) => fn() },
-      withDeployAdmission: async (fn: () => Promise<unknown>) => fn(),
+      withDeployAdmission: async (_producer: string, _context: unknown, fn: () => Promise<unknown>) => fn(),
       poolUserOwnerMatches: async () => true,
       containerIdentity: async () => "original-vm",
       observeRunForEviction: async () => ({

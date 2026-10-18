@@ -232,3 +232,5 @@ src/channels/mcpApprovals.test.ts	const APPROVAL_PROTOCOL_VERSION = "2026-07-28"
 # Public issue permalinks are the source of the external-PR contract re-evaluation.
 docs/decisions/0077-a-plan-becomes-a-durable-work-record-before-code-starts.md	[external-pr-consolidation]: https://github.com/coreplanelabs/switchboard/issues/2290#issuecomment-5822450307
 docs/decisions/0077-a-plan-becomes-a-durable-work-record-before-code-starts.md	[external-pr-intake]: https://github.com/coreplanelabs/switchboard/issues/2353
+# The living spec links the immutable design record by its required dated filename.
+docs/reference/specs/resident-repos.md	The [owned background operation design](../../plans/2026-10-17-001-owned-background-operations-design.md) records the operator owner, opaque-effect and ordinary-ending boundaries.

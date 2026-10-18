@@ -1,4 +1,17 @@
 import {
+  archiveControlAnswer,
+  restoreSnapshotSchema,
+  restoreIdentitySchema,
+  restoreReceiptSchema,
+  workspaceMutationPathsSchema,
+  restorePrivateDirectory,
+  pathsOverlap,
+  sameRestoreIdentity,
+  RESTORE_RECEIPT_BYTES,
+  type RestoreIdentity,
+  type RestoreReceipt,
+} from "./restoreArchive.js";
+import {
   nativeRetirementPermitSchema,
   nativeRetirementTargetKey,
   type NativeRetirementPermit,
@@ -17,10 +30,20 @@ import {
   nativeTimeoutEndingSchema,
   type NativeTimeoutEnding,
   type NativeScopeRef,
+  nativeExecutionScopeRefSchema,
+  nativeOperatorScopeRefSchema,
+  nativeOperatorScopeKey,
+  nativeOperatorScopeEnding,
+  nativeOperatorScopeClosing,
+  reserveNativeOperatorScope,
+  type NativeExecutionScopeRef,
+  type NativeOperatorOwner,
 } from "./nativeScope.js";
 
 export const NATIVE_OPERATION_PREFIX = "native-operation:";
 const RECEIPT_PREFIX = "native-operation-receipt:";
+const OPERATOR_ENDING_PREFIX = "native-operation-ending:";
+const PRODUCER_PREFIX = "native-operation-producer:";
 const RETIREMENT_PREFIX = "native-retirement:";
 const CONTROL_PREFIX = "native-operation-control:";
 const PAGE_SIZE = 25;
@@ -37,25 +60,77 @@ const attemptSchema = z
   .object({
     kind: z.enum(["process", "opaque"]),
     process: processIdentity.optional(),
+    restore: restoreIdentitySchema.optional(),
+    mutationPaths: workspaceMutationPathsSchema.optional(),
+  })
+  .strict()
+  .refine((value) => (!value.restore || value.kind === "opaque") && (!value.mutationPaths || value.kind === "process"));
+export const nativeOperationOriginSchema = z
+  .object({
+    producer: z.enum([
+      "git-setup",
+      "provisioning",
+      "hydration",
+      "deps-materialize",
+      "deps-backup",
+      "deps-adopt",
+      "op-test",
+      "op-build",
+      "resident-call",
+      "refresh-step",
+      "snapshot",
+      "restore",
+    ]),
+    resource: z
+      .string()
+      .max(63)
+      .regex(/^repo:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+    callId: z.string().uuid(),
+    sourceId: z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/),
+    actor: z.enum(["system", "service", "admin", "operator", "read", "drain"]),
+    traceId: z
+      .string()
+      .regex(/^[a-f0-9]{32}$/)
+      .nullable(),
+    parentSourceId: z.string().min(1).max(256).nullable(),
+    build: z.string().min(1).max(128),
+    workerVersion: z.string().uuid().nullable(),
+    startedAt: z.number().int().nonnegative(),
   })
   .strict();
+export type NativeOperationOrigin = z.infer<typeof nativeOperationOriginSchema>;
+export type NativeOperationProducer = NativeOperationOrigin["producer"];
 const nativeSchema = z
   .object({
     version: z.literal(1),
     closed: z.boolean(),
     threadKey: z.string().min(1).max(256).optional(),
-    scope: nativeScopeRefSchema.optional(),
+    scope: nativeExecutionScopeRefSchema.optional(),
     pending: z.record(z.string(), attemptSchema).refine((attempts) => Object.keys(attempts).length <= ATTEMPT_LIMIT),
   })
   .strict();
 const recordSchema = z.union([
-  z.object({ opOwner: z.string().startsWith("op:"), native: nativeSchema }).strict(),
+  z
+    .object({
+      opOwner: z.string().startsWith("op:"),
+      origin: nativeOperationOriginSchema.optional(),
+      native: nativeSchema.extend({
+        scope: nativeOperatorScopeRefSchema.optional(),
+        restoreReceipts: z
+          .record(
+            z.string().uuid(),
+            z.object({ receipt: restoreReceiptSchema, hash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+          )
+          .optional(),
+      }),
+    })
+    .strict(),
   z
     .object({
       runId: z.string().min(1),
       ownerGen: z.string().min(1),
       ownerFence: z.number().int().positive(),
-      native: nativeSchema.extend({ threadKey: z.string().min(1).max(256) }),
+      native: nativeSchema.extend({ threadKey: z.string().min(1).max(256), scope: nativeScopeRefSchema.optional() }),
     })
     .strict(),
 ]);
@@ -69,6 +144,7 @@ const terminalSchema = processIdentity.extend({
   }),
 });
 export type NativeOperationRecord = z.infer<typeof recordSchema>;
+export { recordSchema as nativeOperationRecordSchema };
 export interface NativeRuntimeRetirement {
   version: 1;
   cancellationId: string;
@@ -197,6 +273,11 @@ async function recordHash(value: unknown): Promise<string> {
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
 }
+async function producerClaimKey(origin: NativeOperationOrigin): Promise<string | undefined> {
+  if (["op-test", "op-build", "resident-call"].includes(origin.producer)) return;
+  return PRODUCER_PREFIX + (await recordHash([origin.producer, origin.resource, origin.sourceId]));
+}
+
 function recoverable(record: NativeOperationRecord): boolean {
   return Object.values(record.native.pending).every(
     (attempt) => attempt.kind === "process" && attempt.process !== undefined,
@@ -205,13 +286,20 @@ function recoverable(record: NativeOperationRecord): boolean {
 
 function timeoutOwnsAttempt(key: string, record: NativeOperationRecord, ending: NativeTimeoutEnding): boolean {
   const selected = record.native.pending[ending.attempt];
+  const owned =
+    "kind" in ending.ref
+      ? "opOwner" in record &&
+        !!record.origin &&
+        key === `${NATIVE_OPERATION_PREFIX}${record.opOwner}` &&
+        record.opOwner === ending.ref.owner.opOwner
+      : isWorkspaceOwner(record) &&
+        key.startsWith(`native-operation:${ending.ref.threadKey}:${ending.ref.owner.runId}:`) &&
+        record.runId === ending.ref.owner.runId &&
+        record.ownerGen === ending.ref.owner.ownerGen &&
+        record.ownerFence === ending.ref.owner.ownerFence &&
+        record.native.threadKey === ending.ref.threadKey;
   return (
-    isWorkspaceOwner(record) &&
-    key.startsWith(`native-operation:${ending.ref.threadKey}:${ending.ref.owner.runId}:`) &&
-    record.runId === ending.ref.owner.runId &&
-    record.ownerGen === ending.ref.owner.ownerGen &&
-    record.ownerFence === ending.ref.owner.ownerFence &&
-    record.native.threadKey === ending.ref.threadKey &&
+    owned &&
     JSON.stringify(record.native.scope) === JSON.stringify(ending.ref) &&
     Object.keys(record.native.pending).length === 1 &&
     selected?.kind === "process" &&
@@ -543,35 +631,69 @@ export class NativeOperationJournal {
       .map((value) => value.data);
   }
 
-  async open(key: string, owner: WorkspaceOwner | { opOwner: string }, threadKey?: string): Promise<void> {
+  async open(
+    key: string,
+    owner: WorkspaceOwner | { opOwner: string },
+    threadKey?: string,
+    origin?: NativeOperationOrigin,
+  ): Promise<"admitted" | "producer-held"> {
     const record = {
       ...ownerOf(owner),
+      ...(origin ? { origin: nativeOperationOriginSchema.parse(origin) } : {}),
       native: { version: 1 as const, closed: false, ...(threadKey ? { threadKey } : {}), pending: {} },
     };
     recordSchema.parse(record);
-    await this.storage.transaction(async (rows) => {
-      if ((await rows.get(key)) !== undefined || (await rows.get(RECEIPT_PREFIX + key)) !== undefined)
+    const scopeId = crypto.randomUUID();
+    const claim = origin ? await producerClaimKey(origin) : undefined;
+    return this.storage.transaction(async (rows) => {
+      if (
+        (await rows.get(key)) !== undefined ||
+        (await rows.get(RECEIPT_PREFIX + key)) !== undefined ||
+        (await rows.get(OPERATOR_ENDING_PREFIX + key)) !== undefined
+      )
         throw new Error("native operation identity already used");
       if (threadKey && isWorkspaceOwner(owner) && (await rows.get(`cancelled:${threadKey}:${owner.runId}`)))
         throw new Error("run cancelled");
+      let held = false;
+      if (origin && claim) {
+        const active = await this.unresolved(NATIVE_OPERATION_PREFIX, rows);
+        held =
+          (await rows.get(claim)) !== undefined ||
+          [...active.values()].some((value) => {
+            const parsed = recordSchema.safeParse(value);
+            const previous = parsed.success && "opOwner" in parsed.data ? parsed.data.origin : undefined;
+            return (
+              previous?.producer === origin.producer &&
+              previous.resource === origin.resource &&
+              previous.sourceId === origin.sourceId
+            );
+          });
+      }
+      if (claim && !held && "opOwner" in owner)
+        await rows.put(claim, { key, opOwner: owner.opOwner, callId: origin!.callId });
+      if (origin && "opOwner" in owner) await reserveNativeOperatorScope(rows, owner, scopeId);
       await rows.put(key, record);
+      return held ? "producer-held" : "admitted";
     });
   }
 
-  async bindScope(key: string, scope: NativeScopeRef): Promise<void> {
+  async bindScope(key: string, scope: NativeExecutionScopeRef): Promise<void> {
     await this.storage.transaction(async (rows) => {
       const original = await rows.get(key);
       const record = recordSchema.parse(original);
       if (await this.frozen(key, original, rows)) throw new Error("terminal retirement is prepared");
-      if (
-        !isWorkspaceOwner(record) ||
-        record.runId !== scope.owner.runId ||
-        record.ownerGen !== scope.owner.ownerGen ||
-        record.ownerFence !== scope.owner.ownerFence ||
-        record.native.threadKey !== scope.threadKey ||
-        record.native.closed
-      )
-        throw new Error("native scope owner mismatch");
+      const owned =
+        "kind" in scope
+          ? "opOwner" in record &&
+            !!record.origin &&
+            record.opOwner === scope.owner.opOwner &&
+            key === `${NATIVE_OPERATION_PREFIX}${record.opOwner}`
+          : isWorkspaceOwner(record) &&
+            record.runId === scope.owner.runId &&
+            record.ownerGen === scope.owner.ownerGen &&
+            record.ownerFence === scope.owner.ownerFence &&
+            record.native.threadKey === scope.threadKey;
+      if (!owned || record.native.closed) throw new Error("native scope owner mismatch");
       if (record.native.scope && JSON.stringify(record.native.scope) !== JSON.stringify(scope))
         throw new Error("native scope identity changed");
       if (!record.native.scope && Object.keys(record.native.pending).length)
@@ -581,18 +703,210 @@ export class NativeOperationJournal {
     });
   }
 
-  async begin(key: string, kind: "process" | "opaque"): Promise<string> {
+  private evidenceFits(record: NativeOperationRecord): void {
+    const reservations = Object.values(record.native.pending).filter((attempt) => attempt.restore).length;
+    if (
+      new TextEncoder().encode(JSON.stringify(record)).byteLength +
+        reservations * (RESTORE_RECEIPT_BYTES + 256) +
+        4096 >
+      TIMEOUT_RECEIPT_BYTES
+    )
+      throw new Error("native ending evidence capacity is unavailable");
+  }
+
+  private scopeOwnsRecord(key: string, record: NativeOperationRecord): boolean {
+    const ref = record.native.scope;
+    if (!ref) return false;
+    return "opOwner" in record
+      ? !!record.origin &&
+          "kind" in ref &&
+          key === `${NATIVE_OPERATION_PREFIX}${record.opOwner}` &&
+          ref.owner.opOwner === record.opOwner
+      : !("kind" in ref) &&
+          ref.threadKey === record.native.threadKey &&
+          workspaceOwnerKey(ref.owner) === workspaceOwnerKey(record);
+  }
+
+  private async workspaceAvailable(
+    paths: readonly string[],
+    purpose: "restore" | "mutation",
+    rows: NativeOperationRows,
+    selected?: { key: string; id: string },
+  ): Promise<void> {
+    for (const [key, value] of await this.unresolved(NATIVE_OPERATION_PREFIX, rows)) {
+      const parsed = recordSchema.safeParse(value);
+      if (!parsed.success || !(await this.archiveReceiptsMatch(key, parsed.data)))
+        throw new Error("workspace outcome is unknown");
+      if ("opOwner" in parsed.data && key !== selected?.key) {
+        for (const [id, saved] of Object.entries(parsed.data.native.restoreReceipts ?? {})) {
+          const held = [saved.receipt.identity.target, restorePrivateDirectory(id, saved.receipt.identity.ref.id)];
+          if (paths.some((path) => held.some((other) => pathsOverlap(path, other))))
+            throw new Error("workspace path has an unresolved restore");
+        }
+      }
+      for (const [id, attempt] of Object.entries(parsed.data.native.pending)) {
+        if (selected?.key === key && selected.id === id) continue;
+        if (attempt.restore) {
+          const held = [attempt.restore.target, restorePrivateDirectory(id, attempt.restore.ref.id)];
+          if (paths.some((path) => held.some((other) => pathsOverlap(path, other))))
+            throw new Error("workspace path has an unresolved restore");
+        } else if (attempt.kind === "opaque") throw new Error("workspace outcome is unknown");
+        if (
+          purpose === "restore" &&
+          attempt.mutationPaths &&
+          paths.some((path) => attempt.mutationPaths!.some((other) => pathsOverlap(path, other)))
+        )
+          throw new Error("workspace path has an unresolved mutation");
+      }
+    }
+  }
+
+  async reserveArchive(key: string, id: string, input: RestoreIdentity): Promise<void> {
+    const identity = restoreIdentitySchema.parse(input);
+    const observed = (value: unknown) => {
+      const parsed = recordSchema.safeParse(value);
+      return (
+        parsed.success &&
+        this.scopeOwnsRecord(key, parsed.data) &&
+        JSON.stringify(parsed.data.native.scope) === JSON.stringify(identity.ref) &&
+        JSON.stringify(parsed.data.native.pending[id]?.restore) === JSON.stringify(identity)
+      );
+    };
+    try {
+      await this.storage.transaction(async (rows) => {
+        const value = await rows.get(key);
+        if (await this.retirement(key, value, rows)) throw new Error("original native runtime retired");
+        const record = recordSchema.parse(value);
+        if (
+          !this.scopeOwnsRecord(key, record) ||
+          !("opOwner" in record) ||
+          record.native.closed ||
+          id !== identity.attempt ||
+          JSON.stringify(record.native.scope) !== JSON.stringify(identity.ref) ||
+          record.native.pending[id]?.kind !== "opaque" ||
+          record.native.pending[id].restore
+        )
+          throw new Error("original restore admission changed");
+        await this.workspaceAvailable(
+          [identity.target, restorePrivateDirectory(id, identity.ref.id)],
+          "restore",
+          rows,
+          { key, id },
+        );
+        record.native.pending[id].restore = identity;
+        this.evidenceFits(record);
+        await rows.put(key, record);
+      });
+    } catch (error) {
+      if (!observed(await this.storage.get(key).catch(() => undefined))) throw error;
+    }
+  }
+
+  private async archiveReceiptsMatch(key: string, record: NativeOperationRecord): Promise<boolean> {
+    if (!("opOwner" in record)) return true;
+    for (const [id, saved] of Object.entries(record.native.restoreReceipts ?? {})) {
+      if (
+        !this.scopeOwnsRecord(key, record) ||
+        saved.receipt.identity.attempt !== id ||
+        JSON.stringify(saved.receipt.identity.ref) !== JSON.stringify(record.native.scope) ||
+        saved.hash !== (await recordHash(saved.receipt))
+      )
+        return false;
+    }
+    return true;
+  }
+
+  async finishArchive(key: string, id: string, input: RestoreReceipt, expectedRecordHash?: string): Promise<void> {
+    const receipt = restoreReceiptSchema.parse(input);
+    const expected = { receipt, hash: await recordHash(receipt) };
+    const observed = async (value: unknown) => {
+      const parsed = recordSchema.safeParse(value);
+      return (
+        parsed.success &&
+        "opOwner" in parsed.data &&
+        this.scopeOwnsRecord(key, parsed.data) &&
+        JSON.stringify(parsed.data.native.restoreReceipts?.[id]) === JSON.stringify(expected) &&
+        !parsed.data.native.pending[id] &&
+        (await this.archiveReceiptsMatch(key, parsed.data))
+      );
+    };
+    try {
+      await this.storage.transaction(async (rows) => {
+        const value = await rows.get(key);
+        if (value === undefined) {
+          const ending = await rows.get<{ original?: unknown }>(OPERATOR_ENDING_PREFIX + key);
+          if (
+            (await observed(ending?.original)) &&
+            (await this.operatorEnded(key, receipt.identity.ref.owner, undefined, rows))
+          )
+            return;
+          throw new Error("original restore receipt changed");
+        }
+        if (await this.retirement(key, value, rows)) throw new Error("original native runtime retired");
+        if (expectedRecordHash !== undefined && (await recordHash(value)) !== expectedRecordHash)
+          throw new Error("original restore recovery record changed");
+        const record = recordSchema.parse(value);
+        if (
+          !("opOwner" in record) ||
+          !this.scopeOwnsRecord(key, record) ||
+          id !== receipt.identity.attempt ||
+          JSON.stringify(record.native.scope) !== JSON.stringify(receipt.identity.ref)
+        )
+          throw new Error("original restore receipt changed");
+        const pending = record.native.pending[id];
+        if (!pending) {
+          if (await observed(value)) return;
+          throw new Error("original restore receipt changed");
+        }
+        if (!pending.restore || !sameRestoreIdentity(pending.restore, receipt.identity))
+          throw new Error("original restore receipt changed");
+        record.native.restoreReceipts = { ...record.native.restoreReceipts, [id]: expected };
+        delete record.native.pending[id];
+        this.evidenceFits(record);
+        await rows.put(key, record);
+      });
+    } catch (error) {
+      if (await observed(await this.storage.get(key).catch(() => undefined))) return;
+      const ending = await this.storage
+        .get<{ original?: unknown }>(OPERATOR_ENDING_PREFIX + key)
+        .catch(() => undefined);
+      if (
+        (await observed(ending?.original)) &&
+        (await this.operatorEnded(key, receipt.identity.ref.owner).catch(() => false))
+      )
+        return;
+      throw error;
+    }
+  }
+
+  async begin(key: string, kind: "process" | "opaque", mutationInput?: readonly string[]): Promise<string> {
     const id = crypto.randomUUID();
+    const mutationPaths = mutationInput === undefined ? undefined : workspaceMutationPathsSchema.parse(mutationInput);
+    if (mutationPaths && kind !== "process") throw new Error("workspace mutation requires a process");
+    const expectedAttempt = { kind, ...(mutationPaths ? { mutationPaths } : {}) };
     try {
       await this.storage.transaction(async (rows) => {
         const value = await rows.get(key);
         if (await this.retirement(key, value, rows)) throw new Error("original native runtime retired");
         const record = recordSchema.parse(value);
         if (await this.frozen(key, value, rows)) throw new Error("terminal retirement is prepared");
+        if (
+          "opOwner" in record &&
+          record.origin &&
+          nativeOperatorScopeClosing(await rows.get(nativeOperatorScopeKey({ opOwner: record.opOwner })), {
+            opOwner: record.opOwner,
+          })
+        )
+          throw new Error("operator scope is closed");
         if (record.native.closed) throw new Error("native operation already closed");
         if (Object.keys(record.native.pending).length >= ATTEMPT_LIMIT)
           throw new Error("too many pending native attempts");
-        record.native.pending[id] = { kind };
+        if (mutationPaths) {
+          if (!this.scopeOwnsRecord(key, record)) throw new Error("workspace mutation requires its original scope");
+          await this.workspaceAvailable(mutationPaths, "mutation", rows, { key, id });
+        }
+        record.native.pending[id] = expectedAttempt;
+        this.evidenceFits(record);
         await rows.put(key, record);
       });
     } catch (error) {
@@ -602,7 +916,7 @@ export class NativeOperationJournal {
       if (await this.retirement(key, value)) throw error;
       const saved = recordSchema.safeParse(value);
       const attempt = saved.success ? saved.data.native.pending[id] : undefined;
-      if (!attempt || attempt.kind !== kind || attempt.process) throw error;
+      if (!attempt || JSON.stringify(attempt) !== JSON.stringify(expectedAttempt)) throw error;
     }
     return id;
   }
@@ -643,6 +957,7 @@ export class NativeOperationJournal {
     const ending = nativeEnding === undefined ? undefined : nativeTimeoutEndingSchema.parse(nativeEnding);
     if (ending && ending.attempt !== id) throw new Error("native timeout attempt changed");
     let expected: { original: unknown; receipt: TimeoutEndingReceipt } | undefined;
+    let settledOperator: NativeOperationRecord | undefined;
     const observed = async () => {
       const archive = await this.storage.get(RECEIPT_PREFIX + key);
       const saved = await timeoutArchiveOf(archive, key);
@@ -658,9 +973,11 @@ export class NativeOperationJournal {
       const parsed = recordSchema.safeParse(current);
       return (
         parsed.success &&
-        isWorkspaceOwner(parsed.data) &&
-        workspaceOwnerKey(parsed.data) === workspaceOwnerKey(ending.ref.owner) &&
-        parsed.data.native.threadKey === ending.ref.threadKey &&
+        ("kind" in ending.ref
+          ? "opOwner" in parsed.data && parsed.data.opOwner === ending.ref.owner.opOwner
+          : isWorkspaceOwner(parsed.data) &&
+            workspaceOwnerKey(parsed.data) === workspaceOwnerKey(ending.ref.owner) &&
+            parsed.data.native.threadKey === ending.ref.threadKey) &&
         JSON.stringify(parsed.data.native.scope) === JSON.stringify(ending.ref) &&
         !Object.hasOwn(parsed.data.native.pending, id)
       );
@@ -678,6 +995,7 @@ export class NativeOperationJournal {
           return;
         }
         const record = recordSchema.parse(value);
+        if (record.native.pending[id]?.restore) throw new Error("restore cleanup receipt is required");
         if (await this.frozen(key, value, rows)) {
           if (ending) throw new Error("native timeout operation is retired");
           return;
@@ -703,7 +1021,13 @@ export class NativeOperationJournal {
           await rows.put(RECEIPT_PREFIX + key, expected);
         }
         delete record.native.pending[id];
-        if (record.native.closed && Object.keys(record.native.pending).length === 0) await rows.delete(key);
+        if ("opOwner" in record && record.origin) settledOperator = record;
+        if (
+          record.native.closed &&
+          Object.keys(record.native.pending).length === 0 &&
+          !("opOwner" in record && record.origin)
+        )
+          await rows.delete(key);
         else await rows.put(key, record);
       });
     } catch (error) {
@@ -715,21 +1039,262 @@ export class NativeOperationJournal {
           /* An unreadable acknowledgment stays unknown. */
         }
       }
+      if (!ending && settledOperator) {
+        const saved = recordSchema.safeParse(await this.storage.get(key).catch(() => undefined));
+        if (saved.success && JSON.stringify(saved.data) === JSON.stringify(settledOperator)) return;
+      }
       throw error;
     }
   }
 
   async close(key: string): Promise<void> {
-    await this.storage.transaction(async (rows) => {
-      const value = await rows.get(key);
-      if (value === undefined) return;
-      if (await this.retirement(key, value, rows)) return;
-      const record = recordSchema.parse(value);
-      if (await this.frozen(key, value, rows)) return;
-      record.native.closed = true;
-      if (Object.keys(record.native.pending).length === 0) await rows.delete(key);
-      else await rows.put(key, record);
-    });
+    let expected: NativeOperationRecord | undefined;
+    try {
+      await this.storage.transaction(async (rows) => {
+        const value = await rows.get(key);
+        if (value === undefined) return;
+        if (await this.retirement(key, value, rows)) return;
+        const record = recordSchema.parse(value);
+        if (await this.frozen(key, value, rows)) return;
+        record.native.closed = true;
+        if ("opOwner" in record && record.origin) expected = record;
+        if (Object.keys(record.native.pending).length === 0 && !("opOwner" in record && record.origin))
+          await rows.delete(key);
+        else await rows.put(key, record);
+      });
+    } catch (error) {
+      if (expected && JSON.stringify(await this.storage.get(key).catch(() => undefined)) === JSON.stringify(expected))
+        return;
+      throw error;
+    }
+  }
+
+  /** Ordinary operator closure never credits its unknown payload or opaque effects. */
+  async endOperator(
+    key: string,
+    owner: NativeOperatorOwner,
+    callback: "returned" | "threw" | "unknown",
+    expectedRecordHash?: string,
+    requestRecordHash?: string,
+  ): Promise<boolean> {
+    let expected: unknown;
+    try {
+      return await this.storage.transaction(async (rows) => {
+        const original = await rows.get(key);
+        if (original === undefined) return this.operatorEnded(key, owner, undefined, rows);
+        const record = recordSchema.parse(original);
+        if (expectedRecordHash !== undefined && (await recordHash(original)) !== expectedRecordHash) return false;
+        if (
+          !("opOwner" in record) ||
+          record.opOwner !== owner.opOwner ||
+          !record.origin ||
+          key !== `${NATIVE_OPERATION_PREFIX}${owner.opOwner}`
+        )
+          throw new Error("operator ending owner changed");
+        if (!(await this.archiveReceiptsMatch(key, record))) return false;
+        const ending = nativeOperatorScopeEnding(await rows.get(nativeOperatorScopeKey(owner)), owner);
+        if (
+          !ending ||
+          (record.native.scope
+            ? JSON.stringify(record.native.scope) !== JSON.stringify(ending.ref)
+            : Object.keys(record.native.pending).length !== 0) ||
+          (ending.ref === null && Object.keys(record.native.pending).length !== 0)
+        )
+          return false;
+        if (Object.values(record.native.pending).some((attempt) => attempt.kind === "opaque")) {
+          await rows.put(key, { ...record, native: { ...record.native, closed: true } });
+          return false;
+        }
+        const receipt = {
+          key,
+          recordHash: await recordHash(original),
+          ...(requestRecordHash === undefined ? {} : { requestRecordHash }),
+          purpose: "operator-scope-ending",
+          owner,
+          scopeId: ending.id,
+          scope: ending.ref,
+          callback,
+          originalOperationOutcome: "unknown",
+        };
+        expected = { original, receipt };
+        if (new TextEncoder().encode(JSON.stringify(expected)).byteLength > TIMEOUT_RECEIPT_BYTES)
+          throw new Error("operator ending receipt is too large");
+        if ((await rows.get(OPERATOR_ENDING_PREFIX + key)) !== undefined)
+          throw new Error("operator ending identity used");
+        await rows.put(OPERATOR_ENDING_PREFIX + key, expected);
+        const claim = await producerClaimKey(record.origin);
+        if (claim && Object.keys(record.native.pending).length === 0) {
+          const originalClaim = await rows.get(claim);
+          if (
+            JSON.stringify(originalClaim) ===
+            JSON.stringify({ key, opOwner: owner.opOwner, callId: record.origin.callId })
+          )
+            await rows.delete(claim);
+        }
+        await rows.delete(key);
+        return true;
+      });
+    } catch {
+      const saved = await this.storage.get(OPERATOR_ENDING_PREFIX + key).catch(() => undefined);
+      return (
+        expected !== undefined &&
+        JSON.stringify(saved) === JSON.stringify(expected) &&
+        (await this.operatorEnded(key, owner).catch(() => false))
+      );
+    }
+  }
+
+  async operatorEnded(
+    key: string,
+    owner: NativeOperatorOwner,
+    callId?: string,
+    rows: Pick<NativeOperationRows, "get"> = this.storage,
+  ): Promise<boolean> {
+    if (key !== `${NATIVE_OPERATION_PREFIX}${owner.opOwner}` || (await rows.get(key)) !== undefined) return false;
+    const archive = await rows.get<{ original?: unknown; receipt?: Record<string, unknown> }>(
+      OPERATOR_ENDING_PREFIX + key,
+    );
+    const original = recordSchema.safeParse(archive?.original),
+      receipt = archive?.receipt;
+    if (
+      !original.success ||
+      !("opOwner" in original.data) ||
+      original.data.opOwner !== owner.opOwner ||
+      !original.data.origin ||
+      (callId !== undefined && original.data.origin.callId !== callId) ||
+      !receipt ||
+      receipt.key !== key ||
+      receipt.purpose !== "operator-scope-ending" ||
+      (receipt.requestRecordHash !== undefined && !/^[a-f0-9]{64}$/.test(String(receipt.requestRecordHash))) ||
+      receipt.originalOperationOutcome !== "unknown" ||
+      !["returned", "threw", "unknown"].includes(String(receipt.callback)) ||
+      JSON.stringify(receipt.owner) !== JSON.stringify(owner) ||
+      receipt.recordHash !== (await recordHash(archive!.original)) ||
+      Object.values(original.data.native.pending).some((attempt) => attempt.kind === "opaque")
+    )
+      return false;
+    if (!(await this.archiveReceiptsMatch(key, original.data))) return false;
+    const ending = nativeOperatorScopeEnding(await rows.get(nativeOperatorScopeKey(owner)), owner);
+    return (
+      !!ending &&
+      receipt.scopeId === ending.id &&
+      JSON.stringify(receipt.scope) === JSON.stringify(ending.ref) &&
+      (original.data.native.scope
+        ? JSON.stringify(original.data.native.scope) === JSON.stringify(ending.ref)
+        : Object.keys(original.data.native.pending).length === 0)
+    );
+  }
+
+  /** Existing admin recovery can close only a new, before-effect operator scope. */
+  async recoverOperator(
+    key: string,
+    hash: string,
+    native: NativeScopeTransport,
+    ownerMatches: (record: NativeOperationRecord) => Promise<boolean>,
+    terminate: boolean,
+  ) {
+    const original = await this.storage.get(key);
+    if (original === undefined) {
+      const saved = await this.storage.get<{ original?: unknown; receipt?: Record<string, unknown> }>(
+        OPERATOR_ENDING_PREFIX + key,
+      );
+      const parsed = recordSchema.safeParse(saved?.original);
+      if (
+        parsed.success &&
+        "opOwner" in parsed.data &&
+        (saved?.receipt?.requestRecordHash ?? saved?.receipt?.recordHash) === hash &&
+        (await ownerMatches(parsed.data)) &&
+        (await this.operatorEnded(key, { opOwner: parsed.data.opOwner }))
+      )
+        return {
+          key,
+          recordHash: hash,
+          outcome: "operator-scope-ended" as const,
+          originalOperationOutcome: "unknown" as const,
+          requestEnd: "unobserved" as const,
+        };
+      return;
+    }
+    const parsed = recordSchema.safeParse(original);
+    if (!parsed.success || !("opOwner" in parsed.data) || !parsed.data.origin) return;
+    const record = parsed.data;
+    if (
+      key !== `${NATIVE_OPERATION_PREFIX}${record.opOwner}` ||
+      hash !== (await recordHash(original)) ||
+      !(await ownerMatches(record))
+    )
+      return refuse("record-or-owner-changed");
+    const owner = { opOwner: record.opOwner };
+    const row = await this.storage.get(nativeOperatorScopeKey(owner));
+    let ending = nativeOperatorScopeEnding(row, owner);
+    if (!ending) {
+      if (!terminate) return refuse("explicit-operator-scope-closure-required");
+      // A missing original reservation never creates a new scope during recovery.
+      if (row === undefined) return refuse("original-operator-scope-unavailable");
+      const expected = record.native.scope;
+      if (expected && !("kind" in expected)) return refuse("operator-scope-owner-changed");
+      await new NativeRunScopes(this.storage, native).closeOperator(owner, expected);
+      ending = nativeOperatorScopeEnding(await this.storage.get(nativeOperatorScopeKey(owner)), owner);
+    }
+    if (!ending || !(await ownerMatches(record))) return refuse("operator-scope-closure-unconfirmed");
+    let expected = original;
+    for (const [id, pending] of Object.entries(record.native.pending)) {
+      if (!pending.restore) continue;
+      const identity = pending.restore;
+      if (JSON.stringify(identity.ref) !== JSON.stringify(ending.ref)) return refuse("original-archive-scope-changed");
+      const request = { ref: identity.ref, attempt: id, identity };
+      let receipt: RestoreReceipt | undefined;
+      try {
+        const saved = restoreSnapshotSchema.parse(
+          archiveControlAnswer(await native.request({ mode: "archive-read", ...request }, 2000)),
+        );
+        if (saved.receipt && sameRestoreIdentity(saved.receipt.identity, identity)) receipt = saved.receipt;
+      } catch {
+        /* Missing original readback grants no replay. */
+      }
+      if (!receipt) {
+        if (!terminate) return refuse("explicit-original-archive-cleanup-required");
+        try {
+          const saved = restoreSnapshotSchema.parse(
+            archiveControlAnswer(await native.request({ mode: "archive-clean", ...request }, 2000)),
+          );
+          if (saved.receipt && sameRestoreIdentity(saved.receipt.identity, identity)) receipt = saved.receipt;
+        } catch {
+          /* The original effect stays held. */
+        }
+      }
+      if (!receipt) return refuse("original-archive-cleanup-unconfirmed");
+      if (!(await ownerMatches(record))) return refuse("record-or-owner-changed");
+      await this.finishArchive(key, id, receipt, await recordHash(expected));
+      const next = structuredClone(recordSchema.parse(expected));
+      if (!("opOwner" in next)) return refuse("record-or-owner-changed");
+      next.native.restoreReceipts = {
+        ...next.native.restoreReceipts,
+        [id]: {
+          receipt: restoreReceiptSchema.parse(receipt),
+          hash: await recordHash(restoreReceiptSchema.parse(receipt)),
+        },
+      };
+      delete next.native.pending[id];
+      expected = next;
+    }
+    if (
+      !(await this.endOperator(
+        key,
+        owner,
+        "unknown",
+        await recordHash(expected),
+        expected === original ? undefined : hash,
+      ))
+    )
+      return refuse("operator-ending-held-or-changed");
+    return {
+      key,
+      recordHash: hash,
+      outcome: "operator-scope-ended" as const,
+      originalOperationOutcome: "unknown" as const,
+      requestEnd: "unobserved" as const,
+    };
   }
 
   async list(cursor?: string) {
@@ -758,6 +1323,7 @@ export class NativeOperationJournal {
                 : "original-process-result-required",
           controls: await this.controls(key),
           journal: parsed.success ? parsed.data.native : null,
+          ...(parsed.success && "opOwner" in parsed.data && parsed.data.origin ? { origin: parsed.data.origin } : {}),
           ...(retirement ? { retirement } : {}),
         };
       }),
