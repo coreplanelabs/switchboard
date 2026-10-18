@@ -598,6 +598,58 @@ describe("writeTombstone — the provisional interrupted record at the loop's st
   const resolved = { agentName: "general", modelRef: "anthropic/general-model" } as ResolvedRequest;
   const msg = { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0", text: "hello" };
 
+  it.each([false, true])("preserves the public review start session only when supplied: %s", (supplied) => {
+    const review = getAgent("review");
+    const registry = new RunRegistry({ genId: () => "ordinary-start", genToken: () => "fixture", now: () => 1234 });
+    const message = { ...msg, text: "Review the fixture" };
+    const run = registry.create("review fixture", { ...message, agent: "review", repo: "acme/api" });
+    registry.publish(run.id, { type: "input", messageId: "m1", text: "Review the fixture", at: 1234 });
+    const writes: Array<{ record: RunRecord; opts?: { provisional?: boolean } }> = [];
+    writeTombstone(
+      {
+        runHistoryWriter: {
+          write: (record: RunRecord, opts?: { provisional?: boolean }) => void writes.push({ record, opts }),
+        } as never,
+      },
+      {
+        msg: message,
+        agent: review,
+        profile: declaredProfile(review),
+        resolved: { agentName: "review", modelRef: "test/review-model" } as ResolvedRequest,
+        repoCtx: { repo: "acme/api", pr: 7 },
+        channelVisibility: "public",
+        run,
+        registry,
+        resume: undefined,
+        ...(supplied
+          ? { session: { key: "slack:CX:1.0:review", seedFrom: 0, request: 0, range: { from: 0, to: 0 } } }
+          : {}),
+      },
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0].opts).toEqual({ provisional: true });
+    expect(writes[0].record).toMatchObject({
+      id: "ordinary-start",
+      agent: "review",
+      repo: "acme/api",
+      targetPr: 7,
+      userId: "slack:UX",
+      channelId: "slack:CX",
+      threadKey: "slack:CX:1.0",
+      channelVisibility: "public",
+      provisional: true,
+      status: "interrupted",
+      startedAt: 1234,
+      finishedAt: 1234,
+      events: [expect.objectContaining({ type: "input", text: "Review the fixture" })],
+    });
+    expect(isRunRecord(writes[0].record)).toBe(true);
+    expect(writes[0].record.session).toEqual(
+      supplied ? { key: "slack:CX:1.0:review", seedFrom: 0, request: 0, range: { from: 0, to: 0 } } : undefined,
+    );
+    expect(writes[0].record.contextCheckpointReceipt).toBeUndefined();
+  });
+
   it("a fresh run writes one provisional record: interrupted, finishedAt = startedAt, the events so far", () => {
     const registry = new RunRegistry({ genId: () => "run-t", genToken: () => "tok" });
     const run = registry.create("general · #CX · UX", {

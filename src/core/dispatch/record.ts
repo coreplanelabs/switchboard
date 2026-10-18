@@ -708,6 +708,8 @@ export interface TombstoneContext {
   run: RunHandle;
   registry: RunRegistry;
   resume: ResumeContext | undefined;
+  /** The session already admitted for this request, when the ledger has one. */
+  session?: RunSession;
   /** The route the run ran under (routing-and-config item 21), when it has one
    *  — a sticky-carried decision has no `route` event for the assembly to read. */
   route?: RunRouteDecision;
@@ -742,6 +744,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
     parentRunId,
     coordinator,
     seed,
+    session,
   } = ctx;
   const privateMain =
     agent.name === "orchestrator" &&
@@ -786,6 +789,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
             ...(parentRunId !== undefined ? { parentRunId } : {}),
             ...(coordinator !== undefined ? { coordinator } : {}),
             ...(seed !== undefined ? { seed } : {}),
+            ...(session !== undefined ? { session } : {}),
             finishedAt: startSnap.startedAt,
             status: "interrupted",
             diagnosis: analyzeRunFriction(startSnap.events, {

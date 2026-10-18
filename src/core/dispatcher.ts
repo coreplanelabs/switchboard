@@ -5217,6 +5217,7 @@ export async function dispatch(
       parentRunId,
       coordinator,
       seed,
+      session: ledgerRun?.session,
     });
     setupCard = undefined;
     clearInterval(setupHeartbeat);

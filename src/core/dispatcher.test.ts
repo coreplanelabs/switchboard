@@ -14114,6 +14114,52 @@ describe("run history write path", () => {
   });
 
   describe("tombstone-first provisional records", () => {
+    it.each([false, true])(
+      "the initial record carries this request's admitted ledger session only: %s",
+      async (tracked) => {
+        const inner = new InMemoryRunStore();
+        const puts: RunRecord[] = [];
+        const store = {
+          abandoned: () => {},
+          put: async (record: RunRecord) => {
+            puts.push(structuredClone(record));
+            return inner.put(record);
+          },
+        } as unknown as RunStore;
+        const { deps, writer } = wired(capturingProvider("answer"), { store });
+        const ledger = new InMemoryRunLedger();
+        if (tracked) {
+          deps.runStore = ledgerBackedStore(ledger, inner);
+          deps.runLedger = createLedgerWriteThrough({ ledger, gen: "own-generation", fallback: inner, warn: () => {} });
+          deps.channelDirectory = {
+            info: async () => ({ visibility: "public" }),
+            isMember: async () => "unknown",
+            channelsOf: async () => "unknown",
+            channels: async () => "unknown",
+          };
+          deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
+        }
+        const { io, replies } = fakeIO();
+        await dispatch(deps, msg("hello there"), io);
+        await writer.settled();
+        expect(replies).toContain("answer");
+        const initial = puts.find((record) => record.provisional);
+        expect(initial).toMatchObject({ id: "run-h", agent: "general", status: "interrupted", provisional: true });
+        if (tracked) {
+          expect(initial!.session).toMatchObject({
+            key: "slack:CX:1.0:general:@context-v1",
+            seedFrom: 0,
+            request: 0,
+            range: { from: 0 },
+          });
+          expect(ledger.finished.get("run-h")?.contextCheckpointReceipt).toMatchObject({
+            runId: "run-h",
+            ownerGen: "own-generation",
+          });
+        } else expect(initial!.session).toBeUndefined();
+      },
+    );
+
     it("a provisional interrupted record is written at run start — finishedAt = startedAt, the request/context events — and the finish write replaces it", async () => {
       const inner = new InMemoryRunStore();
       const puts: RunRecord[] = [];
