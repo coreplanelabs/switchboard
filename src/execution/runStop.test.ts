@@ -51,14 +51,14 @@ function row(): LiveRunRow {
 }
 
 describe("run runtime stop", () => {
-  it("distinguishes a stale Resident owner from an invalid fence without sending either target", async () => {
+  it("refuses an invalid Resident owner or fence and retains a valid original owner", async () => {
     const target = row();
     target.state.binding = {
       backend: "resident",
       workspace: "/private/checkout",
       user: "private-user",
       container: "private-container",
-      ownerGen: "old-owner",
+      ownerGen: "invalid owner",
       ownerFence: 7,
     };
     const sent: unknown[] = [];
@@ -72,7 +72,7 @@ describe("run runtime stop", () => {
     )!;
     expect(await stop(target, cancellation)).toEqual({
       stopped: false,
-      refusal: { phase: "prepare", cause: "custody-unverified", custody: "owner-generation-mismatch" },
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "owner-generation-invalid" },
     });
     target.state.binding = { ...(target.state.binding as object), ownerGen: "g1", ownerFence: 0 };
     expect(await stop(target, cancellation)).toEqual({
@@ -80,7 +80,7 @@ describe("run runtime stop", () => {
       refusal: { phase: "prepare", cause: "custody-unverified", custody: "owner-fence-invalid" },
     });
     expect(sent).toEqual([]);
-    target.state.binding = { ...(target.state.binding as object), ownerFence: 7 };
+    target.state.binding = { ...(target.state.binding as object), ownerGen: "old-owner", ownerFence: 7 };
     expect(await stop(target, cancellation)).toEqual({ stopped: true, disposition: "processes-stopped" });
     expect(sent).toEqual([{ cancellation, binding: target.state.binding, resource: "repo:fixture/repo" }]);
   });

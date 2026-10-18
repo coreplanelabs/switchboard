@@ -2,7 +2,7 @@ import { prepareStorageRequest } from "../storeResponse.js";
 import { storageTransport } from "../storageTransport.js";
 import { residentRouteOf } from "../../execution/residentRoute.js";
 import { RUN_STORE_TIMEOUT_MS } from "../runStoreConstants.js";
-import type { LiveRunRow } from "./types.js";
+import { GEN_PATTERN, type LiveRunRow } from "./types.js";
 import type { RunRecord } from "../runRecord.js";
 import { RUN_ID_PATTERN } from "../runIdentity.js";
 
@@ -64,6 +64,7 @@ export interface RunCancellation {
   version: 1;
   id: string;
   runId: string;
+  /** The ledger controller; the binding retains the original runtime owner. */
   ownerGen: string;
   threadKey: string;
   startedAt: number;
@@ -107,6 +108,7 @@ const CANCELLATION_CUSTODY_FAILURES = [
   "resident-route-unverified",
   "resident-identity-incomplete",
   "owner-generation-mismatch",
+  "owner-generation-invalid",
   "owner-fence-invalid",
   "resident-repository-missing",
   "host-process",
@@ -206,6 +208,8 @@ export function cancellationFailureMessage(
     case "state-not-prepared":
       return "The recorded stop could not be verified.";
     case "custody-unverified":
+      if (refusal.custody === "owner-generation-invalid")
+        return "The recorded workspace owner could not be verified. Shutdown is not confirmed.";
       if (refusal.custody === "owner-generation-mismatch")
         return "The recorded workspace owner does not match the run owner. Shutdown is not confirmed.";
       if (refusal.custody === "owner-fence-invalid")
@@ -450,7 +454,9 @@ export function cancellationRuntimeCustodyFailure(row: LiveRunRow): Cancellation
     binding.workspace.length === 0
   )
     return "resident-identity-incomplete";
-  if (binding.ownerGen !== row.ownerGen) return "owner-generation-mismatch";
+  // Reclaim changes the controller, not the original physical target. The
+  // runtime checks this saved owner and fence against its own registration.
+  if (typeof binding.ownerGen !== "string" || !GEN_PATTERN.test(binding.ownerGen)) return "owner-generation-invalid";
   if (typeof binding.ownerFence !== "number" || !Number.isSafeInteger(binding.ownerFence) || binding.ownerFence <= 0)
     return "owner-fence-invalid";
 }

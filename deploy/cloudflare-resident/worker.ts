@@ -13122,7 +13122,6 @@ export class ResidentDO extends Sandbox<Env> {
         !isWorkspaceOwner(registration) ||
         !isWorkspaceOwner(fence) ||
         registration.runId !== cancellation.runId ||
-        registration.ownerGen !== cancellation.ownerGen ||
         workspaceOwnerKey(registration) !== workspaceOwnerKey(fence) ||
         !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
       )
@@ -13163,7 +13162,6 @@ export class ResidentDO extends Sandbox<Env> {
           typeof saved.workspace === "string" &&
           saved.workspace.length > 0 &&
           validRunOwner(cancellation.runId, saved.ownerGen, saved.ownerFence) &&
-          saved.ownerGen === cancellation.ownerGen &&
           Object.keys(target).every(
             (field) => saved[field as keyof typeof target] === target[field as keyof typeof target],
           )
@@ -14728,8 +14726,7 @@ export class ResidentDO extends Sandbox<Env> {
         text(rawTarget.container, 128) &&
         text(rawTarget.workspace, 4096) &&
         rawTarget.workspace.startsWith("/workspace/threads/") &&
-        isWorkspaceOwner({ runId, ownerGen: rawTarget.ownerGen, ownerFence: rawTarget.ownerFence }) &&
-        rawTarget.ownerGen === ticket.ownerGen
+        isWorkspaceOwner({ runId, ownerGen: rawTarget.ownerGen, ownerFence: rawTarget.ownerFence })
           ? {
               ref: rawTarget.ref,
               user: rawTarget.user,

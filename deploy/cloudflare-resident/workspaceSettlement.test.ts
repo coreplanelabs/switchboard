@@ -589,7 +589,7 @@ describe("resident cancellation inspection", () => {
   it("reports the saved original retirement refusal without changing state or exposing private bytes", async () => {
     const h = harness();
     h.rows.set(`cancelled:${threadKey}:${owner.runId}`, {
-      cancellation: ticket,
+      cancellation: { ...ticket, ownerGen: "gen-recovered" },
       target: shutdownTarget,
       failure: { phase: "resident", cause: "kill-unconfirmed" },
       observation,
@@ -603,7 +603,7 @@ describe("resident cancellation inspection", () => {
         threadKey: "slack:C1:123",
         evidence: "stored-only",
         state: "recorded",
-        ticket: { id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb", ownerGen: "gen-old", startedAt: 1 },
+        ticket: { id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb", ownerGen: "gen-recovered", startedAt: 1 },
         target: { ref: "main", user: "worker2", container: "vm-a", ownerGen: "gen-old", ownerFence: 7 },
         binding: { ref: "main", user: "worker2", container: "vm-a" },
         registration: { runId: "run-old", ownerGen: "gen-old", ownerFence: 7 },
@@ -658,7 +658,7 @@ describe("resident cancellation inspection", () => {
   it("reports successor mismatches and labels completed receipts as stored evidence", async () => {
     const h = harness();
     h.rows.set(`cancelled:${threadKey}:${owner.runId}`, {
-      cancellation: ticket,
+      cancellation: { ...ticket, ownerGen: "gen-recovered" },
       target: shutdownTarget,
       stopped: true,
       disposition: "runtime-retired",
@@ -666,6 +666,8 @@ describe("resident cancellation inspection", () => {
     expect((await h.instance.debugThreads({ threadKey, runId: owner.runId })).cancellation).toMatchObject({
       state: "recorded",
       evidence: "stored-only",
+      ticket: { ownerGen: "gen-recovered" },
+      target: { ownerGen: "gen-old", ownerFence: 7 },
       receipt: { stopped: true, disposition: "runtime-retired", refusal: null, observation: null },
       matches: { binding: true, registration: true, fence: true },
     });
@@ -718,6 +720,41 @@ describe("resident cancellation admission", () => {
     startedAt: 1,
     actor: { kind: "chat", id: "slack:operator" },
   };
+  it.each([physical, null])(
+    "stops the original workspace after its controller changes generation: %j",
+    async (binding) => {
+      const h = harness();
+      const recovered = { ...ticket, ownerGen: "gen-recovered" };
+      expect(await h.instance.cancelRun(recovered, binding)).toEqual({
+        stopped: true,
+        cancellationId: ticket.id,
+        disposition: "processes-stopped",
+      });
+      expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toMatchObject({
+        cancellation: { ownerGen: "gen-recovered" },
+        target: { ownerGen: "gen-old", ownerFence: 7 },
+        stopped: true,
+      });
+      expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
+      expect(
+        new Set(h.instance.ctx.container.exec.mock.calls.map(([argv]: [string[]]) => JSON.stringify(argv.slice(-2)))),
+      ).toEqual(new Set(['["vm-a","worker2"]']));
+    },
+  );
+
+  it("keeps a same-run successor when the recovered controller names its old target", async () => {
+    const h = harness();
+    const successor = { ...owner, ownerGen: "gen-successor", ownerFence: 8 };
+    h.rows.set("runReg:" + threadKey, { threadKey, ...successor });
+    h.rows.set("runFence:" + threadKey, successor);
+    expect(await h.instance.cancelRun({ ...ticket, ownerGen: "gen-recovered" }, physical)).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "target-changed" },
+    });
+    expect(h.rows.get("runReg:" + threadKey)).toEqual({ threadKey, ...successor });
+    expect(h.instance.ctx.container.exec).not.toHaveBeenCalled();
+  });
   it.each(["process", "opaque"])(
     "does not turn an unbound submitted %s into retirement after its scope ends",
     async (kind) => {

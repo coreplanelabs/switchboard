@@ -2438,6 +2438,64 @@ describe("original workspace durability in real SQLite", () => {
       });
     },
   );
+  it("cancels a reclaimed controller while retaining the original Resident settlement owner", async () => {
+    const sk = storeKey();
+    const req = request(sk, null);
+    const binding = {
+      backend: "resident",
+      ref: "main",
+      workspace: "/workspace/threads/original/main",
+      user: "worker2",
+      container: "original-boot",
+      ownerGen: "g1",
+      ownerFence: 7,
+    };
+    req.run.state = { binding };
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: sk,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await client.claim(req.run)).toMatchObject({ ok: true });
+    expect((await client.reclaim("g2", Date.now() + LEASE_MS * 2, LEASE_MS))[0].row).toMatchObject({
+      ownerGen: "g2",
+      state: { binding },
+    });
+    expect(await client.requestStop(id, "hard")).toMatchObject({ ok: true });
+    const prepared = await client.prepareCancellation(id, { kind: "chat", id: "slack:operator" });
+    expect(prepared).toMatchObject({ ok: true, cancellation: { ownerGen: "g2" } });
+    if (!prepared.ok) throw new Error("reclaimed cancellation unavailable");
+    for (const [ticket, target, accepted] of [
+      [prepared.cancellation, binding, true],
+      [{ ...prepared.cancellation, ownerGen: "g1" }, binding, false],
+      [prepared.cancellation, { ...binding, ownerGen: "g2", ownerFence: 8 }, false],
+    ] as const) {
+      expect(
+        (await post("/runs/cancellation/read", { storeKey: sk, cancellation: ticket, binding: target })).data,
+      ).toEqual({ prepared: accepted, cancellationId: prepared.cancellation.id });
+    }
+    const record = reclaimedRunRecord({
+      row: prepared.row,
+      events: [],
+      status: "stopped_hard",
+      finishedAt: Date.now(),
+    });
+    record.cancellation = {
+      version: 1,
+      actor: prepared.cancellation.actor,
+      cancellation: prepared.cancellation,
+      disposition: "processes-stopped",
+    };
+    expect(await client.finishCancellation(prepared.cancellation, record)).toEqual({ ok: true, stored: true });
+    expect(await client.listLive()).toEqual([]);
+    const settled = await post("/runs/preservation-owner", { storeKey: sk, runId: id, ownerGen: "g1", ownerFence: 7 });
+    expect(settled.data).toMatchObject({
+      kind: "terminal",
+      settlement: { owner: { runId: id, ownerGen: "g1", ownerFence: 7 } },
+    });
+  });
+
   it("prepares only recorded Resident discovery and never treats an unknown target as absent", async () => {
     const sk = storeKey();
     const req = request(sk, null);
