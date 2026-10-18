@@ -4,14 +4,31 @@ import { z } from "zod";
 export const NATIVE_SCOPE_CONTROL_MS = 2_000;
 import type { WorkspaceOwner } from "../../src/core/workspaceSettlement.js";
 import type { NativeOperationStorage } from "./nativeOperation.js";
-import { nativeScopeRefSchema, type NativeScopeRef } from "../../src/execution/nativeScope.js";
-export { nativeScopeRefSchema, type NativeScopeRef } from "../../src/execution/nativeScope.js";
+import {
+  nativeScopeRefSchema,
+  nativeOperatorOwnerSchema,
+  nativeOperatorScopeRefSchema,
+  nativeExecutionScopeRefSchema,
+  type NativeScopeRef,
+  type NativeOperatorOwner,
+  type NativeOperatorScopeRef,
+  type NativeExecutionScopeRef,
+} from "../../src/execution/nativeScope.js";
+export {
+  nativeScopeRefSchema,
+  nativeOperatorScopeRefSchema,
+  nativeExecutionScopeRefSchema,
+  type NativeScopeRef,
+  type NativeOperatorOwner,
+  type NativeOperatorScopeRef,
+  type NativeExecutionScopeRef,
+} from "../../src/execution/nativeScope.js";
 
 const ownerSchema = nativeScopeRefSchema.shape.owner;
 export const nativeTimeoutEndingSchema = z
   .object({
     version: z.literal(1),
-    ref: nativeScopeRefSchema,
+    ref: nativeExecutionScopeRefSchema,
     attempt: z.string().uuid(),
     closed: z.literal(false),
     populated: z.literal(false),
@@ -24,7 +41,7 @@ export const nativeTimeoutEndingSchema = z
   })
   .strict();
 export type NativeTimeoutEnding = z.infer<typeof nativeTimeoutEndingSchema>;
-const rowSchema = z
+const runRowSchema = z
   .object({
     id: z.string().uuid(),
     threadKey: z.string().min(1),
@@ -43,7 +60,28 @@ const rowSchema = z
       (row.closedBoot === undefined || (row.closed && row.boot !== null)) &&
       (!row.closed || row.boot === null || row.closedBoot !== undefined),
   );
+const operatorRowSchema = z
+  .object({
+    kind: z.literal("operation"),
+    id: z.string().uuid(),
+    owner: nativeOperatorOwnerSchema,
+    boot: z.string().uuid().nullable(),
+    closing: z.boolean(),
+    closed: z.boolean(),
+    bootstrap: z.enum(["reserved", "requested", "ready"]),
+    closedBoot: z.string().uuid().optional(),
+  })
+  .strict()
+  .refine(
+    (row) =>
+      (!row.closed || row.closing) &&
+      (row.bootstrap === "reserved" || row.boot !== null) &&
+      (row.closedBoot === undefined || (row.closed && row.boot !== null)) &&
+      (!row.closed || row.boot === null || row.closedBoot !== undefined),
+  );
+const rowSchema = z.union([runRowSchema, operatorRowSchema]);
 type Row = z.infer<typeof rowSchema>;
+type ExecutionOwner = WorkspaceOwner | NativeOperatorOwner;
 export interface NativeScopeOutput {
   stdout: string;
   stderr: string;
@@ -79,8 +117,8 @@ export function nativeScopeKey(threadKey: string, owner: WorkspaceOwner): string
 export function nativeScopeRetirementKey(threadKey: string, owner: WorkspaceOwner): string {
   return nativeScopeKey(threadKey, owner).replace(PREFIX, "native-scope-retirement:");
 }
-function ownedRow(value: unknown, threadKey: string, owner: WorkspaceOwner): Row {
-  const row = rowSchema.parse(value);
+function ownedRow(value: unknown, threadKey: string, owner: WorkspaceOwner): z.infer<typeof runRowSchema> {
+  const row = runRowSchema.parse(value);
   if (
     row.threadKey !== threadKey ||
     row.owner.runId !== owner.runId ||
@@ -90,15 +128,79 @@ function ownedRow(value: unknown, threadKey: string, owner: WorkspaceOwner): Row
     throw new Error("native-scope owner changed");
   return row;
 }
-function refOf(row: Row): NativeScopeRef {
-  return nativeScopeRefSchema.parse({
-    version: 1,
-    id: row.id,
-    boot: row.boot,
-    threadKey: row.threadKey,
-    owner: row.owner,
-  });
+export function nativeOperatorScopeKey(owner: NativeOperatorOwner): string {
+  return `native-operator-scope:${encodeURIComponent(nativeOperatorOwnerSchema.parse(owner).opOwner)}`;
 }
+function ownedExecutionRow(value: unknown, owner: ExecutionOwner, threadKey?: string): Row {
+  if (!("opOwner" in owner)) return ownedRow(value, threadKey!, owner);
+  const row = operatorRowSchema.parse(value);
+  if (row.owner.opOwner !== owner.opOwner) throw new Error("native-scope owner changed");
+  return row;
+}
+export async function reserveNativeOperatorScope(
+  rows: Pick<NativeOperationStorage, "get" | "put">,
+  owner: NativeOperatorOwner,
+  id: string,
+) {
+  const at = nativeOperatorScopeKey(owner);
+  const value = await rows.get(at);
+  if (value !== undefined) {
+    const saved = ownedExecutionRow(value, owner);
+    if (saved.closing || saved.closed) throw new Error("operator scope is closed");
+    return saved;
+  }
+  const initial = {
+    kind: "operation" as const,
+    id,
+    owner: nativeOperatorOwnerSchema.parse(owner),
+    boot: null,
+    closing: false,
+    closed: false,
+    bootstrap: "reserved" as const,
+  };
+  await rows.put(at, initial);
+  return initial;
+}
+export function nativeOperatorScopeClosing(value: unknown, owner: NativeOperatorOwner): boolean {
+  const row = operatorRowSchema.safeParse(value);
+  return row.success && row.data.owner.opOwner === owner.opOwner && row.data.closing;
+}
+function refOf(row: Row): NativeExecutionScopeRef {
+  return "kind" in row
+    ? nativeOperatorScopeRefSchema.parse({
+        version: 1,
+        kind: "operation",
+        id: row.id,
+        boot: row.boot,
+        owner: row.owner,
+      })
+    : nativeScopeRefSchema.parse({
+        version: 1,
+        id: row.id,
+        boot: row.boot,
+        threadKey: row.threadKey,
+        owner: row.owner,
+      });
+}
+export function nativeOperatorScopeClosed(value: unknown, ref: NativeOperatorScopeRef): boolean {
+  const parsed = operatorRowSchema.safeParse(value);
+  return (
+    parsed.success &&
+    parsed.data.closing &&
+    parsed.data.closed &&
+    !!parsed.data.closedBoot &&
+    JSON.stringify(refOf(parsed.data)) === JSON.stringify(ref)
+  );
+}
+export function nativeOperatorScopeEnding(value: unknown, owner: NativeOperatorOwner) {
+  const parsed = operatorRowSchema.safeParse(value);
+  if (!parsed.success || parsed.data.owner.opOwner !== owner.opOwner || !parsed.data.closed || !parsed.data.closing)
+    return;
+  const row = parsed.data;
+  if (row.boot === null) return row.bootstrap === "reserved" ? { id: row.id, ref: null } : undefined;
+  return row.closedBoot ? { id: row.id, ref: nativeOperatorScopeRefSchema.parse(refOf(row)) } : undefined;
+}
+
 function answer(output: NativeScopeOutput): unknown {
   if (output.exitCode !== 0 || output.timedOut || output.truncated || output.stderr !== "")
     throw new Error("native-scope operation is unconfirmed");
@@ -172,12 +274,54 @@ export class NativeRunScopes {
   }
 
   async ensure(threadKey: string, owner: WorkspaceOwner, allowed: () => Promise<void>): Promise<NativeScopeRef> {
-    const at = nativeScopeKey(threadKey, owner);
     await this.reserve(threadKey, owner);
-    const reserved = ownedRow(await this.storage.get(at), threadKey, owner);
+    return nativeScopeRefSchema.parse(
+      await this.ensureExecution(nativeScopeKey(threadKey, owner), owner, allowed, threadKey),
+    );
+  }
+  async reserveOperator(owner: NativeOperatorOwner): Promise<void> {
+    const at = nativeOperatorScopeKey(owner);
+    const initial = {
+      kind: "operation" as const,
+      id: crypto.randomUUID(),
+      owner: nativeOperatorOwnerSchema.parse(owner),
+      boot: null,
+      closing: false,
+      closed: false,
+      bootstrap: "reserved" as const,
+    };
+    try {
+      await this.storage.transaction(async (rows) => {
+        await reserveNativeOperatorScope(rows, owner, initial.id);
+      });
+    } catch (error) {
+      const saved = ownedExecutionRow(await this.storage.get(at), owner);
+      if (JSON.stringify(saved) !== JSON.stringify(initial)) throw error;
+    }
+  }
+  async ensureOperator(owner: NativeOperatorOwner, allowed: () => Promise<void>): Promise<NativeOperatorScopeRef> {
+    await this.reserveOperator(owner);
+    const capability = z
+      .object({ version: z.literal(1), boot: z.string().uuid(), operatorScopes: z.literal(1).optional() })
+      .strict()
+      .parse(answer(await this.native.request({ mode: "inspect", operator: true }, NATIVE_SCOPE_CONTROL_MS)));
+    if (capability.operatorScopes !== 1) throw new Error("operator scope unsupported");
+    return nativeOperatorScopeRefSchema.parse(
+      await this.ensureExecution(nativeOperatorScopeKey(owner), owner, allowed, undefined, capability.boot),
+    );
+  }
+  private async ensureExecution(
+    at: string,
+    owner: ExecutionOwner,
+    allowed: () => Promise<void>,
+    threadKey?: string,
+    observedBoot?: string,
+  ): Promise<NativeExecutionScopeRef> {
+    const reserved = ownedExecutionRow(await this.storage.get(at), owner, threadKey);
     if (reserved.closing || reserved.closed) throw new Error("run cancelled");
     await allowed();
-    let boot = reserved.boot;
+    if (reserved.boot && observedBoot && reserved.boot !== observedBoot) throw new Error("native-scope kernel changed");
+    let boot = reserved.boot ?? observedBoot;
     if (!boot) {
       const observed = z
         .object({ version: z.literal(1), boot: z.string().uuid() })
@@ -186,7 +330,7 @@ export class NativeRunScopes {
       boot = observed.boot;
     }
     const current = await this.storage.transaction(async (rows) => {
-      const row = ownedRow(await rows.get(at), threadKey, owner);
+      const row = ownedExecutionRow(await rows.get(at), owner, threadKey);
       if (row.id !== reserved.id || row.closing || row.closed) throw new Error("run cancelled");
       if (row.boot && row.boot !== boot) throw new Error("native-scope kernel changed");
       const saved = { ...row, boot };
@@ -197,7 +341,7 @@ export class NativeRunScopes {
     const ref = refOf(current);
     if (current.bootstrap !== "ready") {
       const submit = await this.storage.transaction(async (rows) => {
-        const row = ownedRow(await rows.get(at), threadKey, owner);
+        const row = ownedExecutionRow(await rows.get(at), owner, threadKey);
         if (row.id !== ref.id || row.closing || row.closed) throw new Error("run cancelled");
         if (row.bootstrap !== "reserved") return false;
         await rows.put(at, { ...row, bootstrap: "requested" });
@@ -205,7 +349,7 @@ export class NativeRunScopes {
       });
       const observed = z
         .object({
-          ref: nativeScopeRefSchema,
+          ref: nativeExecutionScopeRefSchema,
           closed: z.literal(false),
           populated: z.boolean().optional(),
           present: z.literal(true).optional(),
@@ -219,13 +363,13 @@ export class NativeRunScopes {
         throw new Error("native-scope bootstrap is unconfirmed");
       if (JSON.stringify(observed.ref) !== JSON.stringify(ref)) throw new Error("native-scope owner changed");
       await this.storage.transaction(async (rows) => {
-        const row = ownedRow(await rows.get(at), threadKey, owner);
+        const row = ownedExecutionRow(await rows.get(at), owner, threadKey);
         if (row.id !== ref.id || row.closing || row.closed) throw new Error("run cancelled");
         await rows.put(at, { ...row, bootstrap: "ready" });
       });
     }
     await allowed();
-    const after = ownedRow(await this.storage.get(at), threadKey, owner);
+    const after = ownedExecutionRow(await this.storage.get(at), owner, threadKey);
     if (after.id !== ref.id || after.closing || after.closed) throw new Error("run cancelled");
     return ref;
   }
@@ -234,7 +378,7 @@ export class NativeRunScopes {
     const value = await this.storage.get<unknown>(nativeScopeKey(threadKey, owner));
     if (value === undefined) return null;
     const row = ownedRow(value, threadKey, owner);
-    return row.boot ? refOf(row) : null;
+    return row.boot ? nativeScopeRefSchema.parse(refOf(row)) : null;
   }
 
   async matching(threadKey: string, runId: string): Promise<WorkspaceOwner[]> {
@@ -244,7 +388,7 @@ export class NativeRunScopes {
     for (;;) {
       const page = await this.storage.list<unknown>({ prefix, limit: 25, ...(cursor ? { startAfter: cursor } : {}) });
       for (const [storedKey, value] of page) {
-        const row = rowSchema.parse(value);
+        const row = runRowSchema.parse(value);
         if (storedKey !== nativeScopeKey(row.threadKey, row.owner))
           throw new Error("native-scope storage identity changed");
         if (row.threadKey === threadKey && row.owner.runId === runId) result.push(row.owner);
@@ -261,18 +405,38 @@ export class NativeRunScopes {
     owner: WorkspaceOwner,
     expected?: NativeScopeRef,
   ): Promise<NativeScopeRef | "unstarted" | null> {
-    const at = nativeScopeKey(threadKey, owner);
+    const result = await this.closeExecution(nativeScopeKey(threadKey, owner), owner, expected, threadKey);
+    return result === null || result === "unstarted" ? result : nativeScopeRefSchema.parse(result);
+  }
+  async closeOperator(
+    owner: NativeOperatorOwner,
+    expected?: NativeOperatorScopeRef,
+  ): Promise<NativeOperatorScopeRef | "unstarted" | null> {
+    const result = await this.closeExecution(nativeOperatorScopeKey(owner), owner, expected);
+    return result === null || result === "unstarted" ? result : nativeOperatorScopeRefSchema.parse(result);
+  }
+  private async closeExecution(
+    at: string,
+    owner: ExecutionOwner,
+    expected?: NativeExecutionScopeRef,
+    threadKey?: string,
+  ): Promise<NativeExecutionScopeRef | "unstarted" | null> {
     const row = await this.storage.transaction(async (rows) => {
       const value = await rows.get<unknown>(at);
       if (value === undefined) return null;
-      const row = ownedRow(value, threadKey, owner);
+      const row = ownedExecutionRow(value, owner, threadKey);
       if (expected && JSON.stringify(refOf(row)) !== JSON.stringify(expected)) throw new Error("native-scope changed");
       await rows.put(at, { ...row, closing: true });
       return row;
     });
     if (!row) return null;
     if (!row.boot) {
-      await this.storage.put(at, { ...row, closing: true, closed: true });
+      const closed = { ...row, closing: true, closed: true };
+      try {
+        await this.storage.put(at, closed);
+      } catch (error) {
+        if (JSON.stringify(await this.storage.get(at)) !== JSON.stringify(closed)) throw error;
+      }
       return "unstarted";
     }
     const ref = refOf(row);
@@ -283,19 +447,27 @@ export class NativeRunScopes {
       .strict()
       .parse(answer(await this.native.request({ mode: "inspect" }, NATIVE_SCOPE_CONTROL_MS)));
     if (kernel.boot !== ref.boot) {
-      await this.storage.transaction(async (rows) => {
-        const current = ownedRow(await rows.get(at), threadKey, owner);
-        if (current.id !== row.id || current.boot !== row.boot || !current.closing)
-          throw new Error("native-scope changed");
-        await rows.put(at, { ...current, closed: true, closedBoot: kernel.boot });
-      });
+      let committedClosure: Row | undefined;
+      try {
+        await this.storage.transaction(async (rows) => {
+          const current = ownedExecutionRow(await rows.get(at), owner, threadKey);
+          if (current.id !== row.id || current.boot !== row.boot || !current.closing)
+            throw new Error("native-scope changed");
+
+          committedClosure = { ...current, closed: true, closedBoot: kernel.boot };
+          await rows.put(at, committedClosure);
+        });
+      } catch (error) {
+        if (!committedClosure || JSON.stringify(await this.storage.get(at)) !== JSON.stringify(committedClosure))
+          throw error;
+      }
       return ref;
     }
     let result: unknown;
     if (row.closing || row.closed) {
       const view = z
         .object({
-          ref: nativeScopeRefSchema,
+          ref: nativeExecutionScopeRefSchema,
           closed: z.boolean(),
           populated: z.boolean(),
           present: z.boolean().optional(),
@@ -312,16 +484,24 @@ export class NativeRunScopes {
           : answer(await this.native.request({ mode: "close", ref }, NATIVE_SCOPE_CONTROL_MS));
     } else result = answer(await this.native.request({ mode: "close", ref }, NATIVE_SCOPE_CONTROL_MS));
     const observed = z
-      .object({ ref: nativeScopeRefSchema, closed: z.literal(true), populated: z.literal(false) })
+      .object({ ref: nativeExecutionScopeRefSchema, closed: z.literal(true), populated: z.literal(false) })
       .strict()
       .parse(result);
     if (JSON.stringify(observed.ref) !== JSON.stringify(ref)) throw new Error("native-scope owner changed");
-    await this.storage.transaction(async (rows) => {
-      const current = ownedRow(await rows.get(at), threadKey, owner);
-      if (current.id !== row.id || current.boot !== row.boot || !current.closing)
-        throw new Error("native-scope changed");
-      await rows.put(at, { ...current, closed: true, closedBoot: kernel.boot });
-    });
+    let committedClosure: Row | undefined;
+    try {
+      await this.storage.transaction(async (rows) => {
+        const current = ownedExecutionRow(await rows.get(at), owner, threadKey);
+        if (current.id !== row.id || current.boot !== row.boot || !current.closing)
+          throw new Error("native-scope changed");
+
+        committedClosure = { ...current, closed: true, closedBoot: kernel.boot };
+        await rows.put(at, committedClosure);
+      });
+    } catch (error) {
+      if (!committedClosure || JSON.stringify(await this.storage.get(at)) !== JSON.stringify(committedClosure))
+        throw error;
+    }
     return ref;
   }
 }
@@ -376,7 +556,7 @@ export class CloudflareNativeScopeTransport implements NativeScopeTransport {
         if (value.mode === "launch") {
           const closure = z
             .object({
-              ref: nativeScopeRefSchema,
+              ref: nativeExecutionScopeRefSchema,
               attempt: z.string().uuid(),
               closed: z.literal(false),
               populated: z.literal(false),

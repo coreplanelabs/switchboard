@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { threadRequestFixture } from "./testing/threadRequestFixture.js";
 import { methodOf, readSource } from "./testing/sourceScan";
 
 // A resumed run's attach reuses the thread's worktree as it stands
@@ -21,33 +22,57 @@ function method(name: string): string {
   return body!;
 }
 
-function functionOf(name: string): string {
-  const start = source.search(new RegExp(`^(?:async )?function ${name}\\(`, "m"));
-  expect(start, `worker.ts declares function ${name}`).toBeGreaterThan(-1);
-  const end = source.indexOf("\n}\n", start);
-  return source.slice(start, end + 3);
-}
-
 describe("the `reuse` body field reaches the worktree decision", () => {
-  it("handleAttach parses `reuse` with the pure parser, refuses a malformed one 400, and hands the flag to attachThread", () => {
-    expect(source).toMatch(/import \{[^}]*parseReuse[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentReuse\.js";/);
-    const handler = functionOf("handleAttach");
-    expect(handler).toMatch(/const reuse = parseReuse\(body\.reuse\);/);
-    expect(handler).toMatch(/if \("error" in reuse\) return json\(\{ error: reuse\.error \}, 400\);/);
-    expect(handler).toMatch(
-      /attachThread\(\s*ctx\.threadKey,\s*refHint,\s*readonly\.readonly,\s*want\.sha,\s*reuse\.reuse,\s*ctx\.record,\s*traceparent,\s*reason,\s*githubDoor,\s*runBudgetMs,\s*runId,\s*ownerGen,\s*ownerFence,\s*nativeBirth,?\s*\)/,
-    );
+  it("handleAttach parses `reuse` with the pure parser, refuses a malformed one 400, and hands the flag to attachThread", async () => {
+    const h = threadRequestFixture();
+    expect(await (await h.attach({ reuse: true })).json()).toEqual({ attached: true });
+    expect(h.attached).toEqual([
+      [
+        "mcp:request",
+        null,
+        true,
+        null,
+        true,
+        { defaultRef: "main" },
+        "trace",
+        { ownPr: null, refByDefault: false },
+        undefined,
+        undefined,
+        "run-request",
+        "gen-request",
+        7,
+        false,
+        h.context,
+      ],
+    ]);
+    const refused = await h.attach({ reuse: "yes" });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "reuse must be a boolean when present" });
+    expect(h.attached).toHaveLength(1);
   });
 
-  it("attachThread carries `reuse` through the traced body to the create step", () => {
-    expect(method("attachThread")).toMatch(/reuse = false,/);
-    expect(method("attachThread")).toMatch(
-      /attachThreadTraced\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*record,\s*t0,\s*reason,\s*githubDoor,\s*runBudgetMs,\s*runId,\s*ownerGen,\s*ownerFence,\s*nativeBirth,?\s*\)/,
-    );
-    expect(method("attachThreadTraced")).toMatch(
-      /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,\s*githubDoor,[\s\S]*?registered && readonly && wantSha !== null && !reuse[\s\S]*?\)/,
-    );
-    expect(method("attachThreadBody")).toMatch(/reuse: boolean,/);
+  it("attachThread carries `reuse` through the traced body to the create step", async () => {
+    const h = threadRequestFixture();
+    expect(await (await h.attach({ reuse: true })).json()).toEqual({ attached: true });
+    expect(h.traced).toEqual([
+      [
+        "mcp:request",
+        null,
+        true,
+        null,
+        true,
+        { defaultRef: "main" },
+        1000,
+        { ownPr: null, refByDefault: false },
+        undefined,
+        undefined,
+        "run-request",
+        "gen-request",
+        7,
+        false,
+        h.context,
+      ],
+    ]);
     expect(method("attachThreadBody")).toMatch(/attachThreadCreate\(\{[\s\S]*?\breuse,[\s\S]*?\}\)/);
     expect(method("attachThreadCreate")).toMatch(/reuse: boolean;/);
   });

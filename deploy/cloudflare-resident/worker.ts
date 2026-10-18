@@ -1,3 +1,4 @@
+import { captureException } from "../../src/core/runStateWriteDiagnostic.js";
 import {
   FENCE_ACQUISITION_PREFIX,
   fenceAcquisitionOf,
@@ -30,6 +31,7 @@ import {
   nativeScopeRetirementKey,
   NATIVE_SCOPE_CONTROL_MS,
   type NativeScopeRef,
+  type NativeExecutionScopeRef,
   type NativeTimeoutEnding,
 } from "./nativeScope.js";
 import {
@@ -47,6 +49,10 @@ import {
 } from "../../src/execution/checkOperation.js";
 import {
   NativeOperationJournal,
+  nativeOperationOriginSchema,
+  nativeOperationRecordSchema,
+  type NativeOperationOrigin,
+  type NativeOperationProducer,
   unstartedNativeOperator,
   validNativeOperationKey,
   type NativeOperationRows,
@@ -228,6 +234,7 @@ import {
   SECOND_MS,
   WORKSPACE_PREDECESSORS_MAX,
   WORKSPACE_RECONCILE_BINDINGS_MAX,
+  RESTORE_BACKUP_EXPIRY_BUFFER_MS,
 } from "../../src/core/budgets.js";
 import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { RESIDENT_MIRROR_PERMISSIONS, verifyGithubMintScope } from "../../src/execution/githubMintScope.js";
@@ -385,8 +392,6 @@ import {
   planWakeDepsBudget,
   RESTORE_MAX_MS,
   RESTORE_POLL_MS,
-  restoreArchivePath,
-  restoreProgressPaths,
   accumulateRestoreProgress,
   withTimeout,
   type RefreshDisk,
@@ -483,13 +488,17 @@ import type { SpanAttrs } from "../../src/core/trace/attrs.js";
 import type { Span as TraceSpan } from "../../src/core/trace/types.js";
 import { systemClock } from "../../src/core/trace/clock.js";
 import { startAdoptedRoot } from "../../src/core/trace/workerTrace.js";
+import { parseTraceparent } from "../../src/core/trace/traceparent.js";
 import { backupTransferMode } from "../../src/execution/residentBackupTransfer.js";
 import {
-  extractRestoreScript,
-  restoreMountDir,
-  unmountAllRestoresScript,
-  unmountRestoreScript,
-} from "../../src/execution/residentRestoreExtract.js";
+  archiveControlAnswer,
+  archiveCapabilitySchema,
+  executeRestoreArchive,
+  prepareRestoreArchive,
+  restoreIdentitySchema,
+  restorePrivateDirectory,
+  RestoreArchiveUnconfirmedError,
+} from "./restoreArchive.js";
 import {
   CHECKOUT_SNAPSHOT_EXCLUDES,
   DEPS_BACKUP_KEY_PREFIX,
@@ -1683,6 +1692,7 @@ const TEST_OVERRIDES_KEY = "testOverrides";
 const DRAIN_KEY = "drain";
 const DEPLOY_ADMISSION_KEY_PREFIX = "deploy:admission:";
 const DEPLOY_RELEASE_RECEIPTS_KEY = "deploy:release-receipts";
+const DEPLOY_RELEASE_RECEIPT_BYTES = 64 * 1024;
 const DEPLOY_RECOVERY_KEY_PREFIX = "deploy:recovered:";
 const DEPLOY_FENCE_RELEASE_KEY_PREFIX = "deploy:fence-release:";
 const DEPLOY_ABANDONED_KEY_PREFIX = "deploy:abandoned:";
@@ -1701,6 +1711,16 @@ interface DeployFenceReleaseReceipt {
 }
 
 /** Safe request provenance, never an authority or a native completion receipt. */
+class OpaqueNativeOutcomeUnconfirmedError extends Error {}
+
+type NativeRequestContext = {
+  sourceId?: string;
+  callId: string;
+  actor: NativeOperationOrigin["actor"];
+  traceId: string | null;
+  parentSourceId: string | null;
+};
+
 function deployAdmissionOrigin(input: unknown) {
   const row = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
   const word = (value: unknown) => (typeof value === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : null);
@@ -1727,6 +1747,44 @@ function deployAdmissionOrigin(input: unknown) {
         ? row.resource
         : null,
     sourceId: word(row.sourceId),
+    producer: [
+      "git-setup",
+      "provisioning",
+      "hydration",
+      "deps-materialize",
+      "deps-backup",
+      "deps-adopt",
+      "op-test",
+      "op-build",
+      "resident-call",
+      "refresh-step",
+      "fleet-lifecycle",
+      "reconcile",
+      "watchdog",
+      "attach",
+      "thread-work",
+      "inspect-preservation",
+      "inspect-dependencies",
+      "detach",
+      "discard-absent",
+      "reconcile-owner",
+      "deadline",
+      "exec",
+      "read",
+      "write",
+      "publish",
+      "credentials",
+    ].includes(String(row.producer))
+      ? String(row.producer)
+      : null,
+    callId:
+      typeof row.callId === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(row.callId)
+        ? row.callId
+        : null,
+    actor: ["system", "service", "admin", "operator", "read", "drain"].includes(String(row.actor))
+      ? String(row.actor)
+      : null,
+    parentSourceId: word(row.parentSourceId),
     traceId:
       typeof row.traceId === "string" && /^[a-f0-9]{32}$/.test(row.traceId) && !/^0+$/.test(row.traceId)
         ? row.traceId
@@ -1737,16 +1795,28 @@ function deployAdmissionOrigin(input: unknown) {
   };
 }
 
-function emitDeployAdmission(event: Record<string, unknown>): void {
+function emitDeployAdmission(event: Record<string, unknown>, failure?: { error: unknown }): void {
   try {
-    console.log(`[resident-deploy-admission] ${JSON.stringify({ schema: 1, ...event })}`);
+    const exception = failure ? captureException(failure.error) : undefined;
+    console.log(
+      `[resident-deploy-admission] ${JSON.stringify({
+        schema: 1,
+        ...event,
+        ...(exception ? { errorName: exception.name, errorMessage: exception.message } : {}),
+      })}`,
+    );
   } catch {
     /* A log sink cannot change request admission or settlement. */
   }
 }
 
 type DeployAdmissionIdentity = { id: string; requestHash: string };
-type DeployReleaseReceipt = DeployAdmissionIdentity & { startedAt: number; releasedAt: number };
+type DeployReleaseReceipt = DeployAdmissionIdentity & {
+  startedAt: number;
+  releasedAt: number;
+  origin?: ReturnType<typeof deployAdmissionOrigin>;
+  originalRecordSha256?: string;
+};
 
 function validDeployAdmissionIdentity(value: unknown): value is DeployAdmissionIdentity {
   if (!value || typeof value !== "object") return false;
@@ -1766,13 +1836,19 @@ function validDeployReleaseReceipts(value: unknown): value is DeployReleaseRecei
     new Set(value.map((row) => row?.id)).size === value.length &&
     value.every((row) => {
       const startedAt = row?.startedAt,
-        releasedAt = row?.releasedAt;
+        releasedAt = row?.releasedAt,
+        origin = row?.origin,
+        originalRecordSha256 = row?.originalRecordSha256;
       return (
         validDeployAdmissionIdentity(row) &&
         Number.isSafeInteger(startedAt) &&
         startedAt >= 0 &&
         Number.isSafeInteger(releasedAt) &&
-        releasedAt >= startedAt
+        releasedAt >= startedAt &&
+        (origin === undefined ||
+          (JSON.stringify(origin) === JSON.stringify(deployAdmissionOrigin(origin)) &&
+            typeof originalRecordSha256 === "string" &&
+            /^[a-f0-9]{64}$/.test(originalRecordSha256)))
       );
     })
   );
@@ -1787,19 +1863,28 @@ async function beginTrackedDeployAdmission(
   origin: unknown,
   reconcile?: { versionId: string | null; versionTimestamp: string | null; attempt?: unknown },
 ): Promise<DeployAdmissionIdentity | null> {
+  const supplied = origin && typeof origin === "object" ? (origin as Record<string, unknown>) : {};
+  const id = crypto.randomUUID();
+  const safeOrigin = deployAdmissionOrigin({
+    ...supplied,
+    callId: supplied.callId ?? id,
+    producer: supplied.producer ?? supplied.kind,
+    actor: supplied.actor ?? supplied.requesterScope ?? (supplied.component === "http" ? "service" : "system"),
+    sourceId: supplied.sourceId ?? supplied.kind,
+  });
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(JSON.stringify([deployAdmissionOrigin(origin), reconcile ?? null])),
+    new TextEncoder().encode(JSON.stringify([safeOrigin, reconcile ?? null])),
   );
   const identity = {
-    id: crypto.randomUUID(),
+    id,
     requestHash: [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
   };
   emitDeployAdmission({
     phase: "admission-requested",
     ...identity,
     observedAt: systemClock(),
-    ...deployAdmissionOrigin(origin),
+    ...safeOrigin,
   });
   try {
     const result = reconcile
@@ -1808,8 +1893,9 @@ async function beginTrackedDeployAdmission(
           reconcile.versionTimestamp,
           identity,
           reconcile.attempt,
+          safeOrigin,
         )
-      : await registry.beginDeployAdmission(origin, identity);
+      : await registry.beginDeployAdmission(safeOrigin, identity);
     if (result === null) return null;
     if (result === identity.id) return identity;
   } catch {
@@ -2590,6 +2676,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     versionTimestamp: string | null,
     identity?: DeployAdmissionIdentity,
     attempt?: unknown,
+    origin?: unknown,
   ): Promise<string | null> {
     if (identity !== undefined && !validDeployAdmissionIdentity(identity))
       throw new Error("deploy-admission-identity-invalid");
@@ -2621,7 +2708,13 @@ export class ResidentRegistryDO extends DurableObject<Env> {
         schema: 1,
         ...(identity ? { requestHash: identity.requestHash } : {}),
         startedAt: systemClock(),
-        ...deployAdmissionOrigin({ kind: "reconcile", component: "http", build: BUILD_ID, workerVersion: versionId }),
+        ...deployAdmissionOrigin({
+          ...(origin && typeof origin === "object" ? origin : {}),
+          kind: "reconcile",
+          component: "http",
+          build: BUILD_ID,
+          workerVersion: versionId,
+        }),
       };
       await txn.put(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`, permit);
       return { id, record: permit };
@@ -2654,10 +2747,21 @@ export class ResidentRegistryDO extends DurableObject<Env> {
             Number(row.startedAt) < 0
           )
             throw new Error("deploy-release-identity-mismatch");
-          await txn.put(DEPLOY_RELEASE_RECEIPTS_KEY, [
+          const retained = [
             ...receipts.slice(-127),
-            { id, requestHash, startedAt: row.startedAt, releasedAt: systemClock() },
-          ]);
+            {
+              id,
+              requestHash,
+              startedAt: row.startedAt,
+              releasedAt: systemClock(),
+              ...(deployAdmissionOrigin(row).callId
+                ? { origin: deployAdmissionOrigin(row), originalRecordSha256: await admissionRecordHash(row) }
+                : {}),
+            },
+          ];
+          while (new TextEncoder().encode(JSON.stringify(retained)).byteLength > DEPLOY_RELEASE_RECEIPT_BYTES)
+            retained.shift();
+          await txn.put(DEPLOY_RELEASE_RECEIPTS_KEY, retained);
         } else if (row && Object.hasOwn(row, "requestHash")) throw new Error("deploy-release-identity-required");
         return txn.delete(key);
       });
@@ -3704,6 +3808,7 @@ export class ResidentDO extends Sandbox<Env> {
         owner: string;
         active: boolean;
         allocated: boolean;
+        origin: NativeOperationOrigin;
       }
     | undefined
   >();
@@ -3712,122 +3817,132 @@ export class ResidentDO extends Sandbox<Env> {
     return this.stepTrace.getStore()?.steps() ?? [];
   }
 
-  /** R2 restores this incarnation started and has not seen settle. The SDK's
-   *  restoreBackup cannot be cancelled: a restore the wake path gave up on
-   *  keeps writing into its target directory, so the next hydrate must not
-   *  `rm -rf` that directory until these have settled (otherwise the second
-   *  attempt's clean runs over the first attempt's still-filling
-   *  checkout). A DO reset drops the set together with the transfers it named:
-   *  the restore is driven from this isolate, so nothing outlives it. */
+  /** Durable restore intents remain held after an isolate reset. This set only
+   * joins work still running in this incarnation; its loss proves no ending. */
   private readonly pendingRestores = new Set<Promise<unknown>>();
 
-  /** Run one R2 restore and judge it by the bytes arriving in its backup work
-   *  directory and target (judgeRestoreProgress): the SDK call takes no timeout, progress
-   *  callback or AbortSignal, and a fixed budget abandoned a restore that then
-   *  completed (481 s against 300 s). While observed disk use keeps
-   *  growing the wait continues; it ends on a stall (no growth for
-   *  RESTORE_STALL_MS) or the RESTORE_MAX_MS cap, with the bytes and the timing
-   *  in the error. On success the observed size and rate are logged so the
-   *  budgets can be revisited from evidence. */
   private async restoreWithProgress(backup: DirectoryBackup, what: string, deadlineMs: number): Promise<void> {
-    const baselineKiB = await this.restoreProgressKiB(backup);
+    let prepared;
+    try {
+      prepared = await prepareRestoreArchive(
+        this.env,
+        backup.id,
+        backup.dir,
+        systemClock(),
+        deadlineMs,
+        RESTORE_BACKUP_EXPIRY_BUFFER_MS,
+      );
+    } catch (error) {
+      emitDeployAdmission(
+        {
+          event: "native.opaque.not-started",
+          phase: "archive-preflight",
+          outcome: "not-started",
+          commit: "not-admitted",
+          reason: "verified-no-start",
+          backupId: backup.id,
+        },
+        { error },
+      );
+      throw error;
+    }
+    const attempt = await this.beginThreadNativeOperation("opaque");
+    const journal = new NativeOperationJournal(this.ctx.storage);
+    let identity;
+    try {
+      if (!attempt.scope || !("kind" in attempt.scope) || !attempt.id || !attempt.key)
+        throw new Error("archive restore requires its original operator scope");
+      const capability = archiveCapabilitySchema.parse(
+        archiveControlAnswer(
+          await this.nativeScopeTransport().request({ mode: "inspect", archive: true }, NATIVE_SCOPE_CONTROL_MS),
+        ),
+      );
+      if (capability.boot !== attempt.scope.boot) throw new Error("original archive kernel changed");
+      identity = restoreIdentitySchema.parse({ ...prepared.descriptor, ref: attempt.scope, attempt: attempt.id });
+      await journal.reserveArchive(attempt.key, attempt.id, identity);
+    } catch (cause) {
+      try {
+        await attempt.settle();
+      } catch (error) {
+        throw new OpaqueNativeOutcomeUnconfirmedError("archive admission is unconfirmed", { cause: error });
+      }
+      throw cause;
+    }
     const startedMs = systemClock();
-    let progress = { previousKiB: baselineKiB ?? 0, observedKiB: 0 };
-    const p = this.restoreBackup(backup);
+    const privateDir = restorePrivateDirectory(identity.attempt, identity.ref.id);
+    const p = executeRestoreArchive({
+      identity,
+      prepared,
+      bucket: this.env.BACKUP_BUCKET,
+      native: this.nativeScopeTransport(),
+      deadline: deadlineMs,
+      now: systemClock,
+      controlMs: NATIVE_SCOPE_CONTROL_MS,
+      finish: (receipt) => journal.finishArchive(attempt.key!, identity.attempt, receipt),
+    }).catch((cause) => {
+      if (cause instanceof RestoreArchiveUnconfirmedError)
+        throw new OpaqueNativeOutcomeUnconfirmedError(cause.message, { cause });
+      throw cause;
+    });
     this.pendingRestores.add(p);
     void p.then(
       () => this.pendingRestores.delete(p),
       () => this.pendingRestores.delete(p),
     );
+    let progress = { previousKiB: 0, observedKiB: 0 };
     const samples: RestoreSample[] = [];
     for (;;) {
       const outcome = await Promise.race([
-        p.then(() => "done" as const),
-        new Promise<"tick">((r) => setTimeout(() => r("tick"), RESTORE_POLL_MS)),
+        p.then((receipt) => ({ receipt })),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), RESTORE_POLL_MS)),
       ]);
-      if (outcome === "done") {
-        const ms = systemClock() - startedMs;
+      if (outcome) {
+        emitDeployAdmission({
+          event: "native.archive.completed",
+          phase: "archive-settlement",
+          outcome: outcome.receipt.outcome,
+          commit: "acknowledged",
+          scopeId: identity.ref.id,
+          attemptId: identity.attempt,
+          backupId: identity.backupId,
+          reason: outcome.receipt.reason,
+          ...identity.ref.owner,
+        });
+        if (outcome.receipt.outcome !== "committed") throw new Error(`${what}: ${outcome.receipt.reason}`);
         const kiB = await this.dirKiB(backup.dir);
-        const rate = kiB !== null && ms > 0 ? ` (${((kiB / 1024 / ms) * 1000).toFixed(1)} MiB/s)` : "";
-        const size = kiB === null ? "? GiB (du did not answer)" : `${(kiB / 1_048_576).toFixed(2)} GiB`;
-        console.log(`${what}: ${size} in ${Math.round(ms / 1000)} s${rate}`);
+        console.log(`${what}: ${kiB ?? "?"} KiB in ${Math.round((systemClock() - startedMs) / 1000)} s`);
         return;
       }
-      const currentKiB = await this.restoreProgressKiB(backup);
+      const currentKiB = await this.restoreProgressKiB([privateDir, backup.dir]);
       progress = accumulateRestoreProgress(progress, currentKiB);
       samples.push({ atMs: systemClock(), kiB: currentKiB === null ? null : progress.observedKiB });
       const verdict = judgeRestoreProgress({ startedMs, nowMs: systemClock(), samples, deadlineMs });
       if (verdict.verdict !== "wait") {
-        // The restore itself keeps running (its settle handlers are attached
-        // above); pendingRestores keeps the next hydrate off its directory.
-        throw new Error(`${what} ${verdict.verdict}: ${verdict.detail}`);
+        // The original coordinator performs one UUID-bound stop and cleanup.
+        // Never grant fallback from a progress timeout alone.
+        throw new OpaqueNativeOutcomeUnconfirmedError(`${what} ${verdict.verdict}: ${verdict.detail}`);
       }
     }
   }
 
-  /** Restore a backup INTO `targetDir` as a plain directory on the resident's
-   *  disk (docs/reference/specs/resident-repos.md item 61). In presigned mode the SDK's restore MOUNTS the
-   *  archive (squashfuse + fuse-overlayfs) at the handle's `dir` instead of
-   *  extracting it, which breaks every step that treats the mirror, checkout
-   *  or a store entry as a directory on one ext4 filesystem (
-   *  `rm -rf` → Device or resource busy, `chown -R` → a full copy-up, `du -x`
-   *  → ~1 MiB, hardlinks and renames across devices). So the handle is
-   *  re-pointed at a staging mount beside the target, judged by bytes arriving
-   *  like every restore, then `extractRestoreScript` puts a real tree in place
-   *  — `unsquashfs` from the downloaded archive, or `cp -a` out of the mount —
-   *  unmounts, and renames it in LAST. A failure leaves no half target and no
-   *  mount behind. */
+  /** Both supported transfer modes install a plain tree through the fixed
+   * archive controller. No SDK restore, FUSE mount or host cleanup is adopted. */
   private async restoreExtracted(
     backup: DirectoryBackup,
     targetDir: string,
     what: string,
-    /** The extraction's own step name (`<x>-restore-extract`): what the trace and the run page show. */
     step: ResidentStepName,
     deadlineMs: number,
   ): Promise<void> {
-    const attempt = crypto.randomUUID().slice(0, 8);
-    const mountDir = restoreMountDir(targetDir, attempt);
-    try {
-      await this.restoreWithProgress({ ...backup, dir: mountDir }, what, deadlineMs);
-      const t0 = systemClock();
-      const r = await this.runOk(
-        [
-          "sh",
-          "-c",
-          extractRestoreScript({
-            mountDir,
-            backupId: backup.id,
-            archivePath: restoreArchivePath(backup.id),
-            targetDir,
-          }),
-        ],
-        step,
-        { timeoutMs: Math.max(60_000, deadlineMs - systemClock()) },
-      );
-      console.log(`${what}: ${r.trim() || "extracted"} in ${Math.round((systemClock() - t0) / 1000)} s`);
-    } catch (err) {
-      // Neither the staging mount nor a partial extraction may outlive the
-      // attempt: a later clean would hit "Device or resource busy" on the
-      // mount, and a half-extracted tree is multi-GiB debris on a
-      // disk-budgeted resident. Best effort — the clean steps sweep both too.
-      await this.run(["sh", "-c", unmountRestoreScript({ mountDir, backupId: backup.id })]).catch(() => {});
-      await this.run(["rm", "-rf", `${targetDir}.extract-${attempt}`]).catch(() => {});
-      throw err;
-    }
+    const startedAt = systemClock();
+    await this.restoreWithProgress({ ...backup, dir: targetDir }, what, deadlineMs);
+    this.stepTrace.getStore()?.record(step, { startedAt, endedAt: systemClock(), exitCode: 0, timedOut: false });
   }
 
-  /** Where a running restore's bytes land, in KiB: the SDK first downloads
-   *  parts under `/var/backups/download.*`, then assembles and moves the final
-   *  archive, and only then extracts into the target. Probe the work directory
-   *  and target in one `du`. A path that does not exist yet is absent from the output
-   *  (`parseDu` skips du's error lines), and no readable path at all is null. */
-  private async restoreProgressKiB(backup: DirectoryBackup): Promise<number | null> {
-    const r = await this.run(["du", "-xsk", ...restoreProgressPaths(backup.dir)]);
+  private async restoreProgressKiB(paths: readonly string[]): Promise<number | null> {
+    const r = await this.run(["du", "-xsk", ...paths]);
     const parsed = parseDu(r.stdout);
-    if (parsed.size === 0) return null;
-    let total = 0;
-    for (const kiB of parsed.values()) total += kiB;
-    return total;
+    return parsed.size === 0 ? null : [...parsed.values()].reduce((total, size) => total + size, 0);
   }
 
   /** `du -xsk <dir>` in KiB (the success line's size and rate); null when the
@@ -4053,6 +4168,7 @@ export class ResidentDO extends Sandbox<Env> {
       runtimeRecovery?: "observe";
       nativeUser?: string;
       nativeAccount?: string;
+      workspacePaths?: readonly string[];
     } = {},
   ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean }> {
     if ((await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== undefined)
@@ -4060,28 +4176,38 @@ export class ResidentDO extends Sandbox<Env> {
     if (this.destroying || (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))) {
       throw new Error("resident-destroy-unconfirmed: container reuse refused until destruction is confirmed");
     }
-    let nativeAttempt = await this.beginThreadNativeOperation("process");
+    let nativeAttempt = await this.beginThreadNativeOperation("process", opts.workspacePaths);
     const timeout = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     if (nativeAttempt.scope) {
+      const inventory =
+        argv.length === 3 && argv[0] === "ps" && argv[1] === "-eo"
+          ? argv[2] === "user="
+            ? "users"
+            : argv[2] === "pid=,user="
+              ? "pid-users"
+              : undefined
+          : undefined;
       const result = await this.nativeScopeTransport().request(
         {
           mode: "launch",
           ref: nativeAttempt.scope,
           attempt: nativeAttempt.id,
           role:
-            argv.length === 3 && argv[0] === "pgrep" && argv[1] === "-u"
+            inventory || (argv.length === 3 && argv[0] === "pgrep" && argv[1] === "-u")
               ? "inventory"
               : opts.nativeAccount
                 ? "provision"
                 : opts.nativeUser
                   ? "user"
                   : "trusted",
+          ...(inventory ? { inventory } : {}),
           ...(argv.length === 3 && argv[0] === "pgrep" && argv[1] === "-u"
             ? { user: argv[2] }
             : opts.nativeAccount || opts.nativeUser
               ? { user: opts.nativeAccount ?? opts.nativeUser }
               : {}),
           argv: [...argv],
+          ...(opts.workspacePaths ? { workspacePaths: opts.workspacePaths } : {}),
           ...(opts.cwd ? { cwd: opts.cwd } : {}),
           env: opts.env ?? {},
         },
@@ -4270,7 +4396,13 @@ export class ResidentDO extends Sandbox<Env> {
   private async runOk(
     argv: readonly string[],
     step: ResidentStepName,
-    opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
+    opts: {
+      cwd?: string;
+      timeoutMs?: number;
+      env?: Record<string, string>;
+      nativeUser?: string;
+      workspacePaths?: readonly string[];
+    } = {},
   ): Promise<string> {
     const startedAt = systemClock();
     const r = await this.run(argv, opts);
@@ -4283,14 +4415,16 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Run one command-table entry as the unprivileged build user in the warm
    *  checkout (or the staged rebuild's tree, item 47). Never root. Never a
-   *  GitHub token — the env is whatever `su` grants the target user, nothing
-   *  injected. */
+   *  GitHub token. The native user role supplies its home and reduced
+   *  privileges inside the original operator scope. */
   private async buildUserRun(
     command: string,
     step: ResidentStepLabelKey,
     timeoutMs: number,
     dir: string = CHECKOUT_DIR,
   ): Promise<string> {
+    if (!this.opOperationScope.getStore()?.active)
+      throw new Error("build command requires its original operator scope");
     // Steps on one tree are sequential, so a live build-user process INSIDE
     // it here is a leftover (a step whose wait was abandoned, or one
     // orphaned by a Worker-only deploy resetting the DO) — and it is writing
@@ -4299,8 +4433,9 @@ export class ResidentDO extends Sandbox<Env> {
     // trees, in parallel, and are live work (killStaleBuildProcessesCommand).
     const swept = await this.runOk(killStaleBuildProcessesCommand(BUILD_USER, dir), `${step}-stale-sweep`);
     if (swept.trim()) console.log(`${step}: ${swept.trim()}`);
-    return this.runOk(["su", "-s", "/bin/bash", BUILD_USER, "-c", `cd ${dir} && ${command}`], step, {
+    return this.runOk(["/bin/bash", "-c", `cd ${dir} && ${command}`], step, {
       timeoutMs,
+      nativeUser: BUILD_USER,
     });
   }
 
@@ -4338,16 +4473,12 @@ export class ResidentDO extends Sandbox<Env> {
 
   // -- repo helpers ----------------------------------------------------------
 
-  /** Idempotent container-local setup that must survive every fresh disk:
-   *  the root-only state dir, and a scoped safe.directory entry so worker
-   *  users can fetch from the root-owned mirror without git's
-   *  dubious-ownership refusal (scoped to the mirror — NOT '*'). */
+  /** Recreate the root-only state directory and mirror ownership on a fresh
+   *  disk. The image supplies the fixed mirror safe.directory setting. */
   private async ensureGitSetup(): Promise<void> {
-    return this.withSharedNativeOperation(async () => {
-      // Memoized per incarnation: this used to be three container forks
-      // (rewriting /etc/gitconfig among them) on EVERY attach and /op — inside
-      // the mirror mutex, extending every peer's wait. One fork now, and only
-      // when the incarnation hasn't run it yet (cleared with the other memos).
+    return this.withSharedNativeOperation("git-setup", async () => {
+      // Reuse this setup only within the current incarnation. A new disk
+      // must restore the private directory and mirror ownership before use.
       if (this.gitSetupDone) return;
       // Thread isolation (the chown/chmod half): thread users must not read the
       // mirror directly (its config/refs are engine plumbing; repo content
@@ -4361,7 +4492,6 @@ export class ResidentDO extends Sandbox<Env> {
           "sh",
           "-c",
           `install -d -m 700 -o root -g root ${RESIDENT_STATE_DIR} && ` +
-            `git config --system safe.directory ${MIRROR_DIR} && ` +
             `if [ -d ${MIRROR_DIR} ]; then chown root:${BUILD_USER} ${MIRROR_DIR} && chmod 750 ${MIRROR_DIR}; fi`,
         ],
         "git-setup",
@@ -4500,21 +4630,36 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`snapshot: local-bucket transfer (presigned env missing: ${missing.join(", ")})`);
       const [mirror, checkout] = await Promise.all([
         withTimeout(
-          this.createBackup({ dir: MIRROR_DIR, localBucket, ttl: SNAPSHOT_TTL_S, name: `${resource} mirror` }),
+          this.withOpaqueNativeEffect(
+            () => this.createBackup({ dir: MIRROR_DIR, localBucket, ttl: SNAPSHOT_TTL_S, name: `${resource} mirror` }),
+            (result) =>
+              typeof result?.id === "string" &&
+              result.id.length > 0 &&
+              typeof result.dir === "string" &&
+              result.dir === MIRROR_DIR,
+          ),
           R2_TRANSFER_TIMEOUT_MS,
           "mirror backup",
         ),
         withTimeout(
-          this.createBackup({
-            dir: CHECKOUT_DIR,
-            localBucket,
-            ttl: SNAPSHOT_TTL_S,
-            name: `${resource} checkout`,
-            // The tree without its deps view (item 61 PR B): the store entry
-            // has its own archive, so a refresh cycle stops re-uploading
-            // node_modules and the wake restores the key's entry instead.
-            excludes: [...CHECKOUT_SNAPSHOT_EXCLUDES],
-          }),
+          this.withOpaqueNativeEffect(
+            () =>
+              this.createBackup({
+                dir: CHECKOUT_DIR,
+                localBucket,
+                ttl: SNAPSHOT_TTL_S,
+                name: `${resource} checkout`,
+                // The tree without its deps view (item 61 PR B): the store entry
+                // has its own archive, so a refresh cycle stops re-uploading
+                // node_modules and the wake restores the key's entry instead.
+                excludes: [...CHECKOUT_SNAPSHOT_EXCLUDES],
+              }),
+            (result) =>
+              typeof result?.id === "string" &&
+              result.id.length > 0 &&
+              typeof result.dir === "string" &&
+              result.dir === CHECKOUT_DIR,
+          ),
           R2_TRANSFER_TIMEOUT_MS,
           "checkout backup",
         ),
@@ -4591,7 +4736,7 @@ export class ResidentDO extends Sandbox<Env> {
       await this.run(["touch", depsUsedPath(key)]);
       return { done: true, entry: depsEntryPath(key) };
     }
-    const attempt = crypto.randomUUID().slice(0, 8);
+    const attempt = crypto.randomUUID();
     const leaseKey = depsLeaseKey(key);
     const holder = this.nextHolder();
     const leaseMs = Math.max(input.budgetMs, (input.restoreDeadlineMs ?? 0) - systemClock()) + DEPS_STEP_OVERHEAD_MS;
@@ -4627,7 +4772,7 @@ export class ResidentDO extends Sandbox<Env> {
           const swept = await this.runOk(killStaleBuildProcessesCommand(BUILD_USER, dir), "deps-install-stale-sweep");
           if (swept.trim()) console.log(`deps: ${swept.trim()}`);
         }
-        await this.run(["rm", "-rf", ...deadPaths]).catch(() => {});
+        await this.run(["rm", "-rf", ...deadPaths], { workspacePaths: deadPaths }).catch(() => {});
       }
       await this.ctx.storage.put(leaseKey, decision.row);
       break;
@@ -4685,11 +4830,13 @@ export class ResidentDO extends Sandbox<Env> {
     );
     if (swept.trim()) console.log(`checkout-stage: ${swept.trim()}`);
     await this.runOk(["rm", "-rf", STAGING_CHECKOUT_DIR], "checkout-stage-clear", {
+      workspacePaths: [STAGING_CHECKOUT_DIR],
       timeoutMs: GIT_NETWORK_TIMEOUT_MS,
     });
     await this.withMirrorLock(
       async () => {
         await this.runOk(["sh", "-c", stageCheckoutScript(CHECKOUT_SWAP_DIRS)], "checkout-stage", {
+          workspacePaths: [CHECKOUT_DIR, STAGING_CHECKOUT_DIR, RETIRED_CHECKOUT_DIR],
           timeoutMs: GIT_NETWORK_TIMEOUT_MS,
         });
         await this.buildUserRun(
@@ -4754,6 +4901,7 @@ export class ResidentDO extends Sandbox<Env> {
         );
         if (swept.trim()) console.log(`checkout-swap: ${swept.trim()}`);
         await this.runOk(["sh", "-c", swapCheckoutScript(CHECKOUT_SWAP_DIRS)], "checkout-swap", {
+          workspacePaths: [MIRROR_DIR, CHECKOUT_DIR, STAGING_CHECKOUT_DIR, RETIRED_CHECKOUT_DIR],
           timeoutMs: GIT_NETWORK_TIMEOUT_MS,
         });
         if (plan.install) {
@@ -4767,9 +4915,9 @@ export class ResidentDO extends Sandbox<Env> {
     );
     // Off the lock: the replaced tree's removal (hardlinks — mostly link
     // drops). A failure here is a log line; the next stage's seed sweeps it.
-    await this.runOk(["rm", "-rf", RETIRED_CHECKOUT_DIR], "checkout-retire").catch((err: unknown) =>
-      console.log(`checkout-retire: ${errMsg(err)} — the next staged rebuild sweeps it`),
-    );
+    await this.runOk(["rm", "-rf", RETIRED_CHECKOUT_DIR], "checkout-retire", {
+      workspacePaths: [RETIRED_CHECKOUT_DIR],
+    }).catch((err: unknown) => console.log(`checkout-retire: ${errMsg(err)} — the next staged rebuild sweeps it`));
     return { done: false, why: plan.why };
   }
 
@@ -4820,7 +4968,7 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Bring the disk to the snapshot's stamp: the ready marker naming its sha
-   *  is done; otherwise unmount and clean, restore both archives (judged by
+   *  is done; otherwise clean through the mutation gate and restore both archives (judged by
    *  their bytes, against the caller's one deadline), verify the restored
    *  mirror against the stamp and hand the checkout to the build user. Runs
    *  inside the hydration lease its caller holds — every mirror-mutex taker
@@ -4834,11 +4982,9 @@ export class ResidentDO extends Sandbox<Env> {
   async restoreCheckout(snap: SnapshotRecord, deadlineMs: number): Promise<{ done: boolean }> {
     const plan = planRestore({ sha: snap.sha, readyStamp: await this.readyStamp() });
     if (plan.action === "done") return { done: true };
-    // A restore a previous attempt gave up on may still be writing into these
-    // directories (the SDK call cannot be cancelled): wait for it to
-    // settle before the clean, bounded by the same cap the restores get. A
-    // restore that will not settle even then leaves the disk alone — a named
-    // `down`, not a clean racing a writer.
+    // Join an original restore still observed by this incarnation before
+    // cleaning. Durable restore intent also excludes cleanup after a reset.
+    // A missing completion is never permission to clean a moving target.
     if (this.pendingRestores.size > 0) {
       try {
         await withTimeout(
@@ -4861,20 +5007,18 @@ export class ResidentDO extends Sandbox<Env> {
         );
       }
     }
-    // A previous incarnation's restore may still be MOUNTED at these paths
-    // (item 61: the SDK's presigned restore mounts) — `rm -rf` on a mount
-    // point is "Device or resource busy". Unmount first, every time.
-    await this.runOk(["sh", "-c", unmountAllRestoresScript()], "unmount-restores");
+    // The fixed mutation gate refuses inherited mounts and pending restores.
     await this.runOk(
       ["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, STAGING_CHECKOUT_DIR, RETIRED_CHECKOUT_DIR, ...DISK_MARKERS],
       "clean-before-restore",
+      { workspacePaths: [MIRROR_DIR, CHECKOUT_DIR, STAGING_CHECKOUT_DIR, RETIRED_CHECKOUT_DIR] },
     );
     try {
       // The restore pair IS the cold-wake critical path. Sequential on purpose:
-      // the SDK serializes backup operations anyway (one queue), so a
+      // the two targets share one hydration deadline, so a
       // concurrent pair only made the second one's clock run while it waited —
       // and each is judged by its own bytes (restoreWithProgress), not by
-      // a fixed budget: a slow transfer waits, a stalled one goes down with
+      // a short fixed budget: a slow transfer waits, a stalled one goes down with
       // the bytes and the idle span named instead of stranding `restoring` for
       // the watchdog.
       await this.restoreExtracted(snap.mirror, MIRROR_DIR, "mirror restore", "mirror-restore-extract", deadlineMs);
@@ -4895,12 +5039,9 @@ export class ResidentDO extends Sandbox<Env> {
       // asks the runtime whether the container the extract wrote to is still
       // there (the incident that named this: a resident went `down` on exactly
       // this, 10 ms before every exec answered "container is not running").
-      // A DO code-update reset under a live restore leaves nothing to land (the
-      // restore's SDK call is gone with this isolate), so it shares the
-      // replacement disposition — interrupted, retried onto the container that
-      // comes back. This is the ONLY site that folds the DO reset in;
-      // `isRuntimeReplacement` itself stays immune to it, so `/exec` never
-      // answers the replaced word for a reset over a live container.
+      // A control reset interrupts this caller. The durable original restore
+      // remains held until its own result or cleanup receipt is verified.
+      // The replacement wording does not credit that original effect.
       const runtimeReplaced = isRuntimeReplacement(err) || isControlReset(err);
       const runtimeActive = runtimeReplaced ? false : await this.isRuntimeActive().catch(() => null);
       const disposition = restoreFailureDisposition(errMsg(err), {
@@ -4927,15 +5068,8 @@ export class ResidentDO extends Sandbox<Env> {
         // came from the SDK's wording, the kill signature or the probe.
         throw new StepError(err instanceof StepError ? err.step : "restore", disposition.reason);
       }
-      // A stalled or capped restore is STILL STREAMING (the SDK call cannot be
-      // cancelled); `pendingRestores` keeps the next hydrate off its directory,
-      // but a `down` resident's only exit is a REBUILD, and provisioning owns
-      // the same directories. Left running, the restore the wake path gave up
-      // on lands into the checkout the rebuild has just cloned and linked —
-      // tar overwrites in place through the deps store's hardlinks, resetting
-      // every hardened entry file from 444 to 644. Stop
-      // the container on the way down: the disk is ephemeral, the stream dies
-      // with it, and the rebuild starts on an empty one.
+      // A progress failure is not cleanup proof. Preserve unresolved journal
+      // evidence even when the existing workspace policy permits a VM stop.
       if (
         !(await this.automaticContainerLoss("restore failure", async () => {
           this.swapIncarnation(); // deliberate incarnation swap
@@ -5193,153 +5327,155 @@ export class ResidentDO extends Sandbox<Env> {
    *  deliberately KEPT so /status shows the named reason (only a stuck
    *  onboarding releases the slot, via the deadline/watchdog). */
   async runProvisioning(payload: string): Promise<void> {
-    const resource = payload || ((await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "");
+    const savedResource = await this.ctx.storage.get<string>(RESOURCE_KEY);
+    const resource = payload || savedResource || "";
+    if (resource !== savedResource) return; // stale schedule from another membership
     if ((await this.ctx.storage.get<ResidentState>(STATE_KEY)) !== "onboarding") return; // stale schedule
-    try {
-      // An older image could have deleted every DO key after a failed
-      // offboard destroy. No prior row is evidence of a fresh VM; confirm
-      // destruction here, after onboard returned, before any provision step.
-      if (
-        !(await this.currentUidLedger().then(
-          () => true,
-          () => false,
-        ))
-      ) {
-        if (
-          !(await this.automaticContainerLoss("provisioning VM reset", async () => {
-            this.swapIncarnation();
-            await this.destroyConfirmed();
-          }))
-        )
-          throw new StepError("provision", "workspace-preservation: automatic VM reset deferred");
-      }
-      const record = await this.registry().getRecord(resource);
-      if (!record) throw new StepError("registry", "registry record missing (offboarded mid-onboard?)");
-      const slug = resource.slice("repo:".length);
-      const stepBudget = record.provisioningTimeoutMs;
-
-      // A mint failure is command-level — fall back to an anonymous
-      // clone (works for public repos); a private repo then fails AT CLONE
-      // with the real, named signal.
-      let token: string | null = null;
-      if (githubAppConfigured(this.env)) {
-        try {
-          token = (await mintRepoScopedToken(this.env, slug)).token;
-        } catch (err) {
-          console.log(
-            `provisioning ${resource}: token mint failed (command-level), trying anonymous clone: ${errMsg(err)}`,
-          );
-        }
-      }
-
-      // A restore an earlier hydrate gave up on may still be writing into these
-      // directories (the SDK call cannot be cancelled, and a rebuild is
-      // exactly what follows a restore that went `down`). The hydrate path
-      // waits for `pendingRestores` before its clean; provisioning must too, or
-      // the clone races a writer. Bounded like the hydrate's wait; a stream
-      // that will not settle even then fails the provision with the wait
-      // named, never a clone over a moving target.
-      if (this.pendingRestores.size > 0) {
-        const n = this.pendingRestores.size;
-        await withTimeout(
-          Promise.allSettled([...this.pendingRestores]),
-          RESTORE_MAX_MS,
-          `${n} earlier restore(s) still running before the clean`,
-        ).catch((err) => {
-          throw new StepError("await-restores", errMsg(err));
-        });
-      }
-      await this.runOk(["sh", "-c", unmountAllRestoresScript()], "unmount-restores");
-      await this.runOk(
-        ["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, STAGING_CHECKOUT_DIR, RETIRED_CHECKOUT_DIR, ...DISK_MARKERS],
-        "clean-workspace",
-      );
-      await this.ensureGitSetup();
-      await this.withMirrorLock(() =>
-        this.gitWithCred(
-          token,
-          ["clone", "--mirror", `https://github.com/${slug}.git`, MIRROR_DIR],
-          "clone",
-          stepBudget,
-        ),
-      );
-      await this.ensureGitSetup(); // the clone just created MIRROR_DIR — lock its perms down
-
-      // Resolve the default branch: the configured ref when it exists, else
-      // the mirror's HEAD (what GitHub reports as the default branch).
-      let ref = record.defaultRef;
-      if (!(await this.refExists(ref))) {
-        ref = (
-          await this.runOk(["git", "-C", MIRROR_DIR, "symbolic-ref", "--short", "HEAD"], "detect-default-branch")
-        ).trim();
-        if (!(await this.refExists(ref))) {
-          throw new StepError(
-            "detect-default-branch",
-            `neither configured ref "${record.defaultRef}" nor detected HEAD "${ref}" exists in the mirror`,
-          );
-        }
-      }
-      const sha = await this.readMirrorSha(ref);
-      const lockfileHash = await this.lockfileKey(sha);
-
-      await this.runOk(["git", "clone", "--branch", ref, MIRROR_DIR, CHECKOUT_DIR], "checkout-clone", {
-        timeoutMs: stepBudget,
-      });
-      await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
-
-      // Deps into the store (item 59), the checkout a hardlink view of the
-      // entry; then the build, unprivileged and token-free. The
-      // install budget is at least the refresh's: a provisioning budget below
-      // a real install time just fails the onboarding.
-      if (record.commands.install) {
-        const { entry } = await this.installDeps({
-          key: lockfileHash,
-          sha,
-          installCmd: record.commands.install,
-          budgetMs: Math.max(stepBudget, REFRESH_INSTALL_TIMEOUT_MS),
-        });
-        await this.linkDepsView(`${entry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
-      }
-      await this.buildUserRun(record.commands.build, "build", stepBudget);
-
-      // Provisioning is the only writer while `onboarding`, so the step cannot
-      // be superseded; a record already at the stamp (a re-fired schedule) is
-      // reused.
-      const snapped = await this.snapshot({ resource, stamp: { ref, sha, lockfileHash } });
-      if (!snapped.done && snapped.superseded) throw new StepError("snapshot", "superseded by a concurrent writer");
-      const snap = snapped.record;
-
-      // The deadline may have fired mid-provision (down + slot released);
-      // never flip a non-onboarding resident to warm from here.
-      if ((await this.ctx.storage.get<ResidentState>(STATE_KEY)) !== "onboarding") {
-        await this.deleteBackupObjects([snap.mirror.id, snap.checkout.id]).catch(() => {});
-        return;
-      }
-      const now = new Date(systemClock()).toISOString();
-      const facts: RepoFacts = { defaultRef: ref, sha, lockfileHash, provisionedAt: now, lastRefreshAt: now };
-      await this.ctx.storage.put({ [FACTS_KEY]: facts, [SNAPSHOT_KEY]: snap });
-      await this.writeDiskMarkers({ ready: sha, depsKey: lockfileHash, builtSha: sha });
-      this.deleteSchedules(PROVISIONING_CALLBACK);
-      await this.setResidentState("warm");
-      // A fresh provision runs on the image the deployed Worker pins, so it IS
-      // the cycle a held drain waits for (issue 2044): report it — a rebuild
-      // mid-drain reopens the fleet instead of leaving the hold standing on a
-      // report `reconcileImage` would never send for a container it never saw
-      // as stale. The marker is cleared with the report; a failure keeps both
-      // for the next reconcile, and the hold's cycle bound is the backstop.
-      await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource: await this.residentIdentity() });
-      await this.reportPendingImageCurrent("provision");
-      // The first refresh instance is the cron's: the row now reads `warm`
-      // with no instance recorded, so the next firing creates it (item 9).
-    } catch (err) {
+    return this.withSharedNativeOperation("provisioning", async () => {
       if ((await this.ctx.storage.get<ResidentState>(STATE_KEY)) !== "onboarding") return;
-      this.deleteSchedules(PROVISIONING_CALLBACK);
-      const reason =
-        err instanceof StepError
-          ? `provision-failed at ${err.step}: ${err.message}`
-          : `provision-failed: ${errMsg(err)}`;
-      await this.setResidentState("down", reason);
-    }
+      try {
+        // An older image could have deleted every DO key after a failed
+        // offboard destroy. No prior row is evidence of a fresh VM; confirm
+        // destruction here, after onboard returned, before any provision step.
+        if (
+          !(await this.currentUidLedger().then(
+            () => true,
+            () => false,
+          ))
+        ) {
+          if (
+            !(await this.automaticContainerLoss("provisioning VM reset", async () => {
+              this.swapIncarnation();
+              await this.destroyConfirmed();
+            }))
+          )
+            throw new StepError("provision", "workspace-preservation: automatic VM reset deferred");
+        }
+        const record = await this.registry().getRecord(resource);
+        if (!record) throw new StepError("registry", "registry record missing (offboarded mid-onboard?)");
+        const slug = resource.slice("repo:".length);
+        const stepBudget = record.provisioningTimeoutMs;
+
+        // A mint failure is command-level — fall back to an anonymous
+        // clone (works for public repos); a private repo then fails AT CLONE
+        // with the real, named signal.
+        let token: string | null = null;
+        if (githubAppConfigured(this.env)) {
+          try {
+            token = (await mintRepoScopedToken(this.env, slug)).token;
+          } catch (err) {
+            console.log(
+              `provisioning ${resource}: token mint failed (command-level), trying anonymous clone: ${errMsg(err)}`,
+            );
+          }
+        }
+
+        // Join original work still running in this incarnation before cleanup.
+        // The mutation reservation also protects against retained restore
+        // intent after a reset; promise-set absence proves no ending.
+        if (this.pendingRestores.size > 0) {
+          const n = this.pendingRestores.size;
+          await withTimeout(
+            Promise.allSettled([...this.pendingRestores]),
+            RESTORE_MAX_MS,
+            `${n} earlier restore(s) still running before the clean`,
+          ).catch((err) => {
+            throw new StepError("await-restores", errMsg(err));
+          });
+        }
+
+        await this.runOk(
+          ["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, STAGING_CHECKOUT_DIR, RETIRED_CHECKOUT_DIR, ...DISK_MARKERS],
+          "clean-workspace",
+          { workspacePaths: [MIRROR_DIR, CHECKOUT_DIR, STAGING_CHECKOUT_DIR, RETIRED_CHECKOUT_DIR] },
+        );
+        await this.ensureGitSetup();
+        await this.withMirrorLock(() =>
+          this.gitWithCred(
+            token,
+            ["clone", "--mirror", `https://github.com/${slug}.git`, MIRROR_DIR],
+            "clone",
+            stepBudget,
+          ),
+        );
+        await this.ensureGitSetup(); // the clone just created MIRROR_DIR — lock its perms down
+
+        // Resolve the default branch: the configured ref when it exists, else
+        // the mirror's HEAD (what GitHub reports as the default branch).
+        let ref = record.defaultRef;
+        if (!(await this.refExists(ref))) {
+          ref = (
+            await this.runOk(["git", "-C", MIRROR_DIR, "symbolic-ref", "--short", "HEAD"], "detect-default-branch")
+          ).trim();
+          if (!(await this.refExists(ref))) {
+            throw new StepError(
+              "detect-default-branch",
+              `neither configured ref "${record.defaultRef}" nor detected HEAD "${ref}" exists in the mirror`,
+            );
+          }
+        }
+        const sha = await this.readMirrorSha(ref);
+        const lockfileHash = await this.lockfileKey(sha);
+
+        await this.runOk(["git", "clone", "--branch", ref, MIRROR_DIR, CHECKOUT_DIR], "checkout-clone", {
+          timeoutMs: stepBudget,
+        });
+        await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
+
+        // Deps into the store (item 59), the checkout a hardlink view of the
+        // entry; then the build, unprivileged and token-free. The
+        // install budget is at least the refresh's: a provisioning budget below
+        // a real install time just fails the onboarding.
+        if (record.commands.install) {
+          const { entry } = await this.installDeps({
+            key: lockfileHash,
+            sha,
+            installCmd: record.commands.install,
+            budgetMs: Math.max(stepBudget, REFRESH_INSTALL_TIMEOUT_MS),
+          });
+          await this.linkDepsView(`${entry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
+        }
+        await this.buildUserRun(record.commands.build, "build", stepBudget);
+
+        // Provisioning is the only writer while `onboarding`, so the step cannot
+        // be superseded; a record already at the stamp (a re-fired schedule) is
+        // reused.
+        const snapped = await this.snapshot({ resource, stamp: { ref, sha, lockfileHash } });
+        if (!snapped.done && snapped.superseded) throw new StepError("snapshot", "superseded by a concurrent writer");
+        const snap = snapped.record;
+
+        // The deadline may have fired mid-provision (down + slot released);
+        // never flip a non-onboarding resident to warm from here.
+        if ((await this.ctx.storage.get<ResidentState>(STATE_KEY)) !== "onboarding") {
+          await this.deleteBackupObjects([snap.mirror.id, snap.checkout.id]).catch(() => {});
+          return;
+        }
+        const now = new Date(systemClock()).toISOString();
+        const facts: RepoFacts = { defaultRef: ref, sha, lockfileHash, provisionedAt: now, lastRefreshAt: now };
+        await this.ctx.storage.put({ [FACTS_KEY]: facts, [SNAPSHOT_KEY]: snap });
+        await this.writeDiskMarkers({ ready: sha, depsKey: lockfileHash, builtSha: sha });
+        this.deleteSchedules(PROVISIONING_CALLBACK);
+        await this.setResidentState("warm");
+        // A fresh provision runs on the image the deployed Worker pins, so it IS
+        // the cycle a held drain waits for (issue 2044): report it — a rebuild
+        // mid-drain reopens the fleet instead of leaving the hold standing on a
+        // report `reconcileImage` would never send for a container it never saw
+        // as stale. The marker is cleared with the report; a failure keeps both
+        // for the next reconcile, and the hold's cycle bound is the backstop.
+        await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource: await this.residentIdentity() });
+        await this.reportPendingImageCurrent("provision");
+        // The first refresh instance is the cron's: the row now reads `warm`
+        // with no instance recorded, so the next firing creates it (item 9).
+      } catch (err) {
+        if ((await this.ctx.storage.get<ResidentState>(STATE_KEY)) !== "onboarding") return;
+        this.deleteSchedules(PROVISIONING_CALLBACK);
+        const reason =
+          err instanceof StepError
+            ? `provision-failed at ${err.step}: ${err.message}`
+            : `provision-failed: ${errMsg(err)}`;
+        await this.setResidentState("down", reason);
+      }
+    });
   }
 
   /** Fail-closed deadline (armed at onboard): a resident still `onboarding`
@@ -5397,7 +5533,7 @@ export class ResidentDO extends Sandbox<Env> {
     // with the isolate that started it.
     const holder = this.nextHolder();
     const p = this.recordInFlight("hydration", holder, STALE_MIDFLIGHT_MS, "restore")
-      .then(() => this.withSharedNativeOperation(() => this.doHydrate()))
+      .then(() => this.withSharedNativeOperation("hydration", () => this.doHydrate()))
       .then(() => {
         this.hydratedVerdictAt = systemClock();
       })
@@ -6368,12 +6504,25 @@ export class ResidentDO extends Sandbox<Env> {
     const startedAt = systemClock();
     const trace = createStepTrace(startedAt);
     const registry = this.registry();
+    const operationOwner = `op:${crypto.randomUUID()}`;
+    const requestContext: NativeRequestContext = {
+      sourceId: step,
+      callId: crypto.randomUUID(),
+      actor: "system",
+      traceId: null,
+      parentSourceId: instance,
+    };
     const admission = await beginTrackedDeployAdmission(registry, {
       kind: "refresh-step",
       component: "workflow",
       sourceId: instance,
       build: BUILD_ID,
       workerVersion: workerVersionId(this.env),
+      producer: "refresh-step",
+      actor: "system",
+      callId: requestContext.callId,
+      parentSourceId: step,
+      resource: await this.ctx.storage.get(RESOURCE_KEY),
     });
     if (!admission) {
       await this.yieldCycle(instance);
@@ -6388,23 +6537,16 @@ export class ResidentDO extends Sandbox<Env> {
     };
     let outcome = "done";
     try {
-      await this.ctx.storage
-        .get(RESOURCE_KEY)
-        .then((resource) => registry.recordDeployAdmissionResource(admission.id, resource))
-        .catch(() =>
-          emitDeployAdmission({
-            phase: "origin-unverified",
-            id: admission.id,
-            observedAt: systemClock(),
-            failure: "storage-or-rpc",
-          }),
-        );
-      if (await this.recreateAdmission.blocked()) {
-        outcome = "stopped (recreate-in-progress)";
-        await this.clearInstanceLease(instance);
-        return { status: "stopped", why: "recreate-in-progress", startedAt, trace: trace.steps() };
-      }
-      const result = await this.stepTrace.run(trace, () => fn({ count }));
+      const result = await this.withOpNativeOperation(
+        operationOwner,
+        async () => {
+          if (await this.recreateAdmission.blocked())
+            return { status: "stopped" as const, why: "recreate-in-progress" };
+          return this.stepTrace.run(trace, () => fn({ count }));
+        },
+        "refresh-step",
+        requestContext,
+      );
       if (result.status !== "done") {
         outcome = result.status === "stopped" ? `stopped (${result.why})` : `failed (${result.reason})`;
         await this.clearInstanceLease(instance);
@@ -6471,7 +6613,17 @@ export class ResidentDO extends Sandbox<Env> {
       await this.recordInstanceStep(instance, step, outcome).catch((err) =>
         console.log(`refresh instance ${instance}: recording ${step} failed: ${errMsg(err)}`),
       );
-      await endTrackedDeployAdmission(registry, admission);
+      const ended = await new NativeOperationJournal(this.ctx.storage)
+        .operatorEnded(`native-operation:${operationOwner}`, { opOwner: operationOwner }, requestContext.callId)
+        .catch(() => false);
+      if (ended) await endTrackedDeployAdmission(registry, admission);
+      else
+        emitDeployAdmission({
+          phase: "permit-release",
+          id: admission.id,
+          commit: "held",
+          failure: "operator-ending-unverified",
+        });
     }
   }
 
@@ -7615,7 +7767,7 @@ export class ResidentDO extends Sandbox<Env> {
     const body = capBytes
       ? capWrappedCommand(worktreePath, command, capBytes, capFiles)
       : `cd ${worktreePath} && ${command}`;
-    const owned = this.threadOperationScope?.getStore();
+    const owned = this.threadOperationScope?.getStore() ?? this.opOperationScope?.getStore();
     return this.run(owned ? ["/bin/bash", "-c", body] : ["su", "-s", "/bin/bash", user, "-c", body], {
       timeoutMs,
       env: injected,
@@ -8064,6 +8216,20 @@ export class ResidentDO extends Sandbox<Env> {
       }),
     );
     for (const [key, owner] of native) {
+      const requestScope = this.opOperationScope?.getStore();
+      const operation = owner as { origin?: unknown; native?: { scope?: unknown } };
+      if (
+        requestScope?.active &&
+        !requestScope.allocated &&
+        key === requestScope.key &&
+        owner.opOwner === requestScope.owner &&
+        JSON.stringify(operation.origin) === JSON.stringify(requestScope.origin) &&
+        operation.native?.scope === undefined &&
+        unstartedNativeOperator(owner, requestScope.owner) &&
+        !this.workloadReservations.has(requestScope.owner) &&
+        ![...this.opUsersInUse.values()].includes(requestScope.owner)
+      )
+        continue;
       const end = validRunOwner(owner?.runId, owner?.ownerGen, owner?.ownerFence)
         ? key.lastIndexOf(`:${owner.runId}:`)
         : -1;
@@ -8594,6 +8760,7 @@ export class ResidentDO extends Sandbox<Env> {
     ownerGen?: string,
     ownerFence?: number,
     nativeBirth = false,
+    requestContext?: NativeRequestContext,
   ): Promise<AttachOk | ThreadErr> {
     // One step trace per attach (docs/reference/specs/tracing.md item 19): every command
     // the attach runs lands on it, and the answer carries it.
@@ -8618,6 +8785,7 @@ export class ResidentDO extends Sandbox<Env> {
           ownerGen,
           ownerFence,
           nativeBirth,
+          requestContext,
         ),
       );
     } finally {
@@ -8647,9 +8815,10 @@ export class ResidentDO extends Sandbox<Env> {
     ownerGen?: string,
     ownerFence?: number,
     nativeBirth = false,
+    requestContext?: NativeRequestContext,
   ): Promise<AttachOk | ThreadErr> {
     try {
-      return await this.withDeployAdmission(() =>
+      return await this.withDeployAdmission("attach", requestContext, () =>
         this.threadAttaches.run(threadKey, async () => {
           // The attachment fence takes precedence over every 503 gate. Keep the
           // same thread lock through the gates and registration write so a newer
@@ -9847,7 +10016,16 @@ export class ResidentDO extends Sandbox<Env> {
 
   private async ensureDepsStoreDir(): Promise<void> {
     if (this.depsStoreDirReady) return;
-    await this.runOk(["install", "-d", "-m", "755", "-o", "root", "-g", "root", DEPS_STORE_DIR], "deps-store-dir");
+    await this.runOk(
+      [
+        "/usr/bin/python3",
+        "-I",
+        "-c",
+        "import os,stat; p='/workspace/deps';\ntry: os.mkdir(p,0o755)\nexcept FileExistsError: pass\nf=os.open(p,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); s=os.fstat(f); assert s.st_uid==0 and not s.st_mode & 0o022 and 'system.posix_acl_access' not in os.listxattr(f), 'dependency parent ownership is unverified'; os.close(f)",
+      ],
+      "deps-store-dir",
+      { workspacePaths: [DEPS_STORE_DIR] },
+    );
     this.depsStoreDirReady = true;
   }
 
@@ -9897,20 +10075,23 @@ export class ResidentDO extends Sandbox<Env> {
     }
     await this.assertThreadOperationAllowed();
     // `restore` (item 61 PR B): the key's archive comes down into a scratch
-    // tree and commits like an install would. A restore that fails for any
-    // reason drops the record (an expired or missing archive would fail the
-    // same way next time) and falls through to the installer, which records
-    // a fresh backup — never a stranded key.
+    // tree and commits like an install would. Only a confirmed restore
+    // failure can fall through to installation. An unconfirmed SDK effect
+    // preserves its original target and durable producer claim.
     const restoreDeadlineMs = opts.restoreDeadlineMs ?? systemClock() + Math.min(budgetMs, RESTORE_MAX_MS);
-    const attempt = opts.attempt ?? crypto.randomUUID().slice(0, 8);
-    const p = this.withSharedNativeOperation(() =>
-      plan.action === "restore" && backupRecord
-        ? this.restoreDepsEntry(key, backupRecord, restoreDeadlineMs, attempt).catch(async (err) => {
-            console.log(`deps: restore of ${key.slice(0, 8)} failed — installing instead: ${errMsg(err)}`);
-            await this.dropDepsBackups([key]).catch(() => {});
-            return this.installDepsEntry(key, sha, installCmd, budgetMs, { ...opts, attempt });
-          })
-        : this.installDepsEntry(key, sha, installCmd, budgetMs, { ...opts, attempt }),
+    const attempt = opts.attempt ?? crypto.randomUUID();
+    const p = this.withSharedNativeOperation(
+      "deps-materialize",
+      () =>
+        plan.action === "restore" && backupRecord
+          ? this.restoreDepsEntry(key, backupRecord, restoreDeadlineMs, attempt).catch(async (err) => {
+              if (err instanceof OpaqueNativeOutcomeUnconfirmedError) throw err;
+              console.log(`deps: restore of ${key.slice(0, 8)} failed — installing instead: ${errMsg(err)}`);
+              await this.dropDepsBackups([key]).catch(() => {});
+              return this.installDepsEntry(key, sha, installCmd, budgetMs, { ...opts, attempt });
+            })
+          : this.installDepsEntry(key, sha, installCmd, budgetMs, { ...opts, attempt }),
+      key,
     ).finally(() => this.depsInFlight.delete(key));
     this.depsInFlight.set(key, p);
     const result = await p;
@@ -9931,50 +10112,61 @@ export class ResidentDO extends Sandbox<Env> {
    *  wake installs, as before. The key stays protected from eviction while
    *  the upload runs (`depsBackupsInFlight`). */
   private async backupDepsEntry(key: string): Promise<void> {
-    return this.withSharedNativeOperation(async () => {
-      if (this.depsBackupsInFlight.has(key) || (await this.depsBackupRecord(key))) return;
-      const transfer = backupTransferMode(this.env as unknown as Record<string, unknown>);
-      if (transfer.mode === "local") return;
-      this.depsBackupsInFlight.add(key);
-      const t0 = systemClock();
-      try {
-        const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
-        const backup = await withTimeout(
-          this.createBackup({
-            // The entry dir itself, not only its top-level node_modules: nested
-            // workspace node_modules are entry content too. The markers are
-            // excluded so a restore's own commit writes `.complete` LAST.
-            dir: depsEntryPath(key),
-            localBucket: transfer.localBucket,
-            ttl: DEPS_BACKUP_TTL_S,
-            name: `${resource} deps ${key.slice(0, 8)}`,
-            excludes: [...DEPS_ENTRY_BACKUP_EXCLUDES],
-          }),
-          R2_TRANSFER_TIMEOUT_MS,
-          "deps backup",
-        );
-        // The entry may have been evicted or replaced while the archive was
-        // taken (it is protected, but a rebuild wipes the disk): record only
-        // what still describes a complete entry.
-        if (!(await this.depsEntryComplete(key))) {
-          await this.deleteBackupObjects([backup.id]).catch(() => {});
-          return;
+    return this.withSharedNativeOperation(
+      "deps-backup",
+      async () => {
+        if (this.depsBackupsInFlight.has(key) || (await this.depsBackupRecord(key))) return;
+        const transfer = backupTransferMode(this.env as unknown as Record<string, unknown>);
+        if (transfer.mode === "local") return;
+        this.depsBackupsInFlight.add(key);
+        const t0 = systemClock();
+        try {
+          const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+          const backup = await withTimeout(
+            this.withOpaqueNativeEffect(
+              () =>
+                this.createBackup({
+                  // The entry dir itself, not only its top-level node_modules: nested
+                  // workspace node_modules are entry content too. The markers are
+                  // excluded so a restore's own commit writes `.complete` LAST.
+                  dir: depsEntryPath(key),
+                  localBucket: transfer.localBucket,
+                  ttl: DEPS_BACKUP_TTL_S,
+                  name: `${resource} deps ${key.slice(0, 8)}`,
+                  excludes: [...DEPS_ENTRY_BACKUP_EXCLUDES],
+                }),
+              (result) =>
+                typeof result?.id === "string" &&
+                result.id.length > 0 &&
+                typeof result.dir === "string" &&
+                result.dir === depsEntryPath(key),
+            ),
+            R2_TRANSFER_TIMEOUT_MS,
+            "deps backup",
+          );
+          // The entry may have been evicted or replaced while the archive was
+          // taken (it is protected, but a rebuild wipes the disk): record only
+          // what still describes a complete entry.
+          if (!(await this.depsEntryComplete(key))) {
+            await this.deleteBackupObjects([backup.id]).catch(() => {});
+            return;
+          }
+          const record: DepsBackupRecord = { key, backup, createdAt: new Date(systemClock()).toISOString() };
+          await this.ctx.storage.put(depsBackupStorageKey(key), record);
+          console.log(`deps: backed up ${key.slice(0, 8)} in ${systemClock() - t0}ms`);
+        } catch (err) {
+          console.log(`deps: backup of ${key.slice(0, 8)} failed: ${errMsg(err)}`);
+        } finally {
+          this.depsBackupsInFlight.delete(key);
         }
-        const record: DepsBackupRecord = { key, backup, createdAt: new Date(systemClock()).toISOString() };
-        await this.ctx.storage.put(depsBackupStorageKey(key), record);
-        console.log(`deps: backed up ${key.slice(0, 8)} in ${systemClock() - t0}ms`);
-      } catch (err) {
-        console.log(`deps: backup of ${key.slice(0, 8)} failed: ${errMsg(err)}`);
-      } finally {
-        this.depsBackupsInFlight.delete(key);
-      }
-    });
+      },
+      key,
+    );
   }
 
-  /** The `restore` backing of materializeDeps (item 61 PR B): download the
-   *  key's archive into a private scratch tree — the SDK extracts wherever
-   *  the handle's `dir` says, so the handle is re-pointed at the scratch —
-   *  judged by the bytes arriving like every restore (restoreWithProgress),
+  /** The `restore` backing of materializeDeps (item 61): install the archive
+   *  in its UUID scratch target through the fixed native restore operation,
+   *  judged by the bytes arriving (restoreWithProgress),
    *  then the same commit script an install ends with: staging, atomic
    *  rename, `.complete` LAST. A partial download never becomes an entry.
    *  `deadlineMs` is the caller's (see materializeDeps): never a fresh cap. */
@@ -10018,12 +10210,13 @@ export class ResidentDO extends Sandbox<Env> {
           }),
         ],
         "deps-restore-commit",
-        { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
+        { timeoutMs: GIT_NETWORK_TIMEOUT_MS, workspacePaths: [scratch, staging, depsEntryPath(key)] },
       );
       console.log(`deps: restored ${key.slice(0, 8)} from backup in ${systemClock() - t0}ms`);
       return depsEntryPath(key);
     } catch (err) {
-      await this.run(["rm", "-rf", scratch, staging]).catch(() => {});
+      if (err instanceof OpaqueNativeOutcomeUnconfirmedError) throw err;
+      await this.run(["rm", "-rf", scratch, staging], { workspacePaths: [scratch, staging] }).catch(() => {});
       throw err;
     }
   }
@@ -10101,8 +10294,9 @@ export class ResidentDO extends Sandbox<Env> {
       }
       // Unprivileged and token-free, in a tree only this attempt
       // knows — no stale sweep needed: nothing else can be running in it.
-      await this.runOk(["su", "-s", "/bin/bash", BUILD_USER, "-c", `cd ${scratch} && ${installCmd}`], "deps-install", {
+      await this.runOk(["/bin/bash", "-c", `cd ${scratch} && ${installCmd}`], "deps-install", {
         timeoutMs: budgetMs,
+        nativeUser: BUILD_USER,
       });
       // Owner write stripped before the entry becomes visible: every consumer
       // hardlinks these inodes, and worker1 (the checkout's build) owns them —
@@ -10135,13 +10329,13 @@ export class ResidentDO extends Sandbox<Env> {
           }),
         ],
         "deps-commit",
-        { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
+        { timeoutMs: GIT_NETWORK_TIMEOUT_MS, workspacePaths: [scratch, staging, depsEntryPath(key)] },
       );
       console.log(`deps: installed ${key.slice(0, 8)} in ${systemClock() - t0}ms`);
       this.ctx.waitUntil(this.backupDepsEntry(key));
       return depsEntryPath(key);
     } catch (err) {
-      await this.run(["rm", "-rf", scratch, staging]).catch(() => {});
+      await this.run(["rm", "-rf", scratch, staging], { workspacePaths: [scratch, staging] }).catch(() => {});
       throw err;
     } finally {
       this.releaseDepsInstallSlot();
@@ -10266,10 +10460,14 @@ export class ResidentDO extends Sandbox<Env> {
    *  checkout earlier are untouched. Under the mirror lock: the checkout
    *  mutates. A no-op when the entry is complete or the checkout has no deps. */
   private async ensureWarmDepsInStore(warmKey: string): Promise<void> {
-    return this.withSharedNativeOperation(async () => {
-      if (await this.depsEntryComplete(warmKey)) return;
-      await this.withMirrorLock(async () => this.adoptCheckoutDeps(warmKey), ATTACH_MUTEX_WAIT_MS);
-    });
+    return this.withSharedNativeOperation(
+      "deps-adopt",
+      async () => {
+        if (await this.depsEntryComplete(warmKey)) return;
+        await this.withMirrorLock(async () => this.adoptCheckoutDeps(warmKey), ATTACH_MUTEX_WAIT_MS);
+      },
+      warmKey,
+    );
   }
 
   private async adoptCheckoutDeps(warmKey: string): Promise<void> {
@@ -10291,7 +10489,7 @@ export class ResidentDO extends Sandbox<Env> {
         }),
       ],
       "deps-adopt",
-      { timeoutMs: GIT_NETWORK_TIMEOUT_MS },
+      { timeoutMs: GIT_NETWORK_TIMEOUT_MS, workspacePaths: [CHECKOUT_DIR, depsEntryPath(warmKey)] },
     );
     await this.linkDepsView(`${depsEntryPath(warmKey)}/node_modules`, CHECKOUT_DIR, BUILD_USER);
     this.ctx.waitUntil(this.backupDepsEntry(warmKey));
@@ -10316,7 +10514,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  them (item 61 PR B: a spare nothing references on disk is a spare nothing
    *  will wake into). Shared by the sweep and the attach's pressure path. */
   private async applyDepsEviction(plan: DepsEvictionPlan, listing: DepsStoreListing, who: string): Promise<void> {
-    await this.runOk(["rm", "-rf", ...plan.remove], "deps-evict", { timeoutMs: DU_TIMEOUT_MS });
+    await this.runOk(["rm", "-rf", ...plan.remove], "deps-evict", {
+      timeoutMs: DU_TIMEOUT_MS,
+      workspacePaths: [DEPS_STORE_DIR],
+    });
     console.log(
       `deps: ${who} evicted ${plan.remove.length} path(s) — ${plan.remove.map((p) => p.slice(DEPS_STORE_DIR.length + 1, DEPS_STORE_DIR.length + 9)).join(", ")}; kept ${plan.keep.map((k) => k.slice(0, 8)).join(", ")}`,
     );
@@ -10442,13 +10643,44 @@ export class ResidentDO extends Sandbox<Env> {
    *  thread operations until their final observation or removal settles. */
   private workspaceExclusiveOpsInFlight = new Set<string>();
 
-  private async withDeployAdmission<T>(fn: () => Promise<T>): Promise<T | ThreadErr> {
+  private async withDeployAdmission<T>(
+    producer: string,
+    requestContext: NativeRequestContext | undefined,
+    fn: () => Promise<T>,
+    endingOwner?: string,
+  ): Promise<T | ThreadErr> {
+    if (!endingOwner && !this.threadOperationScope.getStore() && !this.opOperationScope.getStore()) {
+      const owner = `op:${crypto.randomUUID()}`;
+      const context: NativeRequestContext = requestContext ?? {
+        callId: crypto.randomUUID(),
+        actor: "service",
+        traceId: null,
+        parentSourceId: null,
+      };
+      return this.withDeployAdmission(
+        producer,
+        { ...context, sourceId: producer },
+        () => this.withOpNativeOperation(owner, fn, "resident-call", { ...context, sourceId: producer }),
+        owner,
+      );
+    }
     const registry = this.registry();
     const id = await beginTrackedDeployAdmission(registry, {
       kind: "resident-call",
       component: "resident",
       build: BUILD_ID,
       workerVersion: workerVersionId(this.env),
+      resource: await this.ctx.storage.get(RESOURCE_KEY),
+      producer,
+      sourceId:
+        endingOwner ??
+        this.threadOperationScope.getStore()?.owner.runId ??
+        this.opOperationScope.getStore()?.owner ??
+        producer,
+      actor: requestContext?.actor ?? (endingOwner ? "system" : "service"),
+      callId: requestContext?.callId ?? crypto.randomUUID(),
+      traceId: requestContext?.traceId,
+      parentSourceId: requestContext?.parentSourceId,
     });
     if (!id)
       return {
@@ -10472,10 +10704,32 @@ export class ResidentDO extends Sandbox<Env> {
         );
       return await fn();
     } finally {
-      await endTrackedDeployAdmission(registry, id).catch(() => {
-        // The helper reports unverified cleanup. Retained permits still block deployment;
-        // preserve the original work result or error for the caller and check recorder.
-      });
+      let endingReadFailure: { error: unknown } | undefined;
+      const ended =
+        !endingOwner ||
+        (await new NativeOperationJournal(this.ctx.storage)
+          .operatorEnded(`native-operation:${endingOwner}`, { opOwner: endingOwner })
+          .catch((error) => {
+            endingReadFailure = { error };
+            return false;
+          }));
+      if (!ended)
+        emitDeployAdmission(
+          {
+            phase: "permit-release",
+            id: id.id,
+            opOwner: endingOwner,
+            commit: "held",
+            failure: "operator-ending-unverified",
+            reason: endingReadFailure ? "ending-read-failed" : "ending-not-observed",
+          },
+          endingReadFailure,
+        );
+      else
+        await endTrackedDeployAdmission(registry, id).catch(() => {
+          // The helper reports unverified cleanup. Retained permits still block deployment;
+          // preserve the original work result or error for the caller and check recorder.
+        });
     }
   }
 
@@ -10505,7 +10759,7 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Admit before native work; only a known completion or no-start result settles it.
    * An unknown outcome deliberately keeps the enclosing durable operation held. */
-  private async beginThreadNativeOperation(kind: "process" | "opaque" = "opaque") {
+  private async beginThreadNativeOperation(kind: "process" | "opaque" = "opaque", mutationPaths?: readonly string[]) {
     await this.assertThreadOperationAllowed();
     const thread = this.threadOperationScope?.getStore();
     const scope = thread ?? this.opOperationScope?.getStore();
@@ -10515,7 +10769,7 @@ export class ResidentDO extends Sandbox<Env> {
     };
     if (scope && !scope.active) ended();
     const journal = new NativeOperationJournal(this.ctx.storage);
-    let nativeScope: NativeScopeRef | undefined;
+    let nativeScope: NativeExecutionScopeRef | undefined;
     const nativeScopes = new NativeRunScopes(this.ctx.storage, {
       request: (value, timeout) => this.nativeScopeTransport().request(value, timeout),
     });
@@ -10527,8 +10781,20 @@ export class ResidentDO extends Sandbox<Env> {
         this.assertThreadOperationAllowed(),
       );
       await journal.bindScope(thread.key, nativeScope);
+    } else if (!thread && scope && "origin" in scope) {
+      await nativeScopes.reserveOperator({ opOwner: scope.owner });
+      if (!this.ctx.container?.running) await this.start();
+      const allowed = async () => {
+        if (!scope.active) ended();
+        if (this.destroying || (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)))
+          throw new Error("operator runtime unavailable");
+      };
+      nativeScope = await nativeScopes.ensureOperator({ opOwner: scope.owner }, allowed);
+      await journal.bindScope(scope.key, nativeScope);
     }
-    const id = scope ? await journal.begin(scope.key, kind) : null;
+    if (mutationPaths && (!scope || !nativeScope))
+      throw new Error("workspace mutation requires its original native scope");
+    const id = scope ? await journal.begin(scope.key, kind, mutationPaths) : null;
     // Admission itself awaited storage. A scope which closed in that interval
     // must settle its never-submitted attempt instead of launching after closure.
     if (scope && !scope.active) {
@@ -10544,6 +10810,7 @@ export class ResidentDO extends Sandbox<Env> {
     let settled = false;
     return {
       scope: nativeScope,
+      key: scope?.key,
       id,
       launched: async (process: { status(): Promise<unknown> }) => {
         if (!scope || !id) return;
@@ -10615,10 +10882,69 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Shared VM hydration and cache work has its own durable owner. A cancelled
    * consumer cannot stop maintenance that still serves other worktrees. */
-  private withSharedNativeOperation<T>(fn: () => Promise<T>): Promise<T> {
-    return this.threadOperationScope.run(undefined, () =>
-      this.opOperationScope.run(undefined, () => this.withOpNativeOperation(`op:${crypto.randomUUID()}`, fn)),
+  private async withSharedNativeOperation<T>(
+    producer: NativeOperationProducer,
+    fn: () => Promise<T>,
+    sourceId: string = producer,
+  ): Promise<T> {
+    const owner = `op:${crypto.randomUUID()}`;
+    const requestContext: NativeRequestContext = {
+      sourceId,
+      callId: crypto.randomUUID(),
+      actor: "system",
+      traceId: this.opOperationScope.getStore()?.origin.traceId ?? null,
+      parentSourceId:
+        this.threadOperationScope.getStore()?.owner.runId ?? this.opOperationScope.getStore()?.owner ?? null,
+    };
+    const answer = await this.threadOperationScope.run(undefined, () =>
+      this.opOperationScope.run(undefined, () =>
+        this.withDeployAdmission(
+          producer,
+          requestContext,
+          async () => ({ value: await this.withOpNativeOperation(owner, fn, producer, requestContext) }),
+          owner,
+        ),
+      ),
     );
+    if ("error" in answer) throw new Error(answer.error);
+    return answer.value;
+  }
+
+  private async operationOrigin(
+    producer: NativeOperationProducer,
+    sourceId: string,
+    requestContext?: NativeRequestContext,
+  ): Promise<NativeOperationOrigin> {
+    return nativeOperationOriginSchema.parse({
+      producer,
+      resource: await this.ctx.storage.get(RESOURCE_KEY),
+      callId: requestContext?.callId ?? crypto.randomUUID(),
+      sourceId: requestContext?.sourceId ?? sourceId,
+      actor: requestContext?.actor ?? (producer.startsWith("op-") ? "service" : "system"),
+      traceId: requestContext?.traceId ?? null,
+      parentSourceId:
+        requestContext?.parentSourceId ??
+        this.threadOperationScope.getStore()?.owner.runId ??
+        this.opOperationScope.getStore()?.owner ??
+        null,
+      build: BUILD_ID,
+      workerVersion: workerVersionId(this.env),
+      startedAt: systemClock(),
+    });
+  }
+
+  private async withOpaqueNativeEffect<T>(fn: () => Promise<T>, acknowledged: (result: T) => boolean): Promise<T> {
+    const attempt = await this.beginThreadNativeOperation("opaque");
+    let result: T;
+    try {
+      result = await fn();
+    } catch (cause) {
+      throw new OpaqueNativeOutcomeUnconfirmedError("original SDK outcome is unconfirmed", { cause });
+    }
+    if (!acknowledged(result))
+      throw new OpaqueNativeOutcomeUnconfirmedError("original SDK acknowledgement is unconfirmed");
+    await attempt.settle();
+    return result;
   }
 
   private nativeScopeTransport() {
@@ -10686,6 +11012,8 @@ export class ResidentDO extends Sandbox<Env> {
     fn: () => Promise<T>,
     requestOwner?: WorkspaceOwner | null,
     nativeKey?: string,
+    requestContext?: NativeRequestContext,
+    purpose = "thread-work",
   ): Promise<T | ThreadErr> {
     if (this.workspaceExclusiveOpsInFlight.has(threadKey))
       return { error: "workspace is busy", status: 409, reason: "busy", cause: "system" };
@@ -10693,7 +11021,7 @@ export class ResidentDO extends Sandbox<Env> {
     // waiting for deploy admission, storage, preflight or native launch too.
     this.threadOpsInFlight.set(threadKey, (this.threadOpsInFlight.get(threadKey) ?? 0) + 1);
     try {
-      return await this.withDeployAdmission(async () => {
+      return await this.withDeployAdmission(purpose, requestContext, async () => {
         const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
         const last =
           registration ?? (await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey)))?.lastRunOwner;
@@ -10798,6 +11126,7 @@ export class ResidentDO extends Sandbox<Env> {
     env?: Record<string, string>,
     requestOwner: WorkspaceOwner | null = null,
     checkOperation?: CheckOperation,
+    requestContext?: NativeRequestContext,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
     const queuedAt = systemClock();
     let startedAt = queuedAt;
@@ -10811,6 +11140,8 @@ export class ResidentDO extends Sandbox<Env> {
         },
         requestOwner,
         nativeKey,
+        requestContext,
+        "exec",
       );
       if ("error" in answer) refusal = answer;
       return answer;
@@ -10856,7 +11187,10 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Observe the original terminal workspace under its existing exclusion.
    * The ordinary release guard judges the measured tree; this method never releases it. */
-  async inspectThreadPreservation(input: unknown): Promise<
+  async inspectThreadPreservation(
+    input: unknown,
+    requestContext?: NativeRequestContext,
+  ): Promise<
     | { kind: "unknown"; reason: string }
     | {
         kind: "observed";
@@ -10878,7 +11212,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (!parsed.success || typeof runId !== "string" || !runId || runId.length > 512) return unknown("invalid-input");
     const { threadKey, ref, head } = parsed.data;
     try {
-      const inspection = await this.withDeployAdmission(() =>
+      const inspection = await this.withDeployAdmission("inspect-preservation", requestContext, () =>
         this.threadAttaches.run(threadKey, async () => {
           if (
             this.destroying ||
@@ -10959,77 +11293,84 @@ export class ResidentDO extends Sandbox<Env> {
             !["completed", "failed", "interrupted", "stopped_soft", "stopped_hard"].includes(record.status ?? "")
           )
             return unknown("owner-unverified");
-          return this.withThreadBusy(threadKey, async () => {
-            if ((this.threadOpsInFlight.get(threadKey) ?? 0) !== 1) return unknown("workspace-busy");
-            this.workspaceExclusiveOpsInFlight.add(threadKey);
-            try {
-              if (this.ctx.container?.running !== true) return unknown("runtime-unavailable");
-              const path = shellQuote(binding.worktreePath);
-              const command = [
-                'printf "container=%s\\n" "$(/bin/cat /proc/sys/kernel/random/boot_id)"',
-                `test -d ${path} && test ! -L ${path} || exit 1`,
-                `test "$(/usr/bin/stat -c %u ${path})" = "$(/usr/bin/id -u ${shellQuote(binding.user)})" || exit 1`,
-                `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
-                'test "$?" = 1 || exit 1',
-                privateTreeObservationScript(binding.worktreePath, binding.user, true),
-                'code=$?; test "$code" = 0 || exit "$code"',
-                `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
-                'test "$?" = 1 || exit 1',
-              ].join("\n");
-              const process = await this.ctx.container.exec([
-                "/usr/bin/env",
-                "-i",
-                "PATH=/usr/local/bin:/usr/bin:/bin",
-                "/usr/bin/timeout",
-                "-s",
-                "KILL",
-                String(CREDENTIAL_INSPECTION_MAX_MS / SECOND_MS),
-                "/bin/sh",
-                "-c",
-                command,
-              ]);
-              const tree = await collectPrivateTreeObservation(process, binding.container!);
-              if (!tree || tree.branch !== ref || tree.head !== head) return unknown("private-tree-unverified");
-              const unchanged = async () =>
-                this.ctx.container?.running === true &&
-                JSON.stringify(await this.ctx.storage.get(threadBindingKey(threadKey))) === JSON.stringify(binding) &&
-                JSON.stringify(await this.ctx.storage.get(runRegKey(threadKey))) === JSON.stringify(registration) &&
-                JSON.stringify(await this.ctx.storage.get(runFenceKey(threadKey))) === JSON.stringify(fence) &&
-                (this.threadOpsInFlight.get(threadKey) ?? 0) === 1 &&
-                (await soleClaimant()) &&
-                (this.containerIdMemo === undefined || this.containerIdMemo === binding.container);
-              if (!(await unchanged())) return unknown("observation-changed");
-              const decision = await this.workspaceRemovalDecision(binding, true, false, {
-                tree,
-                container: binding.container!,
-              });
-              if (!(await unchanged())) return unknown("observation-changed");
-              return {
-                kind: "observed" as const,
-                binding: {
-                  threadKey,
-                  ref,
-                  sha: binding.sha,
-                  user: binding.user,
-                  worktreePath: binding.worktreePath,
-                  container: binding.container,
-                },
-                owner,
-                fence: owner,
-                ownerStatus: record.status!,
-                ownerEvidence: {
-                  kind: answer!.kind === "acknowledged" ? ("acknowledged" as const) : ("terminal" as const),
-                  revision: answer!.kind === "acknowledged" ? saved!.revision : null,
-                },
-                soleClaimant: true as const,
-                uidProcesses: 0 as const,
-                tree,
-                decision,
-              };
-            } finally {
-              this.workspaceExclusiveOpsInFlight.delete(threadKey);
-            }
-          });
+          return this.withThreadBusy(
+            threadKey,
+            async () => {
+              if ((this.threadOpsInFlight.get(threadKey) ?? 0) !== 1) return unknown("workspace-busy");
+              this.workspaceExclusiveOpsInFlight.add(threadKey);
+              try {
+                if (this.ctx.container?.running !== true) return unknown("runtime-unavailable");
+                const path = shellQuote(binding.worktreePath);
+                const command = [
+                  'printf "container=%s\\n" "$(/bin/cat /proc/sys/kernel/random/boot_id)"',
+                  `test -d ${path} && test ! -L ${path} || exit 1`,
+                  `test "$(/usr/bin/stat -c %u ${path})" = "$(/usr/bin/id -u ${shellQuote(binding.user)})" || exit 1`,
+                  `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
+                  'test "$?" = 1 || exit 1',
+                  privateTreeObservationScript(binding.worktreePath, binding.user, true),
+                  'code=$?; test "$code" = 0 || exit "$code"',
+                  `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
+                  'test "$?" = 1 || exit 1',
+                ].join("\n");
+                const process = await this.ctx.container.exec([
+                  "/usr/bin/env",
+                  "-i",
+                  "PATH=/usr/local/bin:/usr/bin:/bin",
+                  "/usr/bin/timeout",
+                  "-s",
+                  "KILL",
+                  String(CREDENTIAL_INSPECTION_MAX_MS / SECOND_MS),
+                  "/bin/sh",
+                  "-c",
+                  command,
+                ]);
+                const tree = await collectPrivateTreeObservation(process, binding.container!);
+                if (!tree || tree.branch !== ref || tree.head !== head) return unknown("private-tree-unverified");
+                const unchanged = async () =>
+                  this.ctx.container?.running === true &&
+                  JSON.stringify(await this.ctx.storage.get(threadBindingKey(threadKey))) === JSON.stringify(binding) &&
+                  JSON.stringify(await this.ctx.storage.get(runRegKey(threadKey))) === JSON.stringify(registration) &&
+                  JSON.stringify(await this.ctx.storage.get(runFenceKey(threadKey))) === JSON.stringify(fence) &&
+                  (this.threadOpsInFlight.get(threadKey) ?? 0) === 1 &&
+                  (await soleClaimant()) &&
+                  (this.containerIdMemo === undefined || this.containerIdMemo === binding.container);
+                if (!(await unchanged())) return unknown("observation-changed");
+                const decision = await this.workspaceRemovalDecision(binding, true, false, {
+                  tree,
+                  container: binding.container!,
+                });
+                if (!(await unchanged())) return unknown("observation-changed");
+                return {
+                  kind: "observed" as const,
+                  binding: {
+                    threadKey,
+                    ref,
+                    sha: binding.sha,
+                    user: binding.user,
+                    worktreePath: binding.worktreePath,
+                    container: binding.container,
+                  },
+                  owner,
+                  fence: owner,
+                  ownerStatus: record.status!,
+                  ownerEvidence: {
+                    kind: answer!.kind === "acknowledged" ? ("acknowledged" as const) : ("terminal" as const),
+                    revision: answer!.kind === "acknowledged" ? saved!.revision : null,
+                  },
+                  soleClaimant: true as const,
+                  uidProcesses: 0 as const,
+                  tree,
+                  decision,
+                };
+              } finally {
+                this.workspaceExclusiveOpsInFlight.delete(threadKey);
+              }
+            },
+            undefined,
+            undefined,
+            requestContext,
+            "inspect-preservation",
+          );
         }),
       );
       return "error" in inspection ? unknown("deploy-admission-unavailable") : inspection;
@@ -11041,13 +11382,14 @@ export class ResidentDO extends Sandbox<Env> {
   /** Inspect an existing terminal owner's tree without waking, reattaching or repairing it. */
   async inspectThreadDependencies(
     input: unknown,
+    requestContext?: NativeRequestContext,
   ): Promise<{ result: DependencyInspection; owner?: { runId: string; ownerGen: string; ownerFence: number } }> {
     const unknown = (): { result: DependencyInspection } => ({ result: { kind: "unknown" } });
     const parsed = dependencyInspectionInputSchema.safeParse(input);
     if (!parsed.success) return unknown();
     const { threadKey, ref, head } = parsed.data;
     try {
-      const inspection = await this.withDeployAdmission(() =>
+      const inspection = await this.withDeployAdmission("inspect-dependencies", requestContext, () =>
         this.threadAttaches.run(threadKey, async () => {
           if (
             this.destroying ||
@@ -11107,47 +11449,54 @@ export class ResidentDO extends Sandbox<Env> {
             binding.worktreePath !== (await replacementWorktreePath(threadKey, ref, canonical))
           )
             return unknown();
-          return this.withThreadBusy(threadKey, async () => {
-            if ((this.threadOpsInFlight.get(threadKey) ?? 0) !== 1) return unknown();
-            this.workspaceExclusiveOpsInFlight.add(threadKey);
-            try {
-              if (this.ctx.container?.running !== true) return unknown();
-              const command = [
-                `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
-                "code=$?",
-                'if test "$code" != 1; then printf \'{"kind":"unknown"}\'; exit 1; fi',
-                `exec /usr/bin/su -s /bin/sh ${shellQuote(binding.user)} --session-command ${shellQuote(dependencyInspectionCommand(binding.worktreePath, head))}`,
-              ].join("\n");
-              // Native container exec cannot start a stopped runtime. No model environment, SDK recovery or retry is used.
-              const process = await this.ctx.container.exec([
-                "/usr/bin/env",
-                "-i",
-                "PATH=/usr/local/bin:/usr/bin:/bin",
-                "/usr/bin/timeout",
-                "-s",
-                "KILL",
-                String(CREDENTIAL_INSPECTION_MAX_MS / SECOND_MS),
-                "/bin/sh",
-                "-c",
-                command,
-              ]);
-              const result = await collectDependencyInspection(process);
-              const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
-              const currentRegistration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-              const currentFence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
-              if (
-                this.ctx.container?.running !== true ||
-                JSON.stringify(current) !== JSON.stringify(binding) ||
-                JSON.stringify(currentRegistration) !== JSON.stringify(registration) ||
-                JSON.stringify(currentFence) !== JSON.stringify(fence) ||
-                (this.threadOpsInFlight.get(threadKey) ?? 0) !== 1
-              )
-                return unknown();
-              return result.kind === "unknown" ? unknown() : { result, owner };
-            } finally {
-              this.workspaceExclusiveOpsInFlight.delete(threadKey);
-            }
-          });
+          return this.withThreadBusy(
+            threadKey,
+            async () => {
+              if ((this.threadOpsInFlight.get(threadKey) ?? 0) !== 1) return unknown();
+              this.workspaceExclusiveOpsInFlight.add(threadKey);
+              try {
+                if (this.ctx.container?.running !== true) return unknown();
+                const command = [
+                  `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
+                  "code=$?",
+                  'if test "$code" != 1; then printf \'{"kind":"unknown"}\'; exit 1; fi',
+                  `exec /usr/bin/su -s /bin/sh ${shellQuote(binding.user)} --session-command ${shellQuote(dependencyInspectionCommand(binding.worktreePath, head))}`,
+                ].join("\n");
+                // Native container exec cannot start a stopped runtime. No model environment, SDK recovery or retry is used.
+                const process = await this.ctx.container.exec([
+                  "/usr/bin/env",
+                  "-i",
+                  "PATH=/usr/local/bin:/usr/bin:/bin",
+                  "/usr/bin/timeout",
+                  "-s",
+                  "KILL",
+                  String(CREDENTIAL_INSPECTION_MAX_MS / SECOND_MS),
+                  "/bin/sh",
+                  "-c",
+                  command,
+                ]);
+                const result = await collectDependencyInspection(process);
+                const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+                const currentRegistration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+                const currentFence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
+                if (
+                  this.ctx.container?.running !== true ||
+                  JSON.stringify(current) !== JSON.stringify(binding) ||
+                  JSON.stringify(currentRegistration) !== JSON.stringify(registration) ||
+                  JSON.stringify(currentFence) !== JSON.stringify(fence) ||
+                  (this.threadOpsInFlight.get(threadKey) ?? 0) !== 1
+                )
+                  return unknown();
+                return result.kind === "unknown" ? unknown() : { result, owner };
+              } finally {
+                this.workspaceExclusiveOpsInFlight.delete(threadKey);
+              }
+            },
+            undefined,
+            undefined,
+            requestContext,
+            "inspect-dependencies",
+          );
         }),
       );
       return "error" in inspection ? unknown() : inspection;
@@ -11162,6 +11511,7 @@ export class ResidentDO extends Sandbox<Env> {
     input: unknown,
     env: Record<string, string>,
     requestOwner: WorkspaceOwner | null = null,
+    requestContext?: NativeRequestContext,
   ): Promise<CredentialInspection> {
     try {
       const inspection = await this.withThreadBusy(
@@ -11222,6 +11572,9 @@ export class ResidentDO extends Sandbox<Env> {
           });
         },
         requestOwner,
+        undefined,
+        requestContext,
+        "credentials",
       );
       return "error" in inspection ? emptyCredentialInspection() : inspection;
     } catch {
@@ -11236,6 +11589,7 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     input: Omit<ResidentPublicationInput, "worktreePath">,
     requestOwner: WorkspaceOwner | null = null,
+    requestContext?: NativeRequestContext,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
     return this.withThreadBusy(
       threadKey,
@@ -11285,6 +11639,9 @@ export class ResidentDO extends Sandbox<Env> {
         };
       },
       requestOwner,
+      undefined,
+      requestContext,
+      "publish",
     );
   }
 
@@ -11369,8 +11726,16 @@ export class ResidentDO extends Sandbox<Env> {
     path: string,
     encoding: ReadEncoding = "utf8",
     requestOwner: WorkspaceOwner | null = null,
+    requestContext?: NativeRequestContext,
   ): Promise<{ content: string; truncated: boolean } | Base64ReadAnswer | ThreadErr> {
-    return this.withThreadBusy(threadKey, () => this.readThreadFileImpl(threadKey, path, encoding), requestOwner);
+    return this.withThreadBusy(
+      threadKey,
+      () => this.readThreadFileImpl(threadKey, path, encoding),
+      requestOwner,
+      undefined,
+      requestContext,
+      "read",
+    );
   }
 
   private async readThreadFileImpl(
@@ -11461,11 +11826,15 @@ export class ResidentDO extends Sandbox<Env> {
     path: string,
     content: string,
     requestOwner: WorkspaceOwner | null = null,
+    requestContext?: NativeRequestContext,
   ): Promise<{ ok: true; bytes: number } | ThreadErr> {
     return this.withThreadBusy(
       threadKey,
       () => this.threadWrites.run(threadKey, () => this.writeThreadFileImpl(threadKey, path, content)),
       requestOwner,
+      undefined,
+      requestContext,
+      "write",
     );
   }
 
@@ -12322,8 +12691,9 @@ export class ResidentDO extends Sandbox<Env> {
     runId?: string,
     ownerGen?: string,
     ownerFence?: number,
+    requestContext?: NativeRequestContext,
   ): Promise<DetachAnswer | ThreadErr> {
-    return this.withDeployAdmission(() =>
+    return this.withDeployAdmission("detach", requestContext, () =>
       this.threadAttaches.run(threadKey, async () => {
         await this.reconcileWorkspaceBinding(threadKey);
         const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
@@ -12482,7 +12852,7 @@ export class ResidentDO extends Sandbox<Env> {
         ? boot
         : undefined;
     };
-    return this.withDeployAdmission(() =>
+    return this.withDeployAdmission("discard-absent", undefined, () =>
       this.threadAttaches.run(threadKey, async () => {
         const prior = await this.ctx.storage.get<Receipt>(key);
         if (prior && !matches(prior)) return refuse("discard-target-mismatch");
@@ -13465,7 +13835,7 @@ export class ResidentDO extends Sandbox<Env> {
   async reconcileRetainedOwner(
     threadKey: string,
   ): Promise<{ migrated: number; legacy: number; ledger: number; reason: string } | ThreadErr> {
-    return this.withDeployAdmission(() =>
+    return this.withDeployAdmission("reconcile-owner", undefined, () =>
       this.threadAttaches.run(threadKey, async () => {
         const refuse = (reason: string): ThreadErr => ({
           error: `owner-reconciliation-refused: ${reason}`,
@@ -13625,8 +13995,9 @@ export class ResidentDO extends Sandbox<Env> {
     remainingMs: number,
     ownerGen?: string,
     ownerFence?: number,
+    requestContext?: NativeRequestContext,
   ): Promise<{ deadlineAt: number } | ThreadErr> {
-    return this.withDeployAdmission(() =>
+    return this.withDeployAdmission("deadline", requestContext, () =>
       this.ctx.storage.transaction(async (txn) => {
         const registration = await txn.get<RunRegistration>(runRegKey(threadKey));
         if (
@@ -13755,7 +14126,7 @@ export class ResidentDO extends Sandbox<Env> {
    * bound to that process's existing runtime, never a PID in a new VM. */
   async recoverNativeOperation(key: string, recordHash: string, terminate = false) {
     return this.withRecreateSafeAdmin(async () => {
-      if (this.runsInFlightCount() !== 0)
+      if (this.runsInFlightCount() !== 0 || this.activeOperatorRequests.size !== 0)
         return { error: "native-operation-recovery-refused: request-active", status: 409 as const };
       const ownerMatches = async (rows: NativeOperationRows, record: NativeOperationRecord) => {
         if (this.runsInFlightCount() !== 0) return false;
@@ -13771,6 +14142,19 @@ export class ResidentDO extends Sandbox<Env> {
           fence.ownerFence === record.ownerFence
         );
       };
+      const journal = new NativeOperationJournal(this.ctx.storage);
+      const operator = await journal.recoverOperator(
+        key,
+        recordHash,
+        { request: (value, timeout) => this.nativeScopeTransport().request(value, timeout) },
+        async (record) =>
+          "opOwner" in record &&
+          key === `native-operation:${record.opOwner}` &&
+          !this.activeOperatorRequests.has(record.opOwner) &&
+          record.origin?.resource === (await this.ctx.storage.get(RESOURCE_KEY)),
+        terminate,
+      );
+      if (operator !== undefined) return operator;
       const processes = new Map<
         string,
         NonNullable<Awaited<ReturnType<ReturnType<typeof createExtensionProcessSandbox>["getProcess"]>>>
@@ -13980,11 +14364,58 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** The existing native echo counter also protects anonymous operator work.
    * An unknown command outcome keeps its capacity marker across an isolate reset. */
-  private async withOpNativeOperation<T>(owner: string, fn: () => Promise<T>): Promise<T> {
-    const scope = { key: `native-operation:${owner}`, owner, active: true, allocated: false };
-    return this.withNativeOperationScope(`native-operation:${owner}`, { opOwner: owner }, scope, () =>
-      this.opOperationScope.run(scope, fn),
-    );
+  private readonly activeOperatorRequests = new Set<string>();
+
+  private async withOpNativeOperation<T>(
+    owner: string,
+    fn: () => Promise<T>,
+    producer: NativeOperationProducer,
+    requestContext?: NativeRequestContext,
+  ): Promise<T> {
+    this.activeOperatorRequests.add(owner);
+    try {
+      const key = `native-operation:${owner}`;
+      const origin = await this.operationOrigin(producer, owner, requestContext);
+      const scope = { key, owner, origin, active: true, allocated: false };
+      const journal = new NativeOperationJournal(this.ctx.storage);
+      const scopes = new NativeRunScopes(this.ctx.storage, {
+        request: (value, timeout) => this.nativeScopeTransport().request(value, timeout),
+      });
+      const admission = await journal.open(key, { opOwner: owner }, undefined, origin);
+      await scopes.reserveOperator({ opOwner: owner });
+      let callback: "returned" | "threw" = "threw";
+      try {
+        if (admission === "producer-held")
+          throw new Error("background producer has an original active or unknown operation");
+        const result = await this.opOperationScope.run(scope, fn);
+        callback = "returned";
+        return result;
+      } finally {
+        scope.active = false;
+        let stage: "journal-close" | "scope-close" | "ending-write" = "journal-close";
+        try {
+          await journal.close(key);
+          stage = "scope-close";
+          await scopes.closeOperator({ opOwner: owner });
+          stage = "ending-write";
+          if (!(await journal.endOperator(key, { opOwner: owner }, callback)))
+            emitDeployAdmission({
+              phase: "operator-ending",
+              id: owner,
+              stage,
+              commit: "unverified",
+              failure: "opaque-or-scope-held",
+            });
+        } catch (error) {
+          emitDeployAdmission(
+            { phase: "operator-ending", id: owner, stage, commit: "unverified", failure: "storage-or-rpc" },
+            { error },
+          );
+        }
+      }
+    } finally {
+      this.activeOperatorRequests.delete(owner);
+    }
   }
 
   /** POST /op work half: run ONE readonly command-table entry in a
@@ -13997,7 +14428,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  materialize through the exact thread mechanism: the shared
    *  lockfile-keyed cache, scoped token-free install only when the committed
    *  key differs. No snapshot is ever written here. */
-  async runOp(op: "test" | "build", refArg: string | null, traceparent?: string): Promise<OpRunOk | ThreadErr> {
+  async runOp(
+    op: "test" | "build",
+    refArg: string | null,
+    traceparent?: string,
+    requestContext?: NativeRequestContext,
+  ): Promise<OpRunOk | ThreadErr> {
     // One step trace per op (docs/reference/specs/tracing.md item 19), like an attach.
     const t0 = systemClock();
     const trace = createStepTrace(t0);
@@ -14012,8 +14448,17 @@ export class ResidentDO extends Sandbox<Env> {
         if (workload) res = workload;
         else {
           try {
-            res = await this.withOpNativeOperation(owner, () =>
-              this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0)),
+            res = await this.withDeployAdmission(
+              op === "test" ? "op-test" : "op-build",
+              requestContext,
+              () =>
+                this.withOpNativeOperation(
+                  owner,
+                  () => this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0)),
+                  op === "test" ? "op-test" : "op-build",
+                  requestContext,
+                ),
+              owner,
             );
           } finally {
             this.workloadReservations.delete(owner);
@@ -14030,7 +14475,7 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   private async runOpTraced(op: "test" | "build", refArg: string | null, t0: number): Promise<OpRunOk | ThreadErr> {
-    return this.withDeployAdmission(async (): Promise<OpRunOk | ThreadErr> => {
+    return (async (): Promise<OpRunOk | ThreadErr> => {
       if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
       // The fleet drain (item 69; issue 2044): a typed op is a new piece of work
       // like a new run's attach, and during the incident one waited silently at
@@ -14188,7 +14633,7 @@ export class ResidentDO extends Sandbox<Env> {
         await this.run(["rm", "-rf", opDir]).catch(() => {});
         this.opUsersInUse.delete(user);
       }
-    });
+    })();
   }
 
   /** Debug: enumerate thread bindings (read scope). No secrets live in a
@@ -15174,6 +15619,15 @@ export class ResidentDO extends Sandbox<Env> {
     const resource =
       (await this.ctx.storage.get<string>(CLEANUP_PENDING_KEY)) ?? (await this.ctx.storage.get<string>(RESOURCE_KEY));
     if (typeof resource !== "string") throw new Error("resident-cleanup-target-unavailable");
+    for (const value of (await new NativeOperationJournal(this.ctx.storage).unresolved()).values()) {
+      const parsed = nativeOperationRecordSchema.safeParse(value);
+      if (
+        !parsed.success ||
+        Object.values(parsed.data.native.pending).some((attempt) => attempt.restore) ||
+        ("opOwner" in parsed.data && Object.keys(parsed.data.native.restoreReceipts ?? {}).length > 0)
+      )
+        throw new Error("resident-cleanup-refused: original archive restore is unresolved");
+    }
     await this.ctx.storage.put(CLEANUP_PENDING_KEY, resource);
     await this.destroyConfirmed();
     const containerStopped = true;
@@ -15613,6 +16067,12 @@ export default {
     const root = STREAMED_ROUTES.has(url.pathname)
       ? undefined
       : startAdoptedRoot(tracer, "resident.fetch", { sinks: traceSinks, traceparent, attrs: { route: url.pathname } });
+    const requestContext = (): NativeRequestContext => ({
+      callId: crypto.randomUUID(),
+      actor: tokenScope(env, bearer) ?? "service",
+      traceId: root?.traceId ?? parseTraceparent(traceparent)?.traceId ?? null,
+      parentSourceId: null,
+    });
     const res = await (async (): Promise<Response> => {
       try {
         switch (url.pathname) {
@@ -15756,7 +16216,7 @@ export default {
           case "/status":
             return await handleStatus(env, url);
           case "/attach":
-            return await handleAttach(env, body, traceparent, nativeProtocol);
+            return await handleAttach(env, body, traceparent, nativeProtocol, requestContext());
           case "/run-deadline":
             return await handleRunDeadline(env, body);
           case "/cancel-run": {
@@ -15791,7 +16251,7 @@ export default {
             );
           }
           case "/detach":
-            return await handleDetach(env, body);
+            return await handleDetach(env, body, requestContext());
           case "/exec-result": {
             const operation = checkOperationSchema.safeParse(body.checkOperation);
             if (!operation.success) return json({ kind: "unknown" }, 400);
@@ -15803,17 +16263,17 @@ export default {
           case "/settle-check":
             return await handleRecordedCheck(env, body, url.pathname === "/settle-check");
           case "/exec":
-            return await handleExec(env, body, traceparent);
+            return await handleExec(env, body, traceparent, requestContext());
           case "/inspect-credentials":
-            return await handleInspectCredentials(env, body);
+            return await handleInspectCredentials(env, body, requestContext());
           case "/publish":
-            return await handlePublish(env, body);
+            return await handlePublish(env, body, requestContext());
           case "/read":
-            return await handleRead(env, body);
+            return await handleRead(env, body, requestContext());
           case "/write":
-            return await handleWrite(env, body);
+            return await handleWrite(env, body, requestContext());
           case "/op":
-            return await handleOp(env, body, traceparent);
+            return await handleOp(env, body, traceparent, requestContext());
           case "/await-restore":
             return await handleAwaitRestore(env, body);
           default:
@@ -17363,6 +17823,7 @@ async function handleAttach(
   body: Record<string, unknown>,
   traceparent?: string,
   nativeProtocol = false,
+  requestContext?: NativeRequestContext,
 ): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body, true);
   if (ctx instanceof Response) return ctx;
@@ -17500,6 +17961,7 @@ async function handleAttach(
         ownerGen,
         ownerFence,
         nativeBirth,
+        requestContext,
       ),
     ),
     ({ result, levels }) => ({
@@ -17560,7 +18022,11 @@ async function handleAwaitRestore(env: Env, body: Record<string, unknown>): Prom
   );
 }
 
-async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Response> {
+async function handleDetach(
+  env: Env,
+  body: Record<string, unknown>,
+  requestContext?: NativeRequestContext,
+): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
   const runId = body.runId;
@@ -17590,6 +18056,7 @@ async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Re
     runId,
     ownerGen,
     ownerFence,
+    requestContext,
   );
   if ("error" in result) return threadErrResponse(result);
   return json(result);
@@ -17600,7 +18067,12 @@ function requestWorkspaceOwner(body: Record<string, unknown>): WorkspaceOwner | 
   return isWorkspaceOwner(owner) ? owner : null;
 }
 
-async function handleExec(env: Env, body: Record<string, unknown>, traceparent?: string): Promise<Response> {
+async function handleExec(
+  env: Env,
+  body: Record<string, unknown>,
+  traceparent?: string,
+  requestContext?: NativeRequestContext,
+): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
   if (typeof body.command !== "string" || body.command.length === 0 || body.command.length > MAX_EXEC_COMMAND_LENGTH) {
@@ -17629,12 +18101,17 @@ async function handleExec(env: Env, body: Record<string, unknown>, traceparent?:
         execEnv,
         requestWorkspaceOwner(body),
         operation?.success ? operation.data : undefined,
+        requestContext,
       ),
     ),
   );
 }
 
-async function handleInspectCredentials(env: Env, body: Record<string, unknown>): Promise<Response> {
+async function handleInspectCredentials(
+  env: Env,
+  body: Record<string, unknown>,
+  requestContext?: NativeRequestContext,
+): Promise<Response> {
   try {
     const input = credentialInspectionInputSchema.safeParse(body.input);
     if (!input.success || body.resource !== `repo:${input.data.repo}`) return json(emptyCredentialInspection());
@@ -17645,6 +18122,7 @@ async function handleInspectCredentials(env: Env, body: Record<string, unknown>)
       input.data,
       envFromRequest({ body }),
       requestWorkspaceOwner(body),
+      requestContext,
     );
     return json(parseCredentialInspection(result));
   } catch {
@@ -17652,7 +18130,11 @@ async function handleInspectCredentials(env: Env, body: Record<string, unknown>)
   }
 }
 
-async function handlePublish(env: Env, body: Record<string, unknown>): Promise<Response> {
+async function handlePublish(
+  env: Env,
+  body: Record<string, unknown>,
+  requestContext?: NativeRequestContext,
+): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
   if (
@@ -17679,6 +18161,7 @@ async function handlePublish(env: Env, body: Record<string, unknown>): Promise<R
           bearer: body.bearer,
         },
         requestWorkspaceOwner(body),
+        requestContext,
       ),
     ),
   );
@@ -17748,7 +18231,11 @@ function streamThreadExec(
   );
 }
 
-async function handleRead(env: Env, body: Record<string, unknown>): Promise<Response> {
+async function handleRead(
+  env: Env,
+  body: Record<string, unknown>,
+  requestContext?: NativeRequestContext,
+): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
   if (typeof body.path !== "string")
@@ -17760,13 +18247,17 @@ async function handleRead(env: Env, body: Record<string, unknown>): Promise<Resp
   // did not complete) is answered as the DO answers the same fact inside, never
   // left to the fetch handler's catch-all.
   const result = await ctx.stub
-    .readThreadFile(ctx.threadKey, body.path, encoding, requestOwner)
+    .readThreadFile(ctx.threadKey, body.path, encoding, requestOwner, requestContext)
     .catch((err: unknown) => threadRejectionErr(err, "/read"));
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }
 
-async function handleWrite(env: Env, body: Record<string, unknown>): Promise<Response> {
+async function handleWrite(
+  env: Env,
+  body: Record<string, unknown>,
+  requestContext?: NativeRequestContext,
+): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
   if (typeof body.path !== "string")
@@ -17776,7 +18267,7 @@ async function handleWrite(env: Env, body: Record<string, unknown>): Promise<Res
   }
   const requestOwner = requestWorkspaceOwner(body);
   const result = await ctx.stub
-    .writeThreadFile(ctx.threadKey, body.path, body.content, requestOwner)
+    .writeThreadFile(ctx.threadKey, body.path, body.content, requestOwner, requestContext)
     .catch((err: unknown) => threadRejectionErr(err, "/write"));
   if ("error" in result) return threadErrResponse(result);
   return json(result);
@@ -17795,7 +18286,12 @@ const OP_NAMES = ["test", "build", "status"] as const;
  *  refusal is the guard rail for future entries). test/build run in a
  *  disposable per-op checkout (see ResidentDO.runOp) and stream like /exec;
  *  status touches no checkout at all — DO storage reads only. */
-async function handleOp(env: Env, body: Record<string, unknown>, traceparent?: string): Promise<Response> {
+async function handleOp(
+  env: Env,
+  body: Record<string, unknown>,
+  traceparent?: string,
+  requestContext?: NativeRequestContext,
+): Promise<Response> {
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
   const op = body.op;
@@ -17847,7 +18343,7 @@ async function handleOp(env: Env, body: Record<string, unknown>, traceparent?: s
       summary,
     });
   }
-  return streamOp(stub.runOp(op as "test" | "build", ref, traceparent));
+  return streamOp(stub.runOp(op as "test" | "build", ref, traceparent, requestContext));
 }
 
 /** /op's payload mapping: results pass through; a failure streams as the typed

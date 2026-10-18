@@ -75,6 +75,13 @@ subprocess.run(['chmod','777','/workspace/proof'],check=True)
 pa,pb=launch(a,'a','user'),launch(b,'b')
 inventory=invoke(a,role='inventory',user='worker2')
 assert inventory.returncode==0 and inventory.stdout.strip(), 'inventory hid existing UID processes'
+for selector in ('users', 'pid-users'):
+    observed=invoke(b,role='inventory',inventory=selector,argv=['/bin/false'],env={'PATH':'/invalid'})
+    assert observed.returncode==0 and 'worker2' in observed.stdout,('host inventory hid neighbor',selector,observed.stderr)
+    assert not pathlib.Path('/workspace/proof/inventory-injected').exists()
+refused_inventory=invoke(b,role='inventory',inventory='arbitrary',argv=['/bin/touch','/workspace/proof/inventory-injected'])
+assert refused_inventory.returncode==125 and not pathlib.Path('/workspace/proof/inventory-injected').exists()
+
 # Actual payload profile keeps only explicit source privileges. Generic
 # root code cannot modify the controller or the host account/loader database.
 check=invoke(b,role='trusted',argv=['/usr/bin/python3','-I','-c',
@@ -140,4 +147,34 @@ late_boot=subprocess.run(['/usr/bin/python3','-I',HELPER],input=json.dumps({'mod
 assert late_boot.returncode==125
 ctl('close',b)
 pa.wait(timeout=3);pb.wait(timeout=3)
-print(json.dumps({'productionHelper':'passed','runA':'empty','detachedA':'stopped','runB':'unaffected','late_launch':'denied','late_bootstrap':'denied','host_inventory':'visible','root_profile':'contained','write':'passed','image_environment':'preserved','control_port':'denied','startup_privileges':'demoted','admission_observation':'locked','kernel_controls':'readonly','user_kernel_controls':'denied','private_write_links':'denied','harness_roots':'persistent','harness_peer':'protected'}))
+# Operator work uses the same physical exclusion without a synthetic run.
+legacy_probe=subprocess.run(['/usr/bin/python3','-I',HELPER],input=json.dumps({'mode':'inspect'}),text=True,capture_output=True,check=True)
+assert set(json.loads(legacy_probe.stdout))=={'version','boot'}
+operator_probe=subprocess.run(['/usr/bin/python3','-I',HELPER],input=json.dumps({'mode':'inspect','operator':True}),text=True,capture_output=True,check=True)
+assert json.loads(operator_probe.stdout)=={'version':1,'boot':boot,'operatorScopes':1}
+operator={'version':1,'kind':'operation','id':str(uuid.uuid4()),'boot':boot,'owner':{'opOwner':'op:'+str(uuid.uuid4())}}
+foreign={'version':1,'kind':'operation','id':str(uuid.uuid4()),'boot':boot,'owner':{'opOwner':'op:'+str(uuid.uuid4())}}
+ctl('bootstrap',operator);ctl('bootstrap',foreign)
+fixed_git=invoke(operator,role='trusted',argv=['git','config','--system','--get-all','safe.directory'])
+assert fixed_git.returncode==0 and fixed_git.stdout.strip()=='/workspace/mirror',fixed_git.stderr
+system_write=invoke(operator,role='trusted',argv=['git','config','--system','safe.directory','*'])
+assert system_write.returncode!=0,'operator scope made system Git configuration writable'
+user_home=invoke(operator,role='user',user='worker1',argv=['/bin/bash','-c','test "$HOME" = /home/worker1 && printf cache > "$HOME/native-operator-cache" && cat "$HOME/native-operator-cache"'])
+assert user_home.returncode==0 and user_home.stdout=='cache',user_home.stderr
+hybrid={**operator,'threadKey':'fake-run'}
+refused=subprocess.run(['/usr/bin/python3','-I',HELPER],input=json.dumps({'mode':'launch','ref':hybrid,'attempt':str(uuid.uuid4()),'role':'trusted','argv':['touch','/workspace/proof/hybrid']}),text=True,capture_output=True)
+assert refused.returncode==125 and not pathlib.Path('/workspace/proof/hybrid').exists()
+changed={**operator,'owner':{'opOwner':'op:foreign'}}
+refused=subprocess.run(['/usr/bin/python3','-I',HELPER],input=json.dumps({'mode':'view','ref':changed}),text=True,capture_output=True)
+assert refused.returncode==125,'operator scope borrowed another owner'
+po=launch(operator,'operator');pf=launch(foreign,'foreign-operator')
+before=int(pathlib.Path('/workspace/proof/foreign-operator').read_text())
+# Discarding the original launcher's result does not require its SDK identity.
+assert ctl('close',operator)=={'ref':operator,'closed':True,'populated':False}
+observed=pathlib.Path('/workspace/proof/operator').read_text();time.sleep(.15)
+assert pathlib.Path('/workspace/proof/operator').read_text()==observed
+assert int(pathlib.Path('/workspace/proof/foreign-operator').read_text())>before
+late=invoke(operator,role='trusted',argv=['touch','/workspace/proof/operator-late'])
+assert late.returncode==125 and not pathlib.Path('/workspace/proof/operator-late').exists()
+ctl('close',foreign);po.wait(timeout=3);pf.wait(timeout=3)
+print(json.dumps({'productionHelper':'passed','runA':'empty','detachedA':'stopped','runB':'unaffected','late_launch':'denied','late_bootstrap':'denied','host_inventory':'visible','root_profile':'contained','write':'passed','image_environment':'preserved','control_port':'denied','startup_privileges':'demoted','admission_observation':'locked','kernel_controls':'readonly','user_kernel_controls':'denied','private_write_links':'denied','harness_roots':'persistent','harness_peer':'protected','operator_scope':'ended','operator_neighbor':'unaffected','operator_late_launch':'denied','operator_owner':'isolated','operator_hybrid':'denied','operator_user_home':'writable','operator_system_config':'readonly','image_safe_directory':'fixed','operator_capability':'qualified','legacy_probe':'unchanged'}))

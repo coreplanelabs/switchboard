@@ -40,6 +40,8 @@ export const REVIEW_POST_REQUEST_MS = 15 * SECOND_MS;
 export const secondsToMs = (seconds: number): number => seconds * SECOND_MS;
 
 export const MINUTE_MS = 60_000;
+/** Preserve the pinned backup expiry guard before native restore admission. */
+export const RESTORE_BACKUP_EXPIRY_BUFFER_MS = MINUTE_MS;
 /** Optional dashboard identity enrichment must not hold independent browser reads. */
 export const WORK_VIEW_ENRICHMENT_TIMEOUT_MS = 1.5 * SECOND_MS;
 /** Only discovery reuses these checks; private-source authorization always verifies afresh. */

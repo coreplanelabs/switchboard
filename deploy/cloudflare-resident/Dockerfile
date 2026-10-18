@@ -14,9 +14,8 @@ FROM --platform=linux/amd64 docker.io/library/node:24.21.0-slim AS node
 # The tag MUST match the @cloudflare/sandbox version in package.json exactly
 # (no 'latest' tag exists on the @next line) — bump both together.
 FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
-COPY --chmod=0755 native-scope.py /opt/switchboard/native-scope.py
 
-# Git identity only. The engine never uses the gh CLI (ops run git directly,
+# Fixed Git defaults. The engine never uses the gh CLI (ops run git directly,
 # tokens are minted via the GitHub REST API in the Worker/DO, and per-attach
 # credentials use a repo-local `store` helper), so gh is deliberately NOT
 # installed here — matching the resident system prompts and the tests that pin
@@ -30,7 +29,8 @@ COPY --chmod=0755 native-scope.py /opt/switchboard/native-scope.py
 # precedence) — docs/reference/specs/execution.md item 5.
 RUN git config --system user.name "switchboard-resident" \
   && git config --system user.email "switchboard-resident@switchboard.invalid" \
-  && git config --system core.hooksPath /opt/switchboard/hooks
+  && git config --system core.hooksPath /opt/switchboard/hooks \
+  && git config --system safe.directory /workspace/mirror
 
 # The shared agent-trailer hook (deploy/hooks/prepare-commit-msg — this copy is
 # byte-identical, held so by a test: the build context is this directory, so
@@ -294,3 +294,7 @@ RUN su -s /bin/bash worker1 -c "opencode --version | grep -qx 'opencode v2.0.24'
 # through the same `su`, whose PATH is /etc/environment's rather than this
 # file's — so the BUILD proves that PATH resolves the pin, not the base's bun.
 RUN su -s /bin/bash worker1 -c "bun --version | grep -qx '1\.4\.2'"
+
+# Keep the fixed controller independent of tool installation layers.
+RUN install -d -m 755 -o root -g root /workspace
+COPY --chmod=0755 native-scope.py /opt/switchboard/native-scope.py

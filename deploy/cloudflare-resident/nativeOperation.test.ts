@@ -622,6 +622,526 @@ describe("native launch storage acknowledgements", () => {
 });
 
 describe("native operation journal", () => {
+  async function ownedOperator(kind: "process" | "opaque" = "process", close = true) {
+    const h = fixture();
+    const owner = { opOwner: "op:original" };
+    await h.journal.open(key, owner, undefined, {
+      producer: "deps-backup",
+      resource: "repo:acme/api",
+      callId: "11111111-1111-4111-8111-111111111111",
+      sourceId: "cache-a",
+      actor: "system",
+      traceId: null,
+      parentSourceId: null,
+      build: "a".repeat(40),
+      workerVersion: null,
+      startedAt: 1000,
+    });
+    const calls: string[] = [];
+    const native = {
+      request: async (value) => ({
+        stdout:
+          (calls.push(String(value.mode)),
+          JSON.stringify(
+            value.mode === "inspect"
+              ? {
+                  version: 1,
+                  boot: "22222222-2222-4222-8222-222222222222",
+                  ...(value.operator === true ? { operatorScopes: 1 } : {}),
+                }
+              : {
+                  ref: value.ref,
+                  closed: value.mode === "close",
+                  ...(value.mode === "bootstrap" ? {} : { populated: false }),
+                },
+          )),
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+      }),
+    };
+    const scopes = new NativeRunScopes(h.storage, native);
+    const ref = await scopes.ensureOperator(owner, async () => {});
+    await h.journal.bindScope(key, ref);
+    const attempt = await h.journal.begin(key, kind);
+    if (close) await scopes.closeOperator(owner, ref);
+    return { ...h, owner, ref, attempt, native, calls };
+  }
+
+  function archiveIdentity(h: Awaited<ReturnType<typeof ownedOperator>>) {
+    return {
+      version: 1 as const,
+      ref: h.ref,
+      attempt: h.attempt,
+      backupId: "44444444-4444-4444-8444-444444444444",
+      target: "/workspace/mirror",
+      sizeBytes: 3,
+      etag: "a".repeat(32),
+    };
+  }
+
+  it("reserves a restore descriptor before effects and blocks overlapping cleanup after restart", async () => {
+    const h = await ownedOperator("opaque", false);
+    const identity = archiveIdentity(h);
+    await h.journal.reserveArchive(key, h.attempt, identity);
+    expect(h.rows.get(key)).toMatchObject({
+      native: { pending: { [h.attempt]: { kind: "opaque", restore: identity } } },
+    });
+    const cleanup = "native-operation:op:cleanup";
+    await h.journal.open(cleanup, { opOwner: "op:cleanup" }, undefined, {
+      ...(h.rows.get(key) as any).origin,
+      producer: "resident-call",
+      sourceId: "cleanup",
+      callId: "55555555-5555-4555-8555-555555555555",
+    });
+    const scopes = new NativeRunScopes(h.storage, h.native);
+    await h.journal.bindScope(cleanup, await scopes.ensureOperator({ opOwner: "op:cleanup" }, async () => {}));
+    const restarted = new NativeOperationJournal(h.storage);
+    await expect(restarted.begin(cleanup, "process", ["/workspace"])).rejects.toThrow(
+      "workspace path has an unresolved restore",
+    );
+    expect(await restarted.begin(cleanup, "process", ["/workspace/mirror-neighbor"])).toEqual(expect.any(String));
+    expect(h.rows.get(key)).toMatchObject({ native: { pending: { [h.attempt]: { restore: identity } } } });
+  });
+
+  it("refuses restore admission while a matching mutation remains unresolved", async () => {
+    const h = await ownedOperator("process", false);
+    await h.journal.settle(key, h.attempt);
+    const mutation = await h.journal.begin(key, "process", ["/workspace/deps"]);
+    const restore = await h.journal.begin(key, "opaque");
+    const identity = {
+      ...archiveIdentity(h),
+      attempt: restore,
+      target: "/workspace/deps/.scratch-55555555-5555-4555-8555-555555555555",
+    };
+    await expect(h.journal.reserveArchive(key, restore, identity)).rejects.toThrow(
+      "workspace path has an unresolved mutation",
+    );
+    expect(h.rows.get(key)).toMatchObject({
+      native: {
+        pending: { [mutation]: { kind: "process", mutationPaths: ["/workspace/deps"] }, [restore]: { kind: "opaque" } },
+      },
+    });
+    await h.journal.settle(key, mutation);
+    await h.journal.reserveArchive(key, restore, identity);
+    expect(h.rows.get(key)).toMatchObject({ native: { pending: { [restore]: { restore: identity } } } });
+  });
+
+  it("protects a completed restore target until its original operator ends", async () => {
+    const h = await ownedOperator("opaque", false);
+    const identity = archiveIdentity(h);
+    await h.journal.reserveArchive(key, h.attempt, identity);
+    await h.journal.finishArchive(key, h.attempt, { identity, outcome: "committed", cleanup: "complete" });
+    const other = "native-operation:op:cleanup";
+    await h.journal.open(other, { opOwner: "op:cleanup" }, undefined, {
+      ...(h.rows.get(key) as any).origin,
+      producer: "resident-call",
+      sourceId: "cleanup",
+      callId: "55555555-5555-4555-8555-555555555555",
+    });
+    const scopes = new NativeRunScopes(h.storage, h.native);
+    await h.journal.bindScope(other, await scopes.ensureOperator({ opOwner: "op:cleanup" }, async () => {}));
+    await expect(h.journal.begin(other, "process", ["/workspace/mirror"])).rejects.toThrow(
+      "workspace path has an unresolved restore",
+    );
+    const continuation = await h.journal.begin(key, "process", ["/workspace/mirror"]);
+    await h.journal.settle(key, continuation);
+    await scopes.closeOperator(h.owner, h.ref);
+    expect(await h.journal.endOperator(key, h.owner, "returned")).toBe(true);
+    expect(await h.journal.begin(other, "process", ["/workspace/mirror"])).toEqual(expect.any(String));
+  });
+
+  it("keeps unattributed opaque work as a veto on destructive workspace mutation", async () => {
+    const h = await ownedOperator("opaque", false);
+    await expect(h.journal.begin(key, "process", ["/workspace/checkout"])).rejects.toThrow(
+      "workspace outcome is unknown",
+    );
+    expect(h.rows.get(key)).toMatchObject({ native: { pending: { [h.attempt]: { kind: "opaque" } } } });
+  });
+
+  it("cannot settle a reserved restore through the generic native result path", async () => {
+    const h = await ownedOperator("opaque", false);
+    const identity = archiveIdentity(h);
+    await h.journal.reserveArchive(key, h.attempt, identity);
+    await expect(h.journal.settle(key, h.attempt)).rejects.toThrow("restore cleanup receipt is required");
+    expect(h.rows.get(key)).toMatchObject({ native: { pending: { [h.attempt]: { restore: identity } } } });
+  });
+
+  it("retains the exact cleanup receipt before the original restore attempt settles", async () => {
+    const h = await ownedOperator("opaque", false);
+    const identity = archiveIdentity(h);
+    await h.journal.reserveArchive(key, h.attempt, identity);
+    const receipt = { identity, outcome: "committed" as const, cleanup: "complete" as const };
+    await h.journal.finishArchive(key, h.attempt, receipt);
+    expect(h.rows.get(key)).toMatchObject({
+      native: {
+        pending: {},
+        restoreReceipts: { [h.attempt]: { receipt, hash: expect.stringMatching(/^[a-f0-9]{64}$/) } },
+      },
+    });
+    await new NativeRunScopes(h.storage, h.native).closeOperator(h.owner, h.ref);
+    expect(await h.journal.endOperator(key, h.owner, "returned")).toBe(true);
+    expect(h.rows.get(`native-operation-ending:${key}`)).toMatchObject({
+      original: { native: { restoreReceipts: { [h.attempt]: { receipt } } } },
+    });
+    expect(await h.journal.operatorEnded(key, h.owner)).toBe(true);
+  });
+
+  it.each(["target", "etag", "owner", "attempt"] as const)("refuses a changed restore receipt %s", async (field) => {
+    const h = await ownedOperator("opaque", false);
+    const identity = archiveIdentity(h);
+    await h.journal.reserveArchive(key, h.attempt, identity);
+    const changed =
+      field === "owner"
+        ? { ...identity, ref: { ...h.ref, owner: { opOwner: "op:foreign" } } }
+        : field === "target"
+          ? { ...identity, target: "/workspace/checkout" }
+          : field === "etag"
+            ? { ...identity, etag: "b".repeat(32) }
+            : { ...identity, attempt: "55555555-5555-4555-8555-555555555555" };
+    await expect(
+      h.journal.finishArchive(key, h.attempt, { identity: changed, outcome: "committed", cleanup: "complete" }),
+    ).rejects.toThrow("original restore receipt changed");
+    expect(h.rows.get(key)).toMatchObject({ native: { pending: { [h.attempt]: { restore: identity } } } });
+  });
+
+  it("qualifies the full retained receipt after a lost settlement acknowledgement", async () => {
+    const h = await ownedOperator("opaque", false);
+    const identity = archiveIdentity(h);
+    await h.journal.reserveArchive(key, h.attempt, identity);
+    const lost = new NativeOperationJournal({
+      ...h.storage,
+      transaction: async (action) => {
+        await h.storage.transaction(action);
+        throw new Error("transaction acknowledgement lost");
+      },
+    });
+    await lost.finishArchive(key, h.attempt, { identity, outcome: "committed", cleanup: "complete" });
+    expect(h.rows.get(key)).toMatchObject({
+      native: { pending: {}, restoreReceipts: { [h.attempt]: { receipt: { identity, outcome: "committed" } } } },
+    });
+  });
+
+  it("rejects changed retained receipt bytes before operator ending", async () => {
+    const h = await ownedOperator("opaque", false);
+    const identity = archiveIdentity(h);
+    await h.journal.reserveArchive(key, h.attempt, identity);
+    await h.journal.finishArchive(key, h.attempt, { identity, outcome: "committed", cleanup: "complete" });
+    const saved = h.rows.get(key) as any;
+    saved.native.restoreReceipts[h.attempt].receipt.identity.etag = "b".repeat(32);
+    await h.storage.put(key, saved);
+    await new NativeRunScopes(h.storage, h.native).closeOperator(h.owner, h.ref);
+    expect(await h.journal.endOperator(key, h.owner, "returned")).toBe(false);
+    expect(await h.journal.operatorEnded(key, h.owner)).toBe(false);
+  });
+
+  it.each([false, true])(
+    "recovers only the original archive receipt after scope closure: cleanup=%s",
+    async (cleanup) => {
+      const h = await ownedOperator("opaque", false);
+      const identity = archiveIdentity(h);
+      await h.journal.reserveArchive(key, h.attempt, identity);
+      const hash = (await h.journal.list()).operations[0]!.recordHash;
+      const modes: unknown[] = [];
+      let receipt = cleanup ? undefined : { identity, outcome: "committed", cleanup: "complete" };
+      const native = {
+        request: async (value: Record<string, any>, timeout: number) => {
+          modes.push(value.mode);
+          if (!String(value.mode).startsWith("archive-")) return h.native.request(value, timeout);
+          expect(value.identity).toEqual(identity);
+          if (value.mode === "archive-clean")
+            receipt = { identity, outcome: "aborted", cleanup: "complete", reason: "cancelled" } as any;
+          return {
+            stdout: JSON.stringify({
+              identity,
+              phase: receipt ? "done" : "receiving",
+              receivedBytes: 0,
+              ...(receipt ? { receipt } : {}),
+            }),
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+          };
+        },
+      };
+      const result = await h.journal.recoverOperator(key, hash, native, matches, true);
+      expect(result).toMatchObject({
+        outcome: "operator-scope-ended",
+        recordHash: hash,
+        originalOperationOutcome: "unknown",
+      });
+      expect(modes.filter((mode) => String(mode).startsWith("archive-"))).toEqual(
+        cleanup ? ["archive-read", "archive-clean"] : ["archive-read"],
+      );
+      expect(await h.journal.operatorEnded(key, h.owner)).toBe(true);
+      const calls = modes.length;
+      expect(await h.journal.recoverOperator(key, hash, native, matches, true)).toEqual(result);
+      expect(modes).toHaveLength(calls);
+      expect(h.rows.get(`native-operation-ending:${key}`)).toMatchObject({
+        original: { native: { pending: {}, restoreReceipts: { [h.attempt]: { receipt } } } },
+        receipt: { requestRecordHash: hash },
+      });
+    },
+  );
+
+  it("requires explicit cleanup authority when an ended archive has no receipt", async () => {
+    const h = await ownedOperator("opaque", false);
+    const identity = archiveIdentity(h);
+    await h.journal.reserveArchive(key, h.attempt, identity);
+    await new NativeRunScopes(h.storage, h.native).closeOperator(h.owner, h.ref);
+    const hash = (await h.journal.list()).operations[0]!.recordHash;
+    const calls: unknown[] = [];
+    const native = {
+      request: async (value: Record<string, any>) => {
+        calls.push(value.mode);
+        return {
+          stdout: JSON.stringify({ identity, phase: "receiving", receivedBytes: 0 }),
+          stderr: "",
+          exitCode: 0,
+          timedOut: false,
+        };
+      },
+    };
+    expect(await h.journal.recoverOperator(key, hash, native, matches, false)).toMatchObject({
+      error: "native-operation-recovery-refused: explicit-original-archive-cleanup-required",
+    });
+    expect(calls).toEqual(["archive-read"]);
+    expect(h.rows.has(key)).toBe(true);
+  });
+
+  it("reserves cumulative receipt capacity before another restore can start", async () => {
+    const h = await ownedOperator("opaque", false);
+    let admitted = 0;
+    let id = h.attempt;
+    for (let count = 0; count < 200; count++) {
+      const identity = { ...archiveIdentity(h), attempt: id };
+      try {
+        await h.journal.reserveArchive(key, id, identity);
+      } catch (error) {
+        expect(String(error)).toContain("evidence capacity");
+        break;
+      }
+      admitted++;
+      await h.journal.finishArchive(key, id, { identity, outcome: "committed", cleanup: "complete" });
+      try {
+        id = await h.journal.begin(key, "opaque");
+      } catch (error) {
+        expect(String(error)).toContain("evidence capacity");
+        break;
+      }
+    }
+    expect(admitted).toBeGreaterThan(1);
+    expect(admitted).toBeLessThan(200);
+    const saved = h.rows.get(key) as any;
+    expect(Object.keys(saved.native.restoreReceipts)).toHaveLength(admitted);
+    expect(new TextEncoder().encode(JSON.stringify(saved)).length).toBeLessThan(65536);
+  });
+
+  it("reconciles a crashed operator only through its original owned scope and ending receipt", async () => {
+    const h = await ownedOperator("process", false);
+    const hash = (await h.journal.list()).operations[0]!.recordHash;
+    expect(await h.journal.recoverOperator(key, hash, h.native, matches, false)).toMatchObject({
+      error: "native-operation-recovery-refused: explicit-operator-scope-closure-required",
+    });
+    expect(await h.journal.recoverOperator(key, hash, h.native, matches, true)).toEqual({
+      key,
+      recordHash: hash,
+      outcome: "operator-scope-ended",
+      originalOperationOutcome: "unknown",
+      requestEnd: "unobserved",
+    });
+    expect(await h.journal.recoverOperator(key, hash, h.native, matches, true)).toEqual({
+      key,
+      recordHash: hash,
+      outcome: "operator-scope-ended",
+      originalOperationOutcome: "unknown",
+      requestEnd: "unobserved",
+    });
+    expect(h.calls.filter((mode) => mode === "close")).toEqual(["close"]);
+  });
+
+  it("settles an operator timeout only for the original scope owner and attempt", async () => {
+    const h = await ownedOperator("process", false);
+    const ending = {
+      version: 1 as const,
+      ref: h.ref,
+      attempt: h.attempt,
+      closed: false as const,
+      populated: false as const,
+      launcherExitCode: 137 as const,
+    };
+    const before = structuredClone(h.rows);
+    await expect(
+      h.journal.settle(key, h.attempt, { ...ending, ref: { ...h.ref, owner: { opOwner: "op:foreign" } } }),
+    ).rejects.toThrow("native timeout admission changed");
+    expect(h.rows).toEqual(before);
+    await h.journal.settle(key, h.attempt, ending);
+    expect(h.rows.get(`native-operation-receipt:${key}`)).toMatchObject({
+      receipt: { purpose: "native-timeout-ending", nativeEnding: ending, originalOperationOutcome: "unknown" },
+    });
+    await h.journal.close(key);
+    await new NativeRunScopes(h.storage, h.native).closeOperator(h.owner, h.ref);
+    expect(await h.journal.endOperator(key, h.owner, "returned")).toBe(true);
+  });
+
+  it("does not adopt an old identityless operator record into the new scope protocol", async () => {
+    const h = fixture();
+    await h.journal.open(key, { opOwner: "op:original" });
+    await h.journal.begin(key, "process");
+    const before = structuredClone(h.rows);
+    const hash = (await h.journal.list()).operations[0]!.recordHash;
+    expect(
+      await h.journal.recoverOperator(
+        key,
+        hash,
+        {
+          request: async () => {
+            throw new Error("must not control native state");
+          },
+        },
+        matches,
+        true,
+      ),
+    ).toBeUndefined();
+    expect(h.rows).toEqual(before);
+    expect((await h.journal.list()).operations).toMatchObject([
+      { recoverable: false, recoveryReason: "original-native-evidence-unavailable" },
+    ]);
+  });
+
+  it("refuses changed or active operator custody before native control", async () => {
+    const h = await ownedOperator("process", false);
+    const hash = (await h.journal.list()).operations[0]!.recordHash;
+    expect(await h.journal.recoverOperator(key, "a".repeat(64), h.native, matches, true)).toMatchObject({
+      error: "native-operation-recovery-refused: record-or-owner-changed",
+    });
+    expect(await h.journal.recoverOperator(key, hash, h.native, async () => false, true)).toMatchObject({
+      error: "native-operation-recovery-refused: record-or-owner-changed",
+    });
+    expect(h.calls).toEqual(["inspect", "bootstrap"]);
+    expect((await h.journal.unresolved()).size).toBe(1);
+  });
+
+  it("archives only the exact closed operator scope and keeps its lost payload result unknown", async () => {
+    const h = await ownedOperator();
+    const original = structuredClone(h.rows.get(key));
+    expect(await h.journal.endOperator(key, h.owner, "threw")).toBe(true);
+    expect(await h.journal.operatorEnded(key, h.owner)).toBe(true);
+    expect(h.rows.get(`native-operation-ending:${key}`)).toMatchObject({
+      original,
+      receipt: {
+        purpose: "operator-scope-ending",
+        owner: { opOwner: "op:original" },
+        scope: h.ref,
+        callback: "threw",
+        originalOperationOutcome: "unknown",
+      },
+    });
+    expect(await h.journal.unresolved()).toEqual(new Map());
+    await expect(h.journal.open(key, h.owner)).rejects.toThrow("native operation identity already used");
+  });
+
+  it("keeps opaque effects held after their operator process scope has ended", async () => {
+    const h = await ownedOperator("opaque");
+    expect(await h.journal.endOperator(key, h.owner, "returned")).toBe(false);
+    expect(await h.journal.operatorEnded(key, h.owner)).toBe(false);
+    expect((await h.journal.list()).operations).toMatchObject([
+      { owner: { opOwner: "op:original" }, journal: { closed: true, pending: { [h.attempt]: { kind: "opaque" } } } },
+    ]);
+    await h.journal.settle(key, h.attempt);
+    expect(await h.journal.endOperator(key, h.owner, "returned")).toBe(true);
+    expect(await h.journal.operatorEnded(key, h.owner)).toBe(true);
+  });
+
+  it.each([true, false])(
+    "qualifies a lost operator ending acknowledgement only from readable exact evidence: %s",
+    async (readable) => {
+      const h = await ownedOperator();
+      const transaction = h.storage.transaction.bind(h.storage);
+      h.storage.transaction = async (action) => {
+        await transaction(action);
+        throw new Error("lost-ending-ack");
+      };
+      const get = h.storage.get.bind(h.storage);
+      if (!readable)
+        h.storage.get = async (at) => {
+          if (at.startsWith("native-operation-ending:")) throw new Error("unavailable");
+          return get(at);
+        };
+      expect(await h.journal.endOperator(key, h.owner, "threw")).toBe(readable);
+      expect(h.rows.get(`native-operation-ending:${key}`)).toMatchObject({
+        receipt: { callback: "threw", originalOperationOutcome: "unknown" },
+      });
+    },
+  );
+
+  it("keeps the original operator hold when its ending receipt cannot commit", async () => {
+    const h = await ownedOperator();
+    const original = structuredClone(h.rows.get(key));
+    h.storage.transaction = async () => {
+      throw new Error("not committed");
+    };
+    expect(await h.journal.endOperator(key, h.owner, "threw")).toBe(false);
+    expect(h.rows.get(key)).toEqual(original);
+  });
+
+  it.each(["owner", "scope", "recordHash"])("rejects changed operator ending evidence: %s", async (field) => {
+    const h = await ownedOperator();
+    expect(await h.journal.endOperator(key, h.owner, "threw")).toBe(true);
+    const archive = h.rows.get(`native-operation-ending:${key}`) as { receipt: Record<string, unknown> };
+    archive.receipt[field] =
+      field === "owner"
+        ? { opOwner: "op:foreign" }
+        : field === "scope"
+          ? { ...h.ref, boot: "33333333-3333-4333-8333-333333333333" }
+          : "a".repeat(64);
+    expect(await h.journal.operatorEnded(key, h.owner)).toBe(false);
+  });
+
+  it("retains the original background producer before any effect starts", async () => {
+    const h = fixture();
+    const origin = {
+      producer: "deps-backup",
+      resource: "repo:acme/api",
+      callId: "11111111-1111-4111-8111-111111111111",
+      sourceId: "cache-a",
+      actor: "system",
+      traceId: null,
+      parentSourceId: null,
+      build: "a".repeat(40),
+      workerVersion: null,
+      startedAt: 1000,
+    };
+    await h.journal.open(key, { opOwner: "op:original" }, undefined, origin);
+    expect(h.rows.get(key)).toMatchObject({ opOwner: "op:original", origin, native: { closed: false, pending: {} } });
+  });
+
+  it("does not repeat a background source whose closed scope still has an unknown payload result", async () => {
+    const h = await ownedOperator();
+    const origin = (h.rows.get(key) as any).origin;
+    expect(await h.journal.endOperator(key, h.owner, "threw")).toBe(true);
+    expect(
+      await h.journal.open("native-operation:op:next", { opOwner: "op:next" }, undefined, {
+        ...origin,
+        callId: "44444444-4444-4444-8444-444444444444",
+      }),
+    ).toBe("producer-held");
+    expect(await h.journal.operatorEnded(key, h.owner)).toBe(true);
+  });
+
+  it("allows a fresh background call after every original payload has a known result", async () => {
+    const h = await ownedOperator();
+    const origin = (h.rows.get(key) as any).origin;
+    await h.journal.settle(key, h.attempt);
+    expect(await h.journal.endOperator(key, h.owner, "returned")).toBe(true);
+    expect(
+      await h.journal.open("native-operation:op:next", { opOwner: "op:next" }, undefined, {
+        ...origin,
+        callId: "44444444-4444-4444-8444-444444444444",
+      }),
+    ).toBe("admitted");
+  });
+
   it("an audit-write failure preserves the entire unresolved record", async () => {
     const h = fixture();
     const operation = await lostProcess(h);

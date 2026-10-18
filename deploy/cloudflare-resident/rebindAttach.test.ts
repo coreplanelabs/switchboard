@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { threadRequestFixture } from "./testing/threadRequestFixture.js";
 import { admitThreadDiskWithRollback, rebindPlan } from "../../src/execution/residentRebind.js";
 import { decideWorktree } from "../../src/execution/residentReuse.js";
 import { methodOf, readSource } from "./testing/sourceScan";
@@ -24,13 +25,6 @@ function method(name: string): string {
   const body = methodOf(residentDO, name);
   expect(body, `worker.ts declares ResidentDO.${name}`).not.toBeNull();
   return body!;
-}
-
-function functionOf(name: string): string {
-  const start = source.search(new RegExp(`^(?:async )?function ${name}\\(`, "m"));
-  expect(start, `worker.ts declares function ${name}`).toBeGreaterThan(-1);
-  const end = source.indexOf("\n}\n", start);
-  return source.slice(start, end + 3);
 }
 
 describe("a named ref replaces the sticky fallback before the worktree is provisioned", () => {
@@ -142,20 +136,18 @@ describe("a named ref replaces the sticky fallback before the worktree is provis
 });
 
 describe("the `ownPr` and `refByDefault` body fields reach the binding decision", () => {
-  it("handleAttach parses both with the pure parsers, checks the PR's ref against the one ref pattern, refuses a malformed field 400, and hands the reason to attachThread", () => {
-    expect(source).toMatch(/import \{[^}]*parseOwnPr[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentRebind\.js";/);
-    expect(source).toMatch(
-      /import \{[^}]*parseRefByDefault[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentRebind\.js";/,
-    );
-    const handler = functionOf("handleAttach");
-    expect(handler).toMatch(/const parsedOwnPr = parseOwnPr\(body\.ownPr\);/);
-    expect(handler).toMatch(/if \("error" in parsedOwnPr\) return json\(\{ error: parsedOwnPr\.error \}, 400\);/);
-    expect(handler).toMatch(/parseRef\(parsedOwnPr\.ownPr\.ref, "ownPr\.ref"\)/);
-    expect(handler).toMatch(/const refByDefault = parseRefByDefault\(body\.refByDefault\);/);
-    expect(handler).toMatch(/if \("error" in refByDefault\) return json\(\{ error: refByDefault\.error \}, 400\);/);
-    expect(handler).toMatch(
-      /attachThread\(\s*ctx\.threadKey,\s*refHint,\s*readonly\.readonly,\s*want\.sha,\s*reuse\.reuse,\s*ctx\.record,\s*traceparent,\s*reason,\s*githubDoor,\s*runBudgetMs,\s*runId,\s*ownerGen,\s*ownerFence,\s*nativeBirth,?\s*\)/,
-    );
+  it("handleAttach parses both with the pure parsers, checks the PR's ref against the one ref pattern, refuses a malformed field 400, and hands the reason to attachThread", async () => {
+    const h = threadRequestFixture();
+    const ownPr = { number: 42, ref: "fix/own-pr" };
+    expect(await (await h.attach({ ownPr, refByDefault: true })).json()).toEqual({ attached: true });
+    expect(h.attached[0]?.[7]).toEqual({ ownPr, refByDefault: true });
+    expect(h.traced[0]?.[14]).toEqual(h.context);
+    for (const body of [{ ownPr: { number: 42, ref: "bad..ref" } }, { ownPr: null }, { refByDefault: "yes" }]) {
+      const refused = await h.attach(body);
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ error: expect.any(String) });
+    }
+    expect(h.attached).toHaveLength(1);
   });
 
   it("attachThread carries the reason through the traced body, decides named authority before the legacy own-PR plan, and records boundBy on a new binding", () => {
@@ -454,15 +446,17 @@ describe("a binding whose own branch is gone from the mirror returns to the defa
 });
 
 describe("the owning run's pushed branches survive release", () => {
-  it("handleDetach parses `pushed` with the pure parser, checks every ref against the one ref pattern, refuses a malformed list 400, and hands it to detachThread", () => {
-    expect(source).toMatch(/import \{[^}]*parsePushed[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentRebind\.js";/);
-    const handler = functionOf("handleDetach");
-    expect(handler).toMatch(/const pushed = parsePushed\(body\.pushed\);/);
-    expect(handler).toMatch(/if \("error" in pushed\) return json\(\{ error: pushed\.error \}, 400\);/);
-    expect(handler).toMatch(/parseRef\(entry\.ref, "pushed\[\]\.ref"\)/);
-    expect(handler).toMatch(
-      /detachThread\(\s*ctx\.threadKey,\s*body\.force === true,\s*pushed\.pushed,\s*runId,\s*ownerGen,\s*ownerFence,?\s*\)/,
-    );
+  it("handleDetach parses `pushed` with the pure parser, checks every ref against the one ref pattern, refuses a malformed list 400, and hands it to detachThread", async () => {
+    const h = threadRequestFixture();
+    const pushed = [{ ref: "fix/own-pr", pr: 42 }];
+    expect(await (await h.detach({ pushed, force: true })).json()).toEqual({ released: true });
+    expect(h.detached).toEqual([["mcp:request", true, pushed, "run-request", "gen-request", 7, h.context]]);
+    for (const body of [{ pushed: "bad" }, { pushed: [{ ref: "bad..ref", pr: 42 }] }]) {
+      const refused = await h.detach(body);
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ error: expect.any(String) });
+    }
+    expect(h.detached).toHaveLength(1);
   });
 
   it("detachThread checks ownership before remembering pushed branches or evicting the tree", () => {

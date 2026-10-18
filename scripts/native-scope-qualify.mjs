@@ -34,7 +34,7 @@ const container = docker([
   "--entrypoint",
   "/bin/sleep",
   image,
-  "120",
+  "300",
 ]).trim();
 const temporary = mkdtempSync(join(tmpdir(), "native-harness-"));
 try {
@@ -80,6 +80,15 @@ try {
     "/tmp/harness-root-commands.json",
   ]);
   const receipt = JSON.parse(result.trim());
+  docker([
+    "cp",
+    `${root}deploy/cloudflare-resident/testing/nativeArchiveLinux.py`,
+    `${container}:/tmp/native-archive-test.py`,
+  ]);
+  const archiveReceipt = JSON.parse(
+    docker(["exec", container, "/usr/bin/python3", "-I", "/tmp/native-archive-test.py"]).trim(),
+  );
+  if (archiveReceipt.productionArchive !== "passed") throw new Error("native archive assertions failed");
   if (receipt.productionHelper !== "passed") throw new Error("native scope assertions failed");
   console.log(
     JSON.stringify({
@@ -87,6 +96,7 @@ try {
       image,
       helperSha256,
       ...receipt,
+      ...archiveReceipt,
     }),
   );
 } finally {

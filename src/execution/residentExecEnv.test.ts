@@ -53,16 +53,25 @@ describe("resident Worker /exec env", () => {
       withLevels: async (_stub: unknown, result: Promise<unknown>) => ({ result: await result }),
       streamThreadExec: async (pending: Promise<{ result: unknown }>) => Response.json((await pending).result),
       json: (body: unknown, status = 200) => Response.json(body, { status }),
-    }) as (env: unknown, body: unknown, trace: string) => Promise<Response>;
+    }) as (env: unknown, body: unknown, trace: string, context?: unknown) => Promise<Response>;
     const operation = { key: "a".repeat(64), commandHash: "b".repeat(64) };
     const owner = { runId: "run", ownerGen: "generation", ownerFence: 1 };
+    const context = {
+      callId: "11111111-1111-4111-8111-111111111111",
+      actor: "operator",
+      traceId: null,
+      parentSourceId: null,
+    };
     const response = await run(
       {},
       { command: "echo env", timeoutMs: 1000, env: { TEST_VALUE: "from-body" }, ...owner, checkOperation: operation },
       "trace",
+      context,
     );
     expect(await response.json()).toEqual({ stdout: "received", stderr: "", exitCode: 0, truncated: false });
-    expect(calls).toEqual([["thread", "echo env", 1000, "trace", { TEST_VALUE: "from-body" }, owner, operation]]);
+    expect(calls).toEqual([
+      ["thread", "echo env", 1000, "trace", { TEST_VALUE: "from-body" }, owner, operation, context],
+    ]);
     const invalid = await run({}, { command: "echo env", checkOperation: { ...operation, key: "invalid" } }, "trace");
     expect(await invalid.json()).toEqual({ error: "invalid check operation" });
     expect(invalid.status).toBe(400);

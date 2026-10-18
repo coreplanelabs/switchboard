@@ -1,3 +1,7 @@
+import { captureException } from "../../src/core/runStateWriteDiagnostic.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { NativeOperationJournal, nativeOperationOriginSchema } from "./nativeOperation.js";
+import { NativeRunScopes } from "./nativeScope.js";
 import { residentAddress } from "../../src/execution/residentMembers";
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
@@ -178,7 +182,7 @@ describe("global deploy admission evidence", () => {
         "\n" +
         routeDeclaration.getText(ast) +
         `\nconst Worker = { ${fetchMethod.getText(ast)} };` +
-        `\nclass Registry extends DurableObject { ${methods} } class Resident { ${methodOf(source.slice(source.indexOf("export class ResidentDO")), "withDeployAdmission")} }`,
+        `\nclass Registry extends DurableObject { ${methods} } class Resident { ${["withDeployAdmission", "withOpNativeOperation", "operationOrigin", "withSharedNativeOperation"].map((name) => methodOf(source.slice(source.indexOf("export class ResidentDO")), name)).join("\n")} }`,
       {
         compilerOptions: { target: ts.ScriptTarget.ES2022 },
       },
@@ -194,7 +198,11 @@ describe("global deploy admission evidence", () => {
       loseDeleteAck = false,
       failOrigin = false,
       loseRecoveryAck = false,
-      failAuditWrite = false;
+      failAuditWrite = false,
+      failOperatorEnding = false,
+      loseOperatorEndingAck = false,
+      unreadableOperatorEnding = false,
+      unreadableAfterOperatorAck = false;
     let onRecoveryProbe = () => {};
     let recoveryView: { state: string; executingRuns: number; unknownRuns: number; activeProcesses?: number } = {
       state: "warm",
@@ -203,9 +211,14 @@ describe("global deploy admission evidence", () => {
     };
     const storage = {
       setAlarm: async (_at: number) => {},
-      get: async <T>(key: string) => rows.get(key) as T | undefined,
+      get: async <T>(key: string) => {
+        if (unreadableOperatorEnding && key.startsWith("native-operation-ending:"))
+          throw new Error("ending-read-unavailable");
+        return rows.get(key) as T | undefined;
+      },
       put: async (key: string, value: unknown) => {
         if (failOrigin) throw new Error("private-origin-error");
+        if (failOperatorEnding && key.startsWith("native-operation-ending:")) throw new Error("ending-write-failed");
         if (
           failAuditWrite &&
           (key.startsWith("deploy:recovered:") ||
@@ -217,7 +230,7 @@ describe("global deploy admission evidence", () => {
         rows.set(key, value);
       },
       delete: async (key: string) => {
-        if (failDelete) throw new Error("private-delete-error");
+        if (failDelete && key.startsWith("deploy:admission:")) throw new Error("private-delete-error");
         const deleted = rows.delete(key);
 
         return deleted;
@@ -233,6 +246,11 @@ describe("global deploy admission evidence", () => {
           rows.clear();
           for (const [key, row] of before) rows.set(key, row);
           throw error;
+        }
+        if (loseOperatorEndingAck && [...rows.keys()].some((key) => key.startsWith("native-operation-ending:"))) {
+          loseOperatorEndingAck = false;
+          unreadableOperatorEnding = unreadableAfterOperatorAck;
+          throw new Error("lost-operator-ending-ack");
         }
         if (loseDeleteAck) {
           loseDeleteAck = false;
@@ -263,6 +281,10 @@ describe("global deploy admission evidence", () => {
         "\n({Registry, Resident, Worker, routes: ROUTES, beginTracked: typeof beginTrackedDeployAdmission === 'function' ? beginTrackedDeployAdmission : null, endTracked: typeof endTrackedDeployAdmission === 'function' ? endTrackedDeployAdmission : null, fenceHandler: handleDeployFence, recoveryHandler: handleRecoverAdmission, inventoryHandler: handleDeployAdmissions})",
       {
         crypto: webcrypto,
+        NativeOperationJournal,
+        captureException,
+        NativeRunScopes,
+        nativeOperationOriginSchema,
         Response,
         Request,
         URL,
@@ -344,6 +366,7 @@ describe("global deploy admission evidence", () => {
         DEPLOY_ADMISSION_KEY_PREFIX: "deploy:admission:",
         RESOURCE_KEY: "resource",
         DEPLOY_RELEASE_RECEIPTS_KEY: "deploy:release-receipts",
+        DEPLOY_RELEASE_RECEIPT_BYTES: 64 * 1024,
         DEPLOY_RECOVERY_KEY_PREFIX: "deploy:recovered:",
         DEPLOY_FENCE_RELEASE_KEY_PREFIX: "deploy:fence-release:",
         REGISTRY_KEY_PREFIX: "resident:",
@@ -500,14 +523,24 @@ describe("global deploy admission evidence", () => {
       endTracked: (store: unknown, identity: unknown) => endTracked(store, identity),
       resident: (failure: "read" | "rpc" | "begin-reply" | "end-reply") => {
         const instance = new Resident();
+        const admission = instance.withDeployAdmission.bind(instance);
+        instance.withDeployAdmission = (...args: unknown[]) =>
+          typeof args[0] === "function" ? admission("resident-call", undefined, args[0]) : admission(...args);
+        instance.threadOperationScope = new AsyncLocalStorage();
+        instance.opOperationScope = new AsyncLocalStorage();
+        instance.activeOperatorRequests = new Set();
         instance.env = {};
+        rows.set("resource", "repo:acme/api");
         instance.ctx = {
-          storage: {
-            get: async () => {
-              if (failure === "read") throw new Error("private-read-error");
-              return "repo:acme/api";
-            },
-          },
+          storage:
+            failure === "read"
+              ? {
+                  ...storage,
+                  get: async () => {
+                    throw new Error("private-read-error");
+                  },
+                }
+              : storage,
         };
         instance.registry = () => ({
           beginDeployAdmission: async (origin: unknown, identity?: unknown) => {
@@ -537,6 +570,13 @@ describe("global deploy admission evidence", () => {
       },
       loseDeleteAck: () => {
         loseDeleteAck = true;
+      },
+      failOperatorEnding: () => {
+        failOperatorEnding = true;
+      },
+      loseOperatorEndingAck: (readable = true) => {
+        loseOperatorEndingAck = true;
+        unreadableAfterOperatorAck = !readable;
       },
       failOrigin: () => {
         failOrigin = true;
@@ -1919,6 +1959,14 @@ describe("global deploy admission evidence", () => {
       ...admitted,
       startedAt: 1000,
     });
+    const storedBeforeRelease = h.rows.get(`deploy:admission:${admitted.id}`) as Record<string, unknown>;
+    const originalHash = createHash("sha256")
+      .update(
+        JSON.stringify(
+          Object.fromEntries(Object.entries(storedBeforeRelease).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
+        ),
+      )
+      .digest("hex");
     h.loseDeleteAck();
     await h.endTracked(h.api, admitted);
     expect(await h.api.readDeployAdmissionReceipt(admitted)).toEqual({
@@ -1927,6 +1975,17 @@ describe("global deploy admission evidence", () => {
       startedAt: 1000,
       releasedAt: 1000,
       nativeOutcome: "unverified",
+      origin: {
+        ...origin,
+        callId: admitted.id,
+        producer: "watchdog",
+        actor: "system",
+        resource: null,
+        sourceId: "watchdog",
+        parentSourceId: null,
+        requesterScope: null,
+      },
+      originalRecordSha256: originalHash,
     });
     let calls = 0;
     const store = {
@@ -1973,6 +2032,228 @@ describe("global deploy admission evidence", () => {
       expect(await h.api.activeDeployAdmissions()).toBe(0);
     },
   );
+
+  it("holds a real deployment permit around the provisioning owner and releases after its ending", async () => {
+    const h = fixture();
+    const resident = h.resident("rpc");
+    const answer = await resident.withSharedNativeOperation("provisioning", async () => {
+      expect(await h.api.activeDeployAdmissions()).toBe(1);
+      const permits = [...h.rows].filter(([key]) => key.startsWith("deploy:admission:")).map(([, row]) => row);
+      expect(permits).toMatchObject([{ producer: "provisioning", actor: "system", resource: "repo:acme/api" }]);
+      const journals = [...h.rows].filter(([key]) => key.startsWith("native-operation:")).map(([, row]) => row);
+      expect(journals).toMatchObject([{ origin: { producer: "provisioning", sourceId: "provisioning" } }]);
+      return "provisioned";
+    });
+    expect(answer).toBe("provisioned");
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
+    expect(h.rows.get("deploy:release-receipts")).toMatchObject([
+      { origin: { producer: "provisioning", actor: "system" } },
+    ]);
+    expect(
+      [...h.rows].filter(([key]) => key.startsWith("native-operation-ending:")).map(([, row]) => row),
+    ).toMatchObject([{ receipt: { purpose: "operator-scope-ending", originalOperationOutcome: "unknown" } }]);
+  });
+
+  it("records request identity before work and operator ending before the exact permit release", async () => {
+    const h = fixture();
+    const resident = h.resident("rpc");
+    const registry = resident.registry();
+    let releases = 0;
+    resident.registry = () => ({
+      ...registry,
+      endDeployAdmission: async (id: string, hash: string) => {
+        expect([...h.rows].filter(([key]) => key.startsWith("native-operation-ending:"))).toMatchObject([
+          [expect.any(String), { receipt: { purpose: "operator-scope-ending", originalOperationOutcome: "unknown" } }],
+        ]);
+        expect([...h.rows].filter(([key]) => key.startsWith("native-operator-scope:"))).toMatchObject([
+          [expect.any(String), { kind: "operation", closed: true }],
+        ]);
+        releases++;
+        return registry.endDeployAdmission(id, hash);
+      },
+    });
+    const context = {
+      callId: "11111111-1111-4111-8111-111111111111",
+      actor: "operator",
+      traceId: "b".repeat(32),
+      parentSourceId: null,
+    };
+    expect(
+      await resident.withDeployAdmission("op-test", context, async () => {
+        const permits = [...h.rows].filter(([key]) => key.startsWith("deploy:admission:")).map(([, row]) => row);
+        expect(permits).toMatchObject([
+          {
+            producer: "op-test",
+            actor: "operator",
+            resource: "repo:acme/api",
+            callId: "11111111-1111-4111-8111-111111111111",
+            traceId: "b".repeat(32),
+          },
+        ]);
+        expect([...h.rows].filter(([key]) => key.startsWith("native-operation:")).map(([, row]) => row)).toMatchObject([
+          {
+            origin: {
+              producer: "resident-call",
+              sourceId: "op-test",
+              actor: "operator",
+              callId: "11111111-1111-4111-8111-111111111111",
+            },
+          },
+        ]);
+        return "original-result";
+      }),
+    ).toBe("original-result");
+    expect(releases).toBe(1);
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
+    expect(h.rows.get("deploy:release-receipts")).toMatchObject([
+      {
+        origin: { producer: "op-test", actor: "operator", callId: context.callId },
+        originalRecordSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    ]);
+  });
+
+  it.each(["write", "lost-unreadable-ack"] as const)(
+    "keeps the request permit and known result when operator ending is unverified: %s",
+    async (fault) => {
+      const h = fixture();
+      if (fault === "write") h.failOperatorEnding();
+      else h.loseOperatorEndingAck(false);
+      let work = 0;
+      expect(
+        await h.resident("rpc").withDeployAdmission(async () => {
+          work++;
+          return "original-result";
+        }),
+      ).toBe("original-result");
+      expect(work).toBe(1);
+      expect(await h.api.activeDeployAdmissions()).toBe(1);
+      expect(await h.fence()).toMatchObject({ activeAdmissions: 1, fenceReady: false });
+      expect(h.events).toContainEqual(
+        expect.objectContaining({
+          schema: 1,
+          phase: "permit-release",
+          id: expect.any(String),
+          commit: "held",
+          failure: "operator-ending-unverified",
+          reason: fault === "write" ? "ending-not-observed" : "ending-read-failed",
+        }),
+      );
+    },
+  );
+
+  it("reports the original container failure while scope closure and permit release stay unverified", async () => {
+    const h = fixture();
+    const resident = h.resident("rpc");
+    const error = Object.assign(new Error("container unavailable token=fixture-secret"), {
+      name: "ContainerUnavailableError",
+    });
+    resident.nativeScopeTransport = () => ({
+      request: async () => {
+        throw error;
+      },
+    });
+    expect(
+      await resident.withDeployAdmission(async () => {
+        const entry = [...h.rows].find(([key]) => key.startsWith("native-operator-scope:"))!;
+        h.rows.set(entry[0], {
+          ...(entry[1] as object),
+          boot: "22222222-2222-4222-8222-222222222222",
+          bootstrap: "ready",
+        });
+        return "original-result";
+      }),
+    ).toBe("original-result");
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        phase: "operator-ending",
+        stage: "scope-close",
+        commit: "unverified",
+        errorName: "ContainerUnavailableError",
+        errorMessage: "container unavailable token=«redacted»",
+      }),
+    );
+    const ending = h.events.find((event) => event.phase === "operator-ending")!;
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        phase: "permit-release",
+        commit: "held",
+        opOwner: ending.id,
+        reason: "ending-not-observed",
+      }),
+    );
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    expect(await h.fence()).toMatchObject({ activeAdmissions: 1, fenceReady: false });
+    expect(JSON.stringify(h.events)).not.toContain("fixture-secret");
+  });
+
+  it.each([
+    {
+      error: new Error("storage unavailable token=fixture-secret"),
+      name: "Error",
+      message: "storage unavailable token=«redacted»",
+    },
+    {
+      error: "storage unavailable token=fixture-secret",
+      name: "ThrownValue",
+      message: "storage unavailable token=«redacted»",
+    },
+    { error: null, name: "ThrownValue", message: "null" },
+    {
+      error: Object.assign(new Error("x".repeat(600)), { name: "n".repeat(100) }),
+      name: "n".repeat(79) + "…",
+      message: "x".repeat(512) + "…",
+    },
+  ])(
+    "reports bounded journal-close details for $name without releasing the permit",
+    async ({ error, name, message }) => {
+      const h = fixture();
+      const put = h.storage.put;
+      h.storage.put = async (key: string, value: unknown) => {
+        if (key.startsWith("native-operation:") && (value as { native?: { closed?: boolean } }).native?.closed)
+          throw error;
+        return put(key, value);
+      };
+      expect(await h.resident("rpc").withDeployAdmission(async () => "original-result")).toBe("original-result");
+      expect(h.events).toContainEqual(
+        expect.objectContaining({
+          phase: "operator-ending",
+          stage: "journal-close",
+          commit: "unverified",
+          errorName: name,
+          errorMessage: message,
+        }),
+      );
+      expect(await h.api.activeDeployAdmissions()).toBe(1);
+      expect(JSON.stringify(h.events)).not.toContain("fixture-secret");
+    },
+  );
+
+  it("reports a failed ending read with bounded redacted details and keeps the original result", async () => {
+    const h = fixture();
+    h.loseOperatorEndingAck(false);
+    expect(await h.resident("rpc").withDeployAdmission(async () => "original-result")).toBe("original-result");
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        phase: "permit-release",
+        commit: "held",
+        reason: "ending-read-failed",
+        errorName: "Error",
+        errorMessage: "ending-read-unavailable",
+      }),
+    );
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    expect(await h.fence()).toMatchObject({ activeAdmissions: 1, fenceReady: false });
+  });
+
+  it("qualifies a lost operator ending acknowledgement before releasing its one request permit", async () => {
+    const h = fixture();
+    h.loseOperatorEndingAck();
+    expect(await h.resident("rpc").withDeployAdmission(async () => "original-result")).toBe("original-result");
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
+    expect([...h.rows].filter(([key]) => key.startsWith("native-operation-ending:"))).toHaveLength(1);
+    expect(h.events.filter((event) => event.phase === "permit-release")).toMatchObject([{ commit: "acknowledged" }]);
+  });
 
   it("keeps the original Resident error when permit release remains unverified", async () => {
     const h = fixture();
@@ -2124,6 +2405,35 @@ describe("global deploy admission evidence", () => {
     );
     expect(await h.api.readDeployAdmissionReceipt(alive)).toEqual({ state: "admitted", ...alive, startedAt: 1000 });
     expect(await h.api.activeDeployAdmissions()).toBe(1);
+  });
+
+  it("bounds retained request provenance by bytes and keeps evicted evidence unknown", async () => {
+    const h = fixture();
+    const first = { id: "00000000-0000-4000-8000-000000000100", requestHash: "e".repeat(64) };
+    for (let i = 0; i < 128; i++) {
+      const identity = {
+        id: `00000000-0000-4000-8000-${String(i + 100).padStart(12, "0")}`,
+        requestHash: "e".repeat(64),
+      };
+      await h.api.beginDeployAdmission(
+        {
+          ...origin,
+          resource: "repo:acme/api",
+          producer: "deps-backup",
+          actor: "system",
+          sourceId: "s".repeat(128),
+          parentSourceId: "p".repeat(128),
+          callId: identity.id,
+        },
+        identity,
+      );
+      await h.api.endDeployAdmission(identity.id, identity.requestHash);
+    }
+    expect(
+      new TextEncoder().encode(JSON.stringify(h.rows.get("deploy:release-receipts"))).byteLength,
+    ).toBeLessThanOrEqual(65536);
+    expect(await h.api.readDeployAdmissionReceipt(first)).toEqual({ state: "unknown" });
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
   });
 
   it("cannot credit absent storage as release or launch work from foreign or unavailable readback", async () => {
@@ -2670,9 +2980,21 @@ describe("global deploy admission evidence", () => {
   });
 
   it.each(["read", "rpc"] as const)(
-    "reports unavailable origin after %s failure while preserving the work result",
+    "distinguishes required origin reads from optional annotation failures: %s",
     async (failure) => {
       const h = fixture();
+      if (failure === "read") {
+        let work = 0;
+        await expect(
+          h.resident(failure).withDeployAdmission(async () => {
+            work++;
+            return "work-completed";
+          }),
+        ).rejects.toThrow("private-read-error");
+        expect(work).toBe(0);
+        expect(await h.api.activeDeployAdmissions()).toBe(0);
+        return;
+      }
       const result = await h.resident(failure).withDeployAdmission(async () => "work-completed");
       const id = h.events[0].id;
       expect(result).toBe("work-completed");
@@ -2705,6 +3027,10 @@ describe("global deploy admission evidence", () => {
       resource: null,
       sourceId: null,
       requesterScope: null,
+      producer: null,
+      actor: null,
+      callId: null,
+      parentSourceId: null,
     });
     h.advance();
     await h.api.endDeployAdmission(id);
@@ -3204,6 +3530,7 @@ describe("fresh provisioning image reports", () => {
           },
         },
         pendingRestores: new Set(),
+        withSharedNativeOperation: async (_producer: string, fn: () => Promise<unknown>) => fn(),
         currentUidLedger: async () => ({}),
         registry: () => registry,
         runOk: async () => "",
