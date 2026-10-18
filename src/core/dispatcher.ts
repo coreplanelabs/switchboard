@@ -5374,7 +5374,7 @@ export async function dispatch(
       channelVisibility,
       slackContext,
       privateAudienceLatch,
-      publicationContextCheck: revalidateAdmitted,
+      admittedContextCheck: revalidateAdmitted,
       publishText,
       ending,
       spawn,

@@ -429,7 +429,7 @@ export interface RunLoopContext {
   channelVisibility: ChannelVisibility;
   slackContext?: SlackContextBinding;
   privateAudienceLatch?: PrivateAudienceLatch;
-  publicationContextCheck?: () => Promise<import("../audienceDecision.js").AudienceCheck>;
+  admittedContextCheck?: () => Promise<import("../audienceDecision.js").AudienceCheck>;
   admitSourceContext?: (context: ContextDependencies) => Promise<boolean>;
   validateExecutionContext?: (context: ContextDependencies) => Promise<import("../audienceDecision.js").AudienceCheck>;
   currentNativeMediaContext?: () => ContextDependencies | undefined;
@@ -2080,7 +2080,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       deps.config.canRunAgent(actor, agent.name) &&
       !!repoCtx.repo &&
       deps.config.canUseRepo(actor, repoCtx.repo) &&
-      (ctx.publicationContextCheck === undefined || (await ctx.publicationContextCheck()).ok)
+      (ctx.admittedContextCheck === undefined || (await ctx.admittedContextCheck()).ok)
     );
   };
   // Give the workspace back now rather than at the inactivity sweep: a
@@ -5004,8 +5004,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       const checked = await root.span("run.publication_context_check", async (span) => {
         const result = privateRun
           ? await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)
-          : ctx.publicationContextCheck
-            ? await ctx.publicationContextCheck()
+          : ctx.admittedContextCheck
+            ? await ctx.admittedContextCheck()
             : { ok: true as const };
         span.setAttrs(audienceCheckAttrs(result));
         return result;

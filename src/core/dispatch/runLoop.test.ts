@@ -12763,7 +12763,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       root: trace.root,
       resume,
       messages: resume.plan.messages,
-      publicationContextCheck: async () => ({
+      admittedContextCheck: async () => ({
         ok: false,
         code: "saved-context-unproved",
         check: "execution_github_access_unproved",
