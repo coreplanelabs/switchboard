@@ -31,6 +31,7 @@ export interface RunStopStatus {
  * `create()`, so callers can sort/label without reaching into run internals.
  */
 export interface RunSummary {
+  failureContext?: import("../requestFailure.js").FailureContext | null;
   prompt?: string;
   title?: string;
   authoritativeHistory?: true;
@@ -132,6 +133,7 @@ export interface RunSummary {
 /** What `snapshot`/`snapshotById` return: a COPY of the retained backlog plus the
  *  two record fields not derivable from the events. */
 export interface RunSnapshot {
+  failureContext?: import("../requestFailure.js").FailureContext | null;
   prompt?: string;
   title?: string;
   privateConversation?: true;
@@ -177,6 +179,7 @@ export interface SealResult {
 export function summaryOf(run: RunState, now: number): RunSummary {
   const m = run.meta;
   return {
+    ...(run.failureContext !== undefined ? { failureContext: run.failureContext && { ...run.failureContext } } : {}),
     id: run.id,
     token: run.token,
     ...(run.prompt !== undefined ? { prompt: run.prompt } : {}),
@@ -240,6 +243,7 @@ export function summaryOf(run: RunState, now: number): RunSummary {
  *  derivable from it. `truncated` says the bounded backlog dropped events. */
 export function snapshotOf(run: RunState): RunSnapshot {
   return {
+    ...(run.failureContext !== undefined ? { failureContext: run.failureContext && { ...run.failureContext } } : {}),
     ...(run.prompt !== undefined ? { prompt: run.prompt } : {}),
     ...(run.title !== undefined ? { title: run.title } : {}),
     ...(run.meta?.privateConversation ? { privateConversation: true as const } : {}),

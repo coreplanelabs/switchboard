@@ -13,6 +13,7 @@ import {
 import { reviewPublicationOf, type ReviewPublicationReceipt } from "./reviewPublication.js";
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import { runSetupOf, type RunSetup } from "./runSetup.js";
+import { isFailureContext, type FailureContext } from "./requestFailure.js";
 import {
   isMainContextRefusalCode,
   MAIN_CONTEXT_REFUSAL_CODES,
@@ -138,6 +139,8 @@ export function branchPushReceiptsOf(value: unknown): BranchPushReceipt[] | unde
 }
 
 export interface RunRecord {
+  /** Last observed request failure; null means its origin was unavailable. */
+  failureContext?: FailureContext | null;
   /** The original producer and required cleanup acknowledged shutdown. Absent means unknown. */
   runtimeShutdownConfirmed?: true;
   /** A negative execution outcome; supplies no promotion or source-release authority. */
@@ -474,6 +477,16 @@ export function pushedHeadsOf(events: readonly RunEvent[]): PushedHead[] | undef
 export function leaseOfEvents(events: readonly RunEvent[]): RunLease | undefined {
   for (const e of events) {
     if (e.type === "lease") return { startedAt: e.startedAt, endsAt: e.endsAt, loopEndsAt: e.loopEndsAt };
+  }
+  return undefined;
+}
+
+/** Write-time reconstruction for reclaimed runs; metadata readers never scan events. */
+export function failureContextOfEvents(events: readonly RunEvent[]): FailureContext | null | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.type === "run_note" && event.failureContext !== undefined)
+      return isFailureContext(event.failureContext) ? { ...event.failureContext } : null;
   }
   return undefined;
 }
@@ -1510,6 +1523,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   }
   // The failure by name (item 57): one of the named kinds, or absent.
   if (r.failure !== undefined && !isRunFailure(r.failure)) return false;
+  if (r.failureContext !== undefined && r.failureContext !== null && !isFailureContext(r.failureContext)) return false;
   if (
     r.contextRefusals !== undefined &&
     (!Array.isArray(r.contextRefusals) ||

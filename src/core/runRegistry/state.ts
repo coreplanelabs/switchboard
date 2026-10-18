@@ -114,6 +114,7 @@ export interface Subscription {
 }
 
 export interface RunState {
+  failureContext?: import("../requestFailure.js").FailureContext | null;
   eventLane: RunEventLane;
   prompt?: string;
   title?: string;

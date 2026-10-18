@@ -1838,54 +1838,150 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.notes).toContain("finale timed out — closing the run without a write-up");
   });
 
-  it("a model call in flight at the budget ends by the wind-down, not an aborted call: the budget answer stands, the failure is a note, and the budget note says what the run was doing", async () => {
-    const clock = { now: NOW };
-    const w = world({ clock, agent: { maxMinutes: 20 } });
-    scriptedPi(w.container, (n, c) => {
-      bashTurn(w, "c1", "ls", "a");
-      c.emit({ type: "turn_start" }); // pi opens the next turn: its model call is under way…
-      // …when the deadline passes — once the harness has read the turn's start
-      // off the log (the call's result lands on the stream in the same read).
-      void vi
-        .waitFor(() => expect(w.events.some((e) => e.type === "tool_result" && e.callId === "c1")).toBe(true))
-        .then(() => {
-          clock.now += 13 * MINUTE_MS;
-          setImmediate(() => {
-            // pi's in-flight model call dies as an abort while the run winds down.
-            c.emit(
-              {
-                type: "message_end",
-                message: {
-                  role: "assistant",
-                  content: [],
-                  stopReason: "error",
-                  errorMessage: "This operation was aborted",
+  it.each([
+    { error: "This operation was aborted", failure: LOCAL_MODEL_ABORT_MESSAGE, requestId: undefined },
+    {
+      error: JSON.stringify({
+        type: "urn:switchboard:request-failure",
+        title: "Request failed",
+        status: 500,
+        request_id: "1".repeat(32),
+      }),
+      failure: UNKNOWN_MODEL_TERMINAL_MESSAGE,
+      requestId: "1".repeat(32),
+    },
+  ])(
+    "a model call in flight at the budget ends by the wind-down, not an aborted call: the budget answer stands, the failure is a note, and the budget note says what the run was doing ($requestId)",
+    async ({ error, failure, requestId }) => {
+      const clock = { now: NOW };
+      const w = world({ clock, agent: { maxMinutes: 20 } });
+      scriptedPi(w.container, (n, c) => {
+        bashTurn(w, "c1", "ls", "a");
+        c.emit({ type: "turn_start" }); // pi opens the next turn: its model call is under way…
+        // …when the deadline passes — once the harness has read the turn's start
+        // off the log (the call's result lands on the stream in the same read).
+        void vi
+          .waitFor(() => expect(w.events.some((e) => e.type === "tool_result" && e.callId === "c1")).toBe(true))
+          .then(() => {
+            clock.now += 13 * MINUTE_MS;
+            setImmediate(() => {
+              // pi's in-flight model call dies as an abort while the run winds down.
+              c.emit(
+                {
+                  type: "message_end",
+                  message: {
+                    role: "assistant",
+                    content: [],
+                    stopReason: "error",
+                    errorMessage: error,
+                  },
                 },
-              },
-              { type: "agent_settled" },
-            );
+                { type: "agent_settled" },
+              );
+            });
           });
-        });
-    });
-    const answer = await w.start();
-    // The wind-down's own words, naming the failed call where the write-up would have been.
-    expect(answer).toBe(
-      `Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (${LOCAL_MODEL_ABORT_MESSAGE}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
-    );
-    expect(w.notes.some((note) => note.includes("the loop's time is up while a model call was in flight"))).toBe(true);
-    expect(
-      w.notes.some((note) =>
-        note.includes(`the model call failed during the wind-down (${LOCAL_MODEL_ABORT_MESSAGE})`),
-      ),
-    ).toBe(true);
-    // The wind-down instruction was steered; the run never became a failure.
-    expect(
-      w.container
-        .commands()
-        .filter((c) => c.type === "steer")
-        .map((s) => String(s.message)),
-    ).toContain(timeBudgetInstruction());
-  });
+      });
+      const answer = await w.start();
+      // The wind-down's own words, naming the failed call where the write-up would have been.
+      expect(answer).toBe(
+        `Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (${failure}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
+      );
+      expect(w.notes.some((note) => note.includes("the loop's time is up while a model call was in flight"))).toBe(
+        true,
+      );
+      expect(w.notes.some((note) => note.includes(`the model call failed during the wind-down (${failure})`))).toBe(
+        true,
+      );
+      if (requestId)
+        expect(w.events).toContainEqual(
+          expect.objectContaining({
+            type: "run_note",
+            kind: "harness_error",
+            modelFailure: expect.objectContaining({
+              diagnostic: expect.objectContaining({
+                source: "unverified",
+                error: expect.objectContaining({ requestId }),
+              }),
+            }),
+          }),
+        );
+      // The wind-down instruction was steered; the run never became a failure.
+      expect(
+        w.container
+          .commands()
+          .filter((c) => c.type === "steer")
+          .map((s) => String(s.message)),
+      ).toContain(timeBudgetInstruction());
+    },
+  );
+
+  it.each(["1".repeat(32), undefined])(
+    "a follow-up wind-down projects its latest failure context without changing the budget answer (%s)",
+    async (requestId) => {
+      const clock = { now: NOW };
+      const w = world({ clock });
+      const registry = new RunRegistry();
+      const tracked = registry.create();
+      registry.publish(tracked.id, {
+        type: "run_note",
+        kind: "harness_error",
+        summary: "Earlier failure",
+        failureContext: { traceId: "2".repeat(32), source: "unverified" },
+      });
+      w.run.onEvent = (event) => {
+        w.events.push(event);
+        registry.publish(tracked.id, event);
+      };
+      scriptedPi(w.container, (n, c) => {
+        if (n === 0) return finalTurn(c, "first answer");
+        c.emit({ type: "turn_start" });
+        clock.now += 5 * MINUTE_MS;
+      });
+      const session = await w.open();
+      try {
+        const turn = session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+        await vi.waitFor(() =>
+          expect(w.container.commands()).toContainEqual(
+            expect.objectContaining({ type: "steer", message: timeBudgetInstruction() }),
+          ),
+        );
+        w.container.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: JSON.stringify({
+                type: "urn:switchboard:request-failure",
+                title: "Request failed",
+                status: 500,
+                request_id: requestId,
+              }),
+            },
+          },
+          { type: "agent_settled" },
+        );
+        await expect(turn).resolves.toBe(
+          `Stopped at the 5-minute budget without finishing; the model call failed during the wind-down (${UNKNOWN_MODEL_TERMINAL_MESSAGE}), so no write-up came. Partial work may exist in the workspace — this is a bug: the task outlived its run budget and no automatic continuation was scheduled.`,
+        );
+        const failureContext = requestId ? { traceId: requestId, source: "unverified" } : null;
+        expect(w.events).toContainEqual(
+          expect.objectContaining({
+            type: "run_note",
+            kind: "harness_error",
+            summary: `the model call failed during the wind-down (${UNKNOWN_MODEL_TERMINAL_MESSAGE}); the turn closes with its findings so far`,
+            failureContext,
+            modelFailure: expect.objectContaining({ kind: "unknown", phase: "follow_up" }),
+          }),
+        );
+        expect(registry.getById(tracked.id)).toMatchObject({ failureContext });
+        expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(2);
+      } finally {
+        await session.end();
+      }
+    },
+  );
 
   it("a pi that dies before settling fails the run naming its last stderr; a refused prompt fails it by reason; a model error fails it with pi's message", async () => {
     const dead = world();

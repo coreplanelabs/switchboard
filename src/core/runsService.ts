@@ -110,6 +110,7 @@ export type Result<T> =
  * expresses the outcome as `status`).
  */
 export interface RunView {
+  failureContext?: RunRecord["failureContext"];
   prompt?: string;
   title?: string;
   /** Stored private model context must not be restored without a current projection. */
@@ -688,6 +689,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
  *  neither. Field-explicit on purpose: a spread would carry `token`. */
 function liveView(s: RunSummary): RunView {
   return {
+    ...(s.failureContext !== undefined ? { failureContext: s.failureContext } : {}),
     id: s.id,
     ...(s.prompt !== undefined ? { prompt: s.prompt } : {}),
     ...(s.title !== undefined ? { title: s.title } : {}),
@@ -1506,11 +1508,10 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         return { ok: true, value: await diagnostic(view) };
       }
       const summary = registry.getById(id);
-      const snap = summary ? registry.snapshotById(id) : null;
-      if (summary && snap) {
+      if (summary) {
         const view: RunRecordView = liveView(summary);
         if (!ordinaryRun(view, opts.privateWorkerAccess)) return notFound;
-        if (opts.include === "messages") view.events = snap.events;
+        if (opts.include === "messages") view.events = registry.snapshotById(id)?.events ?? [];
         // A finished row inside the registry's window: its identity, stop state,
         // finish fields and events are the registry's; the record's typed
         // artifacts are the store's to supply (item 21). A live row never asks.

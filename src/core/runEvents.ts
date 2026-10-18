@@ -713,6 +713,8 @@ export type RunEvent =
       providerFailure?: ProviderFailureDetails & { cause: ProviderFailureCause };
       /** Bounded Pi evidence on a harness error, independent of provider classification. */
       modelFailure?: ModelFailureDiagnostic;
+      /** Bounded request origin, independent of private exception prose; null means unavailable. */
+      failureContext?: import("./requestFailure.js").FailureContext | null;
       /** Redacted request-bound storage diagnosis; never a mutation receipt. */
       storageFailure?: import("./storageFailureDiagnostic.js").StorageFailureDiagnostic;
       /** Closed observation only; never a command outcome or recovery receipt. */

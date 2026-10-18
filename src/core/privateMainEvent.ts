@@ -1,5 +1,6 @@
 import type { RunEvent } from "./runEvents.js";
 import { storageFailureDiagnosticOf } from "./storageFailureDiagnostic.js";
+import { isFailureContext } from "./requestFailure.js";
 
 /** A verified private main DM's source data stays in its requester-scoped model session.
  * Its run page and live stream are shared diagnostic surfaces, so they carry
@@ -7,6 +8,10 @@ import { storageFailureDiagnosticOf } from "./storageFailureDiagnostic.js";
 export function privateMainEvent(event: RunEvent): RunEvent {
   const at = event.at;
   const seq = event.seq;
+  const origin =
+    event.type === "run_note" && event.failureContext !== undefined
+      ? { failureContext: isFailureContext(event.failureContext) ? { ...event.failureContext } : null }
+      : {};
   switch (event.type) {
     case "input":
       return { type: "input", text: "Private request", messageId: event.messageId, at, seq };
@@ -84,6 +89,7 @@ export function privateMainEvent(event: RunEvent): RunEvent {
           kind: "storage_failure",
           summary: "Private storage request failed.",
           ...(structural ? { storageFailure: structural } : {}),
+          ...origin,
           at,
           seq,
         };
@@ -94,6 +100,7 @@ export function privateMainEvent(event: RunEvent): RunEvent {
           kind: "work_context_refused",
           summary: "Private work context refused.",
           contextReason: event.contextReason,
+          ...origin,
           at,
           seq,
         };
@@ -103,10 +110,11 @@ export function privateMainEvent(event: RunEvent): RunEvent {
           kind: "work_source_refused",
           summary: "Private work source refused.",
           sourceReason: event.sourceReason,
+          ...origin,
           at,
           seq,
         };
-      return { type: "run_note", kind: "follow_up", summary: "Private conversation activity", at, seq };
+      return { type: "run_note", kind: "follow_up", summary: "Private conversation activity", ...origin, at, seq };
     default:
       return { type: "run_note", kind: "follow_up", summary: "Private conversation activity", at, seq };
   }

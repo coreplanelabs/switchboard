@@ -39,3 +39,5 @@ For long-running work, read [How agents keep context](explanation/context-engine
 [`reference/specs/`](reference/specs/README.md) is the contract: one file per feature, every criterion bound to a test or a procedure. When a page here disagrees with a spec, the spec is right.
 
 [`README.md`](../README.md) is the front door; [`AGENTS.md`](../AGENTS.md) is for whoever changes Switchboard.
+
+The [shared request failure context design](plans/2026-10-18-003-gateway-failure-correlation-design.md) defines direct failure lookup across the gateway and saved runs.

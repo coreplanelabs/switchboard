@@ -25,6 +25,7 @@ import { usageOfEvents } from "../runUsage.js";
 import {
   branchPushReceiptsOf,
   fitRecordToBudget,
+  failureContextOfEvents,
   decisionRecordOfEvents,
   instanceIdOfEvents,
   leaseOfEvents,
@@ -563,6 +564,7 @@ export function assembleRunRecord(input: {
       organizationPrivateAudienceOf(msg) !== undefined);
   const rawEvents = seal && seal.events.length > 0 ? [...atFinish, ...seal.events] : atFinish;
   const events = privateMain ? rawEvents.map(privateMainEvent) : rawEvents;
+  const failureContext = snap?.failureContext !== undefined ? snap.failureContext : failureContextOfEvents(events);
   // The pull request the run reached (run-history item 2): the post-step's
   // `pr_opened`, published before the stream finished, so it is in the events.
   const pr = prOfEvents(events);
@@ -627,6 +629,7 @@ export function assembleRunRecord(input: {
     ...(seal?.replyNote !== undefined ? { replyNote: seal.replyNote } : {}),
     ...(snap !== null ? { stepCount: snap.stepCount } : {}),
     status: input.status,
+    ...(failureContext !== undefined ? { failureContext } : {}),
     ...(snap?.liveState !== undefined ? { liveState: snap.liveState } : {}),
     ...(snap?.liveStateSeq !== undefined ? { liveStateSeq: snap.liveStateSeq } : {}),
     eventCount: Math.max(snap?.eventCount ?? atFinish.length, seal?.eventCount ?? 0),

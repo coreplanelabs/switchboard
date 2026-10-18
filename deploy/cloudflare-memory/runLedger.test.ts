@@ -6221,6 +6221,47 @@ const diagnosis = () => ({
   verdict: "no friction detected",
 });
 
+describe("request failure context in stored metadata", () => {
+  it("persists a bounded failure context in the keyed summary without retained event rows", async () => {
+    const key = "failure-context-summary";
+    const terminal = {
+      ...record("failure-context", "slack:C1:failure"),
+      status: "failed" as const,
+      events: [],
+      eventCount: 0,
+      storedEventCount: 0,
+      failureContext: { traceId: "1".repeat(32), source: "unverified" as const },
+    };
+    expect((await post("/runs/put", { storeKey: key, record: terminal })).status).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      const stored = state.storage.sql
+        .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id = ?", "failure-context")
+        .one();
+      expect(JSON.parse(stored.summary_json).failureContext).toEqual({
+        traceId: "1".repeat(32),
+        source: "unverified",
+      });
+    });
+    expect((await post("/runs/summary", { storeKey: key, id: "failure-context" })).data.summary).toMatchObject({
+      id: "failure-context",
+      status: "failed",
+      failureContext: { traceId: "1".repeat(32), source: "unverified" },
+    });
+    expect(
+      (
+        await post("/runs/put", {
+          storeKey: key,
+          record: { ...terminal, failureContext: { ...terminal.failureContext, body: "PRIVATE" } },
+        })
+      ).status,
+    ).toBe(400);
+    expect((await post("/runs/summary", { storeKey: key, id: "failure-context" })).data.summary).toMatchObject({
+      failureContext: { traceId: "1".repeat(32), source: "unverified" },
+    });
+  });
+});
+
 function record(id: string, threadKey: string): RunRecord {
   return {
     id,
