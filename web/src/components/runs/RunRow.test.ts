@@ -282,7 +282,40 @@ describe("RunRow", () => {
     });
     expect(item(w, "Kill")?.disabled).toBe(true);
     await vi.waitFor(() => expect(item(w, "Kill")?.disabled).toBe(false));
+    expect(w.find('[role="alert"]').text()).toBe("Could not confirm Kill. This run is still listed.");
+    expect(w.find('[data-run-id="run-1"]').classes()).toContain("live");
+    expect(menuItems(w).map((i) => i.label)).toEqual(["Open thread", "Stop", "Kill"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    item(w, "Kill")!.onSelect!();
+    await vi.waitFor(() => expect(menuItems(w).map((i) => i.label)).toEqual(["Open thread", "Kill"]));
+    expect(w.find('[role="alert"]').exists()).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    { mode: "Stop", failure: "HTTP" },
+    { mode: "Stop", failure: "network" },
+    { mode: "Kill", failure: "network" },
+  ] as const)(
+    "shows an unconfirmed $mode result after a $failure failure without retrying",
+    async ({ mode, failure }) => {
+      vi.spyOn(browser, "confirm").mockReturnValue(true);
+      if (failure === "HTTP") fetchMock.mockResolvedValueOnce({ ok: false, status: 503 });
+      else fetchMock.mockRejectedValueOnce(new TypeError("private transport detail"));
+      const w = mountRow(row({ token: "tok-1" }));
+      item(w, mode)!.onSelect!();
+      await vi.waitFor(() =>
+        expect(w.find('[role="alert"]').text()).toBe(`Could not confirm ${mode}. This run is still listed.`),
+      );
+      expect(w.find('[data-run-id="run-1"]').classes()).toContain("live");
+      expect(menuItems(w).map((i) => i.label)).toEqual(["Open thread", "Stop", "Kill"]);
+      expect(fetchMock).toHaveBeenCalledExactlyOnceWith(`/runs/run-1/stop?t=tok-1&mode=${mode.toLowerCase()}`, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      expect(w.text()).not.toContain("private transport detail");
+    },
+  );
 
   it("a click on a tooltip cell (not a link or button) goes where the row goes", async () => {
     const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
