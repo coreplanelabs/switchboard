@@ -1,6 +1,7 @@
 import { ORCHESTRATOR_DECISION_BYTES_MAX, ORCHESTRATOR_DECISIONS_MAX } from "../budgets.js";
 import { sourceEventReceiptOf, sourceSnapshot, type SourceEventReceipt } from "../runLedger/sourceEvents.js";
 import type { LiveRunRow } from "../runLedger/types.js";
+import { isContextDependencies } from "../references/contextDependencies.js";
 import { sourceHash } from "../references/receipts.js";
 import type { IncomingMessage } from "../types.js";
 
@@ -102,6 +103,28 @@ export function sourceFoldRunTarget(row: LiveRunRow) {
       githubSource: meta.githubSource ?? null,
       recordTaskKey: meta.recordTaskKey ?? null,
     },
+  };
+  sourceSnapshot(projection);
+  return structuredClone(projection);
+}
+
+/** Bind the stored context dependencies of both participants. This is a data
+ * snapshot, not current source access or native input admission. */
+export function sourceFoldRunContext(root: LiveRunRow, destination: LiveRunRow) {
+  const rootDependencies = root.state.contextDependencies;
+  const destinationDependencies = destination.state.contextDependencies;
+  if (
+    !isContextDependencies(rootDependencies) ||
+    rootDependencies.status !== "known" ||
+    !isContextDependencies(destinationDependencies) ||
+    destinationDependencies.status !== "known"
+  )
+    return;
+  const projection = {
+    version: 1 as const,
+    kind: "run-context" as const,
+    root: { target: sourceFoldRunTarget(root), dependencies: rootDependencies },
+    destination: { target: sourceFoldRunTarget(destination), dependencies: destinationDependencies },
   };
   sourceSnapshot(projection);
   return structuredClone(projection);

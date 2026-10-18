@@ -494,17 +494,46 @@ describe("source notice and fold messages", () => {
     };
     decision.target.hash = await sourceHash(sourceSnapshot(target));
     decision.inputHash = await sourceHash(sourceSnapshot(folded));
+    const dependencies = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    expect(await ledger.setState(owner.runId, "g1", { contextDependencies: dependencies })).toEqual({ ok: true });
+    expect(await ledger.setState("child", "g1", { contextDependencies: dependencies })).toEqual({ ok: true });
+    const rootTarget = {
+      ...target,
+      runId: owner.runId,
+      recipient: { ...target.recipient, agent: "orchestrator", threadKey: owner.threadKey },
+      parent: { ...target.parent, runId: null },
+      handoff: null,
+    };
+    decision.contextHash = await sourceHash(
+      sourceSnapshot({
+        version: 1,
+        kind: "run-context",
+        root: { target: rootTarget, dependencies },
+        destination: { target, dependencies },
+      }),
+    );
     const deliver = () => ledger.deliverInbox("child", { version: 1, key: "fold-owner", message: folded });
     expect(await deliver()).toEqual({ kind: "refused", reason: "invalid-delivery" });
     for (const changed of [
       { ...decision, inputHash: "d".repeat(64) },
       { ...decision, target: { ...decision.target, hash: "e".repeat(64) } },
+      { ...decision, contextHash: "f".repeat(64) },
     ]) {
-      expect(await ledger.setState(owner.runId, "g1", { orchestratorDecisions: [changed] })).toEqual({ ok: true });
+      expect(
+        await ledger.setState(owner.runId, "g1", {
+          orchestratorDecisions: [changed],
+          contextDependencies: dependencies,
+        }),
+      ).toEqual({ ok: true });
       expect(await deliver()).toEqual({ kind: "refused", reason: "invalid-delivery" });
       expect(await ledger.readInbox("child", 0)).toEqual([]);
     }
-    expect(await ledger.setState(owner.runId, "g1", { orchestratorDecisions: [decision] })).toEqual({ ok: true });
+    expect(
+      await ledger.setState(owner.runId, "g1", {
+        orchestratorDecisions: [decision],
+        contextDependencies: dependencies,
+      }),
+    ).toEqual({ ok: true });
     ledger.live.get(owner.runId)!.meta.agent = "review";
     expect(await deliver()).toEqual({ kind: "refused", reason: "invalid-delivery" });
     ledger.live.get(owner.runId)!.meta.agent = "orchestrator";
@@ -525,6 +554,28 @@ describe("source notice and fold messages", () => {
       expect(await pending).toEqual({ ok: false, reason: "invalid-message" });
       child.meta = structuredClone(originalMeta);
     }
+    for (const row of [ledger.live.get(owner.runId)!, child]) {
+      for (const context of [
+        { ...dependencies, revision: 1 },
+        { ...dependencies, githubRepos: ["other/repository"] },
+        { ...dependencies, status: "unknown" },
+        { ...dependencies, status: "revoked" },
+        { ...dependencies, revision: -1 },
+      ]) {
+        const pending = ledger.pushInbox("child", folded);
+        row.state.contextDependencies = context;
+        expect(await pending).toEqual({ ok: false, reason: "invalid-message" });
+        row.state.contextDependencies = structuredClone(dependencies);
+      }
+      delete row.state.contextDependencies;
+      expect(await ledger.pushInbox("child", folded)).toEqual({ ok: false, reason: "invalid-message" });
+      row.state.contextDependencies = structuredClone(dependencies);
+    }
+    const root = ledger.live.get(owner.runId)!;
+    const rootChanged = ledger.pushInbox("child", folded);
+    root.meta.repo = "other/root-repository";
+    expect(await rootChanged).toEqual({ ok: false, reason: "invalid-message" });
+    delete root.meta.repo;
     const changedDecision = ledger.pushInbox("child", folded);
     ledger.live.get(owner.runId)!.state.orchestratorDecisions = [{ ...decision, inputHash: "f".repeat(64) }];
     expect(await changedDecision).toEqual({ ok: false, reason: "invalid-message" });

@@ -4,6 +4,7 @@ import {
   orchestratorDecisionsOf,
   sameOrchestratorOwner,
   sourceFoldRunTarget,
+  sourceFoldRunContext,
   type OrchestratorOwner,
   type OrchestratorSourceFoldDecision,
 } from "../dispatch/orchestratorDecisions.js";
@@ -71,7 +72,7 @@ export interface PreparedSourceEvidenceAppend {
   message: Record<string, unknown>;
   key: string;
   recordJson: string;
-  fold?: { targetJson: string; targetHash: string; inputHash: string };
+  fold?: { targetJson: string; targetHash: string; inputHash: string; contextJson: string; contextHash: string };
 }
 
 /** Capture the stored event before hashing can yield, then verify its receipt
@@ -80,6 +81,7 @@ export async function prepareSourceEvidenceAppend(
   value: Record<string, unknown>,
   loadRecord: (key: string) => unknown,
   loadDestination?: () => LiveRunRow | undefined,
+  loadRoot?: (runId: string) => LiveRunRow | undefined,
 ): Promise<PreparedSourceEvidenceAppend | undefined> {
   try {
     const captured = sourceSnapshot(value);
@@ -89,15 +91,29 @@ export async function prepareSourceEvidenceAppend(
     const record = sourceSnapshot(loadRecord(receipt.key));
     const destination = object(captured.routing) && captured.routing.kind === "fold" ? loadDestination?.() : undefined;
     const target = destination && sourceSnapshot(sourceFoldRunTarget(destination));
+    const routing = sourceRoutingOf(captured.routing);
+    const root = routing?.kind === "fold" ? loadRoot?.(routing.owner.runId) : undefined;
+    const context = root && destination ? sourceFoldRunContext(root, destination) : undefined;
     const message = await prepareSourceEvidenceMessage(captured);
     if (message?.version !== 2 || !object(record)) return;
     const expected = await sourceEvidenceMessageFromRecord(record, message.routing);
     if (!expected || JSON.stringify(sourceSnapshot(expected)) !== JSON.stringify(captured)) return;
     let fold: PreparedSourceEvidenceAppend["fold"];
     if (message.routing.kind === "fold") {
-      if (target === undefined) return;
-      const [targetHash, inputHash] = await Promise.all([sourceHash(target), sourceHash(captured)]);
-      fold = { targetJson: JSON.stringify(target), targetHash, inputHash };
+      if (target === undefined || context === undefined) return;
+      const snapshot = sourceSnapshot(context);
+      const [targetHash, inputHash, contextHash] = await Promise.all([
+        sourceHash(target),
+        sourceHash(captured),
+        sourceHash(snapshot),
+      ]);
+      fold = {
+        targetJson: JSON.stringify(target),
+        targetHash,
+        inputHash,
+        contextJson: JSON.stringify(snapshot),
+        contextHash,
+      };
     }
     return {
       message: { ...message },
@@ -117,7 +133,9 @@ export type SourceEvidenceRefusal =
   | "fold-destination"
   | "fold-decision"
   | "fold-target"
-  | "fold-input";
+  | "fold-input"
+  | "fold-context"
+  | "fold-context-unavailable";
 
 /** Return a fixed refusal code, never private source or error data. Call in
  * the existing append transaction with no await before writing the row.
@@ -202,6 +220,13 @@ export function sourceEvidenceAppendRefusal(
     )
       return "fold-target";
     if (decision.inputHash !== prepared.fold.inputHash) return "fold-input";
+    const context = sourceFoldRunContext(root, destination);
+    if (context === undefined) return "fold-context-unavailable";
+    if (
+      JSON.stringify(sourceSnapshot(context)) !== prepared.fold.contextJson ||
+      decision.contextHash !== prepared.fold.contextHash
+    )
+      return "fold-context";
     return;
   } catch {
     return "source-proof";

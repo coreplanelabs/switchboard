@@ -2276,6 +2276,7 @@ export class InMemoryRunLedger implements RunLedger {
           message,
           (key) => this.sourceInboxRecord(key),
           () => this.live.get(runId),
+          (id) => this.live.get(id),
         )
       : undefined;
     if (sourceInput && !source) {
@@ -2301,6 +2302,7 @@ export class InMemoryRunLedger implements RunLedger {
             input.message,
             (key) => this.sourceInboxRecord(key),
             () => this.live.get(runId),
+            (id) => this.live.get(id),
           )
         : undefined;
     const receipts = this.inboxDeliveries.get(runId) ?? new Map<string, InboxDeliveryReceipt>();

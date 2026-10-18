@@ -8225,6 +8225,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           message,
           (key) => this.sourceInboxRecord(key),
           () => this.liveRow(runId),
+          (id) => this.liveRow(id),
         )
       : undefined;
     if (sourceInput && !source) {
@@ -8254,6 +8255,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             input.message,
             (key) => this.sourceInboxRecord(key),
             () => this.liveRow(runId),
+            (id) => this.liveRow(id),
           )
         : undefined;
     let out: InboxDeliveryResult = { kind: "refused", reason: "not-live" };
