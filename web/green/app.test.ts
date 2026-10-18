@@ -1,13 +1,14 @@
 // Feature: docs/reference/specs/browser-home.md — hash-only navigation preserves an explicit reply destination.
 import { enableAutoUnmount, flushPromises } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineComponent, inject, ref } from "vue";
+import { defineComponent, h, inject, provide, ref } from "vue";
+import { useRouter } from "vue-router";
 import type { HomeSession } from "@core/channels/homeSeed.js";
 import type { WebSeed } from "@core/channels/webSeed.js";
 import App from "./App.vue";
 import ThreadPage from "./pages/Thread.vue";
 import UnitPage from "./pages/Unit.vue";
-import { SeedRoutingKey } from "../src/lib/seedRouting";
+import { installSeedRouting, SeedRoutingKey } from "../src/lib/seedRouting";
 import { SeedKey } from "../src/lib/seed";
 import { ALL_ON, mountApp } from "../src/testing/mount";
 import { fakeEventSourceFactory } from "../src/testing/fakeEventSource";
@@ -47,6 +48,148 @@ const island: WebSeed = {
 };
 
 describe("Green App navigation", () => {
+  it("discards a pending page checked before deletion and rechecks the user's selected destination", async () => {
+    let removed = false;
+    const own = {
+      id: "own",
+      role: "user" as const,
+      isViewer: true,
+      content: "Private note for deletion",
+      deleteUrl: "/home/messages/own",
+    };
+    let finishDelete!: (value: Response) => void;
+    const deletion = new Promise<Response>((resolve) => {
+      finishDelete = resolve;
+    });
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url === "/home/messages/own") {
+        removed = true;
+        return deletion;
+      }
+      return Response.json({
+        ...session,
+        accessEpoch: removed ? "after-delete" : session.accessEpoch,
+        entries: removed ? [] : [own],
+      });
+    });
+    const seed = {
+      ...island,
+      title: "Current allowed work",
+      pageAccess: { actor: "access:alice", organization: "org" },
+    };
+    let releaseOld!: (value: WebSeed) => void,
+      releaseFresh!: (value: WebSeed) => void,
+      runReads = 0;
+    const oldPage = new Promise<WebSeed>((resolve) => {
+      releaseOld = resolve;
+    });
+    const freshPage = new Promise<WebSeed>((resolve) => {
+      releaseFresh = resolve;
+    });
+    const host = defineComponent({
+      setup() {
+        const routing = installSeedRouting(useRouter(), {
+          island: seed,
+          leave: vi.fn(),
+          load: async (address) => {
+            if (address !== "/runs") return { ...seed, title: removed ? "Fresh home work" : "Current allowed work" };
+            return ++runReads === 1 ? oldPage : freshPage;
+          },
+        });
+        provide(SeedRoutingKey, routing);
+        return () => h(App);
+      },
+    });
+    const page = mountApp(host, { eventSource: fakeEventSourceFactory().factory });
+    const leaf = defineComponent({
+      setup() {
+        const data = inject(SeedKey);
+        return () => data?.title;
+      },
+    });
+    for (const path of ["/home", "/runs"]) page.vm.$router.addRoute({ path, component: leaf });
+    await page.vm.$router.push("/home");
+    await flushPromises();
+    await page.get("textarea").setValue("Keep the unsent draft");
+    const navigation = page.vm.$router.push("/runs");
+    await vi.waitFor(() => expect(runReads).toBe(1));
+    await page.get('[aria-label="Remove private request content"]').trigger("click");
+    const confirm = page.get('[aria-label="Delete saved text confirmation"]').findAll("button")[0]!;
+    await confirm.trigger("click");
+    finishDelete(Response.json({ status: "ok" }));
+    await flushPromises();
+    releaseOld({ ...seed, title: "Stale private work" });
+    await vi.waitFor(() => expect(runReads).toBe(2));
+    expect(page.text()).not.toContain("Stale private work");
+    releaseFresh({ ...seed, title: "Fresh selected work" });
+    await navigation;
+    await flushPromises();
+    expect(page.text()).toContain("Fresh selected work");
+    expect(page.text()).not.toContain("Dashboard access changed");
+    await page.vm.$router.push("/home");
+    await flushPromises();
+    expect(page.get("textarea").element.value).toBe("Keep the unsent draft");
+    expect(page.text()).not.toContain("Private note for deletion");
+  });
+  it("loads a fresh page after deleting saved text and never restores the old access epoch", async () => {
+    const streams = fakeEventSourceFactory();
+    const own = {
+      id: "own",
+      role: "user" as const,
+      isViewer: true,
+      content: "Erase this saved text",
+      deleteUrl: "/home/messages/own",
+    };
+    let removed = false;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url === "/home/messages/own") {
+        removed = true;
+        return Response.json({ status: "ok" });
+      }
+      return Response.json({
+        ...session,
+        accessEpoch: removed ? "after-deletion" : session.accessEpoch,
+        entries: removed ? [] : [own],
+      });
+    });
+    const currentSeed = ref<WebSeed>({
+      ...island,
+      title: "Old work",
+      pageAccess: { actor: "access:alice", organization: "org" },
+    });
+    const refresh = vi.fn(async (address) => {
+      expect(address).toBe("/home");
+      currentSeed.value = { ...currentSeed.value, title: "Fresh authorized work" };
+      return true;
+    });
+    const wrapper = mountApp(App, {
+      eventSource: streams.factory,
+      provides: [[SeedRoutingKey, { loading: ref(false), seedAt: () => currentSeed.value, refresh }]],
+    });
+    const leaf = defineComponent({
+      setup() {
+        const seed = inject(SeedKey);
+        return () => seed?.title;
+      },
+    });
+    wrapper.vm.$router.addRoute({ path: "/home", component: leaf });
+    await wrapper.vm.$router.push("/home");
+    await flushPromises();
+    const original = streams.created.at(-1)!;
+    await wrapper.get("textarea").setValue("Keep my draft");
+    await wrapper.get('[aria-label="Remove private request content"]').trigger("click");
+    await wrapper.get('[aria-label="Delete saved text confirmation"]').findAll("button")[0]!.trigger("click");
+    await flushPromises();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("Fresh authorized work");
+    expect(wrapper.text()).not.toContain("Dashboard access changed");
+    expect(wrapper.get("textarea").element.value).toBe("Keep my draft");
+    original.emitMessage({ ...session, entries: [own] });
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("Erase this saved text");
+    expect(wrapper.text()).toContain("Fresh authorized work");
+  });
+
   it.each([
     "unit write",
     "thread read",
@@ -464,7 +607,7 @@ describe("Green App navigation", () => {
     expect(wrapper.find("textarea").element.value).toBe("Local reply draft");
     await router.push("/home");
     await flushPromises();
-    expect(wrapper.find(".green-destination").text()).toBe("Messages");
+    expect(wrapper.find(".green-destination").text()).toBe("Private messages · only you");
     expect(wrapper.find("textarea").element.value).toBe("Broad draft");
   });
 });

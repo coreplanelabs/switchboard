@@ -31,6 +31,75 @@ function inventory(rows: CoordinatorUnit[], instances = [instance]): HomeInvento
 }
 
 describe("Home durable fleet", () => {
+  it.each([
+    [new TypeError("PRIVATE_BATCH_DETAIL"), "type_error"],
+    [new SyntaxError("PRIVATE_BATCH_DETAIL"), "syntax_error"],
+    [new Error("PRIVATE_BATCH_DETAIL"), "error"],
+    ["PRIVATE_BATCH_DETAIL", "non_error"],
+  ])("keeps unavailable batch coverage and reports only the closed cause %s", async (error, kind) => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const home = createHomeService({
+        organizationId: "org",
+        instances: {
+          ...inventory([]),
+          listUnitsMany: async () => {
+            throw error;
+          },
+        },
+      });
+      expect(await home.snapshot(viewer)).toMatchObject({ status: "unavailable", waiting: [], pipelines: [] });
+      expect(warning.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            event: "home.read.degraded",
+            phase: "unit_list",
+            reason: "unavailable_or_invalid",
+            errorKind: kind,
+          }),
+        ],
+      ]);
+      expect(JSON.stringify(warning.mock.calls)).not.toContain("PRIVATE_BATCH_DETAIL");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+  it("reads the same 1011-pipeline census with 22 remote requests and no per-pipeline reads", async () => {
+    const memory = new InMemoryCoordinatorInstanceStore();
+    for (let i = 0; i < 1011; i++) {
+      const id = `pipeline-${i}`;
+      await memory.put({ ...instance, id });
+      await memory.putUnits([unit("U10", { instanceId: id })]);
+    }
+    const listInstances = vi.fn(memory.listInstances.bind(memory));
+    const listUnitsMany = vi.fn(memory.listUnitsMany.bind(memory));
+    const listUnits = vi.fn(memory.listUnits.bind(memory));
+    const original = createHomeService({ organizationId: "org", instances: { listInstances, listUnits } });
+    const before = await original.snapshot(viewer);
+    expect(before.waiting).toHaveLength(1011);
+    expect(listInstances).toHaveBeenCalledTimes(11);
+    expect(listUnits).toHaveBeenCalledTimes(1011);
+    listInstances.mockClear();
+    listUnits.mockClear();
+    const service = createHomeService({
+      organizationId: "org",
+      instances: { listInstances, listUnitsMany, listUnits },
+    });
+    const read = await service.snapshot(viewer);
+    expect(read.status).toBe("complete");
+    expect(read.waiting).toHaveLength(1011);
+    expect(read.pipelines).toHaveLength(1011);
+    expect(listInstances).toHaveBeenCalledTimes(11);
+    expect(listUnitsMany).toHaveBeenCalledTimes(11);
+    expect(listUnits).not.toHaveBeenCalled();
+  });
+  it("marks a missing batched unit group partial instead of counting it as an empty complete pipeline", async () => {
+    const service = createHomeService({
+      organizationId: "org",
+      instances: { ...inventory([]), listUnitsMany: async () => [] },
+    });
+    expect(await service.snapshot(viewer)).toMatchObject({ status: "unavailable", waiting: [], pipelines: [] });
+  });
   it.each(["snapshot", "pipeline", "history"] as const)(
     "summarizes failed condition reads once without private details in %s",
     async (operation) => {

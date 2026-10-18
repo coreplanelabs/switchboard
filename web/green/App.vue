@@ -19,7 +19,8 @@ const seedGeneration = ref(0);
 const unavailableExplanation = ref<HTMLElement | null>(null);
 let address = "",
   previousSeed = pageSeed.value,
-  confirmedPrivacy: string | null = null;
+  confirmedPrivacy: string | null = null,
+  removalCountAtStart = home.contentRemovals.value;
 const privacy = () => {
   // A target recovery has no public conversation; only its old invalidation identity remains.
   if (home.recoveringPrivacy.value) return home.recoveringPrivacy.value;
@@ -29,14 +30,24 @@ const privacy = () => {
     : null;
 };
 watch(
-  [() => pageAddress(route), pageSeed, privacy],
-  ([nextAddress, seed, currentPrivacy]) => {
-    if (nextAddress !== address || (seed !== previousSeed && !(seed === null && routing.loading.value))) {
+  [() => pageAddress(route), pageSeed, privacy, () => home.removing.value],
+  ([nextAddress, seed, currentPrivacy, removing], previous) => {
+    if (removing && !previous?.[3]) removalCountAtStart = home.contentRemovals.value;
+    const removed = !removing && previous?.[3] && home.contentRemovals.value > removalCountAtStart;
+    if (
+      nextAddress !== address ||
+      (seed !== previousSeed && !(seed === null && routing.loading.value)) ||
+      (removed && seed)
+    ) {
       address = nextAddress;
       previousSeed = seed;
       confirmedPrivacy = null;
       accessLost.value = null;
       seedGeneration.value++;
+    }
+    if (removing) {
+      accessLost.value = "global";
+      return;
     }
     const current = home.session.value;
     if (
@@ -53,6 +64,30 @@ watch(
     }
   },
   { immediate: true, flush: "sync" },
+);
+const reloadingDashboard = ref(false);
+async function reloadDashboard() {
+  if (reloadingDashboard.value) return;
+  reloadingDashboard.value = true;
+  try {
+    const currentAddress = pageAddress(route);
+    await home.load();
+    if (pageAddress(route) === currentAddress) await routing?.refresh?.(currentAddress);
+  } finally {
+    reloadingDashboard.value = false;
+  }
+}
+watch(
+  home.contentRemovals,
+  async () => {
+    const currentAddress = pageAddress(route);
+    const expectedPrivacy = privacy();
+    // A successful content deletion changes access. Replace the entire page's
+    // source proof rather than lending its old seed to the new session.
+    if (!routing.refresh || !(await routing.refresh(currentAddress))) return;
+    if (pageAddress(route) !== currentAddress || privacy() !== expectedPrivacy) accessLost.value = "global";
+  },
+  { flush: "sync" },
 );
 watch(accessLost, async (lost) => {
   if (!lost) return;
@@ -128,8 +163,20 @@ onBeforeUnmount(() => home.dispose());
             <div v-if="accessLost" ref="unavailableExplanation" tabindex="-1" role="alert">
               <EmptyState
                 title="Dashboard access changed"
-                description="This page is unavailable with the current access."
+                :description="
+                  home.removing.value
+                    ? 'Refreshing current access after message deletion.'
+                    : 'This page is unavailable with the current access.'
+                "
               />
+              <button
+                type="button"
+                class="green-button mt-3"
+                :disabled="reloadingDashboard || !!home.removing.value"
+                @click="reloadDashboard"
+              >
+                Reload dashboard
+              </button>
             </div>
             <RouterView v-else v-slot="{ Component }">
               <component

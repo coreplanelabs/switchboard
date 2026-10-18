@@ -1,5 +1,11 @@
 import type { StorageOperation } from "../../src/core/storageRequestContext.js";
 import {
+  validUnitGroupIds,
+  UNIT_GROUP_MAX_ROWS,
+  UNIT_GROUP_MAX_BYTES,
+  type UnitGroup,
+} from "../../src/core/coordinator/unitGroups.js";
+import {
   nativeRetirementTargetSchema,
   nativeRetirementTargetKey,
   nativeRetirementPermitSchema,
@@ -5818,6 +5824,27 @@ export class RunHistoryDO extends DurableObject<Env> {
     );
   }
 
+  async listUnitsMany(instanceIds: string[]): Promise<UnitGroup[]> {
+    if (!validUnitGroupIds(instanceIds)) throw new Error("Pipeline unit group query is invalid.");
+    const size = this.sql
+      .exec<{ rows: number; bytes: number }>(
+        `SELECT COUNT(*) AS rows, COALESCE(SUM(length(CAST(json AS BLOB))),0) AS bytes FROM coordinator_units WHERE instance_id IN (${instanceIds.map(() => "?").join(",")})`,
+        ...instanceIds,
+      )
+      .one();
+    if (size.rows > UNIT_GROUP_MAX_ROWS || size.bytes > UNIT_GROUP_MAX_BYTES)
+      throw new Error("Pipeline unit group read limit exceeded.");
+    const units = this.sql
+      .exec<{ instance_id: string; json: string }>(
+        `SELECT instance_id, json FROM coordinator_units WHERE instance_id IN (${instanceIds.map(() => "?").join(",")}) ORDER BY rowid LIMIT ${UNIT_GROUP_MAX_ROWS + 1}`,
+        ...instanceIds,
+      )
+      .toArray();
+    if (units.length > UNIT_GROUP_MAX_ROWS) throw new Error("Pipeline unit group read limit exceeded.");
+    const groups = new Map(instanceIds.map((instanceId) => [instanceId, [] as CoordinatorUnit[]]));
+    for (const row of units) groups.get(row.instance_id)!.push(parseStoredJson(row.json) as CoordinatorUnit);
+    return instanceIds.map((instanceId) => ({ instanceId, units: groups.get(instanceId)! }));
+  }
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
     return this.sql
       .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? ORDER BY rowid`, instanceId)
@@ -13670,6 +13697,7 @@ const LEDGER_ROUTES = new Set<string>([
   "/runs/coordinator/units/list-active-recoveries",
   "/runs/coordinator/pull-owners",
   "/runs/coordinator/units/list",
+  "/runs/coordinator/units/list-many",
   "/runs/coordinator/reconcile/offer",
   "/runs/coordinator/events/append",
   "/runs/coordinator/events/list",
@@ -14968,6 +14996,10 @@ async function handleLedger(
     if (typeof b.id !== "string" || !INSTANCE_ID_PATTERN.test(b.id))
       return json({ error: "id must be a Workflow instance id" }, 400);
     return json({ instance: await stub.getInstance(b.id) });
+  }
+  if (pathname === "/runs/coordinator/units/list-many") {
+    if (!validUnitGroupIds(b.instanceIds)) return json({ error: "pipeline unit group query invalid" }, 400);
+    return json({ groups: await stub.listUnitsMany(b.instanceIds) });
   }
   if (pathname === "/runs/coordinator/list") {
     if (

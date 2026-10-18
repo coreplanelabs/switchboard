@@ -1,7 +1,7 @@
 import type { ConfigStore } from "../config.js";
 import type { Actor } from "../core/authz/types.js";
 import { githubCapabilityFor } from "../core/dispatch/run.js";
-import type { GithubApi } from "../execution/githubApi.js";
+import { GithubApiError, GithubCredentialUnavailable, type GithubApi } from "../execution/githubApi.js";
 
 /** Current eligible choices, never installation-wide private repository metadata. */
 export type HomeRepositories =
@@ -17,7 +17,7 @@ const repoSlug = (value: unknown): value is string =>
   typeof value === "string" && value.length <= 2048 && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
 
 /** One existing GitHub capability and policy table; no saved preference or new grant. */
-export function createHomeRepositories(options: { config: ConfigStore; github: GithubApi }) {
+export function createHomeRepositories(options: { config: ConfigStore; github?: GithubApi }) {
   async function read(actor: Actor): Promise<HomeRepositories> {
     try {
       // Without a separately verified native private-read capability, the existing
@@ -26,8 +26,10 @@ export function createHomeRepositories(options: { config: ConfigStore; github: G
         { config: options.config, githubApi: options.github },
         actor,
       ).readableRepos?.();
-      if (!rows || rows.some((row) => !row || !repoSlug(row.fullName)))
+      if (!rows || rows.some((row) => !row || !repoSlug(row.fullName))) {
+        console.warn(JSON.stringify({ event: "home.repositories.unavailable", reason: "invalid_rows" }));
         return { status: "unavailable", repositories: [] };
+      }
       const repositories = rows
         .filter((row) => row.private === false && options.config.canUseRepo(actor, row.fullName))
         .map((row) => ({ repo: row.fullName }))
@@ -42,7 +44,23 @@ export function createHomeRepositories(options: { config: ConfigStore; github: G
           return true;
         }),
       };
-    } catch {
+    } catch (error) {
+      const errorKind =
+        error instanceof GithubCredentialUnavailable
+          ? error.reason === "missing"
+            ? "credential_missing"
+            : "credential_failed"
+          : error instanceof GithubApiError
+            ? "github_http"
+            : "read_error";
+      console.warn(
+        JSON.stringify({
+          event: "home.repositories.unavailable",
+          reason: "read_failed",
+          errorKind,
+          ...(error instanceof GithubApiError ? { httpStatus: error.status } : {}),
+        }),
+      );
       return { status: "unavailable", repositories: [] };
     }
   }

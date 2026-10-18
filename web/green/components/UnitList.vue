@@ -19,6 +19,8 @@ const props = defineProps<{
   rows: (HomeUnit & { activity?: "moving" })[];
   label: string;
   urgent?: boolean;
+  pageOnly?: boolean;
+  investigation?: boolean;
   activity?: "moving";
   attentionRecipient?: string;
   attentionRecipients?: string[];
@@ -142,6 +144,7 @@ const owner = (row: HomeUnit) =>
     )
     .join(" · ");
 const state = (row: (typeof props.rows)[number]) => {
+  if (props.investigation) return "Needs investigation";
   if (row.conditions.some((condition) => condition.state === "open")) return "Waiting";
   if (props.activity === "moving" || row.activity === "moving") return "Working";
   if (row.unit.ending) return endingWordOf(row.unit.ending.kind);
@@ -160,7 +163,11 @@ const state = (row: (typeof props.rows)[number]) => {
       </div>
       <label v-if="rows.length > 8" class="max-w-[48%]"
         ><span class="sr-only">Filter {{ label.toLowerCase() }}</span
-        ><input v-model="query" class="green-input w-full text-xs" placeholder="Filter work…" @input="resetScroll"
+        ><input
+          v-model="query"
+          class="green-input w-full text-xs"
+          :placeholder="pageOnly ? 'Filter this page…' : 'Filter work…'"
+          @input="resetScroll"
       /></label>
     </div>
     <p v-if="!filtered.length" class="p-5 text-xs text-muted">
@@ -168,7 +175,8 @@ const state = (row: (typeof props.rows)[number]) => {
     </p>
     <template v-else>
       <p v-if="filtered.length > 10" class="px-5 pt-3 text-xs text-muted" role="status">
-        {{ filtered.length }} matching units. Scroll or use Page Down and Page Up to see all matching work.
+        {{ filtered.length }} matching units{{ pageOnly ? " on this page" : "" }}. Scroll or use Page Down and Page Up
+        to see all matching work.
       </p>
       <div
         ref="viewport"
@@ -226,12 +234,17 @@ const state = (row: (typeof props.rows)[number]) => {
               {{ item.data.conditions.map((c) => c.summary).join(" · ") }}
             </p>
             <div class="green-unit-row-footer">
-              <span class="green-unit-owner">{{ owner(item.data) || "No condition details available" }}</span
+              <span class="green-unit-owner">{{
+                owner(item.data) || (investigation ? "No wait reason recorded" : "No condition details available")
+              }}</span
               ><span v-if="!answerHere(item.data)" class="green-unit-next">{{
                 item.data.nextAction.kind === "recorded" ? item.data.nextAction.text : "Next action not recorded"
               }}</span>
             </div>
             <div class="green-unit-links" aria-label="Original work links">
+              <RouterLink v-if="pageOnly" :to="`/pipelines/${encodeURIComponent(item.data.instance.id)}`"
+                ><UIcon name="i-lucide-workflow" />Pipeline</RouterLink
+              >
               <MergeAction
                 v-if="urgent && actions?.[item.data.unit.unit] && canReply"
                 :action="actions[item.data.unit.unit]"

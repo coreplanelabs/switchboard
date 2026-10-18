@@ -1,6 +1,9 @@
 import { prepareStorageRequest } from "../storeResponse.js";
 import { storageTransport } from "../storageTransport.js";
 import type { StorageOperation, StorageOperationBody } from "../storageRequestContext.js";
+import { readUnitGroups, validUnitGroupIds, type UnitGroup } from "./unitGroups.js";
+import { mapLimit } from "../mapLimit.js";
+import { HOME_PRIVATE_READ_CONCURRENCY } from "../budgets.js";
 import { admitQuestionAnswer, type QuestionAnswerGuard } from "./questionAnswer.js";
 import {
   qualifyPullOwnerSnapshot,
@@ -237,6 +240,7 @@ export interface CoordinatorInstanceStore {
   prepareAdoptionAudit(expected: CoordinatorUnit, runId: string): Promise<HistoricalNativeAudit | undefined>;
   /** An instance's unit rows in the order they were first written — the plan's. */
   listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
+  listUnitsMany?(instanceIds: readonly string[]): Promise<UnitGroup[]>;
   /** Every row carrying an active original-unit recovery claim. Boot ownership
    * recovery reads this index independently of the terminal parent Workflow. */
   listActiveRecoveries(): Promise<CoordinatorUnit[]>;
@@ -916,6 +920,12 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     const text = this.units.get(unitKey(key));
     return mainTaskUnitSnapshot(text === undefined ? [] : [JSON.parse(text)], key);
   }
+  async listUnitsMany(instanceIds: readonly string[]): Promise<UnitGroup[]> {
+    if (!validUnitGroupIds(instanceIds)) throw new Error("Pipeline unit group query is invalid.");
+    return Promise.all(
+      instanceIds.map(async (instanceId) => ({ instanceId, units: await this.listUnits(instanceId) })),
+    );
+  }
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
     const out: CoordinatorUnit[] = [];
     for (const [key, text] of this.units)
@@ -1579,6 +1589,27 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     );
   }
 
+  async listUnitsMany(instanceIds: readonly string[]): Promise<UnitGroup[]> {
+    if (!validUnitGroupIds(instanceIds)) throw new Error("Pipeline unit group query is invalid.");
+    try {
+      return await this.post("/runs/coordinator/units/list-many", { instanceIds }, async (response) =>
+        readUnitGroups((response.data as { groups?: unknown }).groups, instanceIds),
+      );
+    } catch (error) {
+      // An older state Worker has no batch route. Preserve the original read
+      // during independent rollouts; every other failure stays unavailable.
+      if (
+        !(error instanceof Error) ||
+        error.message !== "coordinator store /runs/coordinator/units/list-many: HTTP 404"
+      )
+        throw error;
+      console.warn(JSON.stringify({ event: "coordinator.units.batch_unavailable", instances: instanceIds.length }));
+      return mapLimit(instanceIds, HOME_PRIVATE_READ_CONCURRENCY, async (instanceId) => ({
+        instanceId,
+        units: await this.listUnits(instanceId),
+      }));
+    }
+  }
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
     return this.post("/runs/coordinator/units/list", { instanceId }, async (r): Promise<CoordinatorUnit[]> => {
       const d = r.data as { units?: unknown };

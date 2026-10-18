@@ -1,3 +1,4 @@
+import type { HomeOverview } from "../core/home/overview.js";
 import type { HomeRepositories } from "./homeRepositories.js";
 import type { HomeHistory, HomePipeline, HomeSnapshot, HomeUnit } from "../core/home/service.js";
 import type { HomeCommandSeed, HomeSeed } from "./webSeed.js";
@@ -80,6 +81,7 @@ export interface HomeMergeAction {
 export interface HomeFleetSeed {
   page: "fleetHome";
   snapshot: HomeSnapshot;
+  overview?: HomeOverview;
   /** Only the current actor's exact recorded question, selected by the server. */
   answers?: Record<string, HomeAnswerTarget>;
   /** Current viewer command affordances; the command rechecks authority and head. */

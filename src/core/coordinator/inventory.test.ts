@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryCoordinatorInstanceStore, WorkerCoordinatorInstanceStore } from "./instanceStore.js";
 import type { CoordinatorInstance } from "./contract.js";
 
@@ -15,6 +15,73 @@ const instance = (id: string): CoordinatorInstance => ({
 });
 
 describe("durable pipeline inventory", () => {
+  it("reads exact unit groups through one HTTP read and refuses missing or foreign groups", async () => {
+    const memory = new InMemoryCoordinatorInstanceStore();
+    await memory.put(instance("one"));
+    await memory.putUnits([{ instanceId: "one", unit: "U10", slug: "u1", branch: "work", rounds: [], dependsOn: [] }]);
+    const requests: unknown[] = [];
+    let broken = false;
+    const store = new WorkerCoordinatorInstanceStore({
+      baseUrl: "https://state.test",
+      token: "fixture",
+      storeKey: "runs:fixture",
+      fetch: async (url, init) => {
+        requests.push([String(url), JSON.parse(String(init?.body))]);
+        return Response.json({
+          groups: broken ? [{ instanceId: "foreign", units: [] }] : await memory.listUnitsMany(["one", "empty"]),
+        });
+      },
+    });
+    expect(await store.listUnitsMany(["one", "empty"])).toEqual([
+      {
+        instanceId: "one",
+        units: [{ instanceId: "one", unit: "U10", slug: "u1", branch: "work", rounds: [], dependsOn: [] }],
+      },
+      { instanceId: "empty", units: [] },
+    ]);
+    expect(requests).toEqual([
+      [
+        "https://state.test/runs/coordinator/units/list-many",
+        { storeKey: "runs:fixture", instanceIds: ["one", "empty"] },
+      ],
+    ]);
+    broken = true;
+    await expect(store.listUnitsMany(["one", "empty"])).rejects.toThrow("unavailable");
+    await expect(store.listUnitsMany(["one", "one"])).rejects.toThrow("invalid");
+  });
+  it("uses the original bounded read only when the older Worker has no batch route", async () => {
+    const requests: string[] = [];
+    const store = new WorkerCoordinatorInstanceStore({
+      baseUrl: "https://state.test",
+      token: "fixture",
+      storeKey: "runs:fixture",
+      fetch: async (url) => {
+        requests.push(String(url));
+        return String(url).endsWith("list-many")
+          ? new Response("not found", { status: 404 })
+          : Response.json({ units: [] });
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await store.listUnitsMany(["one"])).toEqual([{ instanceId: "one", units: [] }]);
+      expect(requests).toEqual([
+        "https://state.test/runs/coordinator/units/list-many",
+        "https://state.test/runs/coordinator/units/list",
+      ]);
+      expect(warn.mock.calls.map(([line]) => JSON.parse(line))).toEqual([
+        expect.objectContaining({
+          event: "storage.request.failure",
+          context: { scope: "coordinator" },
+          runIds: [],
+          diagnostic: expect.objectContaining({ operation: "/runs/coordinator/units/list-many", httpStatus: 404 }),
+        }),
+        { event: "coordinator.units.batch_unavailable", instances: 1 },
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
   it("keeps old pipelines discoverable without a run and excludes later insertions from its census", async () => {
     const store = new InMemoryCoordinatorInstanceStore();
     for (const id of ["old", "middle", "last"]) await store.put(instance(id));

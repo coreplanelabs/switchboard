@@ -241,7 +241,9 @@ describe("MCP approval parity", () => {
     });
     expect((await f.call("runs_stop", args, "other", consent)).body).toMatchObject({ error: { code: -32001 } });
     const result = await f.call("runs_stop", args, "tok", consent);
-    expect(result.body).toMatchObject({ result: { content: [{ text: expect.stringContaining("state: stopping") }] } });
+    expect(result.body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("Stop requested. Shutdown is not confirmed.") }] },
+    });
     expect(own.control.requested).toBe("hard");
     expect(own.control.hardSignal.aborted).toBe(true);
     expect(f.stopRuns.getById(own.id)).toMatchObject({ finished: false });
@@ -320,7 +322,7 @@ describe("MCP approval parity", () => {
         inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
       });
       expect(result.body).toMatchObject({
-        result: { content: [{ text: expect.stringContaining("state: stopping") }] },
+        result: { content: [{ text: expect.stringContaining("Stop requested. Shutdown is not confirmed.") }] },
       });
       expect(target.control.requested).toBe("hard");
     }
@@ -1471,7 +1473,7 @@ describe("MCP approval parity", () => {
       inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
     };
     expect((await f.call("runs_stop", args, token, approve)).body).toMatchObject({
-      result: { content: [{ text: expect.stringContaining("state: stopping") }] },
+      result: { content: [{ text: expect.stringContaining("Stop requested. Shutdown is not confirmed.") }] },
     });
     expect(own.control.hardSignal.aborted).toBe(true);
     const input = { id: foreign.id };

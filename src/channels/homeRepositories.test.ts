@@ -1,9 +1,9 @@
 // Feature: docs/reference/specs/browser-home.md — explicit repository context stays within current source authority.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ConfigStore, InMemoryOverridesBacking } from "../config.js";
 import { resolveActor } from "../core/authz/actor.js";
 import { envelopeSchema } from "../core/organization/contract.js";
-import { InMemoryGithubApi } from "../execution/githubApi.js";
+import { InMemoryGithubApi, GithubApiError, GithubCredentialUnavailable } from "../execution/githubApi.js";
 import { createHomeRepositories } from "./homeRepositories.js";
 
 function fixture(granted = ["sample/a", "sample/z", "sample/private"]) {
@@ -30,6 +30,55 @@ function fixture(granted = ["sample/a", "sample/z", "sample/private"]) {
 }
 
 describe("Home repository selection", () => {
+  it.each([
+    [new GithubCredentialUnavailable("missing"), "credential_missing", 401],
+    [new GithubCredentialUnavailable("failed"), "credential_failed", 503],
+    [new GithubApiError(429, "PRIVATE_DETAIL"), "github_http", 429],
+    [new TypeError("PRIVATE_DETAIL"), "read_error", undefined],
+  ])("reports a closed repository-read cause without private exception details %s", async (error, kind, status) => {
+    const { actor, config } = fixture();
+    class FailedApi extends InMemoryGithubApi {
+      override async listRepos(): Promise<never> {
+        throw error;
+      }
+    }
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const read = createHomeRepositories({ config, github: new FailedApi() });
+      expect(await read.read(actor)).toEqual({ status: "unavailable", repositories: [] });
+      expect(warn.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            event: "home.repositories.unavailable",
+            reason: "read_failed",
+            errorKind: kind,
+            ...(status === undefined ? {} : { httpStatus: status }),
+          }),
+        ],
+      ]);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("PRIVATE_DETAIL");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  it("reports an invalid repository list without exposing repository names", async () => {
+    const { actor, config } = fixture();
+    const permission = vi.spyOn(config, "canUseRepo").mockReturnValue(true);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const read = createHomeRepositories({
+        config,
+        github: new InMemoryGithubApi({ "private name/repository": { private: false } }),
+      });
+      expect(await read.read(actor)).toEqual({ status: "unavailable", repositories: [] });
+      expect(warn.mock.calls).toEqual([
+        [JSON.stringify({ event: "home.repositories.unavailable", reason: "invalid_rows" })],
+      ]);
+    } finally {
+      permission.mockRestore();
+      warn.mockRestore();
+    }
+  });
   it("lists stable public choices within the actual actor's policy and hides private repositories even with code access", async () => {
     const { actor, repositories } = fixture();
     expect(await repositories.read(actor)).toEqual({

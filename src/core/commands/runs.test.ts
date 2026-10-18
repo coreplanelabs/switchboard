@@ -1350,6 +1350,14 @@ describe("runs.get / runs.events / runs.friction", () => {
 });
 
 describe("runs.stop", () => {
+  it.each([
+    ["stopped", "✅ Run stopped."],
+    ["stopping", "Stop requested. Shutdown is not confirmed."],
+    ["withdrawn", "✅ Queued request withdrawn."],
+  ])("renders the confirmed %s command outcome without claiming another state", (state, expected) => {
+    const command = runsCommands.find((command) => command.id === "runs.stop")!;
+    expect(renderText(command, { id: "original-run", mode: "stop", state })).toBe(expected);
+  });
   it.each(["soft", "hard"] as const)("keeps legacy mode=%s calls non-destructive", async (mode) => {
     const { reg, registry, deps } = await setup();
     const { id, control } = reg.create("legacy caller", {

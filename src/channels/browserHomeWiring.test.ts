@@ -46,7 +46,7 @@ import { createHomeConditionReader } from "../core/home/conditions.js";
 import { readableRuns } from "./liveView/viewer.js";
 import { matchesPredicate } from "../core/authz/predicate.js";
 import { NO_GRANTS } from "../core/authz/types.js";
-import { InMemoryGithubApi } from "../execution/githubApi.js";
+import { RestGithubApi, InMemoryGithubApi } from "../execution/githubApi.js";
 import { seedCoordinatorInstance, seedCoordinatorUnit } from "../core/testing/coordinatorInstance.js";
 import type { HomeSession } from "./homeSeed.js";
 import { handleIngressRequest, type HttpIO, type IngressConfig } from "./http.js";
@@ -79,6 +79,7 @@ async function fixture(
     Parameters<typeof createBrowserHomeWiring>[0],
     "personByEmail" | "emailOf" | "onWorkViewResolved"
   > & { now?: () => number } = {},
+  defaultGithub = false,
 ) {
   const dir = mkdtempSync(join(tmpdir(), "home-wiring-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -136,7 +137,9 @@ async function fixture(
     runStore,
     coordinatorInstances: coordinator,
     commands,
-    githubApi: new InMemoryGithubApi({ "sample/api": { private: false }, "sample/web": { private: false } }),
+    githubApi: defaultGithub
+      ? undefined
+      : new InMemoryGithubApi({ "sample/api": { private: false }, "sample/web": { private: false } }),
     runLedger: new NullLedgerWriteThrough("fixture", runStore),
     runHistoryWriter: new NullRunHistoryWriter(),
     completions: {
@@ -256,6 +259,39 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
+  it("loads repository choices with the default GitHub client used by production", async () => {
+    const repos = vi.spyOn(RestGithubApi.prototype, "listRepos").mockResolvedValue([
+      { fullName: "sample/api", private: false, defaultBranch: "main", description: null },
+      { fullName: "sample/private", private: true, defaultBranch: "main", description: null },
+    ]);
+    try {
+      const s = await fixture(true, true, undefined, undefined, undefined, false, {}, true);
+      await s.wiring.initialize();
+      const context = await s.wiring.context(s.request(), s.credential);
+      const req = s.request();
+      req.url = "/home/session";
+      req.method = "GET";
+      let body = "";
+      let finish!: () => void;
+      const done = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const res = {
+        setHeader() {},
+        writeHead() {},
+        end(value: string) {
+          body = value;
+          finish();
+        },
+      } as unknown as ServerResponse;
+      expect(s.wiring.current()!.handler(req, res, context!)).toBe(true);
+      await done;
+      expect(JSON.parse(body).repositories).toEqual({ status: "complete", repositories: [{ repo: "sample/api" }] });
+    } finally {
+      repos.mockRestore();
+    }
+  });
+
   async function accessOffer(command: "runs.stop" | "repo.offboard" = "runs.stop") {
     let currentPerson = "slack:UALICE",
       sessionValid = true,

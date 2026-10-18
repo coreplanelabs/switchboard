@@ -154,6 +154,8 @@ export interface RunView {
   recoveryPending?: true;
   /** The original producer is retained without replay of unverified private context. */
   recoveryHold?: "private_context";
+  /** A saved execution pause overrides an older working-state deadline. */
+  pausedForRetry?: true;
   /** Total events published (monotonic; the backlog/record may hold fewer). */
   eventCount: number;
   storedEventCount?: number;
@@ -658,6 +660,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     finished: false,
     ...(recoveryPending ? { recoveryPending: true as const } : {}),
     ...(contextHeld ? { recoveryHold: "private_context" as const } : {}),
+    ...(row.state.pausedForRetry === true ? { pausedForRetry: true as const } : {}),
     ...(!contextHeld && row.liveState !== undefined ? { liveState: row.liveState } : {}),
     ...(!contextHeld && row.liveStateSeq !== undefined ? { liveStateSeq: row.liveStateSeq } : {}),
     eventCount: events.length,

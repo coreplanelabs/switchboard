@@ -957,6 +957,7 @@ describe("Home actions", () => {
     );
     await home.load();
     const page = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
+    await page.get(".green-repository-toggle").trigger("click");
     await page.get('[aria-label="Repository for coding work"]').setValue("sample/web");
     await page.get("textarea").setValue("Build this change");
     await page.get("form").trigger("submit");
@@ -989,6 +990,7 @@ describe("Home actions", () => {
     );
     await unavailable.load();
     const a = mountApp(ConversationDock, { provides: [[HomeSessionKey, unavailable]] });
+    await a.get(".green-repository-toggle").trigger("click");
     expect(a.get('[aria-label="Repository for coding work"]').text()).toBe("Repository list unavailable");
     const empty = createHomeSession(
       (async () => json({ ...session(), repositories: { status: "complete", repositories: [] } })) as typeof fetch,
@@ -996,6 +998,7 @@ describe("Home actions", () => {
     );
     await empty.load();
     const b = mountApp(ConversationDock, { provides: [[HomeSessionKey, empty]] });
+    await b.get(".green-repository-toggle").trigger("click");
     expect(b.get('[aria-label="Repository for coding work"]').text()).toBe("No eligible repositories");
     unavailable.dispose();
     empty.dispose();

@@ -2,6 +2,7 @@
 import { enableAutoUnmount } from "@vue/test-utils";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HomeSnapshot, HomeUnit } from "@core/core/home/service.js";
+import { homeOverview } from "@core/core/home/overview.js";
 import HomePage from "./Home.vue";
 import CostsPage from "./Costs.vue";
 import PipelinePage from "./Pipeline.vue";
@@ -44,6 +45,48 @@ function snapshot(over: Partial<HomeSnapshot> = {}): HomeSnapshot {
   };
 }
 describe("Green browser frontend", () => {
+  it("renders qualified investigation states and authorized run links from a paged response", () => {
+    const paged = homeOverview(
+      snapshot(),
+      [
+        {
+          id: "expired",
+          repo: "sample/api",
+          label: "Review work",
+          startedAt: 1,
+          finished: false,
+          eventCount: 0,
+          liveState: { state: "working", since: 1, bound: 2 },
+        },
+      ],
+      { view: "investigation", page: 1 },
+      10,
+    );
+    paged.overview.runs[0]!.viewPath = "/runs/expired?t=authorized-local-token";
+    const page = mountApp(HomePage, { seed: { page: "fleetHome", ...paged } });
+    expect(page.get(".green-live-work p").text()).toBe("sample/api · Live state expired");
+    expect(page.get(".green-live-work a").attributes("href")).toBe("/runs/expired?t=authorized-local-token");
+  });
+  it("keeps recorded thread, branch, pull request and Changes shortcuts in the actual paged pipeline response", () => {
+    const work = unit("work", "Work to inspect");
+    work.unit.threads = { coding: "slack:C1:original", review: "slack:C1:review" };
+    work.unit.pr = { number: 42, url: "https://github.com/sample/api/pull/42" };
+    const source = snapshot({
+      needsYou: [work],
+      pipelines: [{ instance: work.instance, unresolved: 1, needsYou: 1, moving: 0, waiting: 0 }],
+    });
+    const paged = homeOverview(source, [], { view: "pipelines", page: 1 }, 10);
+    const page = mountApp(HomePage, { seed: { page: "fleetHome", ...paged } });
+    const links = page
+      .get(".green-pipeline-card")
+      .findAll("a")
+      .map((link) => link.attributes("href"));
+    expect(links).toContain("/threads/slack%3AC1%3Aoriginal");
+    expect(links).toContain("/threads/slack%3AC1%3Areview");
+    expect(links).toContain("https://github.com/sample/api/tree/codex/work");
+    expect(links).toContain("https://github.com/sample/api/pull/42");
+    expect(links).toContain("/runs/unit/i%3Awork#changes");
+  });
   it("distinguishes partial and unknown pipeline coverage from a complete unit read", () => {
     const pipeline = {
       instance: { id: "i", repo: "sample/api", createdAt: 1 },
@@ -190,7 +233,7 @@ describe("Green browser frontend", () => {
     expect(wrapper.findAll(".green-section-heading h2").map((heading) => heading.text())).toEqual([
       "Needs you 1",
       "Moving 1",
-      "Other waits 1",
+      "Waiting 1",
     ]);
     expect(wrapper.text()).toContain("Confirm the deployment target");
     expect(wrapper.text()).toContain("Choose the staging target");

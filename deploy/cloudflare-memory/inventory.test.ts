@@ -31,6 +31,49 @@ async function post(path: string, body: unknown, token = "test-token") {
 }
 
 describe("durable pipeline census", () => {
+  it("reads several canonical unit groups in one store request and rejects an oversized or duplicate query", async () => {
+    const storeKey = `runs:groups-${crypto.randomUUID()}`;
+    for (const id of ["one", "two"]) await post("/runs/coordinator/put", { storeKey, instance: instance(id) });
+    const unit: CoordinatorUnit = {
+      instanceId: "one",
+      unit: "U10",
+      slug: "u1",
+      branch: "work",
+      rounds: [],
+      dependsOn: [],
+    };
+    await post("/runs/coordinator/units/put", { storeKey, units: [unit] });
+    expect(await post("/runs/coordinator/units/list-many", { storeKey, instanceIds: ["two", "one"] })).toEqual({
+      status: 200,
+      body: {
+        groups: [
+          { instanceId: "two", units: [] },
+          { instanceId: "one", units: [unit] },
+        ],
+      },
+    });
+    for (const instanceIds of [[], ["one", "one"], Array.from({ length: 101 }, (_, i) => `id-${i}`)])
+      expect((await post("/runs/coordinator/units/list-many", { storeKey, instanceIds })).status).toBe(400);
+  });
+  it("reads a full 100-pipeline unit batch through SQLite", async () => {
+    const storeKey = `runs:full-groups-${crypto.randomUUID()}`;
+    const instanceIds = Array.from({ length: 100 }, (_, index) => `pipeline-${index}`);
+    for (const id of instanceIds)
+      expect((await post("/runs/coordinator/put", { storeKey, instance: instance(id) })).status).toBe(200);
+    const units: CoordinatorUnit[] = instanceIds.map((instanceId) => ({
+      instanceId,
+      unit: "work",
+      slug: "work",
+      branch: "work",
+      rounds: [],
+      dependsOn: [],
+    }));
+    expect((await post("/runs/coordinator/units/put", { storeKey, units })).status).toBe(200);
+    expect(await post("/runs/coordinator/units/list-many", { storeKey, instanceIds })).toEqual({
+      status: 200,
+      body: { groups: instanceIds.map((instanceId, index) => ({ instanceId, units: [units[index]] })) },
+    });
+  });
   it.each([
     [new TypeError("PRIVATE_INVENTORY_DETAIL"), "type_error"],
     [new SyntaxError("PRIVATE_INVENTORY_DETAIL"), "syntax_error"],

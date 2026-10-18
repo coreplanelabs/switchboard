@@ -36,6 +36,41 @@ describe("pageAddress", () => {
 });
 
 describe("installSeedRouting", () => {
+  it("keeps a pending user navigation ahead of an automatic refresh", async () => {
+    const r = router();
+    const { load, release } = manualLoad();
+    const routing = installSeedRouting(r, { island: ISLAND, load, leave: vi.fn() });
+    await r.push("/runs");
+    const nav = r.push("/costs");
+    await vi.waitFor(() => expect(load).toHaveBeenCalledWith("/costs"));
+    expect(await routing.refresh!("/runs")).toBe(false);
+    expect(load).toHaveBeenCalledTimes(1);
+    release("/costs", seedFor("stale private work"));
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(routing.seedAt("/costs")).toBeNull();
+    release("/costs", seedFor("costs"));
+    await nav;
+    expect(routing.seedAt("/costs")?.title).toBe("costs");
+  });
+  it("replaces the same page only with a fresh seed and drops a refresh superseded by navigation", async () => {
+    const r = router();
+    const { load, release } = manualLoad();
+    const routing = installSeedRouting(r, { island: ISLAND, load, leave: vi.fn() });
+    await r.push("/runs");
+    const refreshed = routing.refresh!("/runs");
+    release("/runs", seedFor("fresh"));
+    expect(await refreshed).toBe(true);
+    expect(routing.seedAt("/runs")?.title).toBe("fresh");
+    const late = routing.refresh!("/runs");
+    const nav = r.push("/costs");
+    await vi.waitFor(() => expect(load).toHaveBeenCalledWith("/costs"));
+    release("/runs", ISLAND);
+    expect(await late).toBe(false);
+    release("/costs", seedFor("costs"));
+    await nav;
+    expect(routing.seedAt("/costs")?.title).toBe("costs");
+  });
+
   it("the first navigation is the document's own: its seed is the island, nothing is loaded", async () => {
     const r = router();
     const load = vi.fn();

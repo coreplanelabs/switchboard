@@ -31,6 +31,7 @@ const viewingAs = useViewingAs();
 const globalSeed = inject(SeedKey, null);
 const transcript = ref<HTMLElement | null>(null);
 const expanded = ref(false);
+const deleting = ref<string | null>(null);
 const unavailableExplanation = ref<HTMLElement | null>(null);
 const explicitLoss = ref(false);
 watch(
@@ -234,17 +235,47 @@ watch([destinationKey, transcript], () => {
                   : (entry.authorLabel ?? (entry.role === "receipt" ? "Receipt" : "Unknown author"))
               }}<span class="text-muted">{{ entry.source }}</span>
             </div>
-            <MarkdownText :text="entry.content" />
+            <MarkdownText v-if="entry.content.trim()" :text="entry.content" />
+            <p v-else class="text-xs text-muted">
+              {{ entry.role === "user" ? "Action confirmation" : "No message text retained" }}
+            </p>
             <button
               v-if="entry.deleteUrl && !home.focused.value && !viewingAs && home.session.value.destination.canWrite"
-              class="text-xs text-muted min-h-10"
+              class="green-message-delete text-xs text-muted min-h-10"
               type="button"
               aria-label="Remove private request content"
-              :disabled="!!home.removing.value"
-              @click="home.removePrivate(entry.id)"
+              :disabled="!!home.removing.value || home.sending.value || !!home.pendingSubmission.value"
+              @click="deleting = deleting === entry.id ? null : entry.id"
             >
-              Remove request content
+              Delete saved text
             </button>
+            <div
+              v-if="deleting === entry.id"
+              class="green-notice mt-2 text-xs"
+              aria-label="Delete saved text confirmation"
+            >
+              <p>
+                Delete the saved text for this request and its replies? This cannot be undone. It does not stop an
+                existing run or delete its original Slack message.
+              </p>
+              <div class="flex gap-2 mt-2">
+                <button
+                  type="button"
+                  class="green-button"
+                  :disabled="!!home.removing.value || home.sending.value || !!home.pendingSubmission.value"
+                  @click="
+                    home.removePrivate(entry.id).then((ok) => {
+                      if (ok) deleting = null;
+                    })
+                  "
+                >
+                  Delete saved text
+                </button>
+                <button type="button" class="green-button" :disabled="!!home.removing.value" @click="deleting = null">
+                  Keep text
+                </button>
+              </div>
+            </div>
           </li>
         </ol>
         <AssistantTurn
@@ -267,7 +298,7 @@ watch([destinationKey, transcript], () => {
           v-if="home.session.value.history.previousUrl"
           class="green-button"
           type="button"
-          :disabled="home.historyLoading.value || home.sending.value"
+          :disabled="home.historyLoading.value || home.sending.value || !!home.removing.value"
           @click="home.loadHistory(home.session.value.history.previousUrl)"
         >
           Older messages
@@ -276,7 +307,7 @@ watch([destinationKey, transcript], () => {
           v-if="home.session.value.history.latestUrl"
           class="green-button"
           type="button"
-          :disabled="home.historyLoading.value || home.sending.value"
+          :disabled="home.historyLoading.value || home.sending.value || !!home.removing.value"
           @click="home.loadHistory(home.session.value.history.latestUrl)"
         >
           Latest messages
@@ -292,10 +323,9 @@ watch([destinationKey, transcript], () => {
           aria-atomic="true"
           :title="home.focused.value ? home.session.value.destination.label : 'Private messages'"
         >
-          <UIcon :name="home.focused.value ? 'i-lucide-message-square' : 'i-lucide-lock-keyhole'" /><span
-            class="sr-only"
-            >{{ home.focused.value ? home.session.value.destination.label : "Messages" }}</span
-          >
+          <UIcon :name="home.focused.value ? 'i-lucide-message-square' : 'i-lucide-lock-keyhole'" /><span>{{
+            home.focused.value ? home.session.value.destination.label : "Private messages · only you"
+          }}</span>
         </p>
         <button
           v-if="home.focused.value && !viewingAs"
@@ -347,8 +377,8 @@ watch([destinationKey, transcript], () => {
   flex-direction: column;
   position: sticky;
   top: 24px;
-  height: calc(100dvh - 110px);
-  min-height: 460px;
+  height: calc(100dvh - 170px);
+  min-height: 340px;
   max-height: 900px;
   min-width: 0;
 }
@@ -429,6 +459,7 @@ watch([destinationKey, transcript], () => {
   font-weight: 400;
 }
 .green-dock-composer {
+  flex-shrink: 0;
   padding: 12px;
   border-top: 1px solid var(--ui-border);
 }
