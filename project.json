@@ -3,7 +3,7 @@
   "name": "switchboard",
   "displayName": "Switchboard",
   "npmPackage": "@coreplane/switchboard",
-  "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.",
+  "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question \u2014 on the model you choose, with its tools running where you decide.",
   "organization": "coreplanelabs",
   "repository": "https://github.com/coreplanelabs/switchboard",
   "image": "ghcr.io/coreplanelabs/switchboard",
@@ -30,14 +30,14 @@
     "url": "https://coreplane.ai"
   },
   "commands": {
-    "$comment": "What each root npm script does and when to run it — the source of the Commands table in AGENTS.md (npm run agents:gen). A script without an entry fails agents:check, so a new script cannot ship undocumented.",
+    "$comment": "What each root npm script does and when to run it \u2014 the source of the Commands table in AGENTS.md (npm run agents:gen). A script without an entry fails agents:check, so a new script cannot ship undocumented.",
     "verify": {
       "does": "Runs every CI check across the repo and workspaces.",
       "when": "Local sessions before review; CI selects affected checks on each push."
     },
     "verify:root": {
       "does": "Runs the bot package's CI gates.",
-      "when": "Bot-only changes; scope checks in agent sessions."
+      "when": "Bot changes; agents use affected checks."
     },
     "check:consistency": {
       "does": "The sub-second checks that generated and declared things equal the code, this table included.",
@@ -84,8 +84,8 @@
       "when": "Local development against a real Slack app."
     },
     "cli": {
-      "does": "The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack.",
-      "when": "Smoke tests, deploys, config, run history."
+      "does": "Runs operator commands and sends asks through the dispatcher.",
+      "when": "Smoke tests, deploys, config and run history."
     },
     "resident:archive": {
       "does": "Captures a retained resident and checks its offline restore.",
@@ -93,7 +93,7 @@
     },
     "ci:gate": {
       "does": "Reads the `needs` context of a CI fan-out and accepts only successful legs or an explicitly planned skip.",
-      "when": "CI only — the `bot`, `workers` and `image` gate jobs."
+      "when": "CI only \u2014 the `bot`, `workers` and `image` gate jobs."
     },
     "ci:plan": {
       "does": "Selects checks and builds from the full diff; uncertainty runs all.",
@@ -109,7 +109,7 @@
     },
     "check:pr-title": {
       "does": "Judges one PR title as the changelog line: grammar, type, scope, `!`.",
-      "when": "`-- \"feat(scope): …\"` before opening a PR; CI's `title` check."
+      "when": "`-- \"feat(scope): \u2026\"` before opening a PR; CI's `title` check."
     },
     "pr-title:gen": {
       "does": "Writes the title gate's types and scopes from the release config and the code map.",
@@ -225,7 +225,7 @@
     },
     "deploy:targets": {
       "does": "Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment.",
-      "when": "CI only — the `deploy targets` job."
+      "when": "CI only \u2014 the `deploy targets` job."
     },
     "docs:dev": {
       "does": "Serves the docs site locally with live reload.",
@@ -244,7 +244,7 @@
       "when": "Paused; enable websiteMaintenance in project.json."
     },
     "screenshots:check": {
-      "does": "Each surface's inputs still hash to what its screenshots were rendered from — no browser.",
+      "does": "Each surface's inputs still hash to what its screenshots were rendered from \u2014 no browser.",
       "when": "Skips while website maintenance is paused."
     },
     "load": {
@@ -270,6 +270,10 @@
     "staging:bootstrap-held": {
       "does": "Installs Resident support and keeps maintenance held.",
       "when": "Manual staging CI; separate readiness artifact."
+    },
+    "emoji:sync": {
+      "does": "Downloads custom Slack emoji.",
+      "when": "Manual; emoji:read."
     }
   },
   "websiteMaintenance": false

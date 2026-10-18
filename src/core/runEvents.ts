@@ -544,6 +544,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
     case "context":
     case "reference":
     case "run_meta":
+    case "run_title":
     case "run_state":
     case "publication_settlement":
     case "route":
@@ -632,6 +633,7 @@ export type RouteInputValue = RouteInputLeafOrList | RouteInputObject3;
 export type RouteOutcome = "hand_back" | "offered" | "confirmed" | "refused";
 
 export type RunEvent =
+  | { type: "run_title"; title: string; seq?: number; at?: number }
   /** `callId` is the provider's tool_use id — the explicit pair key between a
    *  call and its result (live-view item 13); the runner stamps it on both. */
   /** `command` rides on bash calls only: the FULL command (redacted, capped at

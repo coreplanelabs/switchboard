@@ -40,10 +40,11 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run dev` | Runs the bot from source with tsx. | Local development against a real Slack app. |
 | `npm run typecheck` | TypeScript over the bot and its scripts, no emit. | After type-level changes; `verify:root` runs it. A pipeline agent scopes it to the touched tsconfig. |
 | `npm run test` | The whole vitest suite from one entry, after `deploy:gen`. | Local sessions before pushing; CI runs it for relevant changes. |
-| `npm run cli` | The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack. | Smoke tests, deploys, config, run history. |
+| `npm run cli` | Runs operator commands and sends asks through the dispatcher. | Smoke tests, deploys, config and run history. |
 | `npm run resident:archive` | Captures a retained resident and checks its offline restore. | Reviewed disposable rehearsal; verify the binding and builds. |
+| `npm run emoji:sync` | Downloads custom Slack emoji. | Manual; emoji:read. |
 | `npm run verify` | Runs every CI check across the repo and workspaces. | Local sessions before review; CI selects affected checks on each push. |
-| `npm run verify:root` | Runs the bot package's CI gates. | Bot-only changes; scope checks in agent sessions. |
+| `npm run verify:root` | Runs the bot package's CI gates. | Bot changes; agents use affected checks. |
 | `npm run check:consistency` | The sub-second checks that generated and declared things equal the code, this table included. | After touching a generated or declared artifact; one CI leg. |
 | `npm run ci:gate` | Reads the `needs` context of a CI fan-out and accepts only successful legs or an explicitly planned skip. | CI only — the `bot`, `workers` and `image` gate jobs. |
 | `npm run ci:plan` | Selects checks and builds from the full diff; uncertainty runs all. | CI; locally with `-- --base <ref>`. |

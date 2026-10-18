@@ -37,6 +37,14 @@
           "effort": "medium"
         }
       }
+    },
+    "title": {
+      "model": "openai/gpt-6-luna",
+      "modelSettings": {
+        "reasoning": {
+          "effort": "low"
+        }
+      }
     }
   },
   "agentDefaults": {
@@ -104,7 +112,7 @@
       }
     },
     "ship": {
-      "description": "Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.",
+      "description": "Coding \u2192 review \u2192 fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.",
       "instructions": "builtin:ship",
       "tools": "full",
       "machine": "repo-resident",
@@ -177,7 +185,7 @@
       }
     },
     "conductor": {
-      "description": "Coordinates other runs: spawns child runs as the requester — each in a thread of its own, under their permissions — follows them, and reports. No workspace or shell.",
+      "description": "Coordinates other runs: spawns child runs as the requester \u2014 each in a thread of its own, under their permissions \u2014 follows them, and reports. No workspace or shell.",
       "instructions": "builtin:conductor",
       "tools": "conductor",
       "machine": "none",
@@ -200,6 +208,9 @@
     },
     "intake": {
       "profile": "light"
+    },
+    "title": {
+      "profile": "title"
     },
     "memory": {
       "profile": "standard"

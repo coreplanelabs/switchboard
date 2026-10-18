@@ -296,6 +296,7 @@ export function artifactHref(links: ArtifactsSeed, key: string): string {
 
 export interface RunPageModel {
   state: {
+    title: string | null;
     /** The FIRST `input` event — what started the run. Every later `input`
      *  is a steered follow-up and lives in `log` as a `FollowUpVm`. */
     request: RequestVm | null;
@@ -513,6 +514,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   const timeline = createRunTimeline();
 
   const state: RunPageModel["state"] = reactive({
+    title: null,
     request: null,
     meta: null,
     context: [],
@@ -698,6 +700,9 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   function apply(change: TimelineChange): void {
     state.placeholder = false;
     switch (change.kind) {
+      case "title":
+        state.title = change.title;
+        return;
       case "input": {
         const vm: RequestVm = {
           text: change.text,

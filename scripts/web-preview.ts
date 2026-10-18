@@ -44,6 +44,8 @@ import { buildPlaneTable } from "../src/core/plane/table.js";
 import { systemClock } from "../src/core/trace/clock.js";
 import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web-preview-reading-diff.js";
 import { createGreenPreview } from "./web-green-fixtures.js";
+import { createSlackEmojiCache, FileEmojiStore } from "../src/channels/slackEmoji.js";
+import type { PageSender } from "../src/channels/webShell.js";
 
 // Local visual preview of the web app (web/) with fixture data — no Slack, no
 // config.yaml, no credentials. Build the app first (`npm run build` in web/),
@@ -82,7 +84,15 @@ const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cw
 // paints the smallest installation instead — Runs alone, no Scheduled tab, no
 // docs link — so both shapes of the header can be seen and screenshotted.
 const CAPABILITIES = process.env.SWITCHBOARD_PREVIEW_CAPABILITIES === "minimal" ? NO_CAPABILITIES : ALL_CAPABILITIES;
-const sendPage = makePageSender(assets.entry, CAPABILITIES);
+const documentPage = makePageSender(assets.entry, CAPABILITIES);
+const emoji = process.env.SWITCHBOARD_PREVIEW_EMOJI_DIR
+  ? createSlackEmojiCache({ store: new FileEmojiStore(process.env.SWITCHBOARD_PREVIEW_EMOJI_DIR) })
+  : undefined;
+await emoji?.load();
+const sendPage: PageSender = (req, res, status, actor, title, seed) => {
+  const enriched = { ...seed, ...(emoji ? { emoji: emoji.catalog() } : {}) };
+  documentPage(req, res, status, actor, title, enriched);
+};
 
 const row = (over: Partial<RunIndexRowSeed>): RunIndexRowSeed => ({
   id: "run-x",
@@ -100,6 +110,8 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
     id: "live-1",
     token: "tok-live-1",
     label: 'review · acme/api · "re-review after the repush"',
+    prompt:
+      "Prepare the :ship: release with :shipit:. Inspect the deployment changes, check the retry queue, and explain each remaining step before this release can ship. Keep the full request readable while a short title is generated.",
     activity: "$ npm test",
     userName: "alice",
     sourceUrl: "https://example.slack.com/archives/C1/p1",
@@ -128,6 +140,8 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
     id: "live-2",
     token: "tok-live-2",
     label: 'general · #dev · alice · "what changed in the last deploy?"',
+    prompt: "What changed in the last deployment?",
+    title: "Inspect the last deployment :rocket:",
     startedAt: NOW - 61_000,
     eventCount: 3,
     eventsLast5m: 3,
@@ -2875,6 +2889,10 @@ function page(
 
 createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
+  if (emoji && url.pathname.startsWith("/assets/emoji/")) {
+    void emoji.handle(req, res);
+    return;
+  }
   if (url.pathname === "/maintenance") {
     const reply = maintenanceResponse(new Request("http://localhost/maintenance"), {
       version: 1,

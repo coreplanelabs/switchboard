@@ -163,6 +163,8 @@ export interface RunRecord {
   id: string;
   /** The human run label from the runs index. */
   label?: string;
+  prompt?: string;
+  title?: string;
   /** Resolved agent name, when known. */
   agent?: string;
   /** `<provider>/<model>` the run resolved to, when known. */
@@ -1345,6 +1347,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
     if (!cancellation || !cancellationRecordMatches(r as unknown as RunRecord, cancellation)) return false;
   }
   if (!isOptionalString(r.label) || !isOptionalString(r.agent) || !isOptionalString(r.model)) return false;
+  if (!isOptionalString(r.prompt) || !isOptionalString(r.title)) return false;
   if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl) || !isOptionalString(r.userName)) return false;
   if (r.record !== undefined && (typeof r.record !== "string" || !/^\d{4}$/.test(r.record))) return false;
   if (r.recordTaskKey !== undefined && (typeof r.recordTaskKey !== "string" || !/^[0-9a-f]{16}$/.test(r.recordTaskKey)))

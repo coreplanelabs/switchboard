@@ -3,10 +3,16 @@ import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { HOSTED_MCP_PROBE_TIMEOUT_MS } from "../core/budgets.js";
+import {
+  EMOJI_NAME as NAME,
+  standardEmoji,
+  isStandardEmoji,
+  type EmojiSyncResult,
+  type EmojiEntry,
+} from "../core/emoji.js";
 
-export type EmojiCatalog = Record<string, { path: string }>;
-const ASSET = /^[0-9a-f]{64}\.(png|gif|webp)$/;
-const NAME = /^[A-Za-z0-9_+-]{1,100}$/;
+export type EmojiCatalog = Record<string, EmojiEntry>;
+const ASSET = /^[0-9a-f]{64}\.(png|gif|webp|jpg)$/;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 export interface EmojiStore {
   catalog(): Promise<EmojiCatalog>;
@@ -43,10 +49,11 @@ export class FileEmojiStore implements EmojiStore {
             NAME.test(name) &&
             value &&
             typeof value === "object" &&
-            "path" in value &&
-            typeof value.path === "string" &&
-            value.path.startsWith("/assets/emoji/") &&
-            ASSET.test(value.path.slice("/assets/emoji/".length)),
+            (("path" in value &&
+              typeof value.path === "string" &&
+              value.path.startsWith("/assets/emoji/") &&
+              ASSET.test(value.path.slice("/assets/emoji/".length))) ||
+              ("text" in value && typeof value.text === "string" && isStandardEmoji(value.text))),
         ),
       );
     } catch {
@@ -72,13 +79,19 @@ export class FileEmojiStore implements EmojiStore {
     await mkdir(this.directory, { recursive: true });
     await writeFile(join(this.directory, asset), bytes, { flag: "wx" }).catch(async (error: NodeJS.ErrnoException) => {
       if (error.code !== "EEXIST") throw error;
+      const existing = await this.get(asset);
+      if (existing && Buffer.from(existing).equals(Buffer.from(bytes))) return;
+      const temporary = join(this.directory, `${asset}-${randomUUID()}.tmp`);
+      await writeFile(temporary, bytes);
+      await rename(temporary, join(this.directory, asset));
     });
   }
 }
-function imageExtension(bytes: Uint8Array): "png" | "gif" | "webp" | undefined {
+function imageExtension(bytes: Uint8Array): "png" | "gif" | "webp" | "jpg" | undefined {
   const b = Buffer.from(bytes);
   if (b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "png";
   if (["GIF87a", "GIF89a"].includes(b.subarray(0, 6).toString("ascii"))) return "gif";
+  if (b[0] === 255 && b[1] === 216 && b[2] === 255) return "jpg";
   if (b.subarray(0, 4).toString("ascii") === "RIFF" && b.subarray(8, 12).toString("ascii") === "WEBP") return "webp";
 }
 function sourceUrl(raw: string): URL | undefined {
@@ -88,7 +101,7 @@ function sourceUrl(raw: string): URL | undefined {
       !url.username &&
       !url.password &&
       !url.port &&
-      ["emoji.slack-edge.com", "emoji.slack.com", "my.slack.com"].includes(url.hostname)
+      ["emoji.slack-edge.com", "a.slack-edge.com", "emoji.slack.com", "my.slack.com"].includes(url.hostname)
       ? url
       : undefined;
   } catch {
@@ -97,6 +110,7 @@ function sourceUrl(raw: string): URL | undefined {
 }
 export function createSlackEmojiCache(options: { store: EmojiStore; fetch?: typeof fetch }) {
   let current: EmojiCatalog = {};
+  let refreshing: Promise<EmojiSyncResult> | undefined;
   async function download(raw: string) {
     let url = sourceUrl(raw);
     for (let hop = 0; url && hop < 4; hop++) {
@@ -132,44 +146,71 @@ export function createSlackEmojiCache(options: { store: EmojiStore; fetch?: type
       return { path: `/assets/emoji/${asset}` };
     }
   }
-  async function refresh(client: { emoji: { list(): Promise<{ ok?: boolean; emoji?: Record<string, string> }> } }) {
+  async function synchronize(client: {
+    emoji: { list(): Promise<{ ok?: boolean; emoji?: Record<string, string>; error?: string }> };
+  }): Promise<EmojiSyncResult> {
     current = await options.store.catalog();
     try {
       const result = await client.emoji.list();
-      if (result.ok !== true || !result.emoji) return { status: "unavailable" as const, downloaded: 0 };
+      if (result.ok !== true || !result.emoji) return unavailable(result.error);
       const urls = result.emoji,
         catalog: EmojiCatalog = Object.create(null),
-        seen = new Map<string, Promise<{ path: string } | undefined>>();
-      const resolve = (name: string): string | undefined => {
+        seen = new Map<string, Promise<EmojiEntry | undefined>>();
+      const resolve = (name: string): string | { text: string } | undefined => {
         const path = new Set<string>();
         while (NAME.test(name) && !path.has(name) && path.size < 100) {
           path.add(name);
           const value = Object.hasOwn(urls, name) ? urls[name] : undefined;
-          if (!value) return;
+          if (!value) {
+            const text = standardEmoji(name);
+            return text ? { text } : undefined;
+          }
           if (!value.startsWith("alias:")) return value;
           name = value.slice(6);
         }
       };
-      const names = Object.keys(urls).filter((name) => NAME.test(name));
+      const names = Object.keys(urls);
+      const knownSources = new Map(
+        Object.values(current)
+          .filter((entry) => entry.path && entry.source)
+          .map((entry) => [entry.source!, entry]),
+      );
+      const downloaded = new Set<string>();
       let offset = 0,
         missing = 0;
       await Promise.all(
         Array.from({ length: 4 }, async () => {
           while (offset < names.length) {
             const name = names[offset++]!,
-              raw = resolve(name);
+              raw = NAME.test(name) ? resolve(name) : undefined;
             if (!raw) {
               missing++;
+              continue;
+            }
+            if (typeof raw !== "string") {
+              catalog[name] = raw;
               continue;
             }
             if (!seen.has(raw))
               seen.set(
                 raw,
-                download(raw).catch(() => undefined),
+                (async () => {
+                  const existing = knownSources.get(raw);
+                  if (sourceUrl(raw) && existing?.path && (await verified(existing.path))) return existing;
+                  const asset = await download(raw);
+                  if (asset) {
+                    downloaded.add(asset.path);
+                    return { ...asset, source: raw };
+                  }
+                })().catch(() => undefined),
               );
             const asset = await seen.get(raw);
             if (asset) catalog[name] = asset;
-            else missing++;
+            else {
+              missing++;
+              const previous = current[name];
+              if (previous?.path && (await verified(previous.path))) catalog[name] = previous;
+            }
           }
         }),
       );
@@ -177,11 +218,40 @@ export function createSlackEmojiCache(options: { store: EmojiStore; fetch?: type
       current = catalog;
       return {
         status: missing ? ("partial" as const) : ("complete" as const),
-        downloaded: Object.keys(catalog).length,
+        total: names.length,
+        available: Object.keys(catalog).length,
+        downloaded: downloaded.size,
+        failed: missing,
       };
-    } catch {
-      return { status: "unavailable" as const, downloaded: 0 };
+    } catch (error) {
+      const data = error && typeof error === "object" && "data" in error ? error.data : undefined;
+      return unavailable(data && typeof data === "object" && "error" in data ? data.error : undefined);
     }
+  }
+  async function verified(path: string) {
+    const asset = path.slice("/assets/emoji/".length);
+    const bytes = ASSET.test(asset) ? await options.store.get(asset) : undefined;
+    return bytes && `${createHash("sha256").update(bytes).digest("hex")}.${imageExtension(bytes)}` === asset;
+  }
+  function unavailable(error: unknown): EmojiSyncResult {
+    return {
+      status: "unavailable",
+      total: null,
+      available: Object.keys(current).length,
+      downloaded: 0,
+      failed: 0,
+      reason:
+        error === "missing_scope"
+          ? "missing_scope"
+          : ["invalid_auth", "not_authed", "token_revoked", "token_expired"].includes(String(error))
+            ? "invalid_auth"
+            : "source_unavailable",
+    };
+  }
+  function refresh(client: Parameters<typeof synchronize>[0]): Promise<EmojiSyncResult> {
+    return (refreshing ??= synchronize(client).finally(() => {
+      refreshing = undefined;
+    }));
   }
   /** The host authenticates the organization before this handler is called. */
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -198,11 +268,24 @@ export function createSlackEmojiCache(options: { store: EmojiStore; fetch?: type
       return;
     }
     res.writeHead(200, {
-      "content-type": `image/${asset.endsWith(".png") ? "png" : asset.endsWith(".gif") ? "gif" : "webp"}`,
+      "content-type": `image/${asset.endsWith(".jpg") ? "jpeg" : asset.endsWith(".png") ? "png" : asset.endsWith(".gif") ? "gif" : "webp"}`,
       "x-content-type-options": "nosniff",
       "cache-control": "private, max-age=3600",
     });
     res.end(bytes);
   }
-  return { refresh, catalog: () => ({ ...current }), handle };
+  return {
+    refresh,
+    load: async () => {
+      current = await options.store.catalog();
+    },
+    catalog: (): EmojiCatalog =>
+      Object.fromEntries(
+        Object.entries(current).map(([name, entry]) => [
+          name,
+          entry.path !== undefined ? { path: entry.path } : { text: entry.text },
+        ]),
+      ),
+    handle,
+  };
 }

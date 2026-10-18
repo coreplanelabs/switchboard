@@ -37,6 +37,8 @@ import { foldRunLiveState, type RunLiveStateMaterialized } from "./runLiveState.
 import type { LiveStateAssignResult } from "./runLedger/types.js";
 import { privateMainEvent } from "./privateMainEvent.js";
 import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
+import { RUN_PROMPT_MAX, boundedRunTitle } from "./runDisplay.js";
+import { RunEventLane } from "./runEventLane.js";
 
 /** Hard cap on the pace ring (item 32): the window's stamps for a run far
  *  chattier than any real one; past it the oldest go first, like the backlog. */
@@ -206,6 +208,89 @@ export class RunRegistry {
   private readonly now: () => number;
   /** Monotonic creation counter; stamps each run's `seq` for stable ordering. */
   private seq = 0;
+  private titleGenerator?: (prompt: string, signal?: AbortSignal, runId?: string) => Promise<string | undefined>;
+  private readonly titleJobs = new Map<string, { done: Promise<void>; pending: boolean }>();
+
+  /** Installed once at the composition root. A title never blocks run work. */
+  configureTitles(
+    generate: (prompt: string, signal?: AbortSignal, runId?: string) => Promise<string | undefined>,
+  ): void {
+    this.titleGenerator = generate;
+  }
+
+  async titleSettled(id: string, phase?: "seal"): Promise<void> {
+    const job = this.titleJobs.get(id);
+    const pending = job?.pending === true;
+    const startedAt = this.now();
+    await job?.done;
+    if (phase === "seal")
+      console.info(
+        JSON.stringify({ event: "run.title.seal_wait", runId: id, pending, ms: Math.max(0, this.now() - startedAt) }),
+      );
+  }
+
+  /** Share event ordering with admission, tools, provider recovery and metadata. */
+  eventLane(id: string): RunEventLane {
+    const run = this.runs.get(id);
+    if (!run) throw new Error("Run event lane is unavailable.");
+    return run.eventLane;
+  }
+
+  private startTitle(run: RunState): void {
+    if (
+      !this.titleGenerator ||
+      !run.prompt?.trim() ||
+      run.title ||
+      this.titleJobs.has(run.id) ||
+      privateMainRun(run.meta)
+    )
+      return;
+    // Keep the completed promise until eviction. Later inputs cannot buy another call.
+    const generate = this.titleGenerator;
+    const startedAt = this.now();
+    let stage: "generation" | "publication" = "generation";
+    const job: { done: Promise<void>; pending: boolean } = {
+      pending: true,
+      done: Promise.resolve()
+        .then(() => generate(run.prompt!, run.control.hardSignal, run.id))
+        .then((title) => {
+          if (!title?.trim()) return;
+          const generatedAt = this.now();
+          stage = "publication";
+          return run.eventLane.write(() => {
+            const timing = {
+              runId: run.id,
+              ms: Math.max(0, generatedAt - startedAt),
+              queueMs: Math.max(0, this.now() - generatedAt),
+            };
+            const current = this.runs.get(run.id);
+            if (current !== run || run.sealedAt !== undefined) {
+              const reason = current === undefined ? "missing" : current !== run ? "replaced" : "sealed";
+              console.info(JSON.stringify({ event: "run.title.dropped", ...timing, reason }));
+              return;
+            }
+            this.publish(run.id, { type: "run_title", title: boundedRunTitle(title), at: this.now() });
+            console.info(JSON.stringify({ event: "run.title.saved", ...timing }));
+          });
+        })
+        .catch((error: unknown) => {
+          // Exception messages can contain request or provider data.
+          const errorKind =
+            error instanceof TypeError
+              ? "type_error"
+              : error instanceof RangeError
+                ? "range_error"
+                : error instanceof Error
+                  ? "error"
+                  : "non_error";
+          console.warn(JSON.stringify({ event: "run.title.job_failed", runId: run.id, stage, errorKind }));
+        })
+        .finally(() => {
+          job.pending = false;
+        }),
+    };
+    this.titleJobs.set(run.id, job);
+  }
 
   constructor(opts: RunRegistryOptions = {}) {
     this.bounds = {
@@ -240,6 +325,9 @@ export class RunRegistry {
     const privateMain = privateMainRun(meta);
     const replay = privateMain ? opts.replay?.map(privateMainEvent) : opts.replay;
     const run: RunState = {
+      eventLane: new RunEventLane((event) => {
+        if (this.runs.get(id) === run) this.publish(id, event);
+      }),
       id,
       token,
       backlog: [],
@@ -248,6 +336,7 @@ export class RunRegistry {
       subscribers: new Set(),
       finished: false,
       label: stored,
+      ...(meta?.prompt !== undefined && !privateMain ? { prompt: redactAndCap(meta.prompt, RUN_PROMPT_MAX) } : {}),
       meta,
       startedAt: opts.startedAt ?? this.now(),
       seq: ++this.seq,
@@ -279,6 +368,7 @@ export class RunRegistry {
         : folded.liveState;
     run.liveStateSeq = folded.liveStateSeq;
     this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
+    this.startTitle(run);
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
   }
 
@@ -346,7 +436,7 @@ export class RunRegistry {
     if (!run || run.sealedAt !== undefined) return;
     if (privateMainRun(run.meta)) event = privateMainEvent(event);
     const span = isSpanRecord(event);
-    if (run.finished && !span) return;
+    if (run.finished && !span && event.type !== "run_title") return;
     // ONE counter: `eventCount` is the monotonic published total AND the `seq`
     // stamped on the event — the SSE `id:` a client resumes from.
     const seq = ++run.eventCount;
@@ -374,6 +464,7 @@ export class RunRegistry {
     }
     const stamped: RunEvent = { ...event, seq };
     appendToBacklog(run, this.bounds, stamped);
+    if (event.type === "input") this.startTitle(run);
     for (const sub of run.subscribers) {
       try {
         sub.onEvent(stamped, seq);
@@ -466,6 +557,7 @@ export class RunRegistry {
     }
     if (run.finished && !destructive) return;
     this.runs.delete(id);
+    this.titleJobs.delete(id);
     const subs = [...run.subscribers];
     run.subscribers.clear();
     const frame: SealedFrame = { sealedAt: this.now() };
@@ -727,6 +819,7 @@ export class RunRegistry {
         this.sealRun(run, { replyOk: undefined, upsert: false });
       } else if (run.sealedAt > now - this.ttlMs) continue;
       this.runs.delete(id);
+      this.titleJobs.delete(id);
       // Eviction is the ONLY removal signal for the index feed (a finished-but-
       // -unevicted run stays listed). Fires once per run — the delete above
       // ensures a later sweep won't re-emit it.

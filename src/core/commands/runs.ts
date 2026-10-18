@@ -1,3 +1,4 @@
+import { runMetadata } from "../runDisplay.js";
 import { cancellationFailureMessage } from "../runLedger/cancellation.js";
 import { claimObservationCursor } from "../runLedger/claimObservation.js";
 import { checkSelectorSchema, type CheckSelector } from "../checkInspection.js";
@@ -222,8 +223,10 @@ function wrapStorageFailure(
   };
 }
 
-function wrapRunView<T extends RunView>(view: T): T {
-  return view.operator ? { ...view, operator: wrapOperator(view.operator) } : view;
+function wrapRunView<T extends RunView>(view: T): Omit<T, "prompt"> {
+  // Listings stay metadata-only. A prompt is available through explicit message reads.
+  const metadata = runMetadata(view);
+  return view.operator ? { ...metadata, operator: wrapOperator(view.operator) } : metadata;
 }
 
 /** Every free-text field a JSON surface hands out is wrapped as untrusted: the
@@ -231,6 +234,8 @@ function wrapRunView<T extends RunView>(view: T): T {
  *  free-text field a span record carries (`span_end.error`). */
 export function wrapEvent(e: RunEvent): RunEvent {
   switch (e.type) {
+    case "run_title":
+      return { ...e, title: wrapUntrusted(e.title) };
     case "input":
     case "context":
     case "assistant":

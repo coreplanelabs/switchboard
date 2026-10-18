@@ -378,3 +378,24 @@ Memory prepares terminal authority only after the run has a canonical sealed out
 A successful response has `state: "closed"` and `originalOperationOutcome: "unknown"`. A refusal includes the failed `phase` and a bounded `cause`; it does not authorize another target or a command replay. An identical request can read a stored completion or continue that original scope's prepared closure. It never repeats the original command. A changed selector remains held. This control does not release a deployment fence or change deployment readiness checks.
 
 After a terminal permit is created, retain the Memory code that enforces its run-ID fence during rollback. Disable the terminal cleanup route if needed; do not remove permits or roll Memory back past that fence. An older Resident can leave the original work held, but cannot safely replace the qualified receiver.
+
+## Refresh custom Slack emoji
+
+The bot's Slack token needs the `emoji:read` scope. Add it under **OAuth & Permissions → Bot Token Scopes** in [Slack apps](https://api.slack.com/apps), then select **Reinstall to Workspace → Allow** if Slack requests a new installation. The shipped app manifest includes the scope.
+
+After this version is deployed, an operator connected to that host can run:
+
+```sh
+npm run cli -- emoji sync
+```
+
+The command updates the running host's catalog. Check that the result says `complete`, that all source names are available, and that zero names failed. Reload open dashboard pages. Run this after uploading emoji or when needed; there is no emoji polling job.
+
+For a private local export, read the token from a file or 1Password:
+
+```sh
+npm run emoji:sync -- --directory /private/path/emoji --token-file /private/path/slack-emoji-token
+npm run emoji:sync -- --directory /private/path/emoji --token-item <item-id> --token-field "Bot token"
+```
+
+Keep the export outside the public repository. A repeated export downloads only new or changed image URLs. To inspect the actual pack in the local fixture dashboard, set `SWITCHBOARD_PREVIEW_EMOJI_DIR` to the export directory when running `npm run web:preview`. This does not update production.

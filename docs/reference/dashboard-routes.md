@@ -53,6 +53,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 
 | Route | Methods | Action | What it does |
 |---|---|---|---|
+| `/api/emoji.sync` | `POST` | `config:write` | Download the workspace's full custom Slack emoji catalog and aliases on demand. Replaces the local catalog, preserves verified cached images on partial failure, and reports name and file counts. No scheduled polling. |
 | `/api/maintenance.status` | `GET`, `POST` | `maintenance:read` | Read the durable maintenance episode, notice result, and work in flight. Does not prove resident idleness. |
 | `/api/maintenance.announce` | `POST` | `maintenance:write` | Announce scoped maintenance in Slack and return the exact activation call for the client's scheduler. Installs no timer. |
 | `/api/maintenance.start` | `POST` | `maintenance:write` | Close access for new requests for an announced episode by ID, or start immediate maintenance. Existing work is not killed. No automatic expiry. |

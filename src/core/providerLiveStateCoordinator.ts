@@ -6,7 +6,7 @@ import type { RunRegistry } from "./runRegistry.js";
 export interface ProviderLiveStateCoordinatorDeps {
   runLedger: Pick<LedgerWriteThrough, "liveRuns" | "planeLevel" | "planePark">;
   ledger: Pick<RunLedger, "listLive"> | null;
-  registry: Pick<RunRegistry, "commitLiveState" | "getById" | "snapshotById">;
+  registry: Pick<RunRegistry, "commitLiveState" | "getById" | "snapshotById" | "eventLane">;
   clock: () => number;
   warn: (message: string) => void;
 }
@@ -48,40 +48,47 @@ export function createProviderLiveStateCoordinator(
         const rows = await deps.ledger.listLive();
         for (const row of rows) {
           if (row.state.liveProvider !== provider || row.liveState?.state !== "waiting_provider") continue;
-          const tracked = deps.runLedger.liveRuns().find((run) => run.runId === row.runId);
-          const summary = deps.registry.getById(row.runId);
-          if (!tracked || !summary || row.liveState.bound === undefined) continue;
-          const committed = await tracked.assignLiveState({
-            expectedSeq: summary.liveStateSeq ?? 0,
-            eventSeq: summary.eventCount + 1,
-            at: deps.clock(),
-            state: "working",
-            bound: row.liveState.bound,
-            detail: "model turn",
-            statePatch: { liveProvider: undefined },
+          if (!deps.registry.getById(row.runId)) continue;
+          await deps.registry.eventLane(row.runId).write(async () => {
+            const tracked = deps.runLedger.liveRuns().find((run) => run.runId === row.runId);
+            const summary = deps.registry.getById(row.runId);
+            if (!tracked || !summary || summary.finished || row.liveState?.bound === undefined) return;
+            const committed = await tracked.assignLiveState({
+              expectedSeq: summary.liveStateSeq ?? 0,
+              eventSeq: summary.eventCount + 1,
+              at: deps.clock(),
+              state: "working",
+              bound: row.liveState.bound,
+              detail: "model turn",
+              statePatch: { liveProvider: undefined },
+            });
+            if (committed.ok) deps.registry.commitLiveState(row.runId, committed);
           });
-          if (committed.ok) deps.registry.commitLiveState(row.runId, committed);
         }
       }),
     park: (runId, provider) =>
       enqueue(`provider park for ${runId}`, async () => {
         await deps.runLedger.planePark(runId, provider);
-        const summary = deps.registry.getById(runId);
-        const tracked = deps.runLedger.liveRuns().find((run) => run.runId === runId);
-        const events = deps.registry.snapshotById(runId)?.events ?? [];
-        let leaseEndsAt: number | undefined;
-        for (const event of events) if (event.type === "lease") leaseEndsAt = event.endsAt;
-        if (!summary || !tracked || leaseEndsAt === undefined) return;
-        const committed = await tracked.assignLiveState({
-          expectedSeq: summary.liveStateSeq ?? 0,
-          eventSeq: summary.eventCount + 1,
-          at: deps.clock(),
-          state: "waiting_provider",
-          bound: leaseEndsAt,
-          detail: "waiting for the model provider",
-          statePatch: { liveProvider: provider },
+        const local = deps.registry.getById(runId);
+        if (!local) return;
+        await deps.registry.eventLane(runId).write(async () => {
+          const summary = deps.registry.getById(runId);
+          const tracked = deps.runLedger.liveRuns().find((run) => run.runId === runId);
+          const events = deps.registry.snapshotById(runId)?.events ?? [];
+          let leaseEndsAt: number | undefined;
+          for (const event of events) if (event.type === "lease") leaseEndsAt = event.endsAt;
+          if (!summary || summary.finished || !tracked || leaseEndsAt === undefined) return;
+          const committed = await tracked.assignLiveState({
+            expectedSeq: summary.liveStateSeq ?? 0,
+            eventSeq: summary.eventCount + 1,
+            at: deps.clock(),
+            state: "waiting_provider",
+            bound: leaseEndsAt,
+            detail: "waiting for the model provider",
+            statePatch: { liveProvider: provider },
+          });
+          if (committed.ok) deps.registry.commitLiveState(runId, committed);
         });
-        if (committed.ok) deps.registry.commitLiveState(runId, committed);
       }),
   };
 }

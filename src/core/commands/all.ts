@@ -25,6 +25,7 @@ import { registerScheduleCommands, type ScheduleCommandDeps } from "./schedule.j
 import { registerSetupCommands, type SetupCommandDeps } from "./setup.js";
 import { registerSteerCommands, type SteerCommandDeps } from "./steer.js";
 import { registerStatusCommands, type StatusCommandDeps } from "./status.js";
+import { registerEmojiCommands, type EmojiCommandDeps } from "./emoji.js";
 
 // Every command the bot registers, and the deps object they are bound to.
 // Bound ONCE per process by `buildCoreCommands` (src/core/commandCatalogue.ts)
@@ -35,6 +36,7 @@ import { registerStatusCommands, type StatusCommandDeps } from "./status.js";
 // call below; no adapter changes.
 
 export type CoreCommandDeps = IdentityCommandDeps &
+  EmojiCommandDeps &
   MaintenanceCommandDeps &
   HelpCommandDeps &
   ConfigCommandDeps &
@@ -62,6 +64,7 @@ export type CoreCommandDeps = IdentityCommandDeps &
   SteerCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
+  registerEmojiCommands(registry);
   registerMaintenanceCommands(registry);
   registerIdentityCommands(registry);
   registerHelpCommands(registry);

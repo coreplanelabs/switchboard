@@ -44,6 +44,7 @@ import type { RunLedger } from "./runLedger/ledger.js";
 import type { LiveRunRow } from "./runLedger/types.js";
 import { snippetOf } from "./runLedger/sessionLog.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
+import { runDisplayOf } from "./runDisplay.js";
 import { pipelineOfEvents, type PipelineSummary } from "./pipelineStanding.js";
 import { parseUnitKey, unitKeyOf, type CoordinatorUnit } from "./coordinator/contract.js";
 import { assembleRunRecord } from "./dispatch/record.js";
@@ -103,6 +104,8 @@ export type Result<T> =
  * expresses the outcome as `status`).
  */
 export interface RunView {
+  prompt?: string;
+  title?: string;
   /** Stored private model context must not be restored without a current projection. */
   authoritativeHistory?: true;
   answerOutcome?: AnswerOutcome;
@@ -627,6 +630,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
   const answerOutcome = answerOutcomeOf(row.state.answerOutcome);
   return {
     id: row.runId,
+    ...runDisplayOf(events),
     ...(answerOutcome ? { answerOutcome } : {}),
     ...(m.label !== undefined ? { label: m.label } : {}),
     ...(m.agent !== undefined ? { agent: m.agent } : {}),
@@ -667,6 +671,8 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
 function liveView(s: RunSummary): RunView {
   return {
     id: s.id,
+    ...(s.prompt !== undefined ? { prompt: s.prompt } : {}),
+    ...(s.title !== undefined ? { title: s.title } : {}),
     ...(s.label !== undefined ? { label: s.label } : {}),
     ...(s.agent !== undefined ? { agent: s.agent } : {}),
     ...(s.model !== undefined ? { model: s.model } : {}),

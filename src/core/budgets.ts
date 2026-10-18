@@ -771,3 +771,6 @@ export const REVIEW_FEEDBACK_PASS_MS = 45_000;
 
 /** Bounded canonical and native proof reads in each private Home metadata phase. */
 export const HOME_PRIVATE_READ_CONCURRENCY = 8;
+
+/** Background run metadata has a short, independent budget. */
+export const RUN_TITLE_TIMEOUT_MS = 10_000;

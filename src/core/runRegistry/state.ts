@@ -6,6 +6,7 @@ import type { RunSeed, RunStatus } from "../runRecord.js";
 import type { RunLiveState } from "../runLiveState.js";
 import type { RunControl } from "./runControl.js";
 import type { SlackDirectAudience } from "../types.js";
+import type { RunEventLane } from "../runEventLane.js";
 
 // The row a run occupies in the registry while it is live (`RunState`), the
 // identity the dispatcher hands `create()` for it (`RunMeta`), and the contract
@@ -17,6 +18,8 @@ import type { SlackDirectAudience } from "../types.js";
  *  same identity fields the persisted record carries, so a live row projects
  *  like a persisted one (`RunsService.listRuns` filters on them, F8). */
 export interface RunMeta {
+  /** Redacted independently before display or title generation. */
+  prompt?: string;
   /** Redaction only. Current source proof remains an independent admission gate. */
   privateConversation?: true;
   authoritativeHistory?: true;
@@ -111,6 +114,9 @@ export interface Subscription {
 }
 
 export interface RunState {
+  eventLane: RunEventLane;
+  prompt?: string;
+  title?: string;
   id: string;
   token: string;
   /** The newest events, each carrying its `seq` (stream position). Bounded by

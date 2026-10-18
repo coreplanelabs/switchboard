@@ -138,6 +138,14 @@ export function normalizeAgentConfig(value: unknown): AppConfig {
   const harness: Record<string, "pi" | "opencode"> = {};
   for (const name of AGENT_CONFIG_NAMES) {
     const entry = resolveSettings(effective, name);
+    // Optional metadata must not add a provider requirement to an installation.
+    if (
+      name === "title" &&
+      !extension.agents?.title &&
+      !extension.profiles?.title &&
+      !input.providers?.[entry.model?.split("/")[0] ?? ""]
+    )
+      continue;
     if (!entry.model || !input.providers?.[entry.model.split("/")[0]!])
       throw new Error(`agents.${name}.model: declare the provider for ${entry.model ?? "missing model"}`);
     const builtin = AGENTS[name];
@@ -188,11 +196,21 @@ export function settingsForAgent(
 ): { model?: string; effort?: Effort } {
   if (config.extends === "builtin") {
     const entry = config.agents?.[name];
+    if (name === "title" && !entry) return {};
     if (!entry) throw new Error(`Unknown agent "${name}"`);
     const effort = entry.modelSettings?.reasoning?.effort;
     return { model: entry.model, ...(effort != null ? { effort } : {}) };
   }
   const caller = name === "operator" ? "general" : name;
+  if (name === "title") {
+    const fallback = resolveSettings(shipped, "title");
+    const model = config.defaults.models.title ?? fallback.model;
+    if (!model || !config.providers?.[model.split("/")[0]!]) return {};
+    return {
+      model,
+      effort: config.defaults.efforts?.title ?? fallback.modelSettings?.reasoning?.effort ?? undefined,
+    };
+  }
   const background = name === "intake" ? config.intake : name === "memory" ? config.memory : undefined;
   const model =
     name === "memory"

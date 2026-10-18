@@ -73,6 +73,8 @@ function isRunEvent(v: unknown): v is RunEvent {
   const o = v as Record<string, unknown>;
   if (o.at !== undefined && typeof o.at !== "number") return false;
   switch (o.type) {
+    case "run_title":
+      return typeof o.title === "string";
     case "tool_call":
       return typeof o.summary === "string" && typeof o.tool === "string";
     case "tool_input":

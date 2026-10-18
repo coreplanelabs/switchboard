@@ -68,6 +68,16 @@ function model(openTags?: string[]) {
   return createRunPageModel({ openTags });
 }
 
+describe("Run title", () => {
+  it("updates the heading from a saved or streamed title without replacing the request", () => {
+    const m = model();
+    m.handle(input);
+    m.handle({ type: "run_title", title: "Repair the build" });
+    expect(m.state.title).toBe("Repair the build");
+    expect(m.state.request?.text).toBe("fix the build");
+  });
+});
+
 function step(m: ReturnType<typeof model>, i = 0): StepVm {
   const steps = m.state.log.filter((l): l is StepVm => l.kind === "step");
   return steps[i];

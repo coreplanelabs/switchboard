@@ -58,7 +58,7 @@ export interface RunEnding {
 }
 
 export interface RunEndingDeps {
-  registry: Pick<RunRegistry, "seal">;
+  registry: Pick<RunRegistry, "seal"> & Partial<Pick<RunRegistry, "titleSettled">>;
   /** Where a writer's failure is reported — the run id and the error's message only, never the record. */
   log?: (line: string) => void;
   /** Runs the moment a run is reported finished, before its seal — for what must
@@ -133,6 +133,9 @@ export function createRunEnding(deps: RunEndingDeps): RunEnding {
         for (const entry of pending) if (entry.flipOnPostFinishFailure) entry.failedAfterFinish = true;
         throw err;
       } finally {
+        // The reply is already sent. Let the bounded background metadata call
+        // finish before the record is sealed, including for a very short run.
+        await Promise.all(finished.map(({ id }) => deps.registry.titleSettled?.(id, "seal")));
         drain(ok, ok === false ? opts?.undelivered : undefined);
       }
     },

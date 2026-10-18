@@ -3,6 +3,7 @@ import RunRow from "./RunRow.vue";
 import { mountApp } from "../../testing/mount";
 import { browser } from "../../lib/browser";
 import type { IndexRow } from "../../lib/indexRow";
+import { reactive, nextTick } from "vue";
 
 const base: IndexRow = {
   id: "run-1",
@@ -34,6 +35,16 @@ afterEach(() => {
 });
 
 describe("RunRow", () => {
+  it("keeps the full prompt until a generated title arrives in the feed", async () => {
+    const prompt = "Check the release. Then inspect every deployment and explain the remaining work. ".repeat(6);
+    const run = reactive(row({ prompt }));
+    const w = mountRow(run);
+    expect(w.get(".snippet").text()).toBe(prompt.trim());
+    run.title = "Check release deployment";
+    await nextTick();
+    expect(w.get(".snippet").text()).toBe("Check release deployment");
+    expect(w.get(".snippet").attributes("title")).toBe(prompt);
+  });
   it("preserves the public agent label when structured metadata names an internal preset", () => {
     const w = mountRow(row({ label: "main · private conversation", agent: "orchestrator" }));
     expect(w.find(".agent").text()).toBe("main");

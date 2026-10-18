@@ -96,6 +96,7 @@ export interface ArtifactsSeed {
 /** The live run page follows SSE from its local registry or durable ledger.
  *  Registry URLs carry a capability; ledger URLs use the viewer decision. */
 export interface RunLiveSeed {
+  runTitle?: string;
   page: "run";
   mode: "live";
   id: string;
@@ -151,6 +152,7 @@ export interface RunLineageSeed {
 /** The history run page: the stored events (with AE11 omission markers already
  *  in place) are the whole stream — no EventSource, no stop controls. */
 export interface RunHistorySeed {
+  runTitle?: string;
   page: "run";
   mode: "history";
   id: string;
@@ -610,7 +612,7 @@ export type WebSeed = PageSeed & {
   asUser?: ViewablePerson;
   viewAs?: { people: ViewablePerson[] };
   /** Catalog paths are served by this host; upstream image URLs never enter the browser. */
-  emoji?: Record<string, { path: string }>;
+  emoji?: Record<string, import("../core/emoji.js").EmojiEntry>;
 };
 
 /** The id of the `<script type="application/json">` seed island. */
