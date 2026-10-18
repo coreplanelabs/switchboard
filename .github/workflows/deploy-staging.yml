@@ -1,4 +1,5 @@
 name: deploy staging
+run-name: ${{ github.event_name == 'pull_request_target' && github.event.action == 'labeled' && github.event.label.name != 'deploy:staging' && 'Staging label ignored' || 'Staging requested' }}
 
 # The controller comes from the base branch. Current same-repository PR heads
 # release heads owned by repository writers or installed write Apps deploy after validation.
@@ -336,7 +337,7 @@ jobs:
           if-no-files-found: ignore
 
   acceptance:
-    name: ${{ github.event.action == 'labeled' && github.event.label.name != 'deploy:staging' && 'staging / ignored label' || 'staging / Review E2E' }}
+    name: staging / live Review
     needs: [authorize, validate, deploy]
     if: always() && (github.event_name == 'pull_request_target' || inputs.pr != '') && (github.event.action != 'labeled' || github.event.label.name == 'deploy:staging')
     runs-on: depot-ubuntu-24.04-4

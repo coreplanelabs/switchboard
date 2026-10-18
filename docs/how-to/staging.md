@@ -98,11 +98,15 @@ Retained mode never automatically calls `/undrain`, including failure, cancellat
 
 ## GitHub
 
+Ordinary PRs complete `staging / Review E2E` without staging access. Release PRs also require a commit status with that name. The publisher sets it to pending before reading controller evidence, then reports the newest applicable same-head execution. PR events and controller request, start and completion events refresh it, including reruns. A newer run with no final job yet remains pending; a failed or cancelled run cannot reuse an older success. The shared status queue retains up to 100 pending runs, so lifecycle updates do not replace the required PR check in the default single waiting slot.
+
+The status publisher never checks out candidate code. Only the trusted base controller's `pull_request_target` runs can supply success. The controller marks unrelated label events separately, so they do not replace acceptance. Candidate branch dispatches and other event sources cannot qualify a release. Missing or incomplete evidence does not pass. The `workflow_run` publisher becomes active after this workflow exists on the default branch.
+
 For the role of each source, routing, staging and production check, see [the testing model](ship-a-release.md#what-the-checks-prove).
 
 Only same-repository release pull requests start staging automatically after their current head passes CI, CodeQL, the title check and package smoke. The controller waits without staging credentials. Forks cannot deploy. Origin branches are writable only by repository writers and installed write Apps, so automatic runs also support App-created PRs. Label and manual requests require the initiating actor to have repository write access. The head is checked again after waiting for the shared staging stack.
 
-Ordinary pull requests run normal validation and report staging E2E as not required when staging has not been requested. A retained `deploy:staging` label or manual branch request at the same commit keeps the test required when the PR is marked ready or reopened. Apply `deploy:staging`, use manual dispatch, or use the CLI when you want to test one on staging.
+Apply `deploy:staging`, use manual dispatch, or use the CLI to test an ordinary PR on staging. A retained label or manual branch request at the same commit preserves that deployment request when the PR is marked ready or reopened. Its live acceptance result remains separate from the release-only merge gate.
 
 The automatic release job deploys all four runtime Workers, then runs bounded answer, workspace-read and exact-head Review scenarios on the disposable test repository. The shared staging lock stays held through those scenarios. GitHub queues pending deployments instead of replacing a different PR’s request. Each job retains deployment and acceptance receipts; a healthy response alone is not Review acceptance. A changed head or closed request stops before candidate credentials. Unrelated label events do not deploy or replace the real acceptance check.
 

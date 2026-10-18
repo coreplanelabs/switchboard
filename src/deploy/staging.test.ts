@@ -730,9 +730,7 @@ globalThis.fetch = async (url, init) => {
     expect(steps[e2e].env.SMOKE_EXPECTED_COMMIT).toBe("${{ needs.authorize.outputs.commit }}");
     expect(steps[e2e].env.SMOKE_INGRESS_TOKEN).toBe("${{ secrets.STAGING_SMOKE_TOKEN }}");
     expect(steps[e2e].if).toContain("inputs.pr != ''");
-    expect(workflow.jobs.acceptance.name).toBe(
-      "${{ github.event.action == 'labeled' && github.event.label.name != 'deploy:staging' && 'staging / ignored label' || 'staging / Review E2E' }}",
-    );
+    expect(workflow.jobs.acceptance.name).toBe("staging / live Review");
     expect(workflow.jobs.acceptance.if).toContain(
       "github.event.action != 'labeled' || github.event.label.name == 'deploy:staging'",
     );
