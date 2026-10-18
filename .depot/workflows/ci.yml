@@ -290,6 +290,14 @@ jobs:
         if: matrix.worker != 'none'
         with:
           persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.worker != 'none' && matrix.worker == 'deploy/cloudflare-resident'
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - if: matrix.worker != 'none' && matrix.worker == 'deploy/cloudflare-resident'
+        run: npm ci
       - uses: depot/use-action@9bda29f1fc3163c06fc15f375887a341096a5639 # v1
         if: ${{ matrix.worker == 'deploy/cloudflare-sandbox' && vars.DEPOT_PROJECT_ID != '' && github.event_name != 'workflow_dispatch' }}
         with:
@@ -299,6 +307,9 @@ jobs:
         run: npm run check:image -w "$WORKER"
         env:
           WORKER: ${{ matrix.worker }}
+      - name: qualify the Resident image's native containment
+        if: matrix.worker != 'none' && matrix.worker == 'deploy/cloudflare-resident'
+        run: npm run check:native-scope
 
   image:
     # The required check `image`: green only when every image built.

@@ -537,9 +537,10 @@ describe("the required status checks and their gates", () => {
     for (const id of ["bot", "workers", "image"]) expect(needsOf(ci.jobs[id])).toContain("plan");
     for (const id of ["workers-each", "image-each"]) {
       const job = ci.jobs[id];
-      expect(
-        job.steps.filter((step) => step.run?.startsWith("npm ")).every((step) => step.if === "matrix.worker != 'none'"),
-      ).toBe(true);
+      for (const step of job.steps.filter((step) => step.run?.startsWith("npm "))) {
+        // An optional equality may narrow a leg, but cannot reopen the sentinel.
+        expect(step.if).toMatch(/^matrix\.worker != 'none'(?: && matrix\.worker == '[^'\n]+')?$/);
+      }
       expect(job.if).toContain(`needs.plan.outputs.${id === "workers-each" ? "workers" : "images"} != '["none"]'`);
     }
     expect(needsOf(ci.jobs["docs-deploy"])).toEqual(["plan", "docs"]);
