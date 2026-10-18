@@ -228,3 +228,7 @@ src/channels/adminCoordinator.test.ts	issues: [issue(9, "U1: anything (unit)")],
 src/channels/adminCoordinator.test.ts	{ instanceId: INSTANCE.id, unit: "U1", slug: "u1", branch: generated.branch, dependsOn: [], rounds: [] },
 src/channels/adminCoordinator.test.ts	expect(await call(gen, "unit-start", { parentInstanceId: INSTANCE.id, unit: "U1" })).toEqual({
 src/channels/mcpApprovals.test.ts	const APPROVAL_PROTOCOL_VERSION = "2026-07-28";
+
+# Public issue permalinks are the source of the external-PR contract re-evaluation.
+docs/decisions/0077-a-plan-becomes-a-durable-work-record-before-code-starts.md	[external-pr-consolidation]: https://github.com/coreplanelabs/switchboard/issues/2290#issuecomment-5822450307
+docs/decisions/0077-a-plan-becomes-a-durable-work-record-before-code-starts.md	[external-pr-intake]: https://github.com/coreplanelabs/switchboard/issues/2353

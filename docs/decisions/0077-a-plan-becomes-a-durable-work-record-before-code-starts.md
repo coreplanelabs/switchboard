@@ -326,3 +326,73 @@ Keep the exact bridge artifact deployable and schema-compatible until every resu
 Proof covers: mixed binaries refusing legacy execution; same-unit mid-round continuation with budgets; bridge recovery from broken new runtime; unavailable publication leaving a retryable non-executable pin; independent credential/runtime support with no code/merge power; visibility incompatibility refusing attachment with a redacted receipt; and rollback stopping at each named irreversible boundary.
 
 **Five-answer recheck.** The canonical pin plus provider URL remains the only executable reference; projection remains non-canonical; admitted execution survives provider outage through its pin; merge still requires fresh initiator authority; and legacy inputs collapse once into the pinned path, never a compatibility execution path.
+
+## Amended 2026-10-17: an external PR author does not select its repair writer
+
+Status: proposed append-only amendment for maintainer acceptance. Decide this external-PR scope correction before automatic repair admission. Written for an engineer who knows PR review but has not followed the orchestration work.
+
+The decision accepts a repair actor, not an implementation or activation receipt. A canonical pin is the store's immutable validated plan bytes. Its `PlanRef{planId,digest,providerUrl}` names those bytes and the human-readable published plan. The provider page cannot replace the store copy.
+
+The requested outcome is one Switchboard-owned review, code repair and CI loop for eligible PRs opened by external automation, starting with one configured repository. The PR author does not need to write later fixes. A conversation can manage several PRs across repositories; each repair unit retains one immutable PR target. Merge, deployment and activation keep their separate authority checks.
+
+**Re-evaluation.** Record 0077 was accepted because every source converges on one validated store pin, one complete `PlanRef` and the existing guarded execution path. The [external-PR consolidation][external-pr-consolidation] then required an external author to write fixes after a COMMENT review. That restriction is a workflow choice, not a consequence of the accepted pin or authority contract. The maintainer now requests Switchboard agents to review and address findings themselves. Reusing the ordinary repair unit preserves the accepted design, provided deterministic admission proves current write authority and retains the original work owner. The cost is a verified writer handover, including any external automatic follow-up, before a repair can start.
+
+**Today at `0a32350bae56dc56b4f120e3cbf26b929b010949`.**
+
+| Fact | Source |
+|---|---|
+| Manual Ship preflight can resume a same-repository PR without requiring Switchboard authorship; fork heads refuse. | `src/core/ship/preflight.ts`; `src/core/ship/preflight.test.ts`, case `resume: a bare reference to a person's open pull request resumes at review — any author` |
+| Maintenance admission checks the complete existing owner set and can select a named original unit; it does not create another scheduler. | `src/core/coordinator/maintenanceAdmission.ts`, `planMaintenanceAdmission` |
+| Native GitHub PR context is a snapshot, not current access or execution authority. Source evidence cannot become requester input. | `src/execution/githubReadSource.ts`; `src/core/runLedger/inboxMessage.ts` |
+| Common source delivery still refuses a coordinator-managed child. Three inactive component cases do not prove a unit bridge or native consumption. | `src/core/runLedger/sourceEvidence.ts`, `sourceEvidenceOwnerMatches`; `src/core/coordinator/managedPrSourceContract.test.ts` |
+
+**The shape.** Keep the existing orchestrator and deterministic repair unit. This is the usual separation between a durable work record and a temporary execution lease: a lease ending does not erase enrollment or make a second writer safe. The difference from a controller that owns every writer is that an external bot can still push independently. Host policy must establish that the branch is under the admitted writer's custody; a PR label, bot author or model instruction cannot establish it.
+
+```mermaid
+sequenceDiagram
+    participant Intake
+    participant Owner as Existing work owner
+    participant Unit as Existing repair unit
+    participant GitHub
+    Intake->>Owner: Canonical PR evidence and configured policy
+    Owner->>Owner: Resolve same work, current authority and writer custody
+    Owner->>Unit: Exact PR target and accepted head
+    Unit->>GitHub: Review, guarded fix and head-pinned re-review
+    GitHub-->>Owner: Fresh head, verdict and required CI
+    Owner->>Owner: Record readiness or retain a named hold
+```
+
+**One trace: an external push during repair.** A conversation manages `acme/api#7` and `acme/ui#8`. External automation authored the first PR. Its repair stays on the original `acme/api#7` unit; the second PR remains separate work. Intake receives the same event twice and resolves the same enrollment both times. Current policy permits the initiating actor to repair the first branch, and writer handover confirms that no external automatic repair can still write it. The unit reviews head A. Another writer then pushes head B before the fix publishes. The original unit refuses a stale write or readiness claim, retains any uncertain effect receipt, and reports the custody conflict. It does not create a replacement unit or certify B from A's review. Fresh source delivery and a new decision can proceed only after the existing owner resolves custody under current authority.
+
+**Difficulty map.** The main risk is writer handover, described next. The next risk is mistaking source evidence for admission, covered under the scope changes. Shared task/context, access, retention and native delivery remain the largest implementation gap; the Intake owner supplies those contracts before automatic operation.
+
+**Writer handover.** A Switchboard lease fences Switchboard workers; it cannot fence a different service's GitHub credential. Before automatic repair, the host must prove that other repair dispatch is disabled for the enrolled PR or otherwise excluded by a qualified shared ownership protocol. This includes jobs already accepted by an external service and review/comment publications that could start another writer. A policy bit without that proof is insufficient. If another writer is active, its outcome is unknown, or its dispatch cannot be excluded, hold the PR before coding or publishing a trigger that would start it. Initial eligibility is limited to same-repository heads that the current actor can update; fork support requires its own authority proof.
+
+An expired lease, an ended run or a settled unit does not delete enrollment or settle an uncertain push/review POST. Repeated discovery adopts the same work and its retained effects. Any supported recovery uses the exact original action and owner. These rules do not require a second PR lock table, owner service, controller or execution loader. They do require the existing admission path to distinguish durable enrollment, current writer authority and an execution lease.
+
+**Scope changes to the consolidation.** [Issue 2353][external-pr-intake] uses the following replacements for the corresponding external-author acceptance criteria. The other admission, finding identity, publication, head/base, fairness, disablement and recovery requirements remain.
+
+| Earlier criterion | Revised requirement |
+|---|---|
+| 2: external work never starts a branch-writing coding child | Eligible work uses the ordinary code/review/fix/checks unit after current branch authority and exclusive writer custody are proved. Existing owners and uncertain effects refuse rival admission. |
+| 6: a COMMENT batch triggers an external bot's fixes | The existing unit consumes assessed findings and runs its own guarded repair. Publishing a review does not authorize an external repair job. Handover must exclude automatic external follow-up before such a publication. |
+| 10: external author-response clocks control progress | Keep durable round counts, caps and bounded waits from the shared unit. An outside push is evidence, not an acknowledgment that a requested remedy was completed. Preserve existing imported delivery receipts and clocks when recovering old work. |
+| 13: the live proof depends on an external bot response | Prove discovery/event intake, canonical enrollment, Switchboard review, Switchboard code repair, current-head re-review and complete required CI. Include duplicate delivery, restart and concurrent foreign push. A separately authorized single-PR live pilot remains required before broader enablement. |
+
+This amendment sets no new round or time limit and changes no budget resolution. The pilot must record the effective existing limits before it runs; `src/core/shipPipeline.ts`, `resolveShipCaps`, remains the source of their resolution.
+
+The schedule's current actor and configured repository policy supply authority. GitHub authors, comment text, source receipts, relevance results and candidate matches do not. The same source-to-work path serves a PR event or bounded catalog catch-up. Neither entry point grants a worker directly, substitutes for the canonical pin and parent publication, or adds a second composer. A conversation's multiple PRs do not change the repair unit's one-PR binding.
+
+**Alternatives.** Keeping the PR author as a required repair writer would preserve a dependency the maintainer removed and would require the external response protocol to control this loop. This scope uses the existing Ship repair unit instead. Starting a fresh unit on every schedule tick would discard retained work and uncertain effects; repeated ticks must adopt the original enrollment. Treating a bot author, PR label or lease as write authority would leave independently triggered writers outside the fence; unknown custody must hold rather than widen authority.
+
+**Compatibility and acceptance.** The original five acceptance answers still stand: canonical pin plus provider URL, non-canonical human projection, execution from the pin during provider outage, current initiating-actor authority, and one executable loader. Record 0073's composer transfer, migration, retirement, budgets, head guards and merge door remain binding. Independent source preparation follows normal source review and CI with its current owner. It does not release a migration, deployment or activation gate, or require approval from a retired coordination session. No producer or automatic enrollment is enabled by this amendment.
+
+| Required proof before automatic operation | Owner and completion evidence |
+|---|---|
+| Existing work and writer custody survive duplicate intake, lease expiry, restart, a foreign push and uncertain publication. | Auto-Ship owner; real shared-store admission/effect tests and one bounded authorized repair qualification. `[gap]` |
+| Canonical source/task/destination and current access reach the same managed unit, with pending-source retention and exact native consumption acknowledgment. | Intake owner; supported unit-delivery contract and deterministic store/runtime proofs. Current inactive tests leave this open. `[gap]` |
+| Another automatic writer cannot start or remain in flight during the admitted repair. | Auto-Ship owner with the repository's existing automation owner; per-PR handover and in-flight-job proof before admitting the pilot. No suppression mechanism is assumed shipped. `[gap]` |
+| One selected PR in the first configured repository completes the whole Switchboard repair loop at the observed serving build, with current-head review and required CI. | Auto-Ship owner; separately authorized live pilot with target/head/owner, review, push, CI and no-duplicate receipts. Human merge and wider activation remain separate. `[gap]` |
+
+[external-pr-consolidation]: https://github.com/coreplanelabs/switchboard/issues/2290#issuecomment-5822450307
+[external-pr-intake]: https://github.com/coreplanelabs/switchboard/issues/2353
