@@ -2,6 +2,7 @@
 
 - **Code**: `src/core/runLedger/sourceEvidence.ts`
 - **Tests**: `src/core/runLedger/sourceEvidence.test.ts`
+- **Tests**: `src/core/coordinator/managedPrSourceContract.test.ts`
 
 - **Tests**: `src/core/runLedger/inboxDelivery.test.ts`, `src/core/runLedger/sourceRelevance.test.ts`
 
@@ -986,6 +987,12 @@ No producer or runtime reader is enabled. Canonical decision admission, source-j
 
 | Both inbox stores require a version 2 notice or fold to match the stored event's complete receipt, source identity, author and common content. They validate the event hash, keep the provider payload opaque, and compare the same stored source bytes at append. Missing, corrupt or changed sources refuse a new row and keyed receipt together. Source-proof refusal logs name the prepare or append phase with fixed metadata and no source text. An exact keyed replay still returns the old receipt without proving current access or consumption. Legacy messages are unchanged. Task/destination hashes, access, retention and native acknowledgment remain separate gates; producers and consumers stay disabled. | `[unit]` `src/core/runLedger/sourceEvidence.test.ts::source notice and fold messages::refuses substituted source content and receipt fields without saving an inbox row`; `::checks stored source bytes after asynchronous preparation and preserves the original delivery`; `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::typed SQLite source evidence::*` |
 
+
+| Criterion | Proof |
+|---|---|
+| Inactive component checks retain two repository and PR identities in separate root notices. Candidate matching and inbox row witnesses do not grant current access, select canonical work or prove native consumption. Source text and bot authors remain evidence; the requester decoder holds them. | `[unit]` `src/core/coordinator/managedPrSourceContract.test.ts::inactive managed PR source contracts::retains two repository identities as evidence under one root without requester promotion` |
+| Repeating a source delivery ID returns its original reception receipt. A changed body under that ID refuses. Another delivery ID for the same native revision remains a separate reception, not proof of another authorized action. | `[unit]` `src/core/coordinator/managedPrSourceContract.test.ts::inactive managed PR source contracts::deduplicates receptions by delivery ID while retaining a second reception of the same revision` |
+| A managed-unit fold remains unsupported and refuses inbox delivery while the canonical source remains readable. A root notice can still be stored. This immediate readback does not prove pending-source retention through pruning or restart, canonical unit hashes or a source-to-unit bridge. | `[unit]` `src/core/coordinator/managedPrSourceContract.test.ts::inactive managed PR source contracts::refuses a managed-unit fold and retains its source for the future unit delivery contract` |
 
 ## Saved source relevance
 
