@@ -170,9 +170,21 @@ const CHIP_CLS: Record<string, string> = {
   amber: "border-warn/30 text-warn",
   grey: "border-accented text-muted",
 };
+const contextRecoveryHeld = computed(() => {
+  if (isHistory || phase.value === "ended" || phase.value === "finished") return false;
+  if (state.recoveryHold !== undefined) return state.recoveryHold === "private_context";
+  for (let i = state.log.length - 1; i >= 0; i--) {
+    const item = state.log[i];
+    if (item.kind !== "note") continue;
+    if (item.noteKind === "context_recovery_held") return true;
+    if (item.noteKind === "resumed") return false;
+  }
+  return seed?.mode === "live" && seed.recoveryHold === "private_context";
+});
 
 const headerText = computed(() => {
   if (stopError.value) return stopError.value;
+  if (contextRecoveryHeld.value && phase.value !== "stopping") return "held · private context could not be verified";
   if (phase.value === "connecting") return "connecting…";
   if (phase.value === "disconnected") return "disconnected";
   if (phase.value === "stopping") return "stopping";
@@ -182,13 +194,15 @@ const headerText = computed(() => {
   return runClock ? `running · ${formatDuration(runClock.elapsedMs(nowWall.value), "clock")}` : "running";
 });
 const pulseCls = computed(() =>
-  stopError.value || phase.value === "disconnected"
-    ? "text-bad"
-    : phase.value === "running"
-      ? "text-ok motion-safe:animate-pulse"
-      : phase.value === "finished"
-        ? "text-ok" // connected, nothing running: the pulse stops
-        : "text-info motion-safe:animate-pulse",
+  contextRecoveryHeld.value
+    ? "text-warn"
+    : stopError.value || phase.value === "disconnected"
+      ? "text-bad"
+      : phase.value === "running"
+        ? "text-ok motion-safe:animate-pulse"
+        : phase.value === "finished"
+          ? "text-ok" // connected, nothing running: the pulse stops
+          : "text-info motion-safe:animate-pulse",
 );
 
 // ---- the timeline (live-view item 25) --------------------------------------------
@@ -221,11 +235,19 @@ const timeline = computed(() => {
     });
   }
   if (!runClock) return null;
-  const tlPhase: TimelinePhase = phase.value === "ended" ? "ended" : phase.value === "finished" ? "delivering" : "live";
+  const tlPhase: TimelinePhase = contextRecoveryHeld.value
+    ? "held"
+    : phase.value === "ended"
+      ? "ended"
+      : phase.value === "finished"
+        ? "delivering"
+        : "live";
   const totalMs =
-    tlPhase === "live" && phase.value !== "disconnected"
-      ? runClock.elapsedMs(nowWall.value)
-      : (frozenMs.value ?? runClock.elapsedMs(nowWall.value));
+    tlPhase === "held"
+      ? Math.max(0, (state.lastAt ?? seed.serverNow) - start)
+      : tlPhase === "live" && phase.value !== "disconnected"
+        ? runClock.elapsedMs(nowWall.value)
+        : (frozenMs.value ?? runClock.elapsedMs(nowWall.value));
   return buildTimeline({
     spans: model.spanSet(),
     losses: model.losses(start),
@@ -328,7 +350,12 @@ if (!isHistory) {
 // The header times the WHOLE run. There is no separate "tail": the timeline
 // is live, and its last row is now.
 const live = computed(
-  () => !isHistory && phase.value !== "ended" && phase.value !== "disconnected" && phase.value !== "finished",
+  () =>
+    !contextRecoveryHeld.value &&
+    !isHistory &&
+    phase.value !== "ended" &&
+    phase.value !== "disconnected" &&
+    phase.value !== "finished",
 );
 const runnerClock = computed(() => (live.value ? runnerNow(state, nowWall.value) : null));
 provide(RunnerClockKey, runnerClock);

@@ -51,6 +51,11 @@ const finished = (status: IndexRow["status"], over: Partial<IndexRow> = {}) =>
   row({ finished: true, finishedAt: 1_000_000 + 63_000, sealedAt: 1_000_000 + 65_000, status, ...over });
 
 describe("status vocabulary", () => {
+  it("marks a private context recovery hold as held and amber without a terminal claim", () => {
+    const held = row({ recoveryHold: "private_context", recoveryPending: true });
+    expect([statusWord(held), statusDot(held)]).toEqual(["held", "amber"]);
+    expect([statusWord(row()), statusDot(row())]).toEqual(["live", "green"]);
+  });
   it("shows display words, not the enum: succeeded / failed / killed / stopped early", () => {
     expect(statusLabel("completed")).toBe("succeeded");
     expect(statusLabel("failed")).toBe("failed");

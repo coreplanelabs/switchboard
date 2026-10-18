@@ -296,6 +296,7 @@ export function artifactHref(links: ArtifactsSeed, key: string): string {
 
 export interface RunPageModel {
   state: {
+    recoveryHold: "private_context" | null | undefined;
     title: string | null;
     /** The FIRST `input` event — what started the run. Every later `input`
      *  is a steered follow-up and lives in `log` as a `FollowUpVm`. */
@@ -514,6 +515,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
   const timeline = createRunTimeline();
 
   const state: RunPageModel["state"] = reactive({
+    recoveryHold: undefined,
     title: null,
     request: null,
     meta: null,
@@ -875,6 +877,11 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
 
   function handle(event: unknown): void {
     const e = event as { at?: unknown; type?: unknown } | null;
+    if (e?.type === "recovery_state") {
+      const hold = (event as { hold?: unknown }).hold;
+      if (hold === null || hold === "private_context") state.recoveryHold = hold;
+      return;
+    }
     // Span records (docs/reference/specs/tracing.md) are timing, not content: they never
     // move the stream's first/last stamps or the runner clock.
     const isSpan = e?.type === "span_start" || e?.type === "span_end";

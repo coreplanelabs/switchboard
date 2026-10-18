@@ -846,6 +846,29 @@ export async function dispatch(
     opts.restart?.row.meta.authoritativeHistory ||
     (opts.authoritativeHistory && (opts.resume || opts.restart || opts.restartOf))
   ) {
+    const saved = opts.resume ?? opts.restart;
+    if (saved) {
+      const confirmed = await deps.runLedger.holdContextRecovery({
+        runId: saved.row.runId,
+        threadKey: saved.row.threadKey,
+        state: saved.row.state,
+        lastStep: opts.resume?.lastStep.step ?? 0,
+        lastSeq: saved.events.reduce((max, event) => Math.max(max, event.seq), 0),
+      });
+      if (confirmed)
+        console.log(
+          JSON.stringify({
+            event: "run.context_recovery.hold",
+            runId: saved.row.runId,
+            ownerGen: deps.runLedger.gen,
+            outcome: "recorded",
+          }),
+        );
+      if (!confirmed) {
+        await io.reply("The saved private run remains held. Its recovery status could not be saved.");
+        return { status: "refused", refusal: "setup_failed" };
+      }
+    }
     await io.reply("The saved private run is held because its current context could not be verified.");
     return { status: "refused", refusal: "setup_failed" };
   }

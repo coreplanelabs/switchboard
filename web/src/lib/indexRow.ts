@@ -34,6 +34,7 @@ export function stopLabel(stop: { state: string; mode: string }): string {
 }
 
 export function statusWord(run: IndexRow): string {
+  if (!run.finished && run.recoveryHold === "private_context") return "held";
   if (!run.finished) return "live";
   // A provisional record: the tombstone-first start marker still in its window.
   // Never `interrupted` — that is a real terminal state for a confirmed dead run.
@@ -52,6 +53,7 @@ export function delivering(run: IndexRow): boolean {
 }
 
 export function statusDot(run: IndexRow): DotTone {
+  if (!run.finished && run.recoveryHold === "private_context") return "amber";
   if (!run.finished) return "green";
   if (delivering(run)) return "amber";
   // A provisional record: the tombstone-first marker still in its window — amber,

@@ -2631,6 +2631,111 @@ describe("reserve — the row before the prompt (item 42)", () => {
 });
 
 describe("adopt — a reclaimed run continues under this generation (item 37)", () => {
+  it("retains an unknown original hold write until exact same-owner readback without replay", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    await ledger.claim({ ...openReq(), gen: "gen-A", leaseMs: 30_000 });
+    let original: Parameters<RunLedger["setState"]> | undefined;
+    let writes = 0;
+    const { wt, t } = harness({
+      ledger: overriding(ledger, {
+        setState: async (...args) => {
+          writes++;
+          original = structuredClone(args);
+          throw new UncertainStoreError(
+            "reply unavailable",
+            await storeRequestWitness("/runs/state", JSON.stringify(args)),
+          );
+        },
+      }),
+    });
+    const request = {
+      runId: "r1",
+      threadKey: "slack:C1:1.0",
+      state: { privateText: "retained-original" },
+      lastStep: 0,
+      lastSeq: 0,
+    };
+    const first = wt.holdContextRecovery(request);
+    const concurrent = wt.holdContextRecovery({ ...request, state: { privateText: "concurrent-change" } });
+    expect(await Promise.all([first, concurrent])).toEqual([false, false]);
+    expect(await wt.holdContextRecovery({ ...request, state: { privateText: "changed" } })).toBe(false);
+    expect(writes).toBe(1);
+    expect((await ledger.setState(...original!)).ok).toBe(true);
+    ledger.live.get("r1")!.ownerGen = "other";
+    expect(await wt.holdContextRecovery(request)).toBe(false);
+    ledger.live.get("r1")!.ownerGen = "gen-A";
+    expect(await wt.holdContextRecovery(request)).toBe(true);
+    expect([writes, t.heartbeats(), wt.liveRuns().length]).toEqual([1, 0, 0]);
+    expect(ledger.live.get("r1")).toMatchObject({
+      phase: "live",
+      state: { privateText: "retained-original", contextRecoveryHeld: true },
+    });
+  });
+  it("records a private context hold without starting a heartbeat or changing saved runtime custody", async () => {
+    const { ledger, wt, t, fallbackPuts, warnings } = harness();
+    await ledger.claim({ ...openReq(), gen: "gen-A", leaseMs: 30_000 });
+    const state = {
+      harness: { harness: "pi", pid: 4242, logOffset: 32, relaunches: 0 },
+      binding: { backend: "sandbox", sandboxKey: "original" },
+    };
+    await ledger.setState("r1", "gen-A", state);
+    const request = { runId: "r1", threadKey: "slack:C1:1.0", state, lastStep: 3, lastSeq: 8 };
+    expect(await wt.holdContextRecovery(request)).toBe(true);
+    expect(ledger.live.get("r1")).toMatchObject({
+      ownerGen: "gen-A",
+      phase: "live",
+      state: { ...state, contextRecoveryHeld: true },
+    });
+    expect(
+      (await ledger.readEvents("r1")).map((event) => ({
+        kind: event.type === "run_note" ? event.kind : undefined,
+        seq: event.seq,
+      })),
+    ).toEqual([{ kind: "context_recovery_held", seq: 9 }]);
+    expect([t.heartbeats(), wt.liveRuns().length, fallbackPuts.length]).toEqual([0, 0, 0]);
+    expect(await wt.holdContextRecovery({ ...request, state: ledger.live.get("r1")!.state, lastSeq: 9 })).toBe(true);
+    expect((await ledger.readEvents("r1")).length).toBe(1);
+    expect(warnings).toEqual([]);
+    ledger.live.get("r1")!.ownerGen = "other";
+    expect(await wt.holdContextRecovery(request)).toBe(false);
+    expect(ledger.live.get("r1")?.ownerGen).toBe("other");
+    expect(warnings.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))).toEqual([
+      {
+        event: "run.context_recovery.hold_unconfirmed",
+        runId: "r1",
+        ownerGen: "gen-A",
+        outcome: "fenced",
+      },
+    ]);
+  });
+
+  it("refuses a private context hold when its state write is unavailable", async () => {
+    const ledger = new InMemoryRunLedger();
+    await ledger.claim({ ...openReq(), gen: "gen-A", leaseMs: 30_000 });
+    const { wt, t, warnings } = harness({
+      ledger: overriding(ledger, {
+        setState: async () => {
+          throw new PermanentStoreError("PRIVATE_PROVIDER_ERROR");
+        },
+      }),
+    });
+    expect(
+      await wt.holdContextRecovery({
+        runId: "r1",
+        threadKey: "slack:C1:1.0",
+        state: { privateText: "PRIVATE_SAVED_CONTEXT" },
+        lastStep: 0,
+        lastSeq: 0,
+      }),
+    ).toBe(false);
+    expect(ledger.live.get("r1")).toMatchObject({ phase: "live", state: {} });
+    expect(await ledger.readEvents("r1")).toEqual([]);
+    expect([t.heartbeats(), wt.liveRuns().length]).toEqual([0, 0]);
+    expect(warnings.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))).toEqual([
+      { event: "run.context_recovery.hold_unconfirmed", runId: "r1", ownerGen: "gen-A", outcome: "unavailable" },
+    ]);
+  });
+
   it("no claim, no seed: the heartbeat starts at once, steps number on from the last record, events continue past the last seq, state merges into the row's", async () => {
     const { ledger, wt, t, warnings } = harness();
     // The previous generation's row, reclaimed by ours ("gen-A") at boot.
