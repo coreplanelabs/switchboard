@@ -2668,10 +2668,15 @@ describe("browser installation", () => {
     "executes a saved private code proposal once under choice B with fresh source A (%s)",
     async (state) => {
       const requests: import("../core/provider.js").CompletionRequest[] = [];
+      let original = true;
       const provider: Provider = {
         name: "fixture",
         complete: async (request) => {
           requests.push(structuredClone(request));
+          if (original) {
+            original = false;
+            return { content: [{ type: "text", text: "Original source A answer." }], stopReason: "end_turn" };
+          }
           return requests.length === 1
             ? {
                 content: [
@@ -2704,11 +2709,12 @@ describe("browser installation", () => {
         key: home.submissionKey,
         revision: home.destination.revision,
         destination: { kind: "broad" as const },
-        text: "memory forget",
+        text: "agent:general Record the original source",
         context: [{ kind: "repository" as const, key: "sample/api" }],
       };
       expect((await s.request("POST", "/home/send", inputA)).status).toBe(200);
       await s.execute();
+      requests.length = 0;
       const replayA = await s.installation.organization.replay(s.context.authentication, {
         key: inputA.key,
         revision: inputA.revision,
@@ -2720,7 +2726,7 @@ describe("browser installation", () => {
       const sourceA = await s.installation.originalBinding(replayA.receipt.ownerRunId);
       if (!sourceA) throw new Error("No current source A");
       expect(await sourceA.io.authoritativePrivateSourceHistory?.(sourceA.runId)).toEqual([
-        { role: "user", text: "memory forget", user: "access:alice" },
+        { role: "user", text: "agent:general Record the original source", user: "access:alice" },
       ]);
       expect(await sourceA.io.authoritativePrivateSourceHistory?.("foreign-source")).toBeUndefined();
       const id = "00000000-0000-4000-8000-000000000022";
@@ -2780,7 +2786,7 @@ describe("browser installation", () => {
         actId: units[0]!.workBrief!.actId,
       });
       expect(linked?.authority?.sourceMessageId).toBe(`browser:${replayB.receipt.revision}:browser%3A${inputB.key}`);
-      expect(JSON.stringify(requests[0].messages)).toContain("memory forget");
+      expect(JSON.stringify(requests[0].messages)).toContain("Record the original source");
       expect(JSON.stringify(requests[0].messages)).toContain("Build selected repository");
       expect(JSON.stringify(requests)).not.toContain("Untrusted raw source history");
       const originalB = await s.ledger.readIngressByRun(replayB.receipt.ownerRunId);
@@ -2809,13 +2815,19 @@ describe("browser installation", () => {
     },
   );
   it("keeps saved source A context separate from choice B receipt and exact execution owner", async () => {
-    const s = await fixture();
+    const s = await fixture(false, false, {
+      name: "fixture",
+      complete: async () => ({
+        content: [{ type: "text", text: "Original source A answer." }],
+        stopReason: "end_turn",
+      }),
+    });
     const home = (await s.request("GET", "/home/session")).body;
     const inputA = {
       key: home.submissionKey,
       revision: home.destination.revision,
       destination: { kind: "broad" as const },
-      text: "memory forget",
+      text: "agent:general Record the original source",
       context: [],
     };
     expect((await s.request("POST", "/home/send", inputA)).status).toBe(200);
@@ -2866,14 +2878,14 @@ describe("browser installation", () => {
       stream.entries
         .filter((entry) => entry.role === "assistant" && entry.content.includes("Read-only command completed."))
         .map((entry) => entry.receiptId),
-    ).toEqual([replayA.receipt.id, replayB.receipt.id]);
+    ).toEqual([replayB.receipt.id]);
     expect(s.registry.getById(replayB.receipt.ownerRunId)?.status).toBe("completed");
     expect(await s.ledger.readIngressByRun(replayB.receipt.ownerRunId)).toMatchObject({
       status: "record",
       record: { status: "completed", origin: { continuation: { kind: "confirm", id } } },
     });
     expect((await s.request("POST", "/home/send", inputB)).body.duplicate).toBe(true);
-    expect(s.effects).toEqual(["access:alice", "access:alice"]);
+    expect(s.effects).toEqual(["access:alice"]);
   });
   it("restores a completed offer source without restarting it and fences its exact saved choice before consume when source policy changes", async () => {
     const s = await fixture();
@@ -3809,7 +3821,7 @@ describe("browser installation", () => {
       const log = createSpanLog();
       s.core.spanLog = log;
       const response = await s.send({
-        text: "agent:review model:anthropic/general-model effort:high https://github.com/sample/api/pull/42",
+        text: "agent:review review-context:fresh model:anthropic/general-model effort:high https://github.com/sample/api/pull/42",
         thread: "new-loaded-mode",
         idempotencyKey: "new-loaded-review",
       });
@@ -3827,6 +3839,165 @@ describe("browser installation", () => {
       );
     },
   );
+  it("retains private history after restart and login renewal without unlocking the old execution", async () => {
+    const s = await ssoInstallation("access", {
+      name: "fixture",
+      complete: async () => ({ content: [{ type: "text", text: "Saved decision." }], stopReason: "end_turn" }),
+    });
+    const text = "agent:general State the saved decision";
+    const first = await s.send({ text, thread: "renewed-context", idempotencyKey: "prior-login" });
+    const oldId = first.wire.result.structuredContent.admission.runId;
+    await s.execute();
+    const old = await s.ledger.readIngressByRun(oldId);
+    if (old.status !== "record" || !old.record.origin) throw new Error("No original source");
+    const before = await s.authentication.evaluateSourceIdentity(
+      old.record.origin.actor.identity,
+      old.record.origin.sourceReference,
+      old.record.origin.actor.onBehalfOf,
+    );
+    expect(before.status).toBe("allowed");
+    s.restartNative();
+    const next = await s.send(
+      {
+        text: "agent:review https://github.com/sample/api/pull/42",
+        thread: "renewed-context",
+        idempotencyKey: "renewed-login",
+      },
+      s.rotatedHeaders(),
+    );
+    expect(next.wire.result).toMatchObject({ structuredContent: { admission: { status: "accepted" } } });
+    const binding = await s.installation.originalBinding(next.wire.result.structuredContent.admission.runId);
+    expect(await binding?.io.authoritativePrivateHistory?.()).toMatchObject([
+      { role: "user", text, user: "access:alice" },
+      { role: "assistant", text: "Saved decision.", context: { status: "known" } },
+    ]);
+    expect(await s.authentication.resolveEnvelope(old.record.origin)).toEqual({ status: "unavailable" });
+    if (!binding || before.status !== "allowed") throw new Error("No renewed source proof");
+    const current = await s.authentication.resolveEnvelope(binding.envelope);
+    if (current.status !== "resolved") throw new Error("No current reader");
+    expect(
+      await s.authentication.evaluateSourceIdentity(
+        old.record.origin.actor.identity,
+        old.record.origin.sourceReference,
+        old.record.origin.actor.onBehalfOf,
+        current.authentication,
+      ),
+    ).toEqual(before);
+    const other = await s.send(
+      { text: "memory forget", thread: "unrelated-conversation", idempotencyKey: "unrelated-source" },
+      s.rotatedHeaders(),
+    );
+    const unrelated = await s.installation.originalBinding(other.wire.result.structuredContent.admission.runId);
+    expect(await unrelated?.io.authoritativePrivateHistory?.()).toEqual([]);
+    expect(
+      (await s.send({ text, thread: "renewed-context", idempotencyKey: "prior-login" }, s.rotatedHeaders())).wire
+        .result,
+    ).toMatchObject({ isError: true, structuredContent: { admission: { status: "conflict" } } });
+    if (!binding) throw new Error("No renewed source");
+    const execute = s.store.execute.bind(s.store);
+    const missing = vi
+      .spyOn(s.store, "execute")
+      .mockImplementation((request) =>
+        request.action === "submission" && request.key === old.record.origin!.key
+          ? Promise.resolve({ status: "not_found" as const })
+          : execute(request),
+      );
+    await expect(binding.io.authoritativePrivateHistory!()).rejects.toThrow(
+      "retained history producer could not be verified",
+    );
+    missing.mockRestore();
+    s.setSourceGrants({ ...ALL_GRANTS, repos: new Set(), repoAccess: new Set() });
+    const reader = await s.authentication.resolveEnvelope(binding.envelope);
+    if (reader.status !== "resolved") throw new Error("No current reader identity");
+    expect(
+      await s.authentication.evaluateSourceIdentity(
+        old.record.origin.actor.identity,
+        old.record.origin.sourceReference,
+        old.record.origin.actor.onBehalfOf,
+        reader.authentication,
+      ),
+    ).toEqual({ status: "denied" });
+  });
+  it("retains a routing question as verified history for a normal MCP review", async () => {
+    const s = await ssoInstallation(
+      "access",
+      {
+        name: "fixture",
+        complete: async () => ({ content: [{ type: "text", text: "Unused worker reply." }], stopReason: "end_turn" }),
+      },
+      (core) => {
+        core.config.config.routing!.operator = "on";
+        core.operatorModel = async () => ({ tool: "ask", input: { text: "Which behavior should I check?" } });
+      },
+    );
+    const first = await s.send({
+      text: "agent:review https://github.com/sample/api/pull/42",
+      thread: "review-question",
+      idempotencyKey: "question",
+    });
+    const producer = first.wire.result.structuredContent.admission.runId;
+    await s.execute();
+    expect(s.nativeReplies).toEqual(["Which behavior should I check?"]);
+    const next = await s.send({
+      text: "agent:review https://github.com/sample/api/pull/42 Check access loss",
+      thread: "review-question",
+      idempotencyKey: "answer-question",
+    });
+    expect(next.wire.result).toMatchObject({ structuredContent: { admission: { status: "accepted" } } });
+    const binding = await s.installation.originalBinding(next.wire.result.structuredContent.admission.runId);
+    if (!binding) throw new Error("No follow-up source");
+    const history = await binding.io.authoritativePrivateHistory!();
+    expect(history).toMatchObject([
+      { role: "user", text: "agent:review https://github.com/sample/api/pull/42", user: "access:alice" },
+      {
+        role: "assistant",
+        text: "Which behavior should I check?",
+        context: { status: "known", origins: [expect.objectContaining({ runId: producer })] },
+      },
+    ]);
+    const original = await s.runStore.get(producer);
+    expect(original).toMatchObject({
+      id: producer,
+      agent: "door",
+      organizationIngressRunId: producer,
+      contextDependencies: { status: "known" },
+    });
+    expect((await s.runStore.put({ ...original!, contextDependencies: undefined })).stored).toBe(true);
+    await expect(binding.io.authoritativePrivateHistory!()).rejects.toThrow("history source could not be verified");
+  });
+  it.each(["missing", "unknown"] as const)("withholds retained command output with %s source proof", async (proof) => {
+    const s = await ssoInstallation("access");
+    const first = await s.send({ text: "memory forget", thread: "command-sources", idempotencyKey: "command" });
+    expect(first.wire.result).toMatchObject({ structuredContent: { admission: { status: "accepted" } } });
+    await s.execute();
+    expect(s.nativeReplies).toContain("Read-only command completed.");
+    const command = (await s.runStore.list({})).find((row) => row.agent === "command");
+    const old = command ? await s.runStore.get(command.id) : undefined;
+    if (!old) throw new Error("No command archive");
+    expect(
+      (
+        await s.runStore.put({
+          ...old,
+          ...(proof === "unknown"
+            ? { contextDependencies: { version: 1, status: "unknown", revision: 0, origins: [], slack: [], mcp: [] } }
+            : { contextDependencies: undefined }),
+        })
+      ).stored,
+    ).toBe(true);
+    expect((await s.runStore.get(old.id))?.contextDependencies?.status).toBe(
+      proof === "unknown" ? "unknown" : undefined,
+    );
+    const next = await s.send({
+      text: "agent:review https://github.com/sample/api/pull/42",
+      thread: "command-sources",
+      idempotencyKey: "review-command-output",
+    });
+    const binding = await s.installation.originalBinding(next.wire.result.structuredContent.admission.runId);
+    if (!binding) throw new Error("No follow-up source");
+    await expect(binding.io.authoritativePrivateHistory!()).rejects.toThrow(
+      "saved history source could not be verified",
+    );
+  });
   it("admits a fresh request-only Review after restart and a new signed credential", async () => {
     const s = await ssoInstallation("access");
     const log = createSpanLog();
@@ -3841,7 +4012,7 @@ describe("browser installation", () => {
     s.core.config.config.routing!.operator = "on";
     const result = await s.send(
       {
-        text: "agent:review model:anthropic/general-model effort:high https://github.com/sample/api/pull/42",
+        text: "agent:review review-context:fresh model:anthropic/general-model effort:high https://github.com/sample/api/pull/42",
         thread: "reauth",
         idempotencyKey: "new-credential-review",
       },
@@ -3866,7 +4037,7 @@ describe("browser installation", () => {
     expect(await owned.io.authoritativePrivateHistory!(owned.msg)).toEqual([]);
     const repeat = await s.send(
       {
-        text: "agent:review model:anthropic/general-model effort:high https://github.com/sample/api/pull/42",
+        text: "agent:review review-context:fresh model:anthropic/general-model effort:high https://github.com/sample/api/pull/42",
         thread: "reauth",
         idempotencyKey: "new-credential-review",
       },
@@ -3960,7 +4131,7 @@ describe("browser installation", () => {
       const originalUnits = await s.coordinator.listUnits("fixture");
       const result = await s.send(
         {
-          text: "agent:ship review https://github.com/sample/api/pull/42",
+          text: "agent:ship review-context:fresh review https://github.com/sample/api/pull/42",
           thread: "fresh-ship",
           idempotencyKey: "fresh-ship-review",
         },
@@ -4033,7 +4204,10 @@ describe("browser installation", () => {
       s.core.spanLog = log;
       s.core.config.config.routing!.operator = "on";
       const result = await s.send({
-        text: variant === "machine-credential" ? "agent:review https://github.com/sample/api/pull/42" : "memory forget",
+        text:
+          variant === "machine-credential"
+            ? "agent:review review-context:fresh https://github.com/sample/api/pull/42"
+            : "memory forget",
         idempotencyKey: "unmarked-request",
         contextMode: "request",
         sourceReference: { contextMode: "request" },
@@ -4044,7 +4218,7 @@ describe("browser installation", () => {
       if (stored.status !== "record") throw new Error("No original request");
       expect(stored.record.origin?.sourceReference?.contextMode).toBeUndefined();
       expect(log.read({ span: "request" }).lines.at(-1)?.attrs.requestContextSelection).toBe(
-        variant === "machine-credential" ? "actor" : "target",
+        variant === "machine-credential" ? "actor" : "context",
       );
       expect(s.effects).toEqual([]);
     },
@@ -4059,7 +4233,7 @@ describe("browser installation", () => {
       const admit = s.options.admit!;
       const result = await s.send(
         {
-          text: "agent:review https://github.com/sample/api/pull/42 PRIVATE-SELECTION-MARKER",
+          text: "agent:review review-context:fresh https://github.com/sample/api/pull/42 PRIVATE-SELECTION-MARKER",
           idempotencyKey: "selection-observer",
         },
         {},
@@ -4100,7 +4274,7 @@ describe("browser installation", () => {
     const log = createSpanLog();
     s.core.spanLog = log;
     s.core.config.config.routing!.operator = "on";
-    const text = "agent:review https://github.com/sample/api/pull/42 PRIVATE-SELECTION-MARKER";
+    const text = "agent:review review-context:fresh https://github.com/sample/api/pull/42 PRIVATE-SELECTION-MARKER";
     expect((await s.send({ text, idempotencyKey: "selection-control" })).wire.result).toMatchObject({
       structuredContent: { admission: { status: "accepted" } },
     });
@@ -4141,7 +4315,7 @@ describe("browser installation", () => {
           channelId: "mcp:default",
           userId: "access:alice",
           threadKey: "mcp:default:invalid-context",
-          text: "agent:review https://github.com/sample/api/pull/42 PRIVATE-REQUEST-MARKER",
+          text: "agent:review review-context:fresh https://github.com/sample/api/pull/42 PRIVATE-REQUEST-MARKER",
         },
         {
           reply: async (text) => {
@@ -4172,6 +4346,9 @@ describe("browser installation", () => {
   );
   it.each([
     "plain",
+    "normal-followup",
+    "general-followup",
+    "coding-followup",
     "default-on",
     "multiline-request",
     "long-request",
@@ -4194,11 +4371,15 @@ describe("browser installation", () => {
     "late-remote-unnamed",
     "context-observer-fails",
   ] as const)(
-    "isolates a new Review and rechecks its current authority: %s",
+    "selects the requested Review context and rechecks its current authority: %s",
     async (variant) => {
       const head = "e".repeat(40);
+      const followupAgent =
+        variant === "general-followup" ? "general" : variant === "coding-followup" ? "coding" : undefined;
+      const normalFollowup = variant === "normal-followup" || followupAgent !== undefined;
       const succeeds = [
         "plain",
+        "normal-followup",
         "default-on",
         "multiline-request",
         "long-request",
@@ -4233,6 +4414,11 @@ describe("browser installation", () => {
         name: "fixture",
         async complete(request) {
           requests.push({ phase, request: { ...request, messages: structuredClone(request.messages) } });
+          if (phase === "fresh" && followupAgent)
+            return {
+              content: [{ type: "text", text: "Follow-up uses saved Review evidence." }],
+              stopReason: "end_turn",
+            };
           const results = request.messages
             .flatMap((m) => m.content)
             .filter((p) => p.type === "tool_result")
@@ -4365,7 +4551,7 @@ describe("browser installation", () => {
           base: { repo: "sample/api", ref: "main" },
         },
       ];
-      const text = `agent:review model:anthropic/general-model effort:high review-head:${head} https://github.com/sample/api/pull/42`;
+      const text = `agent:review ${normalFollowup ? "" : "review-context:fresh "}model:anthropic/general-model effort:high review-head:${head} https://github.com/sample/api/pull/42`;
       const historyReads = vi.spyOn(s.installation.organization, "streamTail");
       const prior = await s.send({
         text: text + " OLD-REQUEST-MARKER",
@@ -4422,8 +4608,9 @@ describe("browser installation", () => {
         s.core.config.config.routing = loaded.config.routing;
         expect(operatorModeOf(s.core.config.config)).toBe("on");
       } else s.core.config.config.routing!.operator = "on";
-      const freshText =
-        variant === "multiline-request"
+      const freshText = followupAgent
+        ? `agent:${followupAgent} model:anthropic/general-model ${followupAgent === "coding" ? "Fix" : "Explain"} the saved Review findings in sample/api`
+        : variant === "multiline-request"
           ? text.replace(" https://", " Please review the change below.\nhttps://")
           : variant === "long-request"
             ? text.replace(" https://", ` ${"Please check this change. ".repeat(20)}https://`)
@@ -4446,6 +4633,23 @@ describe("browser installation", () => {
       }
       await s.execute();
       const record = await s.runStore.get(freshId);
+      if (followupAgent) {
+        expect(record).toMatchObject({
+          status: "completed",
+          agent: followupAgent,
+          profile: { identity: followupAgent === "general" ? "none" : "write" },
+          contextDependencies: { status: "known", executionGithub: [expect.objectContaining({ runId: oldId })] },
+        });
+        expect(s.nativeReplies.at(-1)).toBe(
+          followupAgent === "coding"
+            ? "No push was confirmed by this run.\n\nWork report (agent-written; publication claims here are unverified):\nFollow-up uses saved Review evidence."
+            : "Follow-up uses saved Review evidence.",
+        );
+        expect(JSON.stringify(requests.filter((r) => r.phase === "fresh"))).toContain("OLD-SUMMARY-MARKER");
+        expect(posts).toHaveLength(1);
+        expect(await s.runStore.get(oldId)).toEqual(old);
+        return;
+      }
       const refusedGate =
         variant === "operator-off" || variant === "operator-shadow"
           ? "operator_mode"
@@ -4496,7 +4700,7 @@ describe("browser installation", () => {
           expect(door).toMatchObject({ agent: "door", status: "completed" });
         }
       }
-      expect(historyReads.mock.calls.length).toBe(0);
+      if (variant !== "normal-followup") expect(historyReads.mock.calls.length).toBe(0);
       if (held) expect(held.inbox.size).toBe(0);
       expect(inboxWrites.mock.calls.length).toBe(0);
       if (variant.startsWith("late-local")) expect(admission.get("mcp:default:reused-review")).toBe(held);
@@ -4532,17 +4736,23 @@ describe("browser installation", () => {
       expect(posts).toHaveLength(2);
       expect(record?.parentRunId).toBeUndefined();
       expect(record?.session?.key).not.toBe(old.session?.key);
-      expect(JSON.stringify(requests.filter((r) => r.phase === "fresh"))).not.toMatch(
-        /OLD-(?:REQUEST|ANSWER|SUMMARY|NOTEPAD|GITHUB-RESULT)-MARKER/,
-      );
+      if (variant !== "normal-followup")
+        expect(JSON.stringify(requests.filter((r) => r.phase === "fresh"))).not.toMatch(
+          /OLD-(?:REQUEST|ANSWER|SUMMARY|NOTEPAD|GITHUB-RESULT)-MARKER/,
+        );
       expect(JSON.stringify(requests.filter((r) => r.phase === "fresh"))).toContain("FRESH-GITHUB-DATA");
-      expect(record?.events).toContainEqual(
-        expect.objectContaining({
-          type: "run_note",
-          kind: "seed",
-          summary: "This Review uses your current request and GitHub. Earlier conversation context is not included.",
-        }),
-      );
+      if (variant === "normal-followup") {
+        expect(JSON.stringify(requests.filter((r) => r.phase === "fresh"))).toContain("OLD-SUMMARY-MARKER");
+        expect((await s.ledger.readContextCheckpoint(freshId))?.members).toContain(oldId);
+        expect(record?.contextDependencies?.executionGithub).toContainEqual(expect.objectContaining({ runId: oldId }));
+      } else
+        expect(record?.events).toContainEqual(
+          expect.objectContaining({
+            type: "run_note",
+            kind: "seed",
+            summary: "This Review uses your current request and GitHub. Earlier conversation context is not included.",
+          }),
+        );
       if (variant === "read-first") expect(operatorCalls).toBe(2);
       expect(await s.runStore.get(oldId)).toEqual(old);
       if (variant === "default-on") {
@@ -4722,7 +4932,7 @@ describe("browser installation", () => {
       });
       expect(s.effects).toEqual([]);
     });
-    it("keeps different-credential history held and returns its real unavailable trace", async () => {
+    it("retains renewed-credential history and returns its actual admission trace", async () => {
       const s = await ssoInstallation("access");
       const log = createSpanLog();
       s.core.spanLog = log;
@@ -4754,24 +4964,20 @@ describe("browser installation", () => {
       expect(verified).toBe(true);
       expect(current!.approvalConnection!.id).not.toBe(original.record.origin.sourceReference.credentialDigest);
       expect(result.wire.result).toMatchObject({
-        isError: true,
-        structuredContent: { admission: { status: "unavailable" } },
+        structuredContent: { admission: { status: "accepted" } },
       });
       const latest = log.read().lines.at(-1)!;
       expect.soft(result.wire.result.structuredContent).toMatchObject({
         diagnostic: {
           traceId: latest.traceId,
-          stage: "private-epoch",
-          receiptObserved: false,
-          reason: "native-source-unavailable",
-          source: "mcp",
-          credentialRelation: "different",
+          stage: "refresh",
+          receiptObserved: true,
         },
       });
       expect.soft(latest).toMatchObject({
         span: "request",
-        status: "error",
-        attrs: { outcome: "unavailable", admissionStage: "private-epoch", receiptObserved: false },
+        status: "ok",
+        attrs: { outcome: "accepted", admissionStage: "refresh", receiptObserved: true },
       });
       let responseStatus = 0,
         body = "";
@@ -4798,7 +5004,7 @@ describe("browser installation", () => {
       expect(responseStatus).toBe(200);
       expect.soft(JSON.parse(body)).toMatchObject({
         ok: true,
-        lines: [{ span: "request", status: "error", attrs: { admissionStage: "private-epoch" } }],
+        lines: [{ span: "request", status: "ok", attrs: { admissionStage: "refresh" } }],
       });
       expect(body).not.toContain("private trace input");
       for (const credential of s.credentials) expect(body).not.toContain(credential);
@@ -4806,6 +5012,7 @@ describe("browser installation", () => {
         status: "record",
         record: { runId: id, status: "dispatching" },
       });
+      expect(await s.authentication.resolveEnvelope(original.record.origin)).toEqual({ status: "unavailable" });
       expect(s.effects).toEqual([]);
     });
     it.each(["plain", "transport"] as const)("returns the actual trace for a %s admission exception", async (kind) => {
@@ -5227,7 +5434,13 @@ describe("browser installation", () => {
     expect(s.tasks).toHaveLength(0);
   });
   it("keeps an SSO native saved choice on the actual Access owner and replays its consumed receipt", async () => {
-    const s = await ssoInstallation("access");
+    const s = await ssoInstallation("access", {
+      name: "fixture",
+      complete: async () => ({
+        content: [{ type: "text", text: "Original source A answer." }],
+        stopReason: "end_turn",
+      }),
+    });
     const meta = {
       _meta: {
         [PROTOCOL_VERSION_META_KEY]: FORM_PROTOCOL_VERSION,
@@ -5235,7 +5448,13 @@ describe("browser installation", () => {
         [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
       },
     };
-    const first = await s.send({ text: "memory forget", idempotencyKey: "sso-offer" }, {}, "dispatch", s.options, meta);
+    const first = await s.send(
+      { text: "agent:general Record the original source", idempotencyKey: "sso-offer" },
+      {},
+      "dispatch",
+      s.options,
+      meta,
+    );
     const owner = first.wire.result.structuredContent.admission.runId;
     await s.execute();
     const original = await s.installation.originalBinding(owner);
@@ -5269,14 +5488,14 @@ describe("browser installation", () => {
       status: "record",
       record: { status: "completed" },
     });
-    expect(s.nativeReplies).toEqual(["Read-only command completed.", "Read-only command completed."]);
-    expect(s.effects).toEqual(["access:alice", "access:alice"]);
+    expect(s.nativeReplies).toEqual(["Original source A answer.", "Read-only command completed."]);
+    expect(s.effects).toEqual(["access:alice"]);
     expect(await s.send({ id }, {}, "approval_resume", s.options)).toMatchObject({
       wire: {
         result: { structuredContent: { admission: { status: "accepted", duplicate: true, runId: choiceOwner } } },
       },
     });
-    expect(s.effects).toEqual(["access:alice", "access:alice"]);
+    expect(s.effects).toEqual(["access:alice"]);
   });
   it.each([
     "retained",

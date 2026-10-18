@@ -29,6 +29,7 @@ export function contextReferencesOf(
     ...(context?.origins ?? []).map((o) => o.runId),
     ...(context?.sourceInputs ?? []).map((ref) => ref.root.runId),
     ...(context?.mcp ?? []).map((r) => r.runId),
+    ...(context?.executionGithub ?? []).map((r) => r.runId),
   ];
   for (const runId of runIds) {
     if (runId === holderRunId) continue;

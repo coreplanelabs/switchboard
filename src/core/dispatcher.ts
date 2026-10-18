@@ -1755,19 +1755,27 @@ export async function dispatch(
             mode: operatorMode,
             beforeModel: async () => {
               const inherited = [
-                ...(opts.seed?.flatMap((turn) =>
-                  turn.context?.version === 3 || turn.context?.nativeMediaSources?.length ? [turn.context] : [],
-                ) ?? []),
-                ...(operatorContext.version === 3 || operatorContext.nativeMediaSources?.length
-                  ? [operatorContext]
-                  : []),
+                ...(opts.seed?.flatMap((turn) => (turn.context ? [turn.context] : [])) ?? []),
+                operatorContext,
               ];
               if (
                 inherited.length &&
                 !(await contextReader.validateDependencies(mergeContextDependencies(freshContext(), ...inherited))).ok
               )
-                throw new NativeMediaHeldError();
+                throw new RefusalError(
+                  refusalOf("setup_failed", "Earlier conversation context could not be verified. No new task started."),
+                );
               const pointer = originalOrganizationDispatchOf(msg);
+              if (
+                opts.authoritativeHistory &&
+                pointer &&
+                !pointer.nativeMediaDigest &&
+                !pointer.savedNativeMediaSource &&
+                !(await io.rehostOrganizationInput?.(msg))
+              )
+                throw new RefusalError(
+                  refusalOf("setup_failed", "The current conversation could not be verified. No new task started."),
+                );
               if (!pointer?.nativeMediaDigest && !pointer?.savedNativeMediaSource) return;
               const media = pointer.savedNativeMediaSource
                 ? await io.readSavedNativeMedia?.(pointer.savedNativeMediaSource, msg)
@@ -1824,7 +1832,10 @@ export async function dispatch(
                       text: `${turn.role}: ${turn.text}`,
                       ...(turn.role === "user" && turn.user !== undefined ? { actor: turn.user } : {}),
                     })),
-                    context: freshContext(),
+                    context: mergeContextDependencies(
+                      freshContext(),
+                      ...opts.seed!.flatMap((turn) => (turn.context ? [turn.context] : [])),
+                    ),
                     unavailable: [],
                   })
                 : readOperatorTailContext({
@@ -1930,6 +1941,7 @@ export async function dispatch(
             ending,
             trace,
             event: operatorEvent!,
+            ingressRunId: opts.ingressRunId,
             contextDependencies: structuredClone(operatorContext),
             validateContext: () => revalidateAdmittedContext(() => operatorContext, contextReader.validateDependencies),
             appendReply: async (text) => {
@@ -4808,7 +4820,10 @@ export async function dispatch(
     const normalizeAdmittedOrigins = (context: ContextDependencies) =>
       committedContextCheckpoint ? applyContextCheckpoint(context, committedContextCheckpoint) : context;
     const validateExecutionContext = async (context: ContextDependencies): Promise<AudienceCheck> => {
-      if (!context.executionGithub?.length) return contextReader.validateDependencies(context);
+      // Archived results use current read access. Only this run's own results
+      // require its exact specialist execution admission.
+      if (!context.executionGithub?.some((ref) => ref.runId === run.id))
+        return contextReader.validateDependencies(context);
       const current = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === run.id);
       const hash = current && current.ownerGen === deps.runLedger.gen && (await executionAdmissionHash(current.meta));
       if (!current) return { ok: false, code: "saved-context-unproved", check: "execution_owner_missing" };

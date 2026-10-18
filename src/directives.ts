@@ -68,7 +68,9 @@ export interface ThreadDirectives {
 export function reviewHeadOf(text: string): string | undefined {
   const heads: string[] = [];
   for (const token of text.trimStart().split(/\s+/)) {
-    const control = /^(agent|model|effort|budget|severity|renewals|verbosity|review-head)[:=](.*)$/.exec(token);
+    const control = /^(agent|model|effort|budget|severity|renewals|verbosity|review-head|review-context)[:=](.*)$/.exec(
+      token,
+    );
     if (!control) break;
     if (control[1] === "review-head") heads.push(control[2]);
   }

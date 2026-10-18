@@ -15,6 +15,49 @@ const use = (name = "mcp__slack__read") => ({
 });
 
 describe("public GitHub result receipts", () => {
+  it("keeps a verified execution receipt covered when history also has native media", async () => {
+    const proof = {
+      version: 2 as const,
+      runId: "current",
+      callId: "call",
+      tool: "github_file",
+      repos: ["acme/api"],
+      resultHash: await sourceHash("source bytes"),
+      admissionHash: "a".repeat(64),
+      inputHash: await sourceHash({}),
+    };
+    const row = { ...result(), json: JSON.stringify({ ...JSON.parse(result().json), sourceResult: proof }) };
+    const mixed: ContextDependencies = {
+      version: 3,
+      status: "known",
+      revision: 0,
+      origins: [],
+      slack: [],
+      mcp: [],
+      executionGithub: [
+        { runId: "current", callId: "call", resultHash: proof.resultHash, admissionHash: proof.admissionHash },
+      ],
+      nativeMediaSources: [
+        {
+          executionRunId: "media",
+          executionSequence: 1,
+          reference: {
+            version: 1,
+            kind: "original",
+            sourceRunId: "media",
+            sourceSequence: 1,
+            sourceDigest: "b".repeat(64),
+            intentDigest: "c".repeat(64),
+          },
+        },
+      ],
+    };
+    const verified = await verifiedSourceResults([row]);
+    expect(uncoveredSourceResult([use("github_file")], [row], mixed, "current", verified)).toBe(false);
+    expect(
+      uncoveredSourceResult([use("github_file")], [row], { ...mixed, executionGithub: [] }, "current", verified),
+    ).toBe(true);
+  });
   const publicContext = { ...context, mcp: [], githubRepos: ["acme/api"] };
   const receipt = async () => ({
     version: 1 as const,

@@ -29,7 +29,7 @@ export interface ContextDependencies {
   mcp: readonly SourceReadReference[];
   /** One catalog-access leaf, containing the original exposed repository names. */
   githubRepos?: readonly string[];
-  /** Exact native results reusable only by the original acknowledged execution. */
+  /** Native result provenance; archived reads recheck current access and canonical bytes. */
   executionGithub?: readonly ExecutionGithubReference[];
   /** Storage scopes remain access dependencies after their content is transformed. */
   memoryScopes?: readonly string[];

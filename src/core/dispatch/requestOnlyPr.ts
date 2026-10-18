@@ -3,6 +3,19 @@ import { explicitPrOf } from "../repoContext.js";
 import { requesterTargetText, requesterUrlText, requesterUrlWords } from "./requesterText.js";
 import { inspectPrTargetEvidence, prUrlIdentity, type PrTargetEvidence } from "./targetEvidence.js";
 
+/** Fresh context is a one-request control, never inferred from a review target. */
+export function freshReviewRequested(text: string): boolean {
+  const controls: string[] = [];
+  for (const token of requesterTargetText(text).trimStart().split(/\s+/)) {
+    const control = /^(agent|model|effort|budget|severity|renewals|verbosity|review-head|review-context)[:=](.*)$/.exec(
+      token,
+    );
+    if (!control) break;
+    if (control[1] === "review-context") controls.push(control[2]!);
+  }
+  return controls.length === 1 && controls[0] === "fresh";
+}
+
 /** A candidate for empty context, never permission to start an agent. */
 export function requestOnlyPrTarget(
   text: string,
@@ -11,7 +24,7 @@ export function requestOnlyPrTarget(
   const direct = parseDirectives(authored);
   const raw = parseDirectives(text);
   if ((direct.agent !== "review" && direct.agent !== "ship") || raw.agent !== direct.agent) return;
-  if (direct.agent === "ship" && !/^review\s/i.test(direct.text.trimStart())) return;
+  if (direct.agent === "ship" && !/^(?:review-context[:=]fresh\s+)?review\s/i.test(direct.text.trimStart())) return;
   for (const key of ["agent", "model", "effort", "budget", "severity", "renewals", "verbosity"] as const)
     if (direct[key] !== raw[key]) return;
   const selected = explicitPrOf(authored);

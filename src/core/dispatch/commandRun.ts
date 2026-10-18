@@ -287,7 +287,7 @@ async function recordDoorDecision(
   ending: RunEnding,
   trace: RequestTrace,
   audienceRefusal?: AudienceRefusalReceipt,
-  opts: Pick<CommandRunOptions, "beforePublish" | "contextDependencies"> = {},
+  opts: Pick<CommandRunOptions, "beforePublish" | "contextDependencies" | "ingressRunId"> = {},
 ): Promise<void> {
   const registry = deps.runRegistry ?? defaultRunRegistry;
   const root = trace.root;
@@ -306,6 +306,7 @@ async function recordDoorDecision(
     }),
     {
       agent: DOOR_RUN_AGENT,
+      ...(opts.ingressRunId ? { organizationIngressRunId: opts.ingressRunId } : {}),
       channelId: msg.channelId,
       userId: msg.userId,
       threadKey,
@@ -315,6 +316,7 @@ async function recordDoorDecision(
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
       ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
     },
+    opts.ingressRunId ? { id: opts.ingressRunId } : {},
   );
   root.setAttrs({ runId: run.id });
   registry.publish(run.id, {
@@ -402,7 +404,7 @@ export async function recordOperatorDecision(
   event: OperatorEventFields,
   ending: RunEnding,
   trace: RequestTrace,
-  opts: Pick<CommandRunOptions, "beforePublish" | "contextDependencies"> = {},
+  opts: Pick<CommandRunOptions, "beforePublish" | "contextDependencies" | "ingressRunId"> = {},
 ): Promise<void> {
   await recordDoorDecision(deps, msg, { kind: "operator", operator: event }, ending, trace, undefined, opts);
 }

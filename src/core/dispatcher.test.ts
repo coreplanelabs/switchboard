@@ -3625,6 +3625,80 @@ describe("dispatch", () => {
     }
   });
 
+  it("rechecks ordinary inherited context before the routing model sees it", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider("Unused worker answer"));
+    deps.config.config.routing = { operator: "on" };
+    const routing = vi.fn(async () => ({ tool: "ask", input: { text: "Which change should I review?" } }));
+    deps.operatorModel = routing;
+    const readable = fakeIO();
+    await dispatch(deps, msg("Review the change"), readable.io, {
+      authoritativeHistory: true,
+      seed: [{ role: "assistant", text: "Earlier readable evidence", context: freshContext() }],
+    });
+    expect(readable.replies).toContain("Which change should I review?");
+    expect(routing).toHaveBeenCalledTimes(1);
+    const denied = fakeIO();
+    await dispatch(deps, { ...msg("Review the change"), threadKey: "slack:C1:revoked-history" }, denied.io, {
+      authoritativeHistory: true,
+      seed: [
+        {
+          role: "assistant",
+          text: "Earlier private evidence",
+          context: { ...freshContext(), memoryScopes: ["user:slack:UDENIED"] },
+        },
+      ],
+    });
+    expect(denied.replies).toEqual(["⚠️ Earlier conversation context could not be verified. No new task started."]);
+    expect(routing).toHaveBeenCalledTimes(1);
+  });
+  it.each([false, true])(
+    "retains inherited sources on routing questions and withholds them after access loss during completion (revoked: %s)",
+    async (revoke) => {
+      const deps = makeDeps(YAML_FIXTURE, capturingProvider("Unused worker answer"));
+      deps.config.config.routing = { operator: "on" };
+      deps.runRegistry = new RunRegistry();
+      const store = new InMemoryRunStore();
+      deps.runStore = store;
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      deps.githubApi = new InMemoryGithubApi();
+      const grants = deps.config.grantsFor.bind(deps.config);
+      let readable = true;
+      vi.spyOn(deps.config, "grantsFor").mockImplementation((id) =>
+        readable ? grants(id) : { ...grants(id), repos: new Set() },
+      );
+      let turns = 0;
+      deps.operatorModel = async (request) => {
+        if (++turns === 1) return { tool: OPERATOR_READ_TOOLS.threadState, input: {} };
+        expect(JSON.stringify(request)).toContain("Earlier private evidence");
+        if (revoke) readable = false;
+        return { tool: "ask", input: { text: "Which change contains Earlier private evidence?" } };
+      };
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("Review the change", "slack:UADMIN"), io, {
+        authoritativeHistory: true,
+        seed: [
+          {
+            role: "assistant",
+            text: "Earlier private evidence",
+            context: { ...freshContext(), memoryScopes: ["repo:acme/private"] },
+          },
+        ],
+      });
+      await deps.runHistoryWriter.settled();
+      const records = await Promise.all((await store.list({})).map((row) => store.get(row.id)));
+      if (revoke) {
+        expect(replies).toEqual([
+          "I couldn't verify that the earlier source details are still safe to share here, so I withheld them. A Switchboard operator can check the source and conversation access.",
+        ]);
+        expect(JSON.stringify(records)).not.toContain("Which change contains Earlier private evidence?");
+      } else {
+        expect(replies).toEqual(["Which change contains Earlier private evidence?"]);
+        expect(records[0]).toMatchObject({
+          contextDependencies: { status: "known", memoryScopes: ["repo:acme/private"] },
+        });
+      }
+    },
+  );
   it("preserves public evidence and categorical source recovery through the model boundary", async () => {
     const fixture = await mainSourceFixture({ mixed: true });
     const { io, replies } = mainDmIO();
@@ -34558,7 +34632,7 @@ describe("durable operator conversation without an agent run", () => {
         const channel = fakeIO();
         await dispatch(deps, msg("What is the deploy command?", "slack:UADMIN"), channel.io);
         await deps.runHistoryWriter.settled();
-        expect(deps.operatorModel).toHaveBeenCalledTimes(decision === "command" ? 3 : 2);
+        expect(deps.operatorModel).toHaveBeenCalledTimes(decision === "command" && !revoke ? 3 : 2);
         expect(JSON.stringify(vi.mocked(deps.operatorModel).mock.calls)).toContain(
           "the deploy command is npm run deploy",
         );
@@ -34570,7 +34644,11 @@ describe("durable operator conversation without an agent run", () => {
           );
           expect(provider.requests).toHaveLength(0);
           expect(deps.invoked).toEqual([]);
-          expect(channel.replies.join(" ")).toContain("check the source and conversation access");
+          expect(channel.replies.join(" ")).toContain(
+            decision === "command"
+              ? "Earlier conversation context could not be verified"
+              : "check the source and conversation access",
+          );
         } else if (decision === "question") {
           expect(channel.replies.join(" ")).toContain(secret);
         } else if (decision === "route") {

@@ -70,6 +70,25 @@ describe("context retention — bounded references follow their live holders", (
     expect(retainContextSources(rows, [], refs)).toEqual([]);
   });
 
+  it("retains an archived GitHub producer only while its derived context is retained", () => {
+    const context = {
+      version: 2 as const,
+      status: "known" as const,
+      revision: 0,
+      origins: [],
+      slack: [],
+      mcp: [],
+      executionGithub: [
+        { runId: "review-source", callId: "read", resultHash: "a".repeat(64), admissionHash: "b".repeat(64) },
+      ],
+    };
+    const references = contextReferencesOf("follow-up", undefined, context);
+    const source = { id: "review-source" },
+      holder = { id: "follow-up" };
+    expect(retainContextSources([source, holder, { id: "unrelated" }], [holder], references)).toEqual([source, holder]);
+    expect(retainContextSources([source, holder], [], references)).toEqual([]);
+    expect(retainContextSources([holder], [holder], references)).toEqual([holder]);
+  });
   it("pins the exact original and execution sources of a retained native media dependency", () => {
     const context = {
       version: 3 as const,

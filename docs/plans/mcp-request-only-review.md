@@ -1,6 +1,7 @@
 ---
 title: New MCP Reviews use their own request context
-status: accepted
+status: superseded
+superseded_by: durable-review-context.md
 date: 2026-10-16
 ---
 

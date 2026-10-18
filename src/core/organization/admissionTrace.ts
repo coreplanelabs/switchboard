@@ -46,6 +46,7 @@ export type RequestContextSelection =
   | "continuation"
   | "media"
   | "routing"
+  | "context"
   | "target";
 export interface AdmissionObservation {
   stage?: AdmissionStage;
@@ -56,6 +57,7 @@ export interface AdmissionObservation {
   refreshFailure?: AdmissionRefreshFailure;
   exceptionKind?: AdmissionExceptionKind;
   contextSelection?: RequestContextSelection;
+  epochScopeExcluded?: number;
 }
 
 /** Use only an existing closed classification; exception names and prose are private. */
@@ -88,6 +90,7 @@ export function observeAdmission(trace: TraceOptions | undefined, observation: A
       ...(observation.refreshFailure ? { admissionRefreshFailure: observation.refreshFailure } : {}),
       ...(observation.exceptionKind ? { admissionExceptionKind: observation.exceptionKind } : {}),
       ...(observation.contextSelection ? { requestContextSelection: observation.contextSelection } : {}),
+      ...(observation.epochScopeExcluded !== undefined ? { epochScopeExcluded: observation.epochScopeExcluded } : {}),
     };
     setObservation(trace?.span, attrs);
   } catch {
