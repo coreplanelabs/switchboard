@@ -121,6 +121,7 @@ const pace = computed(() => {
 const stalled = computed(() => rowStalled(props.run, props.now));
 
 const pending = ref(false);
+const stopError = ref("");
 
 /** The row's actions menu, the one control at every width (a pair of Stop and
  *  Kill buttons per row cost 7.6em of every line for two rarely used actions):
@@ -164,12 +165,15 @@ function requestStop(mode: "stop" | "kill"): void {
   if (pending.value) return;
   if (mode === "kill" && !browser.confirm("Kill this run and delete its row? This action is destructive.")) return;
   pending.value = true;
+  stopError.value = "";
   fetch(stopHref(props.run, mode), { method: "POST", credentials: "same-origin" })
     .then((r) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       stopRequested.value = true;
     })
-    .catch(() => {})
+    .catch(() => {
+      stopError.value = `Could not confirm ${mode === "kill" ? "Kill" : "Stop"}. This run is still listed.`;
+    })
     .finally(() => {
       pending.value = false;
     });
@@ -339,5 +343,8 @@ function onRowClick(ev: MouseEvent): void {
         </UDropdownMenu>
       </span>
     </div>
+    <p v-if="stopError && !run.finished" class="relative z-[1] px-2 pb-2 text-xs text-warn" role="alert">
+      {{ stopError }}
+    </p>
   </li>
 </template>
