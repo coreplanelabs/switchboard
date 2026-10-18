@@ -3,7 +3,9 @@ import {
   isOrchestratorOwner,
   orchestratorDecisionsOf,
   sameOrchestratorOwner,
+  sourceFoldRunTarget,
   type OrchestratorOwner,
+  type OrchestratorSourceFoldDecision,
 } from "../dispatch/orchestratorDecisions.js";
 import { isChildHandoff, orchestratorOwnerForHandoff } from "../dispatch/handoff.js";
 import type { LiveRunRow } from "./types.js";
@@ -69,6 +71,7 @@ export interface PreparedSourceEvidenceAppend {
   message: Record<string, unknown>;
   key: string;
   recordJson: string;
+  fold?: { targetJson: string; targetHash: string; inputHash: string };
 }
 
 /** Capture the stored event before hashing can yield, then verify its receipt
@@ -76,6 +79,7 @@ export interface PreparedSourceEvidenceAppend {
 export async function prepareSourceEvidenceAppend(
   value: Record<string, unknown>,
   loadRecord: (key: string) => unknown,
+  loadDestination?: () => LiveRunRow | undefined,
 ): Promise<PreparedSourceEvidenceAppend | undefined> {
   try {
     const captured = sourceSnapshot(value);
@@ -83,55 +87,57 @@ export async function prepareSourceEvidenceAppend(
     const receipt = sourceEventReceiptOf(captured.receipt);
     if (!receipt) return;
     const record = sourceSnapshot(loadRecord(receipt.key));
+    const destination = object(captured.routing) && captured.routing.kind === "fold" ? loadDestination?.() : undefined;
+    const target = destination && sourceSnapshot(sourceFoldRunTarget(destination));
     const message = await prepareSourceEvidenceMessage(captured);
     if (message?.version !== 2 || !object(record)) return;
     const expected = await sourceEvidenceMessageFromRecord(record, message.routing);
     if (!expected || JSON.stringify(sourceSnapshot(expected)) !== JSON.stringify(captured)) return;
+    let fold: PreparedSourceEvidenceAppend["fold"];
+    if (message.routing.kind === "fold") {
+      if (target === undefined) return;
+      const [targetHash, inputHash] = await Promise.all([sourceHash(target), sourceHash(captured)]);
+      fold = { targetJson: JSON.stringify(target), targetHash, inputHash };
+    }
     return {
       message: { ...message },
       key: receipt.key,
       recordJson: JSON.stringify(sourceSnapshot({ event: record.event, receipt: record.receipt })),
+      ...(fold ? { fold } : {}),
     };
   } catch {
     return;
   }
 }
 
-/** This check must run without an await between it and the inbox append. A
- * valid job claim/release can change without changing the admitted event. */
-export function sourceEvidenceRecordMatches(
-  prepared: PreparedSourceEvidenceAppend | undefined,
-  loadRecord: (key: string) => unknown,
-): boolean {
-  try {
-    if (!prepared) return false;
-    const current = sourceSnapshot(loadRecord(prepared.key));
-    return (
-      object(current) &&
-      sourceEventJobOf(current.job)?.eventKey === prepared.key &&
-      JSON.stringify(sourceSnapshot({ event: current.event, receipt: current.receipt })) === prepared.recordJson
-    );
-  } catch {
-    return false;
-  }
-}
+export type SourceEvidenceRefusal =
+  | "source-proof"
+  | "source-owner"
+  | "source-record"
+  | "fold-destination"
+  | "fold-decision"
+  | "fold-target"
+  | "fold-input";
 
-/** Necessary owner checks at the existing append boundary. These do not prove
- * the canonical event, task, destination hash, current access or native input.
- * Consumers still hold source rows until that complete path is qualified. */
-export function sourceEvidenceOwnerMatches(
+/** Return a fixed refusal code, never private source or error data. Call in
+ * the existing append transaction with no await before writing the row.
+ * These are necessary checks; context/access, retention and native ACK are
+ * separate gates. Ordinary and legacy messages retain their existing path. */
+export function sourceEvidenceAppendRefusal(
   value: Record<string, unknown>,
   destination: LiveRunRow,
   loadRoot: (runId: string) => LiveRunRow | undefined,
-): boolean {
-  if (value.kind !== "source-evidence" || value.version !== 2) return true;
+  loadRecord: (key: string) => unknown,
+  prepared?: PreparedSourceEvidenceAppend,
+): SourceEvidenceRefusal | undefined {
+  if (value.kind !== "source-evidence" || value.version !== 2) return;
   try {
     const captured = sourceSnapshot(value);
-    if (!object(captured)) return false;
+    if (!object(captured)) return "source-proof";
     const routing = sourceRoutingOf(captured.routing);
-    if (!routing) return false;
+    if (!routing) return "source-proof";
     const root = loadRoot(routing.owner.runId);
-    if (!root || root.phase === "finishing" || root.meta.childHandoff !== undefined) return false;
+    if (!root || root.phase === "finishing" || root.meta.childHandoff !== undefined) return "source-owner";
     const owner = orchestratorOwnerForHandoff({
       runId: root.runId,
       requester: root.meta.userId,
@@ -141,40 +147,64 @@ export function sourceEvidenceOwnerMatches(
       parentRunId: root.meta.parentRunId,
       parentInstanceId: root.meta.parentInstanceId,
     });
-    if (!owner || !sameOrchestratorOwner(owner, routing.owner)) return false;
-    if (routing.kind === "notice") return destination.runId === owner.runId;
-    const handoff = destination.meta.childHandoff;
+    if (!owner || !sameOrchestratorOwner(owner, routing.owner)) return "source-owner";
+    if (routing.kind === "notice" && destination.runId !== owner.runId) return "source-owner";
+    let decision: OrchestratorSourceFoldDecision | undefined;
+    if (routing.kind === "fold") {
+      const handoff = destination.meta.childHandoff;
+      if (
+        destination.runId === owner.runId ||
+        destination.phase === "finishing" ||
+        destination.meta.parentRunId !== owner.runId ||
+        destination.meta.parentInstanceId !== undefined ||
+        destination.meta.userId !== owner.requesterId ||
+        !isChildHandoff(handoff) ||
+        handoff.source.runId !== owner.runId ||
+        handoff.source.requester !== owner.requesterId ||
+        handoff.source.channelId !== owner.channelId ||
+        handoff.source.threadKey !== owner.threadKey ||
+        !sameOrchestratorOwner(handoff.orchestratorOwner, owner) ||
+        handoff.consumer?.runId !== destination.runId ||
+        handoff.consumer.requester !== destination.meta.userId ||
+        handoff.consumer.channelId !== destination.meta.channelId ||
+        handoff.consumer.threadKey !== destination.meta.threadKey
+      )
+        return "fold-destination";
+      const saved = orchestratorDecisionsOf(root.state.orchestratorDecisions, owner)?.find(
+        (entry) => entry.id === routing.decision.id,
+      );
+      const receipt = sourceEventReceiptOf(captured.receipt);
+      if (
+        saved?.version !== 2 ||
+        saved.target.kind !== "run" ||
+        !receipt ||
+        !object(captured.source) ||
+        saved.source.kind !== captured.source.kind ||
+        JSON.stringify(sourceEventReceiptOf(saved.source.receipt)) !== JSON.stringify(receipt)
+      )
+        return "fold-decision";
+      decision = saved;
+    }
+    if (!prepared) return "source-proof";
+    const current = sourceSnapshot(loadRecord(prepared.key));
     if (
-      destination.runId === owner.runId ||
-      destination.meta.parentRunId !== owner.runId ||
-      destination.meta.parentInstanceId !== undefined ||
-      destination.meta.userId !== owner.requesterId ||
-      !isChildHandoff(handoff) ||
-      handoff.source.runId !== owner.runId ||
-      handoff.source.requester !== owner.requesterId ||
-      handoff.source.channelId !== owner.channelId ||
-      handoff.source.threadKey !== owner.threadKey ||
-      !sameOrchestratorOwner(handoff.orchestratorOwner, owner) ||
-      handoff.consumer?.runId !== destination.runId ||
-      handoff.consumer.requester !== destination.meta.userId ||
-      handoff.consumer.channelId !== destination.meta.channelId ||
-      handoff.consumer.threadKey !== destination.meta.threadKey
+      !object(current) ||
+      sourceEventJobOf(current.job)?.eventKey !== prepared.key ||
+      JSON.stringify(sourceSnapshot({ event: current.event, receipt: current.receipt })) !== prepared.recordJson
     )
-      return false;
-    const decision = orchestratorDecisionsOf(root.state.orchestratorDecisions, owner)?.find(
-      (entry) => entry.id === routing.decision.id,
-    );
-    const receipt = sourceEventReceiptOf(captured.receipt);
-    return (
-      decision?.version === 2 &&
-      decision.target.kind === "run" &&
-      receipt !== undefined &&
-      object(captured.source) &&
-      decision.source.kind === captured.source.kind &&
-      JSON.stringify(sourceEventReceiptOf(decision.source.receipt)) === JSON.stringify(receipt)
-    );
+      return "source-record";
+    if (routing.kind === "notice") return;
+    if (!decision) return "fold-decision";
+    if (!prepared.fold) return "fold-input";
+    if (
+      JSON.stringify(sourceSnapshot(sourceFoldRunTarget(destination))) !== prepared.fold.targetJson ||
+      decision.target.hash !== prepared.fold.targetHash
+    )
+      return "fold-target";
+    if (decision.inputHash !== prepared.fold.inputHash) return "fold-input";
+    return;
   } catch {
-    return false;
+    return "source-proof";
   }
 }
 
