@@ -314,6 +314,7 @@ Opaque client tracking holds at most one existing reconciliation batch of identi
 | Empty retained child-run evidence does not claim an unstarted unit. Recorded merge facts remain Merged; other absent lifecycle facts stay explicit. | `[unit]` `web/green/frontend.test.ts::Green browser frontend::shows an observed merge on the unit while keeping its original reviewed-head report`; `web/green/app.test.ts::Green App navigation::removes revoked unit metadata…`; `web/src/pages/unitPage.test.ts::UnitPage — the unit is the reading unit (item 28)::a unit with one thread lists its runs by agent…` |
 
 | Shared text updates retain emoji after Vue patches plain labels or mixed text, without changing source code or editable inputs | `[unit]` `web/green/lib/emoji.test.ts::Shared text rendering::*` |
+| The shared text hook is inert when the `Node` global is gone, so a component update that drains after its environment is torn down leaves the text untouched instead of throwing | `[unit]` `web/green/lib/emoji.test.ts::Shared text rendering::stays inert when the DOM global is gone, so a late update cannot throw` |
 
 ## Manual emoji refresh
 
