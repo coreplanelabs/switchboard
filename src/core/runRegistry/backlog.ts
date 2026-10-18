@@ -5,6 +5,7 @@ import { activityOf } from "./activity.js";
 import { RUN_PROMPT_MAX, boundedRunTitle } from "../runDisplay.js";
 import { redactAndCap } from "../redact.js";
 import type { RunState } from "./state.js";
+import { isFailureContext } from "../requestFailure.js";
 
 // The per-run backlog: the newest events a run keeps while it is live, bounded
 // by count and by bytes with a protected head that the bounds never trim, and
@@ -48,6 +49,7 @@ export interface BacklogBounds {
  *  total, the protected head, and the activity line refreshed per event. */
 export type BacklogState = Pick<
   RunState,
+  | "failureContext"
   | "backlog"
   | "backlogSizes"
   | "backlogBytes"
@@ -67,6 +69,8 @@ export type BacklogState = Pick<
  *  the trim then drops the oldest event AFTER the head, never the head, and
  *  always keeps the newest. */
 export function appendToBacklog(run: BacklogState, bounds: BacklogBounds, published: RunEvent): void {
+  if (published.type === "run_note" && published.failureContext !== undefined)
+    run.failureContext = isFailureContext(published.failureContext) ? { ...published.failureContext } : null;
   if (published.type === "input" && run.prompt === undefined) run.prompt = redactAndCap(published.text, RUN_PROMPT_MAX);
   if (published.type === "run_title") run.title = boundedRunTitle(published.title);
   const headEligible =

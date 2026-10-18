@@ -51,6 +51,7 @@ import {
 import { systemClock } from "../../src/core/trace/clock.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
 import { shimRoute, stripTraceContext, withTraceContext, workerLogSink } from "../../src/core/trace/workerTrace.ts";
+import { requestFailureResponse } from "../../src/core/requestFailure.ts";
 import { COPY_PATH, handleArtifactsCopy } from "./artifactsCopy.ts";
 import { handlePrImage, publishPrImage } from "./prImages.ts";
 import { PR_IMAGE_PUBLISH_PATH } from "../../src/artifacts/prImages.ts";
@@ -584,9 +585,7 @@ export default {
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {
-      root.fail(err);
-      root.end("error");
-      throw err;
+      return requestFailureResponse(root, err);
     }
   },
 

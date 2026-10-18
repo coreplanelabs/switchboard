@@ -97,6 +97,26 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it("keeps the current failure context ahead of an older stored artifact", async () => {
+    const { reg, store, svc } = setup();
+    const run = reg.create();
+    await store!.put(record(run.id, NOW, { failureContext: { traceId: "1".repeat(32), source: "unverified" } }));
+    reg.publish(run.id, {
+      type: "run_note",
+      kind: "harness_error",
+      summary: "Later failure has no origin",
+      failureContext: null,
+      modelFailure: {
+        kind: "unknown",
+        phase: "run",
+        stops: { pi: "error", provider: "missing" },
+        diagnostic: { source: "unverified", errorMessage: "present", contentParts: 0 },
+      },
+    });
+    reg.finish(run.id, "failed");
+    expect(await svc.getRun(run.id)).toMatchObject({ ok: true, value: { id: run.id, failureContext: null } });
+  });
+
   it("refuses cached reads when shared deletion state is unavailable", async () => {
     const { reg, store } = setup();
     const warnings: string[] = [];

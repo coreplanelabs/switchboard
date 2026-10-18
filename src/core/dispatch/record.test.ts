@@ -1,4 +1,5 @@
 import type { AudienceTrace } from "../audienceDecision.js";
+import type { RunEvent } from "../runEvents.js";
 import { describe, expect, it, vi } from "vitest";
 import { createRunHistoryWriter, type RunHistoryWriter } from "../runHistoryWriter.js";
 import { InMemoryRunStore } from "../runStore.js";
@@ -731,6 +732,67 @@ describe("assembleRunRecord — the handoff on the record", () => {
     finishedAt: 10,
     status: "completed" as const,
     diagnosis: analyzeRunFriction([], { finished: true, truncated: false }),
+  });
+
+  it("reconstructs retained request failure context on write and rejects malformed stored references", () => {
+    const event: RunEvent = {
+      type: "run_note",
+      failureContext: { traceId: "1".repeat(32), source: "unverified" },
+      kind: "harness_error",
+      summary: "Request failed",
+      modelFailure: {
+        kind: "unknown",
+        phase: "run",
+        stops: { pi: "error", provider: "missing" },
+        diagnostic: {
+          source: "unverified",
+          errorMessage: "present",
+          contentParts: 0,
+          error: {
+            type: "urn:switchboard:request-failure",
+            status: 500,
+            requestId: "1".repeat(32),
+          },
+        },
+      },
+    };
+    const record = assembleRunRecord({
+      ...base(),
+      snap: {
+        events: [event],
+        finished: true,
+        startedAt: 1,
+        finishedAt: 10,
+        eventCount: 1,
+        stepCount: 1,
+        truncated: false,
+      },
+    });
+    expect(record.failureContext).toEqual({ traceId: "1".repeat(32), source: "unverified" });
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord({ ...record, failureContext: null })).toBe(true);
+    expect(
+      isRunRecord({
+        ...record,
+        failureContext: { traceId: "1".repeat(32), source: "unverified", body: "PRIVATE" },
+      }),
+    ).toBe(false);
+    expect(isRunRecord({ ...record, failureContext: { traceId: "0".repeat(32), source: "unverified" } })).toBe(false);
+    const unavailable = assembleRunRecord({
+      ...base(),
+      snap: {
+        events: [event],
+        failureContext: null,
+        finished: true,
+        startedAt: 1,
+        finishedAt: 10,
+        eventCount: 1,
+        stepCount: 1,
+        truncated: false,
+      },
+    });
+    expect(unavailable.failureContext).toBeNull();
+    expect(assembleRunRecord(base())).not.toHaveProperty("failureContext");
   });
 
   it("carries the pull request the run was admitted to act on, and refuses one that is not a positive integer (record 0097)", () => {

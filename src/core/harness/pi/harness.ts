@@ -76,6 +76,7 @@ import {
   type WindDownEnding,
 } from "../windDown.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
+import { failureContextOf } from "../../requestFailure.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement, ToolUsePart } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
@@ -576,13 +577,17 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     run.onProgress?.(summary);
     emit({ type: "run_note", kind, summary, ...(mode ? { mode } : {}) });
   };
-  const noteUnknownTerminal = (terminal: Extract<PiTerminalFailure, { kind: "unknown" }>, followUp = false) => {
-    const summary = unknownTerminalNote(terminal, followUp);
-    run.onProgress?.(terminalFailureText(terminal));
+  const noteUnknownTerminal = (
+    terminal: Extract<PiTerminalFailure, { kind: "unknown" }>,
+    followUp = false,
+    summary?: string,
+  ) => {
+    run.onProgress?.(summary ?? terminalFailureText(terminal));
     emit({
       type: "run_note",
       kind: "harness_error",
-      summary,
+      summary: summary ?? unknownTerminalNote(terminal, followUp),
+      failureContext: failureContextOf(terminal.diagnostic.error) ?? null,
       modelFailure: {
         kind: "unknown",
         phase: followUp ? "follow_up" : "run",
@@ -2508,7 +2513,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // the wind-down's answer stands, and the record says only the typed
           // terminal fact the bridge retained.
           writeUpFailed = terminalFailureText(terminal);
-          note("harness_error", windDownFailureNote(writeUpFailed));
+          if (terminal.kind === "unknown") noteUnknownTerminal(terminal, false, windDownFailureNote(writeUpFailed));
+          else note("harness_error", windDownFailureNote(writeUpFailed));
         } else {
           terminalFailure = terminal;
           if (terminal.kind === "unknown") noteUnknownTerminal(terminal);
@@ -3015,7 +3021,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               // The turn is winding down: the failed call is not the turn's
               // ending — the write-up's label is (the loop's rule).
               writeUpFailed = terminalFailureText(terminal);
-              note("harness_error", windDownFailureNote(writeUpFailed, "turn"));
+              if (terminal.kind === "unknown")
+                noteUnknownTerminal(terminal, true, windDownFailureNote(writeUpFailed, "turn"));
+              else note("harness_error", windDownFailureNote(writeUpFailed, "turn"));
             } else if (terminal.kind === "context_overflow") {
               turnOverflow = terminal.failure;
               note("harness_error", terminalFailureText(terminal));
