@@ -2133,6 +2133,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "values": [
           "messages",
           "audience",
+          "shutdown",
         ],
       },
     ],

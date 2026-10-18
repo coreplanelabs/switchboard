@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRunStop } from "./runStop.js";
 import { secretsFrom } from "../secrets.js";
-import { readCancellationPreparation, type RunCancellation } from "../core/runLedger/cancellation.js";
+import {
+  cancellationRefusalOf,
+  readCancellationPreparation,
+  type RunCancellation,
+} from "../core/runLedger/cancellation.js";
 import type { LiveRunRow } from "../core/runLedger/types.js";
 
 // Feature: docs/reference/specs/run-history.md — hard stop targets an existing runtime.
@@ -47,6 +51,56 @@ function row(): LiveRunRow {
 }
 
 describe("run runtime stop", () => {
+  it("distinguishes a stale Resident owner from an invalid fence without sending either target", async () => {
+    const target = row();
+    target.state.binding = {
+      backend: "resident",
+      workspace: "/private/checkout",
+      user: "private-user",
+      container: "private-container",
+      ownerGen: "old-owner",
+      ownerFence: 7,
+    };
+    const sent: unknown[] = [];
+    const stop = createRunStop(
+      { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+      secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+      async (_url, init) => {
+        sent.push(JSON.parse(String(init?.body)));
+        return Response.json({ cancellationId: cancellation.id, stopped: true, disposition: "processes-stopped" });
+      },
+    )!;
+    expect(await stop(target, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "owner-generation-mismatch" },
+    });
+    target.state.binding = { ...(target.state.binding as object), ownerGen: "g1", ownerFence: 0 };
+    expect(await stop(target, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "owner-fence-invalid" },
+    });
+    expect(sent).toEqual([]);
+    target.state.binding = { ...(target.state.binding as object), ownerFence: 7 };
+    expect(await stop(target, cancellation)).toEqual({ stopped: true, disposition: "processes-stopped" });
+    expect(sent).toEqual([{ cancellation, binding: target.state.binding, resource: "repo:fixture/repo" }]);
+  });
+
+  it("retains only a closed custody discriminator on a prepare refusal", () => {
+    expect(
+      cancellationRefusalOf({ phase: "prepare", cause: "custody-unverified", custody: "owner-generation-mismatch" }),
+    ).toEqual({ phase: "prepare", cause: "custody-unverified", custody: "owner-generation-mismatch" });
+    for (const invalid of [
+      { phase: "prepare", cause: "custody-unverified", custody: "/private/checkout" },
+      { phase: "resident", cause: "custody-unverified", custody: "owner-generation-mismatch" },
+      { phase: "prepare", cause: "runtime-unavailable", custody: "owner-generation-mismatch" },
+    ])
+      expect(cancellationRefusalOf(invalid)).toBeUndefined();
+    expect(cancellationRefusalOf({ phase: "prepare", cause: "custody-unverified" })).toEqual({
+      phase: "prepare",
+      cause: "custody-unverified",
+    });
+  });
+
   it("keeps a recorded sandbox target when the selection metadata is stale", async () => {
     const saved = row();
     saved.meta.selection = "resident";
@@ -70,7 +124,7 @@ describe("run runtime stop", () => {
     expect(stop!.supports(target)).toBe(false);
     expect(await stop!(target, cancellation)).toEqual({
       stopped: false,
-      refusal: { phase: "prepare", cause: "custody-unverified" },
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "host-process" },
     });
   });
 
@@ -258,22 +312,22 @@ describe("run runtime stop", () => {
     delete legacy.meta.selection;
     expect(await stop!(legacy, cancellation)).toEqual({
       stopped: false,
-      refusal: { phase: "prepare", cause: "custody-unverified" },
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "binding-unrecorded" },
     });
     legacy.meta.selection = "none";
     expect(await stop!(legacy, cancellation)).toEqual({
       stopped: false,
-      refusal: { phase: "prepare", cause: "custody-unverified" },
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "binding-unrecorded" },
     });
     legacy.meta.profile = { machine: "none", identity: "read", minutes: 25 };
     expect(await stop!(legacy, cancellation)).toEqual({
       stopped: false,
-      refusal: { phase: "prepare", cause: "custody-unverified" },
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "host-process" },
     });
     legacy.state.binding = { backend: "unknown", workspace: "/private" };
     expect(await stop!(legacy, cancellation)).toEqual({
       stopped: false,
-      refusal: { phase: "prepare", cause: "custody-unverified" },
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "backend-unsupported" },
     });
   });
   it("does not reserve cancellation for an unavailable resident target or an empty physical binding", () => {

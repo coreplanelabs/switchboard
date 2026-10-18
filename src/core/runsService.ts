@@ -1,4 +1,5 @@
 import type { CancellationRefusal, CancellationObservation } from "./runLedger/cancellation.js";
+import { cancellationMatches, cancellationOf, cancellationRefusalOf } from "./runLedger/cancellation.js";
 import type { ClaimObservationPage } from "./runLedger/claimObservation.js";
 import {
   checkSourceReadOf,
@@ -290,7 +291,7 @@ export interface UnitLineage {
   unit?: { key: string; id: string; title?: string; thread: "coding" | "review" };
 }
 
-/** `getRun` adds events or structural audience evidence only on an explicit include. */
+/** Run details and safe diagnostics require an explicit include. */
 export interface RunRecordView extends RunView {
   /** Original sender retained on canonical record-body reads. */
   postedBy?: RunRecord["postedBy"];
@@ -305,6 +306,19 @@ export interface RunRecordView extends RunView {
   branchPublication?: RunRecord["branchPublication"];
   branchPushReceipts?: RunRecord["branchPushReceipts"];
   audience?: { status: "recorded"; refusal: AudienceRefusalReceipt } | { status: "unavailable" };
+  shutdown?:
+    | { status: "unavailable" }
+    | {
+        status: "observed";
+        source: "live-ledger";
+        ownerGen: string;
+        stopIntent: StopMode | null;
+        targetCheck: "eligible" | "refused";
+        refusal?: CancellationRefusal;
+        cancellationId?: string;
+        runtimeContacted: false;
+        confirmation: "not-checked";
+      };
   events?: RunEvent[];
 }
 
@@ -495,7 +509,7 @@ export interface RunsService {
   getRun(
     id: string,
     opts?: {
-      include?: "messages" | "audience";
+      include?: "messages" | "audience" | "shutdown";
       requireFinalRecord?: boolean;
       privateWorkerAccess?: typeof PRIVATE_WORKER_INTERNAL_READ;
     },
@@ -1471,6 +1485,47 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     async getRun(id, opts = {}) {
       if ((await deletedRuns([id])).includes(id)) return notFound;
       const diagnostic = async (view: RunRecordView): Promise<RunRecordView> => {
+        if (opts.include === "shutdown") {
+          let shutdown: NonNullable<RunRecordView["shutdown"]> = { status: "unavailable" };
+          try {
+            // Fresh canonical evidence must match the exact resource the command authorizes.
+            // Local eligibility neither contacts the runtime nor proves its shutdown.
+            const rows = (await ledger?.listLive())?.filter((row) => row.runId === id) ?? [];
+            const row = rows.length === 1 ? rows[0] : undefined;
+            if (
+              row &&
+              !view.finished &&
+              deps.stopRuntime?.unavailable &&
+              row.startedAt === view.startedAt &&
+              row.meta.threadKey === view.threadKey &&
+              row.meta.userId === view.userId &&
+              row.meta.channelId === view.channelId &&
+              row.meta.repo === view.repo &&
+              (row.meta.channelVisibility ?? "unknown") === (view.channelVisibility ?? "unknown")
+            ) {
+              const unavailable = deps.stopRuntime.unavailable(row);
+              const refusal = cancellationRefusalOf(unavailable);
+              if (unavailable === undefined || refusal) {
+                const ticket = cancellationOf(row.state.cancellation);
+                shutdown = {
+                  status: "observed",
+                  source: "live-ledger",
+                  ownerGen: row.ownerGen,
+                  stopIntent: row.stop,
+                  targetCheck: refusal ? "refused" : "eligible",
+                  ...(refusal ? { refusal } : {}),
+                  ...(ticket && cancellationMatches(row, ticket) ? { cancellationId: ticket.id } : {}),
+                  runtimeContacted: false,
+                  confirmation: "not-checked",
+                };
+              }
+            }
+          } catch {
+            // Keep the explicit unavailable result when the diagnostic source cannot be read.
+            return { ...view, shutdown };
+          }
+          return { ...view, shutdown };
+        }
         if (opts.include !== "audience") return view;
         let receipt: AudienceRefusalReceipt | undefined;
         try {
@@ -1815,6 +1870,41 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         return { ok: true, value: { id, mode: "hard", state: "deleted" } };
       }
       const here = registry.getById(id);
+      const refusedCancellation = (
+        row: LiveRunRow,
+        refusal: CancellationRefusal,
+        stage: "target-check" | "runtime-result",
+        observation?: CancellationObservation,
+      ): Result<never> => {
+        const result = {
+          ok: false as const,
+          error: "unavailable" as const,
+          refusal,
+          ...(observation ? { observation } : {}),
+        };
+        try {
+          const ticket = cancellationOf(row.state.cancellation);
+          warn(
+            JSON.stringify({
+              event: "run.cancellation.refused",
+              runId: row.runId,
+              ownerGen: row.ownerGen,
+              mode,
+              stage,
+              phase: refusal.phase,
+              cause: refusal.cause,
+              ...(refusal.custody ? { custody: refusal.custody } : {}),
+              ...(ticket && cancellationMatches(row, ticket) ? { cancellationId: ticket.id } : {}),
+              stopIntentRecorded: true,
+              shutdownConfirmed: false,
+            }),
+          );
+        } catch {
+          // A failed optional diagnostic cannot replace the original refusal or permit shutdown.
+          return result;
+        }
+        return result;
+      };
       let cancellationCandidate: LiveRunRow | undefined;
       if (mode === "hard" && ledger && (!here || deps.stopRuntime)) {
         try {
@@ -1841,15 +1931,21 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             const prepared = await ledger.prepareCancellation(id, sanitizeActor(actor));
             if (prepared.ok) {
               const runtime = await deps.stopRuntime(prepared.row, prepared.cancellation);
-              if (!runtime.stopped)
+              if (!runtime.stopped) {
+                if (runtime.refusal)
+                  return refusedCancellation(prepared.row, runtime.refusal, "runtime-result", runtime.observation);
                 return {
                   ok: false,
                   error: "unavailable",
-                  ...(runtime.refusal ? { refusal: runtime.refusal } : {}),
                   ...(runtime.observation ? { observation: runtime.observation } : {}),
                 };
+              }
               if (runtime.disposition === "no-workspace")
-                return { ok: false, error: "unavailable", refusal: { phase: "prepare", cause: "runtime-unconfirmed" } };
+                return refusedCancellation(
+                  prepared.row,
+                  { phase: "prepare", cause: "runtime-unconfirmed" },
+                  "runtime-result",
+                );
               const events = await ledger.readEvents(id);
               const lastSeq = events.at(-1)?.seq ?? 0;
               events.push({
@@ -1884,11 +1980,11 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             }
             if (prepared.reason !== "unsupported") return { ok: false, error: "unavailable" };
             if (!here)
-              return {
-                ok: false,
-                error: "unavailable",
-                refusal: { phase: "prepare", cause: "custody-unverified" },
-              };
+              return refusedCancellation(
+                cancellationCandidate,
+                { phase: "prepare", cause: "custody-unverified" },
+                "target-check",
+              );
           } else return { ok: false, error: "unavailable" };
         } catch (err) {
           warn(`[runs] hard stop cancellation unconfirmed for ${id}: ${describe(err)}`);
@@ -1925,14 +2021,14 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         } catch {
           return { ok: false, error: "unavailable" };
         }
-        return {
-          ok: false,
-          error: "unavailable",
-          refusal: deps.stopRuntime?.unavailable?.(cancellationCandidate) ?? {
+        return refusedCancellation(
+          cancellationCandidate,
+          deps.stopRuntime?.unavailable?.(cancellationCandidate) ?? {
             phase: "prepare",
             cause: deps.stopRuntime ? "custody-unverified" : "state-unconfigured",
           },
-        };
+          "target-check",
+        );
       }
       if (here) {
         // A retry pause can hand off while this stop is being written.

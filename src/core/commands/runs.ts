@@ -129,7 +129,7 @@ async function getVisibleRun(
   action: Action,
   deps: RunsCommandDeps,
   commandId: string,
-  opts: { include?: "messages" | "audience" } = {},
+  opts: { include?: "messages" | "audience" | "shutdown" } = {},
 ): Promise<RunRecordView> {
   let read: Awaited<ReturnType<RunsService["getRun"]>>;
   try {
@@ -480,15 +480,15 @@ export const runsGet = defineCommand({
   args: [idArg],
   options: z.object({
     include: z
-      .enum(["messages", "audience"])
+      .enum(["messages", "audience", "shutdown"])
       .optional()
-      .describe("add events or the structural audience-refusal diagnostic"),
+      .describe("add events, the audience-refusal diagnostic, or the current local shutdown target check"),
   }),
   action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
   describe:
-    "One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic when recorded.",
+    "One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic; `--include shutdown` checks the current target without contacting its runtime.",
   handler: async ({ args, options, caller, deps }) => {
     const view = await getVisibleRun(
       await deps.runs(),

@@ -76,7 +76,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/credentials.inspect` | `POST` | `credentials:exec` | Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation. |
 | `/api/runs.list` | `GET`, `POST` | `runs:read` | List runs (live and persisted, newest first) — metadata only, never message text. |
 | `/api/runs.claims` | `GET`, `POST` | `runs:read` | List persisted unknown native claim observations. These are not current holds or commit receipts; missing observations do not prove absence. |
-| `/api/runs.get` | `GET`, `POST` | `runs:read` | One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic when recorded. |
+| `/api/runs.get` | `GET`, `POST` | `runs:read` | One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic; `--include shutdown` checks the current target without contacting its runtime. |
 | `/api/runs.events` | `GET`, `POST` | `runs:read` | A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content. |
 | `/api/runs.friction` | `GET`, `POST` | `runs:read` | One run's friction diagnosis (live: computed now; persisted: as stored). |
 | `/api/runs.check` | `GET`, `POST` | `runs:read` | Inspect an original recorded check without running it again; saved output is wrapped as untrusted content. |
