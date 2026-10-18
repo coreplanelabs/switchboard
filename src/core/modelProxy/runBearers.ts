@@ -136,7 +136,7 @@ export class RunBearerStore {
   }
 
   /** Trusted source proof stays on the entry across adopt, issue and rotation.
-   * A fresh mint must bind its own proof before any private model call. */
+   * A run requiring source proof must bind it before any model call. */
   bindSourceGuard(runId: string, guard: () => Promise<boolean>): void {
     const entry = this.entries.get(runId);
     if (entry && !entry.revoked) {

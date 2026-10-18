@@ -32,6 +32,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ASKS } from "../budgets.js";
 import { RunEventLane } from "../runEventLane.js";
 import { ConfigStore } from "../../config.js";
+import { secretsFrom } from "../../secrets.js";
 import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { reissueSteerSentence } from "../plane/decide.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
@@ -44,7 +45,7 @@ import { diffDigestTool } from "../../tools/diffDigest.js";
 import type { ToolContext } from "../../tools/runnableTool.js";
 import { githubRepositoryDependencies, mergeContextDependencies } from "../references/contextDependencies.js";
 import { githubReadWithContext } from "./githubReadContext.js";
-import { contextAccessForExecution, contextAccessForMessage } from "./contextAccess.js";
+import { contextAccessForExecution, contextAccessForMessage, revalidateAdmittedContext } from "./contextAccess.js";
 import { executionAdmissionHash } from "./executionGithubContext.js";
 import { TEST_GITHUB_CREDENTIALS } from "../../execution/testing/githubCredentials.js";
 import type { Provider } from "../provider.js";
@@ -77,7 +78,7 @@ import { planResume, transcriptSource } from "../runLedger/resume.js";
 import { localWorkspaceDir, type ExecutorSelection } from "../../execution/factory.js";
 import { reattachWorkspace } from "./provision.js";
 import { authenticateProxyUnknownTerminal } from "../modelProxy/providerFailureAuth.js";
-import { shapeTools } from "../../channels/modelProxy.js";
+import { shapeTools, handleModelProxyRequest, ANTHROPIC_MESSAGES_PATH } from "../../channels/modelProxy.js";
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import { GitBindings, type GitPublicationClaim } from "../modelProxy/gitBindings.js";
 import { RUN_BEARER_ENV } from "../harness/pi/process.js";
@@ -547,6 +548,7 @@ function setup(
     },
     admitted: new ThreadAdmission<DispatchFollowUp>().claim(message.threadKey, { agent: agentName }).live,
     ledgerRun: undefined,
+    admittedContextCheck: async () => ({ ok: true as const }),
     validateExecutionContext: undefined as RunLoopContext["validateExecutionContext"],
     resume: undefined,
     recovered: false,
@@ -582,6 +584,114 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it("rechecks admitted context before native model calls from a public run", async () => {
+    let context = githubRepositoryDependencies([]);
+    let canRead = true,
+      unavailable = false;
+    const check = () =>
+      revalidateAdmittedContext(
+        () => context,
+        async (snapshot) => {
+          if (unavailable) throw new Error("PRIVATE_SOURCE_BYTES");
+          return snapshot.githubRepos?.length && !canRead
+            ? {
+                ok: false as const,
+                code: "saved-context-unproved" as const,
+                check: "github_repository_unproved" as const,
+              }
+            : { ok: true as const };
+        },
+      );
+    const upstream: Record<string, unknown>[] = [],
+      statuses: number[] = [],
+      refused: string[] = [],
+      logs: string[] = [];
+    const harness = watched(piHarness);
+    harness.harness.open = async () => {
+      const proxy = async (text: string) => {
+        const response = await handleModelProxyRequest(
+          {
+            method: "POST",
+            path: ANTHROPIC_MESSAGES_PATH,
+            headers: { authorization: `Bearer ${token}` },
+            body: (async function* () {
+              yield Buffer.from(
+                JSON.stringify({
+                  model: "ignored",
+                  max_tokens: 32,
+                  stream: false,
+                  messages: [{ role: "user", content: [{ type: "text", text }] }],
+                }),
+              );
+            })(),
+          },
+          {
+            bearers,
+            clock: () => NOW,
+            providers: () => ({ anthropic: { type: "anthropic", apiKeyEnv: "SOURCE_CHECK_KEY" } }),
+            secrets: secretsFrom({ SOURCE_CHECK_KEY: "fixture-only" }),
+            log: (line) => {
+              logs.push(line);
+            },
+            fetch: async (_url, init) => {
+              upstream.push(JSON.parse(String(init?.body)));
+              return Response.json({
+                id: "allowed",
+                type: "message",
+                role: "assistant",
+                model: "general-model",
+                content: [{ type: "text", text: "Allowed." }],
+                stop_reason: "end_turn",
+                usage: { input_tokens: 1, output_tokens: 1 },
+              });
+            },
+          },
+        );
+        statuses.push(response.status);
+        if (response.status === 403) refused.push(String(response.body));
+      };
+      await proxy("PUBLIC_SEED");
+      context = mergeContextDependencies(context, githubRepositoryDependencies(["acme/private"]));
+      await proxy("APPROVED_PRIVATE_SOURCE");
+      canRead = false;
+      await proxy("PRIVATE_SOURCE_BYTES");
+      unavailable = true;
+      await proxy("PRIVATE_SOURCE_BYTES");
+      unavailable = false;
+      loopContext.admittedContextCheck = undefined;
+      await proxy("PRIVATE_SOURCE_BYTES");
+      loopContext.admittedContextCheck = check;
+      return { answer: "Guard checked.", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    s.deps.runBearers = bearers;
+    const token = mintFor(bearers, s);
+    const loopContext: RunLoopContext = { ...s.ctx, admittedContextCheck: check };
+    await runLoop(s.deps, loopContext);
+    expect(statuses).toEqual([200, 200, 403, 403, 403]);
+    expect(bearers.grantOf(s.run.id)?.turns).toBe(2);
+    expect(upstream.map((body) => body.messages)).toEqual([
+      [{ role: "user", content: [{ type: "text", text: "PUBLIC_SEED" }] }],
+      [{ role: "user", content: [{ type: "text", text: "APPROVED_PRIVATE_SOURCE" }] }],
+    ]);
+    expect(refused.map((body) => JSON.parse(body).error.type)).toEqual([
+      "source_unavailable",
+      "source_unavailable",
+      "source_unavailable",
+    ]);
+    expect(JSON.stringify([refused, logs])).not.toContain("PRIVATE_SOURCE_BYTES");
+    expect(context.githubRepos).toEqual(["acme/private"]);
+  });
+
   it.each(["Error", "TypeError", "string"] as const)(
     "retains the failed model source check without copying private exception text: %s",
     async (failureClass) => {
@@ -12767,7 +12877,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       root: trace.root,
       resume,
       messages: resume.plan.messages,
-      publicationContextCheck: async () => ({
+      admittedContextCheck: async () => ({
         ok: false,
         code: "saved-context-unproved",
         check: "execution_github_access_unproved",

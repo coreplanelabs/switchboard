@@ -26370,7 +26370,19 @@ describe("the model proxy's run bearer through dispatch()", () => {
   it("is minted for the run before its first model turn, pinned to the resolved model and the preset's caps and hung under the request root, and is revoked once the run finishes", async () => {
     const clock = { now: 1_700_000_000_000 };
     const store = new RunBearerStore({ clock: () => clock.now });
-    const seen: Array<{ runId: string | undefined; verified: boolean; turns: number | undefined }> = [];
+    const initialSourceChecks: Promise<boolean>[] = [];
+    const mint = store.mint.bind(store);
+    vi.spyOn(store, "mint").mockImplementation((grant, options) => {
+      const token = mint(grant, options);
+      initialSourceChecks.push(store.sourceGuardFor(grant.runId).check());
+      return token;
+    });
+    const seen: Array<{
+      runId: string | undefined;
+      verified: boolean;
+      turns: number | undefined;
+      sourceAllowed: boolean;
+    }> = [];
     let runId: string | undefined;
     const provider: Provider = {
       name: "fake",
@@ -26378,7 +26390,12 @@ describe("the model proxy's run bearer through dispatch()", () => {
         // Mid-turn: the run's entry exists, a bearer issued on it verifies, and the meter has spent this one turn.
         const issued = runId ? store.issue(runId) : undefined;
         const verdict = issued ? store.verify(issued.token) : undefined;
-        seen.push({ runId, verified: verdict?.ok === true, turns: verdict?.ok ? verdict.turns : undefined });
+        seen.push({
+          runId,
+          verified: verdict?.ok === true,
+          turns: verdict?.ok ? verdict.turns : undefined,
+          sourceAllowed: await store.sourceGuardFor(runId ?? "missing").check(),
+        });
         return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
       },
     };
@@ -26389,7 +26406,8 @@ describe("the model proxy's run bearer through dispatch()", () => {
     const io: ChannelIO = { ...base.io, runStarted: ({ id }) => void (runId = id) };
     await dispatch(deps, msg("hello there"), io);
     expect(base.replies).toContain("answer");
-    expect(seen).toEqual([{ runId, verified: true, turns: 1 }]);
+    expect(await Promise.all(initialSourceChecks)).toEqual([false]);
+    expect(seen).toEqual([{ runId, verified: true, turns: 1, sourceAllowed: true }]);
     const facts = store.grantOf(runId!);
     expect(facts).toMatchObject({
       runId,
@@ -26406,16 +26424,16 @@ describe("the model proxy's run bearer through dispatch()", () => {
     expect(store.issue(runId!)).toBeUndefined(); // nothing buys a call after the run's end
   });
 
-  it("a dispatch that ends without a run — a refused agent — mints nothing, and a process without a store runs exactly as before", async () => {
+  it("a refused dispatch mints nothing and a normal configured dispatch answers", async () => {
     const store = new RunBearerStore({ clock: () => 1 });
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.runBearers = store;
     await dispatch(deps, msg("agent:coding do the thing"), fakeIO().io);
     expect(store.size()).toBe(0);
-    const bare = makeDeps(YAML_FIXTURE, capturingProvider());
+    const configured = makeDeps(YAML_FIXTURE, capturingProvider());
     const { io, replies } = fakeIO();
-    await dispatch(bare, msg("hello there"), io);
-    expect(replies).toContain("answer");
+    await dispatch(configured, msg("hello there"), io);
+    expect(replies).toEqual(["answer"]);
   });
 });
 
