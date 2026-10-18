@@ -1040,7 +1040,7 @@ export function createSteerSender(deps: {
         case "steered":
           if (out.where === "elsewhere" && run.recoveryPending)
             return {
-              text: `↪ Saved your message for the *${run.agent}* work (${runId}). This run is paused for storage recovery; your message does not resume it.`,
+              text: `↪ Saved your message for the *${run.agent}* work (${runId}). ${run.recoveryHold === "private_context" ? "This run is held for private context verification" : "This run is paused for storage recovery"}; your message does not resume it.`,
               recoveryPending: true,
             };
           return `↪ Added your message to the *${run.agent}* work (${runId}). It will read it at its next step.`;
@@ -1067,6 +1067,7 @@ export interface SteerableRun {
   id: string;
   finished: boolean;
   recoveryPending?: true;
+  recoveryHold?: "private_context";
   finishedAt?: number;
   agent?: string;
   threadKey?: string;

@@ -96,6 +96,7 @@ export interface ArtifactsSeed {
 /** The live run page follows SSE from its local registry or durable ledger.
  *  Registry URLs carry a capability; ledger URLs use the viewer decision. */
 export interface RunLiveSeed {
+  recoveryHold?: "private_context";
   runTitle?: string;
   page: "run";
   mode: "live";

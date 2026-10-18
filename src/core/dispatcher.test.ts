@@ -1564,8 +1564,9 @@ describe("dispatch", () => {
       }),
     ).toMatchObject({ ok: true });
     ledger.live.get("saved-private")!.leaseUntil = 0;
-    const [reclaimed] = await ledger.reclaim("new", Date.now(), 30_000);
+    const [reclaimed] = await ledger.reclaim("gen-child", Date.now(), 30_000);
     const { io: recoveredIO, replies: recoveredReplies } = fakeIO();
+    const holdLog = vi.spyOn(console, "log");
     expect(
       await dispatch(
         deps,
@@ -1587,9 +1588,29 @@ describe("dispatch", () => {
     expect(requests).toHaveLength(2);
     expect(ledger.live.get("saved-private")).toMatchObject({
       runId: "saved-private",
-      ownerGen: "new",
+      ownerGen: "gen-child",
       meta: { authoritativeHistory: true },
+      state: { contextRecoveryHeld: true },
     });
+    expect(await ledger.readEvents("saved-private")).toEqual([
+      {
+        type: "run_note",
+        kind: "context_recovery_held",
+        summary:
+          "This run is held because its current private context could not be verified. The original runtime and workspace are retained.",
+        seq: 1,
+        at: expect.any(Number),
+      },
+    ]);
+    expect(deps.runLedger.liveRuns()).toEqual([]);
+    expect(
+      holdLog.mock.calls
+        .map((args) => args[0])
+        .filter((line) => typeof line === "string" && line.startsWith('{"event":"run.context_recovery.hold"'))
+        .map((line) => JSON.parse(line)),
+    ).toEqual([
+      { event: "run.context_recovery.hold", runId: "saved-private", ownerGen: "gen-child", outcome: "recorded" },
+    ]);
   });
 
   it("refuses an authoritative private turn without a verified seed instead of reading stored history", async () => {

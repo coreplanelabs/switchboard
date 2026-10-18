@@ -1522,6 +1522,28 @@ describe("RunsService with the run ledger — one registry across generations (r
     ).toBe(true);
   });
 
+  it("shows a private context recovery hold instead of the stale working state", async () => {
+    const { svc, ledger } = ledgerSetup();
+    await farRun(ledger);
+    await ledger.setState("far-1", "g-OTHER", { contextRecoveryHeld: true });
+    const row = ledger.live.get("far-1")!;
+    row.liveState = { state: "working", since: NOW - 4_000, bound: NOW + 10_000 };
+    row.liveStateSeq = 2;
+    expect(await svc.getRun("far-1")).toMatchObject({
+      ok: true,
+      value: {
+        finished: false,
+        recoveryPending: true,
+        recoveryHold: "private_context",
+        activity: "held for private context verification",
+      },
+    });
+    const listed = (await svc.listRuns({ visibleTo: ALL, status: "active" })).runs[0];
+    expect(listed).toMatchObject({ recoveryPending: true, recoveryHold: "private_context" });
+    expect(listed.liveState).toBeUndefined();
+    expect(ledger.live.get("far-1")?.liveState?.state).toBe("working");
+  });
+
   it("lists a run live on the ledger under another generation as a live row — its agent, sender, repo, event count and activity from the ledger, its owner generation named — under `all` and `active`, never under `finished`; its store tombstone never surfaces", async () => {
     const { svc, store, ledger } = ledgerSetup();
     await farRun(ledger);

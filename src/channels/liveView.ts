@@ -1161,6 +1161,7 @@ export function createLiveViewHandler(
             id: route.id,
             threadKey: view.threadKey,
             ...(view.title !== undefined ? { runTitle: view.title } : {}),
+            ...(view.recoveryHold !== undefined ? { recoveryHold: view.recoveryHold } : {}),
             serverNow: now(),
             startedAt: view.startedAt,
             ...(view.receivedAt !== undefined ? { receivedAt: view.receivedAt } : {}),

@@ -359,6 +359,61 @@ describe("RunPage — the timeline (item 25)", () => {
 });
 
 describe("RunPage — recovery notices", () => {
+  it("applies repeated canonical hold snapshots to an open model span without inventing an ending", async () => {
+    vi.useFakeTimers();
+    try {
+      const { wrapper: w, es } = mountLive();
+      await flushPromises();
+      es().emitOpen();
+      es().emitMessage({ type: "span_start", spanId: "root", name: "request", attrs: {}, at: 1000 });
+      es().emitMessage({
+        type: "span_start",
+        spanId: "model",
+        parentSpanId: "root",
+        name: "model.turn",
+        attrs: {},
+        at: 2000,
+      });
+      await flushPromises();
+      expect(w.text()).toContain("currently thinking");
+      es().emitNamed("recovery", JSON.stringify({ hold: "private_context" }));
+      es().emitNamed("recovery", JSON.stringify({ hold: "private_context" }));
+      await flushPromises();
+      expect(w.find("#state").text()).toBe("held · private context could not be verified");
+      expect(w.text()).toContain("Runtime ending is unconfirmed.");
+      expect(w.text()).not.toContain("currently thinking");
+      expect(w.find("#thinking").exists()).toBe(false);
+      const timeline = w.find("#thisrun").text();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(w.find("#thisrun").text()).toBe(timeline);
+      es().emitNamed("recovery", JSON.stringify({ hold: null }));
+      await flushPromises();
+      expect(w.find("#state").text()).toContain("running");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it.each(["seed", "stream"])("shows a private context hold without a thinking row from the %s", async (source) => {
+    const { created, factory } = fakeEventSourceFactory();
+    const w = mountApp(RunPage, {
+      seed: { ...liveSeed, ...(source === "seed" ? { recoveryHold: "private_context" as const } : {}) },
+      eventSource: factory,
+    });
+    await flushPromises();
+    created[0].emitOpen();
+    if (source === "stream")
+      created[0].emitMessage({
+        type: "run_note",
+        kind: "context_recovery_held",
+        summary: "Private context could not be verified. The original runtime is retained.",
+        at: 5000,
+      });
+    await flushPromises();
+    expect(w.find("#state").text()).toBe("held · private context could not be verified");
+    expect(w.find("#thinking").exists()).toBe(false);
+    expect(w.find("#statedot").classes()).toContain("text-warn");
+  });
+
   it.each(["history", "live"])("uses info for routine recovery and warning for failures in %s mode", async (mode) => {
     const events: LiveFrame[] = [
       {

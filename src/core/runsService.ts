@@ -146,6 +146,8 @@ export interface RunView {
   liveStateSeq?: number;
   /** A deferred checkpoint still holds this producer until a recorded resume. */
   recoveryPending?: true;
+  /** The original producer is retained without replay of unverified private context. */
+  recoveryHold?: "private_context";
   /** Total events published (monotonic; the backlog/record may hold fewer). */
   eventCount: number;
   storedEventCount?: number;
@@ -620,7 +622,13 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     if (event.kind === "checkpoint_deferred") recoveryPending = true;
     else if (event.kind === "resumed") recoveryPending = false;
   }
-  const activity = recoveryPending ? "paused for storage recovery" : activityOfEvents(events);
+  const contextHeld = row.state.contextRecoveryHeld === true;
+  recoveryPending ||= contextHeld;
+  const activity = contextHeld
+    ? "held for private context verification"
+    : recoveryPending
+      ? "paused for storage recovery"
+      : activityOfEvents(events);
   // A hosted parent live under another generation still names its instance:
   // the ledger mirrors the run's events, so the record's rule reads it here.
   const instanceId = instanceIdOfEvents(events);
@@ -643,8 +651,9 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     startedAt: row.startedAt,
     finished: false,
     ...(recoveryPending ? { recoveryPending: true as const } : {}),
-    ...(row.liveState !== undefined ? { liveState: row.liveState } : {}),
-    ...(row.liveStateSeq !== undefined ? { liveStateSeq: row.liveStateSeq } : {}),
+    ...(contextHeld ? { recoveryHold: "private_context" as const } : {}),
+    ...(!contextHeld && row.liveState !== undefined ? { liveState: row.liveState } : {}),
+    ...(!contextHeld && row.liveStateSeq !== undefined ? { liveStateSeq: row.liveStateSeq } : {}),
     eventCount: events.length,
     ...(activity !== undefined ? { activity } : {}),
     ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),

@@ -22,7 +22,7 @@ import { formatDuration } from "./format";
 // and the log's own rows — getting ready, thinking, in tools, finishing up,
 // Switchboard overhead — and never a raw span name outside `debug`.
 
-export type TimelinePhase = "live" | "delivering" | "ended";
+export type TimelinePhase = "live" | "held" | "delivering" | "ended";
 
 export interface TimelineInput {
   spans: readonly SpanRecord[];
@@ -156,7 +156,7 @@ const BUCKET_WORD: Record<Bucket, PrintedTerm> = {
 
 export function buildTimeline(input: TimelineInput): TimelineVm {
   const { spans, window, owner } = input;
-  const finished = input.phase !== "live";
+  const finished = input.phase === "ended" || input.phase === "delivering";
   const p = partition(spans, { window, owner, finished, losses: input.losses });
   const printed = printedShape(p);
   const total = formatDuration(printed.totalS * 1000, "clock");
@@ -179,6 +179,23 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
       attrs: s.attrs,
     })),
   };
+  if (input.phase === "held")
+    return {
+      total,
+      lede: total,
+      current: "",
+      openStep: "",
+      captions: [],
+      shown: false,
+      bar: [],
+      legend: [],
+      ranked: [],
+      cut: [],
+      rankedNote: RANKED_NOTE,
+      cutNote: CUT_NOTE,
+      note: "Timing is unavailable while this run is held. Runtime ending is unconfirmed.",
+      debug,
+    };
   if (input.untimed) {
     // A record from before span schema: the header's total and the one note;
     // no shape is read from whatever the record carries.

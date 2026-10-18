@@ -215,6 +215,7 @@ export function serveLedgerEvents(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cursor = afterSeq;
   let finishSent = false;
+  let recoveryHold: "private_context" | null | undefined;
   const close = () => {
     closed = true;
     clearTimeout(timer);
@@ -223,6 +224,13 @@ export function serveLedgerEvents(
   sink.writeHead(200, SSE_HEADERS);
   sink.write(SSE_PRELUDE);
   const send = (view: RunRecordView) => {
+    const hold = view.finished ? null : (view.recoveryHold ?? null);
+    if (hold !== recoveryHold) {
+      // A current projection has no event sequence. Re-send it on reconnect
+      // even when the advisory hold notice was never appended.
+      sink.write(`event: recovery\ndata: ${JSON.stringify({ hold })}\n\n`);
+      recoveryHold = hold;
+    }
     for (const e of view.events ?? []) {
       if (e.seq !== undefined && e.seq > cursor) {
         if (e.seq > cursor + 1) sink.write(sseElided({ fromSeq: cursor + 1, toSeq: e.seq - 1 }));

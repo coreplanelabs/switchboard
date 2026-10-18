@@ -65,6 +65,16 @@ export function attachRunStream(opts: RunStreamOptions): RunStream {
     const range = parseReplayElided(data);
     if (range) opts.model.noteElided(range);
   });
+  es.addEventListener("recovery", (data) => {
+    let frame: { hold?: unknown } | null;
+    try {
+      frame = JSON.parse(data ?? "") as typeof frame;
+    } catch {
+      return;
+    }
+    if (frame && (frame.hold === null || frame.hold === "private_context"))
+      opts.handle({ type: "recovery_state", hold: frame.hold });
+  });
   es.addEventListener("finished", (data) => {
     opts.onFinished?.(parseFinishedFrame(data));
     if (phase.value === "connecting" || phase.value === "running") phase.value = "finished";

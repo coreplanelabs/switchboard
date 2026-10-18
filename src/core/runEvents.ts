@@ -148,6 +148,7 @@ export type RunNoteKind =
   /** The model answered, but the final context cursor could not be confirmed;
    * the live row stays recoverable and no answer or review was published. */
   | "checkpoint_deferred"
+  | "context_recovery_held"
   /** An MCP server configured for this agent did not answer discovery
    *  (docs/reference/specs/mcp-tools.md item 8); the run proceeds without its tools. One
    *  note per server, published by the dispatcher before the first turn. */
@@ -389,6 +390,7 @@ export const RUN_NOTE_KINDS = [
   "provider_failure",
   "storage_failure",
   "checkpoint_deferred",
+  "context_recovery_held",
   "mcp_unavailable",
   "follow_up",
   "resumed",

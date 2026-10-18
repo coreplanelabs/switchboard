@@ -564,6 +564,8 @@ export interface LedgerWriteThrough {
    *  under this generation with no claim and no seed. Synchronous — the row is
    *  ours since the boot reclaim, and the heartbeat must start at once. */
   adopt(req: AdoptRunRequest): LedgerRun;
+  /** Record a private-context hold without adopting or restarting its producer. */
+  holdContextRecovery(req: AdoptRunRequest): Promise<boolean>;
   /** The runs this generation is driving right now (opened or adopted, not yet finished). */
   liveRuns(): LedgerRun[];
   /** Internal canonical rows for source checks; never a public diagnostic projection. */
@@ -681,6 +683,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   adopt(req: AdoptRunRequest): LedgerRun {
     return new NullLedgerRun(req.runId, this.fallback);
+  }
+  async holdContextRecovery(_req: AdoptRunRequest): Promise<boolean> {
+    return false;
   }
   liveRuns(): LedgerRun[] {
     return [];
@@ -913,6 +918,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   const claimAttempts = opts.claimAttempts ?? RETRY_MS.length + 1;
   let routeMissingWarned = false;
   const live = new Set<TrackedRun>();
+  // An uncertain hold save retains its original request and expected state
+  // outside the live producer set. Only exact same-owner readback releases it.
+  const contextRecoveryHolds = new Map<string, { run: TrackedRun; write: Promise<FinishingGate> }>();
   /** The finishes this process is landing right now, by run id (item 54): from
    *  the sink's first `put` to the outcome — landed, refused, or failed for
    *  good. A claim answered `thread-live` for a run named here awaits its
@@ -1348,6 +1356,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     get writeBoundaryFailure(): WriteBoundaryFailure | undefined {
       const pending = this.pendingBoundaries[0];
       return pending && structuredClone(pending.failure);
+    }
+    async reconcileContextRecoveryHold(): Promise<boolean> {
+      await this.stateSending;
+      return this.reconcilePendingBoundary();
     }
     private checkpointMatches(
       receipt: unknown,
@@ -3163,6 +3175,50 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       run.startHeartbeat();
       live.add(run);
       return run;
+    },
+    async holdContextRecovery(req) {
+      // The saved producer may still exist. A display hold must not start a
+      // heartbeat, adopt its tools, or treat the hold as a shutdown receipt.
+      const retained = contextRecoveryHolds.get(req.runId);
+      let entry = retained;
+      if (!entry) {
+        const run = new TrackedRun(req, { stepNo: req.lastStep, lastSeq: req.lastSeq });
+        entry = { run, write: run.commitState({ contextRecoveryHeld: true }) };
+        contextRecoveryHolds.set(req.runId, entry);
+      }
+      const { run } = entry;
+      try {
+        let outcome = await entry.write;
+        if (retained && outcome !== "ok" && run.writeBoundaryFailure)
+          outcome = (await run.reconcileContextRecoveryHold()) ? "ok" : "unavailable";
+        if (outcome !== "ok") {
+          warn(
+            JSON.stringify({
+              event: "run.context_recovery.hold_unconfirmed",
+              runId: req.runId,
+              ownerGen: gen,
+              outcome,
+            }),
+          );
+          return false;
+        }
+        if (!retained && req.state.contextRecoveryHeld !== true)
+          run.event(
+            {
+              type: "run_note",
+              kind: "context_recovery_held",
+              summary:
+                "This run is held because its current private context could not be verified. The original runtime and workspace are retained.",
+              at: now(),
+            },
+            req.lastSeq + 1,
+          );
+        return true;
+      } finally {
+        if (!run.writeBoundaryFailure && contextRecoveryHolds.get(req.runId) === entry)
+          contextRecoveryHolds.delete(req.runId);
+        await run.close();
+      }
     },
     liveRuns: () => [...live],
     readLiveRuns: () => ledger.listLive(),

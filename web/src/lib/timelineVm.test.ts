@@ -71,6 +71,27 @@ const RAW_NAMES = new Set(REVIEW.map((s) => s.name));
 const DISPLAY = new Set<string>(Object.values(DISPLAY_NAMES));
 
 describe("buildTimeline", () => {
+  it("holds timing claims while preserving an unfinished source span", () => {
+    const spans = [sp("root", "request", 0, undefined), sp("model", "model.turn", 1000, undefined, { parent: "root" })];
+    const vm = buildTimeline({
+      spans,
+      losses: [],
+      window: { start: 0, end: 10_000 },
+      owner: "agent",
+      totalMs: 10_000,
+      phase: "held",
+    });
+    expect(vm.note).toBe("Timing is unavailable while this run is held. Runtime ending is unconfirmed.");
+    expect([vm.current, vm.openStep, vm.bar, vm.ranked, vm.cut]).toEqual(["", "", [], [], []]);
+    expect(vm.debug).toMatchObject({
+      phase: "held",
+      spans: [
+        { spanId: "root", endedAt: undefined },
+        { spanId: "model", endedAt: undefined },
+      ],
+    });
+    expect(spans[1].endedAt).toBeUndefined();
+  });
   it("finished: the lede is the header's total split into the five words, summing to it; the bar is the same numbers; the queued and delivered captions read from the root and the stamps", () => {
     const vm = buildTimeline(finishedReview);
     expect(vm.lede).toBe(

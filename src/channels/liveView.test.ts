@@ -515,6 +515,28 @@ describe("serveLedgerEvents", () => {
     ],
   });
 
+  it("delivers a saved hold without its advisory event and repeats the snapshot safely on reconnect", async () => {
+    vi.useFakeTimers();
+    const sink = recordingSink();
+    const reconnect = recordingSink();
+    let view: import("../core/runsService.js").RunRecordView = live();
+    try {
+      serveLedgerEvents(view, async () => view, sink.sink, 2);
+      view = { ...view, recoveryHold: "private_context", recoveryPending: true };
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(sink.body().match(/event: recovery\ndata: \{"hold":"private_context"\}/g)).toHaveLength(1);
+      expect(sink.body()).not.toContain("id:");
+      expect(sink.ended).toBe(false);
+      serveLedgerEvents(view, async () => view, reconnect.sink, 2);
+      expect(reconnect.body()).toContain('event: recovery\ndata: {"hold":"private_context"}');
+      expect(reconnect.body()).not.toContain("event: end");
+    } finally {
+      sink.fireClose();
+      reconnect.fireClose();
+      vi.useRealTimers();
+    }
+  });
+
   it("resumes by sequence, keeps an active replay open and ends only on a terminal receipt", async () => {
     vi.useFakeTimers();
     const sink = recordingSink();
@@ -2512,6 +2534,11 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(seed.startedAt).toBe(NOW - 5_000);
       expect(seed.eventsUrl).toBe("/runs/far-1/events");
       expect(seed.stopUrl).toBe("/runs/far-1/stop");
+      await ledger.setState("far-1", "g-OTHER", { contextRecoveryHeld: true });
+      const heldPage = fakeReqRes("GET", "/runs/far-1");
+      h.handler(heldPage.req, heldPage.res);
+      await done(heldPage);
+      expect(runSeedOf(heldPage.body())).toMatchObject({ mode: "live", recoveryHold: "private_context" });
       expect(page.body()).not.toMatch(/\?t=/);
       const replay = fakeReqRes("GET", "/runs/far-1/events");
       h.handler(replay.req, replay.res);
