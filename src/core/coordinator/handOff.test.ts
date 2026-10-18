@@ -5,6 +5,7 @@ import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { InMemoryCoordinatorInstanceStore, NullCoordinatorInstanceStore } from "./instanceStore.js";
 import { handOffToCoordinator, type HandOffDeps, type HandOffInput } from "./handOff.js";
 import { generatedTaskOf } from "./generatedTask.js";
+import { withOriginalOrganizationDispatch } from "../dispatch/originalOrganizationInput.js";
 import { contractFor } from "./briefs.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
 import { MAX_FILE_CHARS } from "../../execution/githubApi.js";
@@ -1319,6 +1320,30 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([
       { unit: rows[0]!.unit, lastPush: "abcdef1234abcdef1234abcdef1234abcdef1234" },
     ]);
+  });
+
+  it("keeps an existing Ship unit unchanged when a request-only review would reuse it", async () => {
+    const h = harness();
+    const request = input({
+      intent: "review",
+      stillPrivate: async () => true,
+      requestText: "review https://github.com/acme/api/pull/7",
+      entry: { repo: "acme/api", branch: "feat/wake-cache", base: "main", resume: { pr: 7, headSha: "a".repeat(40) } },
+    });
+    request.msg = withOriginalOrganizationDispatch(request.msg, {
+      ingressRunId: request.runId,
+      organizationSequence: 1,
+      contextMode: "request",
+    });
+    const started = await handOffToCoordinator(h.deps, request);
+    expect(started).toMatchObject({ status: "completed", admission: "created" });
+    const original = await h.instances.get(started.instanceId!);
+    const units = await h.instances.listUnits(started.instanceId!);
+    const retry = await handOffToCoordinator(h.deps, { ...request, runId: "new-run" });
+    expect(retry).toMatchObject({ status: "aborted", refusal: { code: "plan_history_unavailable" } });
+    expect(await h.instances.get(started.instanceId!)).toEqual(original);
+    expect(await h.instances.listUnits(started.instanceId!)).toEqual(units);
+    expect(h.created).toEqual([started.instanceId]);
   });
 
   it("a resume at review (agent-ship item 10) is the one generated unit with the pull request on its row and the entry's branch — the pull request's own head — so the runner opens it at the review round; the reply names the pull request and that no coding round runs first", async () => {

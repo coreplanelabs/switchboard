@@ -1,4 +1,5 @@
 import { authorize } from "../core/authz/authorize.js";
+import { nullChannelIO } from "../core/nullChannelIo.js";
 import { createSpanLog } from "../core/trace/spanLog.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import { handleAdminTraceLog, TRACE_LOG_PATH } from "./adminTraceLog.js";
@@ -448,6 +449,8 @@ async function fixture(
     policyEpoch: () => policy,
     launch: (task) => tasks.push(task),
     sourceIo: (request) => ({
+      // Native HTTP/MCP rehosting uses the same logical job-thread handle.
+      ...(request.envelope.source === "mcp" ? { openThread: nullChannelIO(request.msg.threadKey).openThread } : {}),
       ...(request.msg.directAudience
         ? {
             directAudience: () => request.msg.directAudience,
@@ -3889,6 +3892,137 @@ describe("browser installation", () => {
     });
     expect(s.effects).toEqual([]);
   });
+  it.each(["fresh", "owned-thread", "wrong-stage", "revoked-before-start", "revoked-after-records"] as const)(
+    "admits only a fresh current-request Ship review: %s",
+    async (variant) => {
+      const head = "e".repeat(40);
+      const created: string[] = [];
+      const log = createSpanLog();
+      const s = await ssoInstallation("access", undefined, (core) => {
+        core.sinks = [log.sink];
+        core.githubCredentials = TEST_GITHUB_CREDENTIALS;
+        core.fetchRepoShipInfo = async () => ({ defaultBranch: "main" });
+        core.fetchRefExists = async () => true;
+        core.resolveRepoContext = () => ({
+          repo: "sample/api",
+          pr: 42,
+          ref: "patch-1",
+          headSha: head,
+          baseRef: "main",
+        });
+        core.fetchPrFacts = async () => {
+          if (variant === "revoked-before-start") s.revokeSession();
+          return { state: "open", headRef: "patch-1", headSha: head, baseRef: "main", sameRepoHead: true };
+        };
+        core.createCoordinatorInstance = async (id) => {
+          created.push(id);
+          return { kind: "created", id };
+        };
+        core.operatorModel = async () => ({
+          tool: "bind_preset",
+          input: {
+            preset: "ship",
+            shipEntry: variant === "wrong-stage" ? "work" : "review",
+            repo: "sample/api",
+            ...(variant === "wrong-stage"
+              ? {}
+              : {
+                  prTarget: { number: 42, source: "request", quote: "https://github.com/sample/api/pull/42" },
+                }),
+            reason: "Review the requested PR",
+            settingsEvidence: operatorSettingsEvidence(),
+          },
+        });
+      });
+      if (variant === "revoked-after-records") {
+        const put = s.coordinator.putUnits.bind(s.coordinator);
+        vi.spyOn(s.coordinator, "putUnits").mockImplementation(async (rows) => {
+          const result = await put(rows);
+          s.revokeSession();
+          return result;
+        });
+      }
+      const prior = await s.send({ text: "memory forget OLD-PRIVATE-MARKER", idempotencyKey: "prior-ship-source" });
+      const oldId = prior.wire.result.structuredContent.admission.runId;
+      const old = await s.ledger.readIngressByRun(oldId);
+      if (old.status !== "record" || !old.record.origin) throw new Error("No original source");
+      // The old invocation remains owned and unread after the adapter restart.
+      s.tasks.shift();
+      s.restartNative();
+      s.core.config.config.routing!.operator = "on";
+      expect(await s.authentication.resolveEnvelope(old.record.origin)).toEqual({ status: "unavailable" });
+      if (variant === "owned-thread") {
+        await s.seedQuestion({ channelId: "mcp:default", threadKey: "mcp:default:fresh-ship", repo: "sample/api" });
+        seedCoordinatorUnit(s.coordinator, { ...unit, threadKey: "mcp:default:fresh-ship" });
+      }
+      const originalUnits = await s.coordinator.listUnits("fixture");
+      const result = await s.send(
+        {
+          text: "agent:ship review https://github.com/sample/api/pull/42",
+          thread: "fresh-ship",
+          idempotencyKey: "fresh-ship-review",
+        },
+        s.rotatedHeaders(),
+      );
+      expect(result.wire.result).toMatchObject({
+        structuredContent: { admission: { status: "accepted", runId: expect.any(String) } },
+      });
+      const id = result.wire.result.structuredContent.admission.runId;
+      const binding = await s.installation.originalBinding(id);
+      if (!binding) throw new Error("No original Ship binding");
+      expect(binding.envelope.sourceReference?.contextMode).toBe("request");
+      expect(await binding.io.authoritativePrivateHistory!(binding.msg)).toEqual([]);
+      await s.execute();
+      if (variant === "fresh") {
+        expect(created).toHaveLength(1);
+        expect(await s.coordinator.get(created[0]!)).toMatchObject({ repo: "sample/api", runId: id, merge: "person" });
+        const rows = await s.coordinator.listUnits(created[0]!);
+        expect(rows).toMatchObject([
+          {
+            branch: "patch-1",
+            resume: { pr: 42, headSha: head },
+            publication: { repo: "sample/api", pr: 42, headRef: "patch-1", expectedHeadSha: head },
+            rounds: [],
+          },
+        ]);
+        expect(JSON.stringify(rows)).not.toContain("OLD-PRIVATE-MARKER");
+      } else {
+        expect(created).toEqual([]);
+        if (variant === "owned-thread") {
+          expect(s.nativeReplies.at(-1)).toBe(
+            "The original work retains this thread. A new Ship request cannot continue it without its verified context.",
+          );
+          expect(log.read({ span: "request" }).lines.at(-1)?.attrs).toMatchObject({
+            requestContextGate: "thread_owner",
+            requestContextReason: "thread_occupied",
+            status: "refused",
+          });
+          expect(log.read({ span: "dispatch.refuse" }).lines.at(-1)?.attrs).toMatchObject({
+            requestContextGate: "thread_owner",
+            requestContextReason: "thread_occupied",
+            outcome: "setup_failed",
+          });
+          expect(await s.coordinator.listUnits("fixture")).toEqual(originalUnits);
+          const refusals = await s.runStore.list({ agent: "door", threadKey: "mcp:default:fresh-ship" });
+          expect(refusals).toHaveLength(1);
+          expect(
+            (await s.runStore.get(refusals[0]!.id))?.events.filter((event) => event.type === "refusal"),
+          ).toMatchObject([{ type: "refusal", code: "setup_failed" }]);
+        } else if (variant === "wrong-stage") expect(s.nativeReplies.join("\n")).toContain("could not be bound");
+        else
+          expect((await s.runStore.get(id))?.events).toContainEqual(
+            expect.objectContaining({
+              type: "answer",
+              text:
+                variant === "revoked-after-records"
+                  ? "Current source access could not be verified; the saved Ship unit remains held."
+                  : "Current source access could not be verified; no worker started.",
+            }),
+          );
+      }
+      expect(await s.ledger.readIngressByRun(oldId)).toEqual(old);
+    },
+  );
   it.each(["client-marker", "machine-credential"] as const)(
     "keeps %s from selecting request-only context",
     async (variant) => {

@@ -19,6 +19,7 @@ import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { redactSecrets } from "../redact.js";
 import { pullOwnerReadDiagnosticFrom, type PullOwnerReadDiagnostic } from "./pullOwnership.js";
 import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
+import { originalOrganizationDispatchOf } from "../dispatch/originalOrganizationInput.js";
 import { DEFAULT_GRANT, IDLE_DAYS_DEFAULT, type Grant, type GrantSource } from "../budgets.js";
 import { DEFAULT_VERBOSITY, type Verbosity } from "../verbosity.js";
 import { parsePlanUnit, PLAN_MAX_CHARS, unitTitleOf } from "../ship/contract.js";
@@ -710,6 +711,22 @@ function planWhere(
  * attempts did not merge.
  */
 export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
+  const requestOnly = originalOrganizationDispatchOf(input.msg)?.contextMode === "request";
+  if (
+    requestOnly &&
+    (input.intent !== "review" ||
+      input.stillPrivate === undefined ||
+      !input.entry.resume ||
+      input.entry.adopt ||
+      input.entry.plan ||
+      input.context ||
+      input.threadEvidence ||
+      input.requiresThreadEvidence ||
+      input.mainTask ||
+      (input.msg.images?.length ?? 0) > 0 ||
+      (input.msg.documents?.length ?? 0) > 0)
+  )
+    return refused("setup_failed", "This Ship request could not be bound to a new PR review; no worker started.");
   if (input.context !== undefined && !isUnitContext(input.context))
     return refused("setup_failed", "The conversation context could not be saved; no worker started.");
   if (input.mainTask !== undefined && !isMainTaskAuthority(input.mainTask.authority))
@@ -774,6 +791,13 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
   });
   const firstId = planInstanceId(p.planId);
   const first = await deps.instances.get(firstId);
+  // Empty source context cannot authorize reuse of a saved task, its private
+  // evidence, or an uncertain create. Keep that work under its original owner.
+  if (first !== null && originalOrganizationDispatchOf(input.msg)?.contextMode === "request")
+    return refused(
+      "plan_history_unavailable",
+      "The original Ship unit needs its verified context; no new attempt started.",
+    );
   if (first === null) {
     const units = await rowsFor(deps, p, p.selected, firstId);
     const instance: CoordinatorInstance = {
@@ -1241,19 +1265,28 @@ async function start(
   write: "put" | "replace",
 ): Promise<HandOffOutcome> {
   const log = deps.log ?? console.log;
+  const sourceRefusal = (saved = false) =>
+    refused(
+      "setup_failed",
+      originalOrganizationDispatchOf(input.msg)?.contextMode === "request"
+        ? saved
+          ? "Current source access could not be verified; the saved Ship unit remains held."
+          : "Current source access could not be verified; no worker started."
+        : saved
+          ? "This is no longer a private conversation; its task is saved for a safe retry."
+          : "This is no longer a private conversation; no worker started.",
+    );
   const pendingInstance: CoordinatorInstance = { ...instance, admission: "unreconciled" };
   let mainClaim;
   if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
-  if (!(await privateAtGate(input)))
-    return refused("setup_failed", "This is no longer a private conversation; no worker started.");
+  if (!(await privateAtGate(input))) return sourceRefusal();
   if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
   if (input.mainTask !== undefined) {
     const unit = units[0];
     if (unit === undefined || !(await privateWorkerLogReachable(deps, instance.id, unit.unit)))
       return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
     if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
-    if (!(await privateAtGate(input)))
-      return refused("setup_failed", "This is no longer a private conversation; no worker started.");
+    if (!(await privateAtGate(input))) return sourceRefusal();
   }
   try {
     mainClaim =
@@ -1342,12 +1375,10 @@ async function start(
   let answer: CreateInstanceAnswer;
   if (!mainRunLiveAtGate(input))
     return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
-  if (!(await privateAtGate(input)))
-    return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
+  if (!(await privateAtGate(input))) return sourceRefusal(true);
   if (input.mainTask !== undefined && !(await privateWorkerLogReachable(deps, instance.id, units[0]!.unit)))
     return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
-  if (!(await privateAtGate(input)))
-    return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
+  if (!(await privateAtGate(input))) return sourceRefusal(true);
   if (!mainRunLiveAtGate(input))
     return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
   if (input.mainTask !== undefined) {

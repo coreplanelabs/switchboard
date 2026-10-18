@@ -4,11 +4,14 @@ import { requesterTargetText, requesterUrlText, requesterUrlWords } from "./requ
 import { inspectPrTargetEvidence, prUrlIdentity, type PrTargetEvidence } from "./targetEvidence.js";
 
 /** A candidate for empty context, never permission to start an agent. */
-export function requestOnlyReviewTarget(text: string): { repo: string; number: number } | undefined {
+export function requestOnlyPrTarget(
+  text: string,
+): { repo: string; number: number; preset: "review" | "ship" } | undefined {
   const authored = requesterTargetText(text);
   const direct = parseDirectives(authored);
   const raw = parseDirectives(text);
-  if (direct.agent !== "review" || raw.agent !== "review") return;
+  if ((direct.agent !== "review" && direct.agent !== "ship") || raw.agent !== direct.agent) return;
+  if (direct.agent === "ship" && !/^review\s/i.test(direct.text.trimStart())) return;
   for (const key of ["agent", "model", "effort", "budget", "severity", "renewals", "verbosity"] as const)
     if (direct[key] !== raw[key]) return;
   const selected = explicitPrOf(authored);
@@ -24,24 +27,33 @@ export function requestOnlyReviewTarget(text: string): { repo: string; number: n
     );
     if (check.ok) targets.add(`${identity.repo}#${identity.number}`);
   }
-  return targets.size === 1 && targets.has(`${selected.repo}#${selected.number}`) ? selected : undefined;
+  return targets.size === 1 && targets.has(`${selected.repo}#${selected.number}`)
+    ? { ...selected, preset: direct.agent }
+    : undefined;
 }
 
 /** A route must still prove its action and target after the model decision. */
-export function isRequestOnlyReviewDecision(
+export function isRequestOnlyPrDecision(
   text: string,
   event:
     | {
         outcome?: string;
-        binds?: readonly { line: string; preset?: string; repo?: string; prTarget?: PrTargetEvidence }[];
+        binds?: readonly {
+          line: string;
+          preset?: string;
+          repo?: string;
+          prTarget?: PrTargetEvidence;
+          shipEntry?: string;
+        }[];
       }
     | undefined,
 ): boolean {
-  const target = requestOnlyReviewTarget(text);
+  const target = requestOnlyPrTarget(text);
   if (!target || event?.outcome !== "binds" || event.binds?.length !== 1) return false;
   const bind = event.binds[0]!;
   if (
-    bind.preset !== "review" ||
+    bind.preset !== target.preset ||
+    (target.preset === "ship" && bind.shipEntry !== "review") ||
     bind.repo !== target.repo ||
     bind.prTarget?.source !== "request" ||
     bind.prTarget.number !== target.number

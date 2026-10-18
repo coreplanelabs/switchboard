@@ -76,7 +76,7 @@ import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.j
 import type { AttrDomain } from "./trace/attrs.js";
 import { cardShapeLineOf, queuedCaption } from "./runShape.js";
 import { barePrNumberOf, explicitPrOf, type RepoContext, type OperationTarget } from "./repoContext.js";
-import { requestOnlyReviewTarget, isRequestOnlyReviewDecision } from "./dispatch/requestOnlyReview.js";
+import { requestOnlyPrTarget, isRequestOnlyPrDecision } from "./dispatch/requestOnlyPr.js";
 import { redactSecrets, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import type { LiveThread } from "./threadAdmission.js";
@@ -828,10 +828,12 @@ export async function dispatch(
       opts.resume ||
       opts.restart ||
       opts.restartOf ||
-      !requestOnlyReviewTarget(msg.text))
+      !requestOnlyPrTarget(msg.text))
   ) {
     observeRequestContextRefusal("input", "invalid_input");
-    await io.reply("This Review could not be verified as a new request.");
+    await io.reply(
+      `This ${parseDirectives(msg.text).agent === "ship" ? "Ship request" : "Review"} could not be verified as a new request.`,
+    );
     return { status: "refused", refusal: "setup_failed" };
   }
   // A saved provider context cannot prove that excluded private bytes are absent.
@@ -1441,7 +1443,9 @@ export async function dispatch(
     if (opts.contextMode === "request" && operatorMode !== "on") {
       refused = true;
       observeRequestContextRefusal("operator_mode", "routing_disabled", trace);
-      await io.reply("This Review could not be bound to the current request.");
+      await io.reply(
+        `This ${typedAgent === "ship" ? "Ship request" : "Review"} could not be bound to the current request.`,
+      );
       return { status: "refused", refusal: "setup_failed" };
     }
     if (typedAgent === "orchestrator")
@@ -1541,6 +1545,17 @@ export async function dispatch(
         if (pageOwner.kind === "unavailable") {
           await io.reply("This thread's work owner could not be verified, so no new work started.");
           return ended;
+        }
+        if (opts.contextMode === "request" && typedAgent === "ship" && pageOwner.kind !== "none") {
+          refused = true;
+          observeRequestContextRefusal("thread_owner", "thread_occupied", trace);
+          const refusal = refusalOf(
+            "setup_failed",
+            "The original work retains this thread. A new Ship request cannot continue it without its verified context.",
+          );
+          await io.reply(refusal.text);
+          await recordRefusalOnce(refusal);
+          return { status: "refused", refusal: "setup_failed" };
         }
         const unfinishedOwner = pageOwner.kind === "unit";
         if (exactPrReply && pageOwner.kind !== "live") {
@@ -1845,10 +1860,13 @@ export async function dispatch(
       // the live run. Thread occupancy itself is untouched: one live run per
       // thread, and nothing here starts a rival in an occupied one.
       const live = operatorEvent ? admission.get(msg.threadKey) : undefined;
-      if (opts.contextMode === "request" && !isRequestOnlyReviewDecision(msg.text, operatorEvent)) {
+      if (opts.contextMode === "request" && !isRequestOnlyPrDecision(msg.text, operatorEvent)) {
         refused = true;
         observeRequestContextRefusal("operator_decision", "invalid_bind", trace);
-        const refusal = refusalOf("setup_failed", "This Review could not be bound to the current request.");
+        const refusal = refusalOf(
+          "setup_failed",
+          `This ${typedAgent === "ship" ? "Ship request" : "Review"} could not be bound to the current request.`,
+        );
         await io.reply(refusal.text);
         await recordRefusalOnce(refusal);
         return { status: "refused", refusal: "setup_failed" };
@@ -1967,11 +1985,17 @@ export async function dispatch(
 
     if (
       opts.contextMode === "request" &&
-      (operatorMode !== "on" || operatorPreset !== "review" || operatorPrTarget?.source !== "request")
+      (operatorMode !== "on" ||
+        operatorPreset !== requestOnlyPrTarget(msg.text)?.preset ||
+        (operatorPreset === "ship" && operatorShipEntry !== "review") ||
+        operatorPrTarget?.source !== "request")
     ) {
       refused = true;
       observeRequestContextRefusal("typed_route", "invalid_bind", trace);
-      const refusal = refusalOf("setup_failed", "This Review could not be bound to the current request.");
+      const refusal = refusalOf(
+        "setup_failed",
+        `This ${typedAgent === "ship" ? "Ship request" : "Review"} could not be bound to the current request.`,
+      );
       await io.reply(refusal.text);
       await recordRefusalOnce(refusal);
       return { status: "refused", refusal: "setup_failed" };
