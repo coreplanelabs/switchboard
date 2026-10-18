@@ -30,10 +30,12 @@ import type { CostsSnapshotStatus } from "../src/core/costsSnapshot.js";
 import { buildMetricsReport, type MetricsReport, type MetricsRow } from "../src/core/metrics.js";
 import { buildReviewFeedbackReport } from "../src/core/reviewFeedbackReport.js";
 import type { ReviewFeedbackEntry, ReviewFeedbackVote } from "../src/core/reviewFeedback.js";
-import { DAY_MS, MINUTE_MS } from "../src/core/budgets.js";
+import { CONFIRMATION_TTL_MS, DAY_MS, MINUTE_MS } from "../src/core/budgets.js";
 import type { RunUsage, UsageRow } from "../src/core/runUsage.js";
 import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
+import { renderMcpApprovalPage } from "../src/channels/mcpApprovalPage.js";
+import { FORM_PAGE_CSP, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
 import { normalizeSpans } from "../src/core/normalizeSpans.js";
 import type { RunEvent } from "../src/core/runEvents.js";
@@ -2898,6 +2900,30 @@ createServer((req, res) => {
     url.pathname = url.pathname.replace("/settings/runtime", "/residents");
   if (greenPreview && url.pathname === "/home/threads") url.pathname = "/threads";
   if (assets.serve(req, res)) return;
+  if (url.pathname === "/settings/approve") {
+    res.writeHead(200, { ...WEB_HTML_HEADERS, "content-security-policy": FORM_PAGE_CSP });
+    res.end(
+      renderMcpApprovalPage(
+        "Preview complete. No action ran.",
+        assets.entry.css,
+        req.method === "GET"
+          ? {
+              action: "/settings/approve?id=preview-offer",
+              line: "runs stop 00000000-0000-4000-8000-000000000000",
+              risk: "Ends the current turn and cleans up its runtime.",
+              expiresAt: NOW + CONFIRMATION_TTL_MS,
+              run: {
+                label: "Review the run cancellation fix",
+                repo: "acme/app",
+                agent: "review",
+                pr: 42,
+              },
+            }
+          : undefined,
+      ),
+    );
+    return;
+  }
   if (url.pathname === "/favicon.ico") {
     res.writeHead(200, { "content-type": "image/svg+xml" });
     res.end(FAVICON_ICO_SVG);
