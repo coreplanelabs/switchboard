@@ -241,11 +241,11 @@
     },
     "screenshots:gen": {
       "does": "Renders changed dashboard captures in both themes and records input hashes.",
-      "when": "After a `web/` or fixture change; needs Chromium."
+      "when": "Paused; enable websiteMaintenance in project.json."
     },
     "screenshots:check": {
       "does": "Each surface's inputs still hash to what its screenshots were rendered from — no browser.",
-      "when": "Part of `check:consistency`."
+      "when": "Skips while website maintenance is paused."
     },
     "load": {
       "does": "Load harness for infrastructure and route checks.",
@@ -271,5 +271,6 @@
       "does": "Installs Resident support and keeps maintenance held.",
       "when": "Manual staging CI; separate readiness artifact."
     }
-  }
+  },
+  "websiteMaintenance": false
 }

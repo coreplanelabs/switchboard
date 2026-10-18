@@ -101,14 +101,31 @@ contract for each feature and a documentation tree organized by
 [Diataxis](https://diataxis.fr). A pull request that changes what a user,
 operator, or dashboard viewer sees updates the matching spec and the matching
 docs page in the same PR. Reference tables are generated from the code
-(`npm run docs:gen`); never edit between the generated markers by hand. The
-dashboard's screenshots are generated the same way: a change under `web/` that
-alters what a surface looks like needs `npm run screenshots:gen` (once:
-`npx playwright-core install chromium`) and the regenerated PNGs committed —
-`npm run screenshots:check` and its unit-test twin fail otherwise, naming the
-file that changed. Source drift also needs generation to refresh its receipt,
-but unchanged built assets and fixture responses skip browser capture and
-retain the existing images. `--force` always captures.
+(`npm run docs:gen`); never edit between the generated markers by hand.
+
+Website maintenance is paused with `websiteMaintenance: false` in
+`project.json`. CI skips the website build and deployment. Local site builds,
+site checks, screenshot generation, and manifest freshness checks report a
+skip. Keep the existing site source, PNGs, and manifests. Product changes do
+not need to refresh them while maintenance is paused. Reference tables,
+behavioral specs, and dashboard checks remain active.
+
+To enable and refresh the website in one PR:
+
+1. Set `websiteMaintenance` to `true` in `project.json`.
+2. Run `npm run fix` to refresh generated references.
+3. Install the capture browser with `npx playwright-core install chromium`.
+4. Run `npm run screenshots:gen -- --force` and inspect the captures. Commit
+   the refreshed PNGs and manifests with the switch change.
+5. Run `npm run screenshots:check`, `npm run docs:build`,
+   `npm run check:site`, and `npm run verify -w deploy/cloudflare-docs`.
+   Fix stale site content, links, or build inputs in that PR.
+6. Request review. After merge, CI resumes website deployment on `main`.
+
+When maintenance is enabled, dashboard changes require current screenshot
+manifests. `npm run screenshots:gen` refreshes their inputs. Unchanged built
+assets and fixture responses retain the existing images; `--force` captures
+all surfaces.
 
 **Diagrams share one visual system.** Every diagram is a ```mermaid fence; the
 site draws it in its own palette and GitHub in its defaults, so a fence carries

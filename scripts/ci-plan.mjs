@@ -6,6 +6,8 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { websiteMaintenanceEnabled } from "./website-maintenance.mjs";
+
 export const BOT_CHECKS = ["check:consistency", "typecheck", "lint", "format:check"];
 export const WORKERS = [
   "deploy/cloudflare",
@@ -106,7 +108,7 @@ export function fullPlan() {
     botChecks: BOT_CHECKS,
     botTests: true,
     web: true,
-    docs: true,
+    docs: websiteMaintenanceEnabled,
     package: true,
     workers: WORKERS,
     images: IMAGES,
@@ -143,10 +145,13 @@ export function fixtureRegistrationOnly(beforePackage, afterPackage, beforeLock,
 /** Pure path selection; `none` keeps an otherwise empty matrix valid. */
 export function planForPaths(paths, { fixtureRegistrationOnly: fixtureRootOnly = false } = {}) {
   const acceptanceChanged = fixtureRootOnly || paths.some((path) => path.startsWith(`${ACCEPTANCE_SOURCE}/`));
-  const withAcceptance = (plan) =>
-    acceptanceChanged
-      ? { ...plan, workers: [...plan.workers.filter((worker) => worker !== "none"), ACCEPTANCE_SOURCE] }
-      : plan;
+  const withAcceptance = (plan) => ({
+    ...plan,
+    docs: plan.docs && websiteMaintenanceEnabled,
+    ...(acceptanceChanged
+      ? { workers: [...plan.workers.filter((worker) => worker !== "none"), ACCEPTANCE_SOURCE] }
+      : {}),
+  });
   const checks = new Set(["check:consistency"]);
   const workers = new Set();
   const images = new Set();
@@ -321,7 +326,9 @@ function main() {
         readFileSync(join(ROOT, "package-lock.json"), "utf8"),
       )
     : fullPlan();
-  const reason = paths ? `${paths.length} changed path(s) against ${base}` : "no trustworthy diff; running every leg";
+  const reason = paths
+    ? `${paths.length} changed path(s) against ${base}`
+    : "no trustworthy diff; running every enabled leg";
   console.log(`ci:plan — ${reason}`);
   console.log(JSON.stringify(plan));
   if (process.env.GITHUB_OUTPUT) {

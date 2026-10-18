@@ -7,10 +7,12 @@
   },
   "scripts": {
     "build": "npm --prefix ../../docs run build",
-    "deploy": "npm --prefix ../.. run --silent deploy:gen && npm run build && wrangler deploy",
-    "verify": "npm --prefix ../.. run --silent deploy:gen && wrangler deploy --dry-run",
+    "deploy": "node ../../scripts/website-maintenance.mjs npm run deploy:site --",
+    "verify": "node ../../scripts/website-maintenance.mjs npm run verify:site --",
     "dev": "wrangler dev",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "deploy:site": "npm --prefix ../.. run --silent deploy:gen && npm run build && wrangler deploy",
+    "verify:site": "npm --prefix ../.. run --silent deploy:gen && wrangler deploy --dry-run"
   },
   "devDependencies": {
     "wrangler": "^4.148.0"

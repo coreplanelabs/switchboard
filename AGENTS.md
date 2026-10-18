@@ -87,8 +87,8 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs; `-- --port <n>` picks the port. |
 | `npm run docs:build` | Builds the docs site to `docs/.vitepress/dist`. | Rarely by hand; `verify -w docs` and the docs Worker's deploy run it. |
 | `npm run web:preview` | Serves the dashboard bundle over fixtures for a visual check. | After a `web/` change. |
-| `npm run screenshots:gen` | Renders changed dashboard captures in both themes and records input hashes. | After a `web/` or fixture change; needs Chromium. |
-| `npm run screenshots:check` | Each surface's inputs still hash to what its screenshots were rendered from — no browser. | Part of `check:consistency`. |
+| `npm run screenshots:gen` | Renders changed dashboard captures in both themes and records input hashes. | Paused; enable websiteMaintenance in project.json. |
+| `npm run screenshots:check` | Each surface's inputs still hash to what its screenshots were rendered from — no browser. | Skips while website maintenance is paused. |
 | `npm run load` | Load harness for infrastructure and route checks. | Model capacity receipts. |
 | `npm run smoke:ingress` | Checks three deployment capability families; --check makes no network request. | Configured disposable scope; release acceptance. |
 | `npm run staging:deploy` | Deploys isolated staging; --recreate plans explicit recreation. | Staging CI and explicit operator setup. |
