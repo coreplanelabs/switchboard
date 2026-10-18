@@ -1399,7 +1399,7 @@ describe("runs.stop", () => {
     });
   });
 
-  async function staleOwnerWorld(sinkFails = false) {
+  async function invalidOwnerWorld(sinkFails = false) {
     const { reg, registry, store } = await setup();
     let now = NOW;
     const ledger = new InMemoryRunLedger(() => now);
@@ -1429,7 +1429,7 @@ describe("runs.stop", () => {
         workspace: "/private/checkout",
         user: "private-user",
         container: "private-container",
-        ownerGen: "old-owner",
+        ownerGen: "invalid owner",
         ownerFence: 7,
       },
     });
@@ -1457,7 +1457,7 @@ describe("runs.stop", () => {
   }
 
   it("reads a fresh shutdown check without changing the target or borrowing another resource", async () => {
-    const { id, registry, ledger, warnings, fetch, deps } = await staleOwnerWorld();
+    const { id, registry, ledger, warnings, fetch, deps } = await invalidOwnerWorld();
     const input = { args: [id], options: { include: "shutdown" } };
     expect(value<{ shutdown: unknown }>(await registry.invoke("runs.get", input, cli, deps)).shutdown).toEqual({
       status: "observed",
@@ -1465,7 +1465,7 @@ describe("runs.stop", () => {
       ownerGen: "current-owner",
       stopIntent: null,
       targetCheck: "refused",
-      refusal: { phase: "prepare", cause: "custody-unverified", custody: "owner-generation-mismatch" },
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "owner-generation-invalid" },
       runtimeContacted: false,
       confirmation: "not-checked",
     });
@@ -1505,15 +1505,15 @@ describe("runs.stop", () => {
   });
 
   it.each([false, true])(
-    "keeps a stale-owner Stop refused with safe evidence when diagnostic delivery fails=%s",
+    "keeps an invalid-owner Stop refused with safe evidence when diagnostic delivery fails=%s",
     async (sinkFails) => {
-      const { id, registry, ledger, warnings, fetch, deps } = await staleOwnerWorld(sinkFails);
+      const { id, registry, ledger, warnings, fetch, deps } = await invalidOwnerWorld(sinkFails);
       expect(await registry.invoke("runs.stop", { args: [id], options: {} }, cli, deps)).toEqual({
         ok: false,
         error: "unavailable",
         status: 503,
         decidedBy: "handler",
-        message: "The recorded workspace owner does not match the run owner. Shutdown is not confirmed.",
+        message: "The recorded workspace owner could not be verified. Shutdown is not confirmed.",
       });
       expect(warnings).toEqual(
         sinkFails
@@ -1527,7 +1527,7 @@ describe("runs.stop", () => {
                 stage: "target-check",
                 phase: "prepare",
                 cause: "custody-unverified",
-                custody: "owner-generation-mismatch",
+                custody: "owner-generation-invalid",
                 stopIntentRecorded: true,
                 shutdownConfirmed: false,
               },
@@ -1536,7 +1536,7 @@ describe("runs.stop", () => {
       expect(ledger.live.get(id)).toMatchObject({
         ownerGen: "current-owner",
         stop: "hard",
-        state: { binding: { ownerGen: "old-owner", ownerFence: 7 } },
+        state: { binding: { ownerGen: "invalid owner", ownerFence: 7 } },
       });
       expect(ledger.finished.has(id)).toBe(false);
       expect(fetch).not.toHaveBeenCalled();

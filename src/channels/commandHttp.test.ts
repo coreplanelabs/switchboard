@@ -450,6 +450,99 @@ describe("createCommandHttpHandler — hard stop after restart", () => {
     return ledger;
   }
 
+  it("Kill after reclaim stops the original Resident target and removes the run", async () => {
+    const binding = {
+      backend: "resident",
+      workspace: "/workspace/original",
+      ref: "main",
+      user: "worker2",
+      container: "original-boot",
+      ownerGen: "g-original",
+      ownerFence: 7,
+    };
+    const ledger = await stoppedLedger({ binding });
+    expect((await ledger.reclaim("g-restarted", NOW, 30_000))[0].row.ownerGen).toBe("g-restarted");
+    const store = new InMemoryRunStore({ now: () => NOW });
+    // The production ledger and history store share terminal records.
+    const finish = ledger.finishCancellation.bind(ledger);
+    ledger.finishCancellation = async (ticket, record) => {
+      const result = await finish(ticket, record);
+      if (result.ok) await store.put(record);
+      return result;
+    };
+    const requests: unknown[] = [];
+    let acknowledged = false;
+    const { handler } = await fixture(
+      {},
+      {
+        registry: new RunRegistry({ now: () => NOW }),
+        ledger,
+        store,
+        generation: "g-restarted",
+        clock: () => NOW,
+        stopRuntime: createRunStop(
+          { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+          secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+          async (_url, init) => {
+            const request = JSON.parse(String(init?.body));
+            requests.push(request);
+            if (!acknowledged)
+              return Response.json({
+                stopped: false,
+                cancellationId: request.cancellation.id,
+                refusal: { phase: "resident", cause: "operations-busy" },
+              });
+            return Response.json({
+              stopped: true,
+              cancellationId: request.cancellation.id,
+              disposition: "processes-stopped",
+            });
+          },
+        ),
+      },
+    );
+    const killRequest = () =>
+      fakeReqRes({
+        method: "POST",
+        url: "/api/runs.kill",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+    const pending = killRequest();
+    await handler(pending.req, pending.res, operator);
+    expect({ status: pending.status, body: pending.json() }).toEqual({
+      status: 503,
+      body: { code: "unavailable", error: "The run still has operations in progress." },
+    });
+    expect((await ledger.listLive())[0]).toMatchObject({
+      runId: id,
+      ownerGen: "g-restarted",
+      stop: "hard",
+      state: { binding },
+    });
+    expect(await store.deleted([id])).toEqual([]);
+    acknowledged = true;
+    const request = killRequest();
+    await handler(request.req, request.res, operator);
+
+    expect({ status: request.status, body: request.json() }).toEqual({
+      status: 200,
+      body: { id, mode: "kill", state: "deleted" },
+    });
+    expect(requests[0]).toEqual({
+      cancellation: expect.objectContaining({ runId: id, ownerGen: "g-restarted" }),
+      binding,
+      resource: "repo:fixture/repo",
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual(requests[0]);
+    const read = fakeReqRes({ method: "GET", url: `/api/runs.get?id=${id}` });
+    await handler(read.req, read.res, operator);
+    expect(read.status).toBe(404);
+    expect(await store.deleted([id])).toEqual([id]);
+    expect(await ledger.listLive()).toEqual([]);
+  });
+
   it("reports an unavailable shutdown rather than stopping an old run with no target or local control", async () => {
     const ledger = await stoppedLedger();
     // No local control exists in the restarted process. The legacy row has no
