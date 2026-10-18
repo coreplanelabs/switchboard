@@ -4,7 +4,11 @@ import { cancellationRecordMatches } from "../../src/core/runLedger/cancellation
 import { isRunRecord } from "../../src/core/runRecord.ts";
 import { reclaimedRunRecord } from "../../src/core/dispatch/record.ts";
 import { sourceHash, mergeSessionSources } from "../../src/core/references/receipts.ts";
-import { sourceFoldRunTarget, orchestratorDecisionsOf } from "../../src/core/dispatch/orchestratorDecisions.ts";
+import {
+  sourceFoldRunTarget,
+  sourceFoldRunContext,
+  orchestratorDecisionsOf,
+} from "../../src/core/dispatch/orchestratorDecisions.ts";
 import { sourceSnapshot } from "../../src/core/runLedger/sourceEvents.ts";
 import { inboxDeliveryWitness } from "../../src/core/runLedger/inboxDelivery.ts";
 import {
@@ -17729,7 +17733,21 @@ describe("typed SQLite source evidence", () => {
       content: { kind: "facts", facts: { state: "closed", nested: { value: null } } },
     });
     if (kind === "fold") {
+      const dependencies = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
       const live = (await post("/runs/live", { storeKey: key })).data.runs as LiveRunRow[];
+      for (const row of live.filter((row) => [rootId, "r1"].includes(row.runId))) {
+        row.state.contextDependencies = dependencies;
+        expect(
+          (
+            await post("/runs/state", {
+              storeKey: key,
+              runId: row.runId,
+              gen: "g1",
+              state: row.state,
+            })
+          ).data.ok,
+        ).toBe(true);
+      }
       const root = live.find((row) => row.runId === rootId)!;
       const child = live.find((row) => row.runId === "r1")!;
       const saved = orchestratorDecisionsOf(root.state.orchestratorDecisions, owner)?.[0];
@@ -17738,10 +17756,12 @@ describe("typed SQLite source evidence", () => {
         ...saved,
         target: { ...saved.target, hash: await sourceHash(sourceSnapshot(sourceFoldRunTarget(child))) },
         inputHash: await sourceHash(sourceSnapshot(message)),
+        contextHash: await sourceHash(sourceSnapshot(sourceFoldRunContext(root, child))),
       };
       for (const [changed, reason] of [
         [{ ...decision, inputHash: "d".repeat(64) }, "fold-input"],
         [{ ...decision, target: { ...decision.target, hash: "e".repeat(64) } }, "fold-target"],
+        [{ ...decision, contextHash: "f".repeat(64) }, "fold-context"],
         [undefined, "fold-decision"],
       ] as const) {
         expect(
@@ -17750,7 +17770,7 @@ describe("typed SQLite source evidence", () => {
               storeKey: key,
               runId: rootId,
               gen: "g1",
-              state: { orchestratorDecisions: changed ? [changed] : [] },
+              state: { orchestratorDecisions: changed ? [changed] : [], contextDependencies: dependencies },
             })
           ).data.ok,
         ).toBe(true);
@@ -17801,7 +17821,7 @@ describe("typed SQLite source evidence", () => {
             storeKey: key,
             runId: rootId,
             gen: "g1",
-            state: { orchestratorDecisions: [decision] },
+            state: { orchestratorDecisions: [decision], contextDependencies: dependencies },
           })
         ).data.ok,
       ).toBe(true);
@@ -17850,6 +17870,63 @@ describe("typed SQLite source evidence", () => {
           },
         ]),
       });
+      const contextRace = await runInDurableObject(
+        env.RUNS.get(env.RUNS.idFromName(key)),
+        async (instance: RunHistoryDO, state) => {
+          const logs: unknown[][] = [];
+          const warn = console.warn;
+          console.warn = (...fields: unknown[]) => {
+            logs.push(fields);
+          };
+          const results = [];
+          try {
+            for (const [runId, unavailable] of [
+              [rootId, false],
+              ["r1", false],
+              [rootId, true],
+            ] as const) {
+              const stored = state.storage.sql
+                .exec<{ state_json: string }>("SELECT state_json FROM live_runs WHERE run_id=?", runId)
+                .one().state_json;
+              try {
+                const pending = instance.pushInbox("r1", { ...message! });
+                const changed = JSON.parse(stored);
+                if (unavailable) changed.contextDependencies.status = "unknown";
+                else changed.contextDependencies.revision++;
+                state.storage.sql.exec(
+                  "UPDATE live_runs SET state_json=? WHERE run_id=?",
+                  JSON.stringify(changed),
+                  runId,
+                );
+                results.push(await pending);
+              } finally {
+                state.storage.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", stored, runId);
+              }
+            }
+            return { results, logs };
+          } finally {
+            console.warn = warn;
+          }
+        },
+      );
+      expect(contextRace).toEqual({
+        results: [
+          { ok: false, reason: "invalid-message" },
+          { ok: false, reason: "invalid-message" },
+          { ok: false, reason: "invalid-message" },
+        ],
+        logs: ["fold-context", "fold-context", "fold-context-unavailable"].map((reason) => [
+          "[runs/inbox] source evidence refused",
+          {
+            runId: "r1",
+            kind: "source-evidence",
+            version: 2,
+            phase: "append",
+            reason,
+          },
+        ]),
+      });
+      expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1" })).data.items).toEqual([]);
     }
     for (const changed of [
       { ...message!, content: { kind: "facts", facts: { state: "open" } } },
