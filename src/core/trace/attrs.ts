@@ -66,7 +66,8 @@ export interface AttrDomain {
    *  and the request's root, so refusals are countable from the trace alone. */
   refusal: string;
   /** Request-only context gates; no requester, target or model payload. */
-  requestContextGate: "input" | "operator_mode" | "operator_decision" | "typed_route" | "local_owner" | "remote_owner";
+  requestContextGate:
+    "input" | "operator_mode" | "operator_decision" | "typed_route" | "thread_owner" | "local_owner" | "remote_owner";
   requestContextReason: "invalid_input" | "routing_disabled" | "invalid_bind" | "thread_occupied";
   /** The refusal's cause, from the one code→cause table in src/core/refusal.ts. */
   cause: "request" | "policy" | "system";

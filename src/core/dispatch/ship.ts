@@ -73,6 +73,7 @@ import { renderRefusal, replyAck } from "./reply.js";
 import { shows, type Verbosity } from "../verbosity.js";
 import { REFUSAL_SENTENCES } from "./reply.js";
 import type { UnitContext } from "./unitContext.js";
+import { originalOrganizationDispatchOf } from "./originalOrganizationInput.js";
 
 /** What the ship branch reads: the run slice (the config, the registry and
  *  history writers, the GitHub client the hand-off reads the plan with), the
@@ -548,6 +549,13 @@ export async function runShipBranch(
     });
     if (ctx.route) registry.publish(run.id, { type: "route", ...ctx.route, at: clock() });
     if (ctx.operator) registry.publish(run.id, { type: "operator", ...ctx.operator, at: clock() });
+    if (originalOrganizationDispatchOf(msg)?.contextMode === "request")
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "seed",
+        summary: "This Ship review uses your current request and GitHub. Earlier conversation context is not included.",
+        at: clock(),
+      });
     if (deps.config.config.runHistory?.includeContext !== false) {
       for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
     }
@@ -780,6 +788,13 @@ export async function runShipBranch(
               ...(threadEvidence !== undefined ? { threadEvidence } : {}),
               ...(requiresThreadEvidence ? { requiresThreadEvidence: true } : {}),
               msg,
+              ...(originalOrganizationDispatchOf(msg)?.contextMode === "request"
+                ? {
+                    stillPrivate: async () =>
+                      io.authoritativePrivateHistory !== undefined &&
+                      (await io.authoritativePrivateHistory(msg)).length === 0,
+                  }
+                : {}),
               agentSource: ctx.agentSource,
               runId: run.id,
               label,

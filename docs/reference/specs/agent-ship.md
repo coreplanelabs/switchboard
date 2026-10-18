@@ -364,3 +364,13 @@ A complete final pre-model attach refusal carries zero model spend even when its
 | Changing the recorded primary action changes the complete question guard; an old observed action is stale, while the current complete question accepts the original owner's reply | `[unit]` `src/core/coordinator/questionAnswer.test.ts::Original question answer admission::rejects an old primary action after the original owner changes it and accepts only the complete current question` |
 
 | An exact pending recovery action observed after its old unit snapshot rereads that canonical unit before replay. Same-request concurrency retains one claim/start and its unadmitted restore; a conflicting claim, changed bound head or unavailable reread refuses without another admission | `[unit]` `src/channels/adminCoordinator.test.ts::POST /admin/coordinator/recover-unit — unchanged-head original-unit recovery::post-approval recovery admits one concurrent claim and restores an unadmitted claim without consuming the review`, `::post-approval recovery refuses a delayed action read after * without another admission` |
+
+
+## Fresh native PR review
+
+A [request-only native Ship review](mcp-ingress.md#request-only-review-admission) can use a new current-authored PR request without old private conversation context. It retains normal PR ownership and publication checks. Empty context cannot authorize reissue of an existing generated unit, even if its Workflow is absent or ended; the original unit remains held. Current source access must still pass before the durable start effects.
+
+| Criterion | Proof |
+|---|---|
+| A new native Ship review binds one current-authored PR and starts at review on that PR branch, with no historical private text. A wrong stage or revoked source starts no Workflow. | `[unit]` `src/channels/browserHomeInstallation.test.ts::admits only a fresh current-request Ship review: %s` |
+| Request-only admission cannot replace or reissue an existing Ship unit or its saved context. | `[unit]` `src/core/coordinator/handOff.test.ts::keeps an existing Ship unit unchanged when a request-only review would reuse it` |

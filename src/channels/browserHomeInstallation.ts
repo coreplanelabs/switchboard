@@ -67,7 +67,7 @@ import { parsePrivateWorkerThreadKey, type PrivateWorkerLog } from "../core/priv
 import { privateWorkerAudienceFor } from "./privateWorker.js";
 import { isUnitContext } from "../core/dispatch/unitContext.js";
 import { ownerOf, readThread as readOwnedThread } from "../core/dispatch/thread.js";
-import { requestOnlyReviewTarget } from "../core/dispatch/requestOnlyReview.js";
+import { requestOnlyPrTarget } from "../core/dispatch/requestOnlyPr.js";
 import { nativeMediaDigest, nativeMediaSchema, matchesNativeMedia } from "../core/nativeMedia.js";
 import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js";
 import type { HomeAnswerTarget, HomeMergeAction } from "./homeSeed.js";
@@ -1697,7 +1697,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
         (current.authentication.source === "mcp" && continuation.kind === "confirm" && !hasConfirmationConsent(choice)))
     )
       return { status: "not_found" as const };
-    let independent: ReturnType<typeof requestOnlyReviewTarget>;
+    let independent: ReturnType<typeof requestOnlyPrTarget>;
     const selectContext = (): RequestContextSelection => {
       if (original.status !== "not_found")
         return original.status === "submission" && original.envelope.sourceReference?.contextMode === "request"
@@ -1710,7 +1710,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       if (continuation) return "continuation";
       if (hasMedia) return "media";
       if (operatorModeOf(core.config.config) !== "on") return "routing";
-      independent = requestOnlyReviewTarget(msg.text);
+      independent = requestOnlyPrTarget(msg.text);
       return independent ? "selected" : "target";
     };
     observeAdmission(trace, { contextSelection: selectContext() });

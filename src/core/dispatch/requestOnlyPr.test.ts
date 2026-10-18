@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { requestOnlyReviewTarget, isRequestOnlyReviewDecision } from "./requestOnlyReview.js";
+import { requestOnlyPrTarget, isRequestOnlyPrDecision } from "./requestOnlyPr.js";
 
 const request = "agent:review model:openai/request-model effort:high https://github.com/acme/api/pull/7";
 const bind = {
@@ -13,14 +13,31 @@ const bind = {
     },
   ],
 };
-describe("request-only Review qualification", () => {
+describe("request-only PR qualification", () => {
+  it("binds only the requested Ship review stage on the current authored PR", () => {
+    const text = request.replace("agent:review", "agent:ship review");
+    const ship = { ...bind, binds: [{ ...bind.binds[0]!, preset: "ship", shipEntry: "review" }] };
+    expect(requestOnlyPrTarget(text)).toEqual({ repo: "acme/api", number: 7, preset: "ship" });
+    expect(isRequestOnlyPrDecision(text, ship)).toBe(true);
+    for (const stage of ["work", "work_from_thread", "continue", "plan", undefined])
+      expect(isRequestOnlyPrDecision(text, { ...ship, binds: [{ ...ship.binds[0]!, shipEntry: stage }] })).toBe(false);
+    expect(isRequestOnlyPrDecision(text, bind)).toBe(false);
+    for (const invalid of [
+      text.replace("ship review", "ship continue"),
+      text.replace("ship review", "ship plan"),
+      text.replace("ship review", "ship Fix"),
+      text + " https://github.com/acme/web/pull/8",
+      "agent:ship\n> review https://github.com/acme/api/pull/7",
+    ])
+      expect(requestOnlyPrTarget(invalid)).toBeUndefined();
+  });
   it.each([
     request,
     "agent:review acme/api#7",
     "agent:review <https://github.com/acme/api/pull/7|current PR>",
     request + "\n> https://github.com/foreign/api/pull/9",
   ])("selects only one current authored complete target: %s", (text) => {
-    expect(requestOnlyReviewTarget(text)).toEqual({ repo: "acme/api", number: 7 });
+    expect(requestOnlyPrTarget(text)).toEqual({ repo: "acme/api", number: 7, preset: "review" });
   });
   it.each([
     "review https://github.com/acme/api/pull/7",
@@ -36,11 +53,11 @@ describe("request-only Review qualification", () => {
     "agent:review https://evil.test/?next=https://github.com/acme/api/pull/7",
     "agent:coding https://github.com/acme/api/pull/7",
   ])("keeps incomplete, quoted or ambiguous input unqualified: %s", (text) => {
-    expect(requestOnlyReviewTarget(request)).toEqual({ repo: "acme/api", number: 7 });
-    expect(requestOnlyReviewTarget(text)).toBeUndefined();
+    expect(requestOnlyPrTarget(request)).toEqual({ repo: "acme/api", number: 7, preset: "review" });
+    expect(requestOnlyPrTarget(text)).toBeUndefined();
   });
   it("requires one verified current-request Review decision before execution", () => {
-    expect(isRequestOnlyReviewDecision(request, bind)).toBe(true);
+    expect(isRequestOnlyPrDecision(request, bind)).toBe(true);
     for (const invalid of [
       undefined,
       { outcome: "non_decision" },
@@ -50,14 +67,14 @@ describe("request-only Review qualification", () => {
       { ...bind, binds: [{ ...bind.binds[0]!, prTarget: { ...bind.binds[0]!.prTarget, source: "thread" as const } }] },
       { ...bind, binds: [{ ...bind.binds[0]!, prTarget: { ...bind.binds[0]!.prTarget, number: 9 } }] },
     ])
-      expect(isRequestOnlyReviewDecision(request, invalid)).toBe(false);
+      expect(isRequestOnlyPrDecision(request, invalid)).toBe(false);
   });
   it.each([
     "agent:review Please review the change below.\nhttps://github.com/acme/api/pull/7",
     `agent:review ${"Please check this change. ".repeat(20)}https://github.com/acme/api/pull/7`,
   ])("validates the full request and typed target when the display receipt is shortened: %s", (text) => {
     expect(
-      isRequestOnlyReviewDecision(text, {
+      isRequestOnlyPrDecision(text, {
         ...bind,
         binds: [{ ...bind.binds[0]!, line: text.split("\n")[0]!.slice(0, 300) }],
       }),
