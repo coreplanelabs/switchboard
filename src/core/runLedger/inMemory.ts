@@ -10,7 +10,12 @@ import {
 import { parseStoredJson } from "../storedJson.js";
 import { terminalPublicationRetentionRequired } from "../branchPublication.js";
 import { contextReferencesOf } from "./contextRetention.js";
-import { sourceEvidenceOwnerMatches } from "./sourceEvidence.js";
+import {
+  sourceEvidenceOwnerMatches,
+  prepareSourceEvidenceAppend,
+  sourceEvidenceRecordMatches,
+  type PreparedSourceEvidenceAppend,
+} from "./sourceEvidence.js";
 import { RequiredTranscriptError } from "./transcript.js";
 import { TRANSCRIPT_PART_BYTES } from "./types.js";
 import { holdUnreadIngress } from "./unreadIngress.js";
@@ -2260,18 +2265,41 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true };
   }
 
+  private sourceInboxRecord(key: string): unknown {
+    const row = this.sourceEvents.get(key);
+    return row && { event: parseStoredJson(row.json), receipt: row.receipt, job: row.job };
+  }
+
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
-    return this.appendInbox(runId, message);
+    const sourceInput = message.kind === "source-evidence" && message.version === 2;
+    const source = sourceInput
+      ? await prepareSourceEvidenceAppend(message, (key) => this.sourceInboxRecord(key))
+      : undefined;
+    if (sourceInput && !source) {
+      console.warn("[runs/inbox] source evidence refused", {
+        runId,
+        kind: "source-evidence",
+        version: 2,
+        phase: "prepare",
+      });
+      return { ok: false, reason: "invalid-message" };
+    }
+    message = source?.message ?? message;
+    return this.appendInbox(runId, message, source);
   }
 
   async deliverInbox(runId: string, value: unknown): Promise<InboxDeliveryResult> {
     const input = await prepareInboxDelivery(value);
     if (!input || !runId || runId.length > 512) return { kind: "refused", reason: "invalid-delivery" };
+    const source =
+      input.message.kind === "source-evidence" && input.message.version === 2
+        ? await prepareSourceEvidenceAppend(input.message, (key) => this.sourceInboxRecord(key))
+        : undefined;
     const receipts = this.inboxDeliveries.get(runId) ?? new Map<string, InboxDeliveryReceipt>();
     if (receipts.has(input.key)) return replayInboxDelivery(receipts.get(input.key), runId, input);
     if (this.live.get(runId)?.phase === "finishing") return { kind: "refused", reason: "not-live" };
     if (receipts.size >= INBOX_DELIVERY_RECEIPTS_MAX) return { kind: "refused", reason: "capacity" };
-    const pushed = this.appendInbox(runId, input.message);
+    const pushed = this.appendInbox(runId, source?.message ?? input.message, source);
     if (!pushed.ok || pushed.seq === undefined)
       return { kind: "refused", reason: pushed.reason === "not-live" ? "not-live" : "invalid-delivery" };
     const receipt: InboxDeliveryReceipt = {
@@ -2286,11 +2314,28 @@ export class InMemoryRunLedger implements RunLedger {
     return { kind: "delivered", receipt: structuredClone(receipt) };
   }
 
-  private appendInbox(runId: string, message: Record<string, unknown>): InboxPushResult {
+  private appendInbox(
+    runId: string,
+    message: Record<string, unknown>,
+    source?: PreparedSourceEvidenceAppend,
+  ): InboxPushResult {
     const row = this.live.get(runId);
     if (!row) return { ok: false, reason: "not-live" };
     if (!sourceEvidenceOwnerMatches(message, row, (id) => this.live.get(id)))
       return { ok: false, reason: "invalid-message" };
+    if (
+      message.kind === "source-evidence" &&
+      message.version === 2 &&
+      !sourceEvidenceRecordMatches(source, (key) => this.sourceInboxRecord(key))
+    ) {
+      console.warn("[runs/inbox] source evidence refused", {
+        runId,
+        kind: "source-evidence",
+        version: 2,
+        phase: "append",
+      });
+      return { ok: false, reason: "invalid-message" };
+    }
     const stored = bindInboxCustody(message, {
       runId,
       channelId: row.meta.channelId,

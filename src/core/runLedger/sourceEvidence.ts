@@ -12,6 +12,7 @@ import {
   sourceContentOf,
   sourceEventRecordOf,
   sourceEventReceiptOf,
+  sourceEventJobOf,
   sourceSnapshot,
   type SourceEvent,
   type SourceEventContent,
@@ -61,6 +62,57 @@ function sourceRoutingOf(value: unknown): SourceInputRouting | undefined {
   if (value.kind === "fold" && closed(value, ["kind", "owner", "decision"])) {
     const decision = decisionReferenceOf(value.decision);
     if (decision?.runId === value.owner.runId) return { kind: "fold", owner: value.owner, decision };
+  }
+}
+
+export interface PreparedSourceEvidenceAppend {
+  message: Record<string, unknown>;
+  key: string;
+  recordJson: string;
+}
+
+/** Capture the stored event before hashing can yield, then verify its receipt
+ * and common content. Recheck the snapshot in the append transaction. */
+export async function prepareSourceEvidenceAppend(
+  value: Record<string, unknown>,
+  loadRecord: (key: string) => unknown,
+): Promise<PreparedSourceEvidenceAppend | undefined> {
+  try {
+    const captured = sourceSnapshot(value);
+    if (!object(captured) || captured.kind !== "source-evidence" || captured.version !== 2) return;
+    const receipt = sourceEventReceiptOf(captured.receipt);
+    if (!receipt) return;
+    const record = sourceSnapshot(loadRecord(receipt.key));
+    const message = await prepareSourceEvidenceMessage(captured);
+    if (message?.version !== 2 || !object(record)) return;
+    const expected = await sourceEvidenceMessageFromRecord(record, message.routing);
+    if (!expected || JSON.stringify(sourceSnapshot(expected)) !== JSON.stringify(captured)) return;
+    return {
+      message: { ...message },
+      key: receipt.key,
+      recordJson: JSON.stringify(sourceSnapshot({ event: record.event, receipt: record.receipt })),
+    };
+  } catch {
+    return;
+  }
+}
+
+/** This check must run without an await between it and the inbox append. A
+ * valid job claim/release can change without changing the admitted event. */
+export function sourceEvidenceRecordMatches(
+  prepared: PreparedSourceEvidenceAppend | undefined,
+  loadRecord: (key: string) => unknown,
+): boolean {
+  try {
+    if (!prepared) return false;
+    const current = sourceSnapshot(loadRecord(prepared.key));
+    return (
+      object(current) &&
+      sourceEventJobOf(current.job)?.eventKey === prepared.key &&
+      JSON.stringify(sourceSnapshot({ event: current.event, receipt: current.receipt })) === prepared.recordJson
+    );
+  } catch {
+    return false;
   }
 }
 

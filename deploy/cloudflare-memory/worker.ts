@@ -301,7 +301,12 @@ import {
   type ContextDependencies,
 } from "../../src/core/references/contextDependencies.js";
 import { contextReferencesOf, type ContextReference } from "../../src/core/runLedger/contextRetention.js";
-import { sourceEvidenceOwnerMatches } from "../../src/core/runLedger/sourceEvidence.js";
+import {
+  sourceEvidenceOwnerMatches,
+  prepareSourceEvidenceAppend,
+  sourceEvidenceRecordMatches,
+  type PreparedSourceEvidenceAppend,
+} from "../../src/core/runLedger/sourceEvidence.js";
 import { isChildHandoff, type ChildHandoff } from "../../src/core/dispatch/handoff.js";
 import {
   type SessionSources,
@@ -8202,11 +8207,36 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { ok: true };
   }
 
+  private sourceInboxRecord(key: string): unknown {
+    const row = this.sourceEventRow(key);
+    return (
+      row && {
+        event: parseStoredJson(row.event_json),
+        receipt: { version: 1, key: row.key, sequence: row.seq, receivedAt: row.received_at, bodyHash: row.body_hash },
+        job: parseStoredJson(row.job_json),
+      }
+    );
+  }
+
   /** Any generation: a steer arrives on whichever container is up. */
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
+    const sourceInput = message.kind === "source-evidence" && message.version === 2;
+    const source = sourceInput
+      ? await prepareSourceEvidenceAppend(message, (key) => this.sourceInboxRecord(key))
+      : undefined;
+    if (sourceInput && !source) {
+      console.warn("[runs/inbox] source evidence refused", {
+        runId,
+        kind: "source-evidence",
+        version: 2,
+        phase: "prepare",
+      });
+      return { ok: false, reason: "invalid-message" };
+    }
+    message = source?.message ?? message;
     let out: InboxPushResult = { ok: false, reason: "not-live" };
     this.ctx.storage.transactionSync(() => {
-      out = this.appendInbox(runId, message);
+      out = this.appendInbox(runId, message, source);
     });
     return out;
   }
@@ -8214,6 +8244,10 @@ export class RunHistoryDO extends DurableObject<Env> {
   async deliverInbox(runId: string, value: unknown): Promise<InboxDeliveryResult> {
     const input = await prepareInboxDelivery(value);
     if (!input || !runId || runId.length > 512) return { kind: "refused", reason: "invalid-delivery" };
+    const source =
+      input.message.kind === "source-evidence" && input.message.version === 2
+        ? await prepareSourceEvidenceAppend(input.message, (key) => this.sourceInboxRecord(key))
+        : undefined;
     let out: InboxDeliveryResult = { kind: "refused", reason: "not-live" };
     this.ctx.storage.transactionSync(() => {
       const saved = this.sql
@@ -8249,7 +8283,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { kind: "refused", reason: "capacity" };
         return;
       }
-      const pushed = this.appendInbox(runId, input.message);
+      const pushed = this.appendInbox(runId, source?.message ?? input.message, source);
       if (!pushed.ok || pushed.seq === undefined) {
         out = { kind: "refused", reason: pushed.reason === "not-live" ? "not-live" : "invalid-delivery" };
         return;
@@ -8272,11 +8306,28 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
-  private appendInbox(runId: string, message: Record<string, unknown>): InboxPushResult {
+  private appendInbox(
+    runId: string,
+    message: Record<string, unknown>,
+    source?: PreparedSourceEvidenceAppend,
+  ): InboxPushResult {
     const owner = this.liveRow(runId);
     if (!owner) return { ok: false, reason: "not-live" };
     if (!sourceEvidenceOwnerMatches(message, owner, (id) => this.liveRow(id)))
       return { ok: false, reason: "invalid-message" };
+    if (
+      message.kind === "source-evidence" &&
+      message.version === 2 &&
+      !sourceEvidenceRecordMatches(source, (key) => this.sourceInboxRecord(key))
+    ) {
+      console.warn("[runs/inbox] source evidence refused", {
+        runId,
+        kind: "source-evidence",
+        version: 2,
+        phase: "append",
+      });
+      return { ok: false, reason: "invalid-message" };
+    }
     const stored = bindInboxCustody(message, {
       runId,
       channelId: owner.meta.channelId,

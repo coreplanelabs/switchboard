@@ -268,6 +268,98 @@ describe("source notice and fold messages", () => {
     });
   });
 
+  it("refuses substituted source content and receipt fields without saving an inbox row", async () => {
+    const { ledger, message } = await common();
+    await ledger.claim({
+      runId: owner.runId,
+      threadKey: owner.threadKey,
+      gen: "g1",
+      startedAt: 1000,
+      leaseMs: LEASE_MS,
+      system: "Orchestrator",
+      tools: [],
+      meta: {
+        agent: "orchestrator",
+        userId: owner.requesterId,
+        channelId: owner.channelId,
+        threadKey: owner.threadKey,
+      },
+    });
+    for (const changed of [
+      { ...message, content: { kind: "text", state: "present", text: "Substituted text" } },
+      { ...message, source: { ...message.source, authorId: "fixture:other" } },
+      { ...message, source: { ...message.source, objectId: "fixture:other-object" } },
+      { ...message, receipt: { ...message.receipt, sequence: 99 } },
+      { ...message, receipt: { ...message.receipt, bodyHash: "f".repeat(64) } },
+      { ...message, userId: owner.requesterId },
+    ]) {
+      expect(await ledger.deliverInbox(owner.runId, { version: 1, key: "source-match", message: changed })).toEqual({
+        kind: "refused",
+        reason: "invalid-delivery",
+      });
+      expect(await ledger.pushInbox(owner.runId, changed)).toEqual({ ok: false, reason: "invalid-message" });
+    }
+    expect(await ledger.readInbox(owner.runId, 0)).toEqual([]);
+    expect(await ledger.deliverInbox(owner.runId, { version: 1, key: "source-match", message })).toMatchObject({
+      kind: "delivered",
+      receipt: { seq: 1 },
+    });
+    const saved = ledger.sourceEvents.get(message.receipt.key)!;
+    ledger.sourceEvents.delete(message.receipt.key);
+    expect(await ledger.deliverInbox(owner.runId, { version: 1, key: "source-match", message })).toMatchObject({
+      kind: "duplicate",
+      receipt: { seq: 1 },
+    });
+    expect(await ledger.pushInbox(owner.runId, message)).toEqual({ ok: false, reason: "invalid-message" });
+    ledger.sourceEvents.set(message.receipt.key, saved);
+    expect(await ledger.pushInbox(owner.runId, message)).toEqual({ ok: true, seq: 2 });
+    const changed = { ...message, content: { kind: "text", state: "present", text: "Forged" } };
+    const pending = ledger.pushInbox(owner.runId, changed);
+    changed.version = 1;
+    expect(await pending).toEqual({ ok: false, reason: "invalid-message" });
+  });
+
+  it("checks stored source bytes after asynchronous preparation and preserves the original delivery", async () => {
+    const { ledger, message } = await common();
+    await ledger.claim({
+      runId: owner.runId,
+      threadKey: owner.threadKey,
+      gen: "g1",
+      startedAt: 1000,
+      leaseMs: LEASE_MS,
+      system: "Orchestrator",
+      tools: [],
+      meta: {
+        agent: "orchestrator",
+        userId: owner.requesterId,
+        channelId: owner.channelId,
+        threadKey: owner.threadKey,
+      },
+    });
+    const row = ledger.sourceEvents.get(message.receipt.key)!;
+    const original = row.json;
+    const pending = ledger.deliverInbox(owner.runId, { version: 1, key: "source-race", message });
+    row.json = JSON.stringify({ ...JSON.parse(original), payload: { native: "changed" } });
+    expect(await pending).toEqual({ kind: "refused", reason: "invalid-delivery" });
+    expect(await ledger.readInbox(owner.runId, 0)).toEqual([]);
+    row.json = original;
+    expect(await ledger.deliverInbox(owner.runId, { version: 1, key: "source-race", message })).toMatchObject({
+      kind: "delivered",
+      receipt: { seq: 1 },
+    });
+    const push = ledger.pushInbox(owner.runId, message);
+    row.json = JSON.stringify({ ...JSON.parse(original), payload: { native: "changed again" } });
+    expect(await push).toEqual({ ok: false, reason: "invalid-message" });
+    row.json = original;
+    expect(await ledger.pushInbox(owner.runId, message)).toEqual({ ok: true, seq: 2 });
+    const claimRace = ledger.pushInbox(owner.runId, message);
+    expect(await ledger.claimSourceEvents({ owner: "source-worker", readerVersion: 3, limit: 2 })).toMatchObject({
+      kind: "claimed",
+      claims: [{ receipt: { sequence: 1 } }, { receipt: { sequence: 2 } }],
+    });
+    expect(await claimRace).toEqual({ ok: true, seq: 3 });
+  });
+
   it("checks the current notice owner after asynchronous delivery preparation", async () => {
     const { ledger, message } = await common();
     await ledger.claim({
