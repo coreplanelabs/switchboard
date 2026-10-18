@@ -1,3 +1,4 @@
+import type { StorageFailureNotice } from "./storageFailureDiagnostic.js";
 import { terminalPublicationRetentionRequired } from "./branchPublication.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -666,6 +667,7 @@ export function retentionPolicyOf(cfg: RunHistoryConfig): RetentionPolicy {
 }
 
 export interface BuildRunStoreDeps {
+  onFailure?: (notice: StorageFailureNotice) => void;
   dataDir: string;
   warn: (message: string) => void;
   /** The price table the Worker store's metrics points are computed through
@@ -722,6 +724,7 @@ export function buildRunStore(
     policy,
     policyUpdatedAt: now(),
     ...(deps.prices ? { prices: deps.prices } : {}),
+    ...(deps.onFailure ? { onFailure: deps.onFailure } : {}),
   });
 }
 

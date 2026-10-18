@@ -1,10 +1,206 @@
-import { describe, expect, it } from "vitest";
-import { storageFailureDiagnosticOf, storageFailureNotice, storageFailureNote } from "./storageFailureDiagnostic.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  storageFailureDiagnosticOf,
+  storageFailureNotice,
+  storageFailureNote,
+  rememberStorageFailure,
+  originalStorageFailure,
+  storageFailureWasReported,
+  reportStorageFailure,
+  inheritStorageFailure,
+  emitStorageFailure,
+} from "./storageFailureDiagnostic.js";
 import { storeRequestWitness } from "./storeResponse.js";
 import { parseRunEventLines } from "./runEventLines.js";
 import { createRunTimeline } from "../channels/runTimeline.js";
 
 describe("storage diagnostic captures", () => {
+  it("clears a reused error before capture and bounds unavailable targets without decoding request bytes", async () => {
+    const error = new Error("offline");
+    const requestA = await storeRequestWitness("/runs/delete", '{"id":"old"}');
+    const noticeA = storageFailureNotice(requestA, "write", "transport", error);
+    const ids = Array.from({ length: 5000 }, (_, i) => `run-${i}`);
+    const requestB = await storeRequestWitness(
+      "/runs/deleted",
+      JSON.stringify({ ids }),
+      { ids },
+      "11111111-1111-4111-a111-111111111111",
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      reportStorageFailure(error, noticeA);
+      expect(storageFailureWasReported(error)).toBe(true);
+      expect(
+        reportStorageFailure(
+          error,
+          () => {
+            throw new Error("private capture failure");
+          },
+          undefined,
+          requestB,
+        ),
+      ).toBe(false);
+      expect(storageFailureWasReported(error)).toBe(false);
+      expect(originalStorageFailure(error)).toBeUndefined();
+      const line = String(warn.mock.calls[1]?.[0]);
+      expect(JSON.parse(line)).toMatchObject({
+        event: "storage.request.failure.unavailable",
+        operation: "/runs/deleted",
+        requestId: "11111111-1111-4111-a111-111111111111",
+        targetCounts: { total: 5000, emitted: 200, omitted: 4800 },
+      });
+      expect(JSON.parse(line).runIds).toHaveLength(200);
+      expect(JSON.parse(line).runIds.at(-1)).toBe("run-199");
+      expect(Buffer.byteLength(line, "utf8")).toBeLessThanOrEqual(32768);
+      expect(line).not.toContain("private capture failure");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("marks the primary report before an observer can replace its boundary metadata", async () => {
+    const error = new Error("offline");
+    const noticeA = storageFailureNotice(
+      await storeRequestWitness("/runs/delete", '{"id":"request-a"}'),
+      "write",
+      "http",
+      error,
+      new Response(null, { status: 500 }),
+    );
+    const noticeB = storageFailureNotice(
+      await storeRequestWitness("/runs/get", '{"id":"request-b"}'),
+      "read",
+      "http",
+      error,
+      new Response(null, { status: 503 }),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let during: unknown;
+    try {
+      reportStorageFailure(error, noticeA, () => {
+        during = { reported: storageFailureWasReported(error), diagnostic: originalStorageFailure(error) };
+        rememberStorageFailure(error, noticeB.diagnostic);
+      });
+      expect(during).toMatchObject({ reported: true, diagnostic: { operation: "/runs/delete", httpStatus: 500 } });
+      expect(originalStorageFailure(error)).toMatchObject({ operation: "/runs/get", httpStatus: 503 });
+      expect(storageFailureWasReported(error)).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("replaces an earlier report observation when one error is reused for another request", async () => {
+    const error = new Error("offline");
+    const noticeA = storageFailureNotice(
+      await storeRequestWitness("/runs/delete", '{"id":"request-a"}'),
+      "write",
+      "http",
+      error,
+      new Response(null, { status: 500 }),
+    );
+    const noticeB = storageFailureNotice(
+      await storeRequestWitness("/runs/get", '{"id":"request-b"}'),
+      "read",
+      "http",
+      error,
+      new Response(null, { status: 503 }),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      reportStorageFailure(error, noticeA);
+      expect(storageFailureWasReported(error)).toBe(true);
+      inheritStorageFailure(error, error);
+      expect(storageFailureWasReported(error)).toBe(true);
+      warn.mockImplementationOnce(() => {
+        throw new Error("log unavailable");
+      });
+      reportStorageFailure(error, noticeB);
+      expect(originalStorageFailure(error)).toMatchObject({ operation: "/runs/get", httpStatus: 503 });
+      expect(storageFailureWasReported(error)).toBe(false);
+      reportStorageFailure(error, noticeB);
+      expect(storageFailureWasReported(error)).toBe(true);
+      rememberStorageFailure(error, noticeA.diagnostic);
+      expect(originalStorageFailure(error)).toMatchObject({ operation: "/runs/delete", httpStatus: 500 });
+      expect(storageFailureWasReported(error)).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps saved metadata separate from primary reporting and preserves a wrapper's observed report", async () => {
+    const error = new Error("offline");
+    const notice = storageFailureNotice(
+      await storeRequestWitness("/runs/delete", '{"id":"original"}'),
+      "write",
+      "http",
+      error,
+      new Response(null, { status: 500 }),
+    );
+    rememberStorageFailure(error, notice.diagnostic);
+    expect(originalStorageFailure(error)).toMatchObject({ operation: "/runs/delete", httpStatus: 500 });
+    expect(storageFailureWasReported(error)).toBe(false);
+    const metadataWrapper = new Error("unknown outcome", { cause: error });
+    inheritStorageFailure(metadataWrapper, error);
+    expect(storageFailureWasReported(metadataWrapper)).toBe(false);
+    expect(originalStorageFailure(metadataWrapper)).toMatchObject({ operation: "/runs/delete", httpStatus: 500 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      reportStorageFailure(error, notice);
+      const wrapper = new Error("unknown outcome", { cause: error });
+      inheritStorageFailure(wrapper, error);
+      expect(storageFailureWasReported(error)).toBe(true);
+      expect(storageFailureWasReported(wrapper)).toBe(true);
+      expect(originalStorageFailure(wrapper)).toEqual(originalStorageFailure(error));
+      expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toMatchObject([
+        { event: "storage.request.failure", runIds: ["original"], diagnostic: { httpStatus: 500 } },
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not count a successful fallback or observer as an emitted primary log", async () => {
+    const notice = storageFailureNotice(
+      await storeRequestWitness("/runs/delete", '{"id":"original"}'),
+      "write",
+      "transport",
+      new Error("offline"),
+    );
+    const notices: unknown[] = [];
+    const warn = vi
+      .spyOn(console, "warn")
+      .mockImplementationOnce(() => {
+        throw new Error("log unavailable");
+      })
+      .mockImplementation(() => {});
+    try {
+      expect(emitStorageFailure(notice, (value) => notices.push(value))).toBe(false);
+      expect(notices).toEqual([notice]);
+      expect(JSON.parse(String(warn.mock.calls[1]?.[0]))).toEqual({
+        event: "storage.request.failure_telemetry_failed",
+        side: "client",
+        stage: "operator-log",
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps deletion targets and excludes run-like fields on unrelated operations", async () => {
+    const targets: string[][] = [];
+    for (const [operation, body] of [
+      ["/runs/delete", { id: "original" }],
+      ["/runs/deleted", { ids: ["original", "other", "original"] }],
+      ["/runs/summary", { id: "original" }],
+      ["/runs/events", { id: "original" }],
+      ["/runs/list", { runId: "foreign" }],
+      ["/runs/unknown", { runId: "foreign" }],
+    ] as const) {
+      const request = await storeRequestWitness(operation, JSON.stringify(body));
+      targets.push([...storageFailureNotice(request, "read", "transport", new Error("offline")).runIds]);
+    }
+    expect(targets).toEqual([["original"], ["original", "other"], ["original"], ["original"], [], []]);
+  });
   it("does not label an externally consumed body as unread when no decoder evidence was retained", async () => {
     const response = new Response("private body", { status: 403 });
     await response.text();
@@ -132,7 +328,7 @@ describe("storage diagnostic captures", () => {
 
   it("correlates every explicit wire run identity without guessing a key-only request owner", async () => {
     for (const [path, body] of [
-      ["/runs/session/write", { sourceRunId: "run-a", gen: "owner-1" }],
+      ["/runs/session/write", { sourceRunId: "run-a", sources: { version: 1, status: "unknown" }, gen: "owner-1" }],
       ["/runs/workspace-disposition", { allocation: { runId: "run-a" } }],
       ["/runs/claim", { confirm: { runId: "run-a", gen: "owner-1" } }],
       ["/runs/session/expected-seed/read", { reference: { runId: "run-a", gen: "owner-1" } }],

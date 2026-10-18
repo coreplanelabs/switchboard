@@ -1,3 +1,6 @@
+import { prepareStorageRequest } from "../core/storeResponse.js";
+import { storageTransport } from "../core/storageTransport.js";
+import { MINUTE_MS } from "../core/budgets.js";
 // The pending-deploy window (record 0064, "The queue"): the deploy runner
 // tells the plane a deploy is in flight, so an ask that arrives mid-roll
 // queues on `deploy_settled` instead of racing the roll, and is admitted the
@@ -39,14 +42,21 @@ export async function postPlaneDeploy(
   }
   const url = `${deps.stateWorkerUrl.replace(/\/+$/, "")}/plane/deploy`;
   const doFetch =
-    deps.fetchFn ?? ((u: string, init: RequestInit) => fetch(u, { ...init, signal: AbortSignal.timeout(20_000) }));
+    deps.fetchFn ??
+    ((u: string, init: RequestInit) => fetch(u, { ...init, signal: AbortSignal.timeout(MINUTE_MS / 3) }));
   try {
-    const res = await doFetch(url, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ storeKey: RUN_STORE_KEY, phase, version }),
-    });
-    const body = (await res.json().catch(() => ({}))) as { admitted?: number };
+    const request = await prepareStorageRequest("/plane/deploy", { storeKey: RUN_STORE_KEY, phase, version });
+    const { res, body } = await storageTransport(
+      request,
+      {
+        url,
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        signal: AbortSignal.timeout(MINUTE_MS / 3),
+        timeoutMs: MINUTE_MS / 3,
+        fetch: doFetch as typeof fetch,
+      },
+      async (res) => ({ res, body: (await res.json().catch(() => ({}))) as { admitted?: number } }),
+    );
     deps.log(
       res.ok
         ? `[deploy:all] plane: deploy ${phase} posted${phase === "landed" ? ` — ${body.admitted ?? 0} queued ask(s) admitted` : ""}`

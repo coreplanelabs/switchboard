@@ -16,7 +16,7 @@ import {
   type StoreOperationKind,
 } from "./storeResponse.js";
 import { systemClock } from "./trace/clock.js";
-import { RUN_ID_PATTERN } from "./runIdentity.js";
+import { STORAGE_OPERATIONS, type StorageRequestContext } from "./storageRequestContext.js";
 
 export const STORAGE_FAILURE_DIAGNOSTIC_HEADER = "x-switchboard-storage-failure";
 export const STORAGE_REQUEST_ID_HEADER = "x-switchboard-storage-request-id";
@@ -92,22 +92,50 @@ export interface StorageFailureDiagnostic {
 }
 export interface StorageFailureNotice {
   runIds: readonly string[];
+  context: StorageRequestContext;
   diagnostic: StorageFailureDiagnostic;
 }
 
 const originalTransportDiagnostics = new WeakMap<object, StorageFailureDiagnostic>();
+const reportedStorageFailures = new WeakSet<object>();
+const LOG_TARGET_LIMIT = 200;
+
+function clearStorageFailure(error: unknown): void {
+  if (!error || typeof error !== "object") return;
+  originalTransportDiagnostics.delete(error);
+  reportedStorageFailures.delete(error);
+}
 
 /** Preserve closed observations on the original error without retaining exception prose. */
 export function rememberStorageFailure(error: unknown, diagnostic: StorageFailureDiagnostic): void {
   if (!error || typeof error !== "object") return;
   const { exception: _exception, server: _server, ...closed } = diagnostic;
   const parsed = storageFailureDiagnosticOf(closed);
-  if (parsed) originalTransportDiagnostics.set(error, structuredClone(parsed));
+  if (parsed) {
+    originalTransportDiagnostics.set(error, structuredClone(parsed));
+    reportedStorageFailures.delete(error);
+  }
 }
 
 export function originalStorageFailure(error: unknown): StorageFailureDiagnostic | undefined {
   const value = error && typeof error === "object" ? originalTransportDiagnostics.get(error) : undefined;
   return value && structuredClone(value);
+}
+
+/** Saved metadata alone does not prove that the primary operator log succeeded. */
+export function storageFailureWasReported(error: unknown): boolean {
+  return !!error && typeof error === "object" && reportedStorageFailures.has(error);
+}
+
+/** A domain wrapper keeps its cause's evidence without reporting the same failure twice. */
+export function inheritStorageFailure(error: unknown, cause: unknown): void {
+  const reported = storageFailureWasReported(cause);
+  const diagnostic = originalStorageFailure(cause);
+  if (diagnostic) rememberStorageFailure(error, diagnostic);
+  if (error && typeof error === "object") {
+    if (reported) reportedStorageFailures.add(error);
+    else reportedStorageFailures.delete(error);
+  }
 }
 
 export interface StorageFailureCapture {
@@ -163,39 +191,22 @@ export function storageFailureNotice(
   error: unknown,
   response?: Response,
   server?: StateWriteFailure,
-  observation?: Pick<StorageFailureDiagnostic, "timing" | "requestId" | "requestedAt" | "response">,
+  observation?: Pick<
+    StorageFailureDiagnostic,
+    "timing" | "requestId" | "requestedAt" | "response" | "httpStatus" | "rayId"
+  > & { exceptionDetails?: false },
 ): StorageFailureNotice {
-  let body: Record<string, unknown> = {};
-  try {
-    body = JSON.parse(request.payload) as Record<string, unknown>;
-  } catch {
-    /* No identity is invented for unreadable requests. */
-  }
-  const recordOf = (value: unknown): Record<string, unknown> =>
-    value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-  const owners = [body?.run, body?.owner, body?.allocation, body?.confirm, body?.reference, body?.release].map(
-    recordOf,
-  );
-  const record = recordOf(body?.record);
-  const outcomes = Array.isArray(body?.outcomes) ? body.outcomes.map(recordOf) : [];
-  const ids = [
-    body?.runId,
-    body?.sourceRunId,
-    record.id,
-    request.operation === "/runs/get" ? body?.id : undefined,
-    ...owners.map((owner) => owner.runId),
-    ...(Array.isArray(body?.runIds) ? body.runIds : []),
-    ...outcomes.map((outcome) => outcome.runId),
-  ];
-  const runIds = [...new Set(ids.filter((id): id is string => typeof id === "string" && RUN_ID_PATTERN.test(id)))];
-  const ownerGen =
-    body?.gen ?? body?.ownerGen ?? owners.map((owner) => owner.gen ?? owner.ownerGen).find((gen) => gen !== undefined);
+  const context = request.context ?? { scope: "unresolved" as const, reason: "malformed-target" as const };
+  const runIds = context.scope === "runs" ? context.runIds : [];
+  const ownerGen = context.scope === "runs" ? context.ownerGen : undefined;
   const diagnosis = error instanceof UncertainStoreError ? error.diagnosis : undefined;
   const observedPhase = diagnosis?.kind ?? phase;
-  const ray = response?.headers.get("cf-ray");
-  const requestId = storageRequestIdOf(observation?.requestId);
-  return {
+  const ray = response?.headers.get("cf-ray") ?? observation?.rayId;
+  const requestId = storageRequestIdOf(observation?.requestId ?? request.requestId);
+  const responseFacts = observation?.response ?? (response ? storageResponseMetadata(response) : undefined);
+  const notice: StorageFailureNotice = {
     runIds,
+    context,
     diagnostic: {
       version: 1,
       operation: request.operation,
@@ -208,14 +219,16 @@ export function storageFailureNotice(
       ...(typeof ownerGen === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(ownerGen) ? { ownerGen } : {}),
       ...(response
         ? { httpStatus: response.status }
-        : diagnosis && "status" in diagnosis
-          ? { httpStatus: diagnosis.status }
-          : {}),
+        : observation?.httpStatus !== undefined
+          ? { httpStatus: observation.httpStatus }
+          : diagnosis && "status" in diagnosis
+            ? { httpStatus: diagnosis.status }
+            : {}),
       ...(ray && /^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(ray) ? { rayId: ray } : {}),
-      ...(response ? { response: observation?.response ?? storageResponseMetadata(response) } : {}),
+      ...(responseFacts ? { response: responseFacts } : {}),
       // Decoder exceptions can quote private response bytes. Capture only the
       // transport exception; remote exceptions come from the validated header.
-      ...(observedPhase === "transport"
+      ...(observedPhase === "transport" && observation?.exceptionDetails !== false
         ? {
             exception: captureException(
               (error instanceof UncertainStoreError || error instanceof TransientStoreError) &&
@@ -232,18 +245,88 @@ export function storageFailureNotice(
           : {}),
     },
   };
+  notice.diagnostic = structuredClone(notice.diagnostic);
+  const freeze = (value: unknown): void => {
+    if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
+    for (const child of Object.values(value)) freeze(child);
+    Object.freeze(value);
+  };
+  freeze(notice);
+  return notice;
 }
 
-/** A failed log or observer must not replace the original storage outcome. */
-export function emitStorageFailure(
-  notice: StorageFailureNotice,
-  onFailure?: (notice: StorageFailureNotice) => void,
+/** Keep operator output below the platform log ceiling; callbacks keep the full notice. */
+export function storageFailureLog(notice: StorageFailureNotice) {
+  const context = notice.context.scope === "runs" ? { scope: "runs" as const } : notice.context;
+  const diagnostic = { ...notice.diagnostic };
+  const entry = {
+    ...storageFailureTargets(notice.runIds),
+    context,
+    diagnostic,
+    diagnosticDetailsOmitted: false,
+  };
+  if (new TextEncoder().encode(JSON.stringify(entry)).length > 24 * 1024) {
+    delete diagnostic.exception;
+    if (diagnostic.server && "exception" in diagnostic.server) {
+      const { exception: _exception, ...facts } = diagnostic.server;
+      diagnostic.server = facts;
+    }
+    entry.diagnosticDetailsOmitted = true;
+  }
+  if (new TextEncoder().encode(JSON.stringify(entry)).length > 24 * 1024)
+    throw new RangeError("Storage diagnostic exceeds the operator log bound");
+  return entry;
+}
+
+function storageFailureTargets(targets: readonly string[]) {
+  const runIds = targets.slice(0, LOG_TARGET_LIMIT);
+  return {
+    runIds,
+    targetCounts: { total: targets.length, emitted: runIds.length, omitted: targets.length - runIds.length },
+  };
+}
+
+function emitUnavailableStorageFailure(
+  request?: Pick<StoreRequestWitness, "operation" | "requestId" | "digest" | "context">,
 ): void {
   try {
-    console.warn(JSON.stringify({ event: "storage.request.failure", side: "client", ...notice }));
+    const operation = request && Object.hasOwn(STORAGE_OPERATIONS, request.operation) ? request.operation : "unknown";
+    const requestId = storageRequestIdOf(request?.requestId);
+    const digest = request && /^[a-f0-9]{64}$/.test(request.digest) ? request.digest : undefined;
+    console.warn(
+      JSON.stringify({
+        event: "storage.request.failure.unavailable",
+        side: "client",
+        operation,
+        ...(requestId ? { requestId } : {}),
+        ...(digest ? { requestDigest: digest } : {}),
+        ...storageFailureTargets(request?.context?.scope === "runs" ? request.context.runIds : []),
+      }),
+    );
+  } catch {
+    // Failed capture or logging cannot replace the original storage error.
+  }
+}
+
+function emitPrimaryStorageFailure(notice: StorageFailureNotice): boolean {
+  let reported = false;
+  try {
+    console.warn(JSON.stringify({ event: "storage.request.failure", side: "client", ...storageFailureLog(notice) }));
+    reported = true;
   } catch {
     // The observer remains useful when the log sink fails.
+    try {
+      console.warn(
+        JSON.stringify({ event: "storage.request.failure_telemetry_failed", side: "client", stage: "operator-log" }),
+      );
+    } catch {
+      /* Keep the original request outcome. */
+    }
   }
+  return reported;
+}
+
+function notifyStorageFailure(notice: StorageFailureNotice, onFailure?: (notice: StorageFailureNotice) => void): void {
   try {
     onFailure?.(notice);
   } catch {
@@ -251,27 +334,62 @@ export function emitStorageFailure(
   }
 }
 
-/** A diagnostic append cannot recursively create another diagnostic append. */
-export function isStorageDiagnosticAppend(request: StoreRequestWitness): boolean {
-  if (request.operation !== "/runs/append") return false;
+/** A failed log or observer must not replace the original storage outcome. */
+export function emitStorageFailure(
+  notice: StorageFailureNotice,
+  onFailure?: (notice: StorageFailureNotice) => void,
+): boolean {
+  const reported = emitPrimaryStorageFailure(notice);
+  notifyStorageFailure(notice, onFailure);
+  return reported;
+}
+
+/** Retain the original boundary even when its log fails; observers do not confirm logging. */
+export function reportStorageFailure(
+  error: unknown,
+  notice: StorageFailureNotice,
+  onFailure?: (notice: StorageFailureNotice) => void,
+): boolean;
+export function reportStorageFailure(
+  error: unknown,
+  capture: () => StorageFailureNotice,
+  onFailure: ((notice: StorageFailureNotice) => void) | undefined,
+  request: StoreRequestWitness,
+): boolean;
+export function reportStorageFailure(
+  error: unknown,
+  noticeOrCapture: StorageFailureNotice | (() => StorageFailureNotice),
+  onFailure?: (notice: StorageFailureNotice) => void,
+  request?: StoreRequestWitness,
+): boolean {
+  clearStorageFailure(error);
   try {
-    const { events } = JSON.parse(request.payload) as { events?: unknown[] };
-    return (
-      Array.isArray(events) &&
-      events.length > 0 &&
-      events.every(
-        (event) =>
-          event &&
-          typeof event === "object" &&
-          "type" in event &&
-          event.type === "run_note" &&
-          "kind" in event &&
-          event.kind === "storage_failure",
-      )
-    );
+    const notice = typeof noticeOrCapture === "function" ? noticeOrCapture() : noticeOrCapture;
+    rememberStorageFailure(error, notice.diagnostic);
+    const reported = emitPrimaryStorageFailure(notice);
+    if (reported && error && typeof error === "object") reportedStorageFailures.add(error);
+    notifyStorageFailure(notice, onFailure);
+    return reported;
   } catch {
+    clearStorageFailure(error);
+    emitUnavailableStorageFailure(
+      request ??
+        (typeof noticeOrCapture !== "function"
+          ? {
+              operation: noticeOrCapture.diagnostic.operation,
+              requestId: noticeOrCapture.diagnostic.requestId,
+              digest: noticeOrCapture.diagnostic.requestDigest,
+              context: noticeOrCapture.context,
+            }
+          : undefined),
+    );
     return false;
   }
+}
+
+/** A diagnostic append cannot recursively create another diagnostic append. */
+export function isStorageDiagnosticAppend(request: StoreRequestWitness): boolean {
+  return request.operation === "/runs/append" && request.diagnosticOnly === true;
 }
 
 export function storageFailureNote(diagnostic: StorageFailureDiagnostic): RunEvent {

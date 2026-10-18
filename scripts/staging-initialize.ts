@@ -1,3 +1,5 @@
+import { prepareStorageRequest } from "../src/core/storeResponse.js";
+import { storageTransport } from "../src/core/storageTransport.js";
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -443,15 +445,25 @@ export async function initializeOnHost(
         };
       },
       admission: async (phase) => {
-        const response = await fetch(`${memoryUrl}/plane/deploy`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${memoryToken}`, "content-type": "application/json" },
-          body: JSON.stringify({ storeKey: RUN_STORE_KEY, phase, version: commit }),
-          signal: AbortSignal.timeout(MINUTE_MS),
+        const request = await prepareStorageRequest("/plane/deploy", {
+          storeKey: RUN_STORE_KEY,
+          phase,
+          version: commit,
         });
-        if (!response.ok) throw new Error(`initial deploy window ${phase}: HTTP ${response.status}`);
-        const acknowledged = (await response.json()) as { ok?: boolean };
-        if (acknowledged.ok !== true) throw new Error(`initial deploy window ${phase} acknowledgment is uncertain`);
+        await storageTransport(
+          request,
+          {
+            url: `${memoryUrl}/plane/deploy`,
+            headers: { authorization: `Bearer ${memoryToken}`, "content-type": "application/json" },
+            signal: AbortSignal.timeout(MINUTE_MS),
+            timeoutMs: MINUTE_MS,
+          },
+          async (response) => {
+            if (!response.ok) throw new Error(`initial deploy window ${phase}: HTTP ${response.status}`);
+            const acknowledged = (await response.json()) as { ok?: boolean };
+            if (acknowledged.ok !== true) throw new Error(`initial deploy window ${phase} acknowledgment is uncertain`);
+          },
+        );
       },
       verify: async (kind) => {
         const worker = workers.find((w) => w.name === kind)!;

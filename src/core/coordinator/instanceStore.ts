@@ -1,3 +1,6 @@
+import { prepareStorageRequest } from "../storeResponse.js";
+import { storageTransport } from "../storageTransport.js";
+import type { StorageOperation, StorageOperationBody } from "../storageRequestContext.js";
 import { admitQuestionAnswer, type QuestionAnswerGuard } from "./questionAnswer.js";
 import {
   qualifyPullOwnerSnapshot,
@@ -1196,68 +1199,89 @@ export interface WorkerCoordinatorInstanceStoreOptions {
  *  read as "no instance": a spawn on a guess would be a spawn nobody asked for. */
 export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore {
   async prepareAdoptionAudit(expected: CoordinatorUnit, runId: string): Promise<HistoricalNativeAudit | undefined> {
-    const r = await this.post("/runs/coordinator/units/adoption-audit", { expected, runId });
-    const audit = (r.data as { audit?: unknown }).audit;
-    return r.status === 200 && isHistoricalNativeAudit(audit) ? audit : undefined;
+    return this.post(
+      "/runs/coordinator/units/adoption-audit",
+      { expected, runId },
+      async (r): Promise<HistoricalNativeAudit | undefined> => {
+        const audit = (r.data as { audit?: unknown }).audit;
+        return r.status === 200 && isHistoricalNativeAudit(audit) ? audit : undefined;
+      },
+    );
   }
   async admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult> {
     if (!isMaintenanceAdmissionInput(input)) return { ok: false, reason: "conflict" };
     try {
-      const response = await this.post("/runs/coordinator/maintenance/admit", { input });
-      if (!isMaintenanceAdmissionResult(response.data)) return { ok: false, reason: "unavailable" };
-      const result = response.data;
-      if (!result.ok) return response.status === 409 ? result : { ok: false, reason: "unavailable" };
-      const prepared = await prepareMaintenanceAdmission(input);
-      if (response.status !== 200 || !maintenanceAdmissionMatches(prepared, result))
-        return { ok: false, reason: "unavailable" };
-      return result;
+      return await this.post(
+        "/runs/coordinator/maintenance/admit",
+        { input },
+        async (response): Promise<MaintenanceAdmissionResult> => {
+          if (!isMaintenanceAdmissionResult(response.data)) return { ok: false, reason: "unavailable" };
+          const result = response.data;
+          if (!result.ok) return response.status === 409 ? result : { ok: false, reason: "unavailable" };
+          const prepared = await prepareMaintenanceAdmission(input);
+          if (response.status !== 200 || !maintenanceAdmissionMatches(prepared, result))
+            return { ok: false, reason: "unavailable" };
+          return result;
+        },
+      );
     } catch {
       return { ok: false, reason: "unavailable" };
     }
   }
   async offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }> {
-    const response = await this.post("/runs/coordinator/reconcile/offer", { ...key });
-    const result = response.data as { offered?: unknown };
-    if (response.status === 200 && typeof result.offered === "boolean") return { offered: result.offered };
-    throw new Error(`coordinator reconciliation unavailable (HTTP ${response.status})`);
+    return this.post(
+      "/runs/coordinator/reconcile/offer",
+      { ...key },
+      async (response): Promise<{ offered: boolean }> => {
+        const result = response.data as { offered?: unknown };
+        if (response.status === 200 && typeof result.offered === "boolean") return { offered: result.offered };
+        throw new Error(`coordinator reconciliation unavailable (HTTP ${response.status})`);
+      },
+    );
   }
   async findPullOwners(
     target: PullTarget,
     options?: { diagnostic?: boolean; qualifyRecord?: boolean },
   ): Promise<PullOwnersResult> {
     try {
-      const response = await this.post("/runs/coordinator/pull-owners", {
-        target,
-        ...(options?.diagnostic === true ? { diagnostic: true } : {}),
-        ...(options?.diagnostic === true && options.qualifyRecord === true ? { qualifyRecord: true } : {}),
-      });
-      if (response.status !== 200 || !isPullOwnersResult(response.data)) return { ok: false, reason: "unavailable" };
-      if (response.data.ok) return { ok: true, owners: response.data.owners };
-      const diagnostic =
-        options?.diagnostic === true && response.data.reason === "incomplete"
-          ? pullOwnerReadDiagnosticFrom(response.data.diagnostic)
-          : undefined;
-      let qualification;
-      if (
-        options?.diagnostic === true &&
-        options.qualifyRecord === true &&
-        diagnostic?.stage === "run_initial_coding_owner"
-      ) {
-        try {
-          qualification = pullOwnerQualificationFrom(
-            response.data.qualification,
-            await sourceHash(pullOwnerTargetProjection(target)),
-          );
-        } catch {
-          qualification = undefined;
-        }
-      }
-      return {
-        ok: false,
-        reason: response.data.reason,
-        ...(diagnostic ? { diagnostic } : {}),
-        ...(qualification ? { qualification } : {}),
-      };
+      return await this.post(
+        "/runs/coordinator/pull-owners",
+        {
+          target,
+          ...(options?.diagnostic === true ? { diagnostic: true } : {}),
+          ...(options?.diagnostic === true && options.qualifyRecord === true ? { qualifyRecord: true } : {}),
+        },
+        async (response): Promise<PullOwnersResult> => {
+          if (response.status !== 200 || !isPullOwnersResult(response.data))
+            return { ok: false, reason: "unavailable" };
+          if (response.data.ok) return { ok: true, owners: response.data.owners };
+          const diagnostic =
+            options?.diagnostic === true && response.data.reason === "incomplete"
+              ? pullOwnerReadDiagnosticFrom(response.data.diagnostic)
+              : undefined;
+          let qualification;
+          if (
+            options?.diagnostic === true &&
+            options.qualifyRecord === true &&
+            diagnostic?.stage === "run_initial_coding_owner"
+          ) {
+            try {
+              qualification = pullOwnerQualificationFrom(
+                response.data.qualification,
+                await sourceHash(pullOwnerTargetProjection(target)),
+              );
+            } catch {
+              qualification = undefined;
+            }
+          }
+          return {
+            ok: false,
+            reason: response.data.reason,
+            ...(diagnostic ? { diagnostic } : {}),
+            ...(qualification ? { qualification } : {}),
+          };
+        },
+      );
     } catch {
       return { ok: false, reason: "unavailable" };
     }
@@ -1265,81 +1289,101 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
   async transitionUnitEffect(input: UnitEffectTransition): Promise<UnitEffectTransitionResult> {
     if (!isUnitEffectTransition(input)) return { ok: false, reason: "conflict" };
     try {
-      const response = await this.post("/runs/coordinator/units/effect-transition", { input });
-      if (!isUnitEffectTransitionResult(response.data)) return { ok: false, reason: "unavailable" };
-      const result = response.data;
-      if (!result.ok) return response.status === 409 ? result : { ok: false, reason: "unavailable" };
-      if (
-        response.status !== 200 ||
-        result.unit.instanceId !== input.expected.instanceId ||
-        result.unit.unit !== input.expected.unit ||
-        !unitEffectResultMatches(input, result.unit)
-      )
-        return { ok: false, reason: "unavailable" };
-      return result;
+      return await this.post(
+        "/runs/coordinator/units/effect-transition",
+        { input },
+        async (response): Promise<UnitEffectTransitionResult> => {
+          if (!isUnitEffectTransitionResult(response.data)) return { ok: false, reason: "unavailable" };
+          const result = response.data;
+          if (!result.ok) return response.status === 409 ? result : { ok: false, reason: "unavailable" };
+          if (
+            response.status !== 200 ||
+            result.unit.instanceId !== input.expected.instanceId ||
+            result.unit.unit !== input.expected.unit ||
+            !unitEffectResultMatches(input, result.unit)
+          )
+            return { ok: false, reason: "unavailable" };
+          return result;
+        },
+      );
     } catch {
       return { ok: false, reason: "unavailable" };
     }
   }
   async transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult> {
-    const response = await this.post("/runs/coordinator/recovery/transition", { input });
-    const data = response.data as { ok?: unknown; reason?: unknown; unit?: unknown; replayed?: unknown };
-    if (
-      data.ok === true &&
-      isCoordinatorUnit(data.unit) &&
-      data.unit.instanceId === input.expected.instanceId &&
-      data.unit.unit === input.expected.unit
-    )
-      return { ok: true, unit: data.unit, ...(data.replayed === true ? { replayed: true } : {}) };
-    if (
-      data.ok === false &&
-      (data.reason === "stale" ||
-        data.reason === "conflict" ||
-        data.reason === "capacity" ||
-        data.reason === "unavailable" ||
-        data.reason === "owned" ||
-        data.reason === "incomplete")
-    )
-      return { ok: false, reason: data.reason };
-    throw new Error(`recovery transition unavailable (HTTP ${response.status})`);
+    return this.post(
+      "/runs/coordinator/recovery/transition",
+      { input },
+      async (response): Promise<RecoveryTransitionResult> => {
+        const data = response.data as { ok?: unknown; reason?: unknown; unit?: unknown; replayed?: unknown };
+        if (
+          data.ok === true &&
+          isCoordinatorUnit(data.unit) &&
+          data.unit.instanceId === input.expected.instanceId &&
+          data.unit.unit === input.expected.unit
+        )
+          return { ok: true, unit: data.unit, ...(data.replayed === true ? { replayed: true } : {}) };
+        if (
+          data.ok === false &&
+          (data.reason === "stale" ||
+            data.reason === "conflict" ||
+            data.reason === "capacity" ||
+            data.reason === "unavailable" ||
+            data.reason === "owned" ||
+            data.reason === "incomplete")
+        )
+          return { ok: false, reason: data.reason };
+        throw new Error(`recovery transition unavailable (HTTP ${response.status})`);
+      },
+    );
   }
   async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest | string): Promise<RecoveryAction | null> {
     const actionId = typeof request === "string" ? request : await recoveryActionId(key, request);
     if (!/^r_[a-f0-9]{64}$/.test(actionId)) throw new Error("invalid recovery action identity");
-    const response = await this.post("/runs/coordinator/recovery/action", {
-      key,
-      ...(typeof request === "string" ? { actionId } : { request }),
-    });
-    const action = (response.data as { action?: unknown }).action;
-    if (action === null) return null;
-    if (
-      !isRecoveryAction(action) ||
-      action.instanceId !== key.instanceId ||
-      action.unit !== key.unit ||
-      action.id !== actionId
-    )
-      throw new Error("invalid recovery action response");
-    return action;
+    return this.post(
+      "/runs/coordinator/recovery/action",
+      {
+        key,
+        ...(typeof request === "string" ? { actionId } : { request }),
+      },
+      async (response): Promise<RecoveryAction | null> => {
+        const action = (response.data as { action?: unknown }).action;
+        if (action === null) return null;
+        if (
+          !isRecoveryAction(action) ||
+          action.instanceId !== key.instanceId ||
+          action.unit !== key.unit ||
+          action.id !== actionId
+        )
+          throw new Error("invalid recovery action response");
+        return action;
+      },
+    );
   }
   async listRecoveryHistory(key: UnitEventKey, after = 0): Promise<RecoveryHistoryPage> {
-    const response = await this.post("/runs/coordinator/recovery/history", { key, after });
-    const page = response.data as RecoveryHistoryPage;
-    if (
-      !Array.isArray(page.receipts) ||
-      !page.receipts.every(
-        (row) => isRecoveryReceipt(row) && row.instanceId === key.instanceId && row.unit === key.unit,
-      ) ||
-      typeof page.more !== "boolean"
-    )
-      throw new Error("invalid recovery history response");
-    const checked = recoveryHistoryPage(page.receipts, after);
-    if (
-      checked.cursor !== page.cursor ||
-      checked.receipts.length !== page.receipts.length ||
-      page.receipts.some((row, i) => row.seq <= (i === 0 ? after : page.receipts[i - 1]!.seq))
-    )
-      throw new Error("invalid recovery history cursor");
-    return page;
+    return this.post(
+      "/runs/coordinator/recovery/history",
+      { key, after },
+      async (response): Promise<RecoveryHistoryPage> => {
+        const page = response.data as RecoveryHistoryPage;
+        if (
+          !Array.isArray(page.receipts) ||
+          !page.receipts.every(
+            (row) => isRecoveryReceipt(row) && row.instanceId === key.instanceId && row.unit === key.unit,
+          ) ||
+          typeof page.more !== "boolean"
+        )
+          throw new Error("invalid recovery history response");
+        const checked = recoveryHistoryPage(page.receipts, after);
+        if (
+          checked.cursor !== page.cursor ||
+          checked.receipts.length !== page.receipts.length ||
+          page.receipts.some((row, i) => row.seq <= (i === 0 ? after : page.receipts[i - 1]!.seq))
+        )
+          throw new Error("invalid recovery history cursor");
+        return page;
+      },
+    );
   }
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -1349,51 +1393,70 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     this.fetchImpl = opts.fetch ?? fetch;
   }
 
-  private async post(path: string, body: Record<string, unknown>): Promise<{ status: number; data: unknown }> {
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
-      body: JSON.stringify({ storeKey: this.opts.storeKey, ...body }),
-      signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
-    });
-    if (!res.ok && res.status !== 409) throw new Error(`coordinator store ${path}: HTTP ${res.status}`);
-    let data: unknown;
-    try {
-      data = await res.json();
-    } catch {
-      throw new Error(`coordinator store ${path}: non-JSON body (HTTP ${res.status})`);
-    }
-    return { status: res.status, data };
+  private async post<O extends StorageOperation, T>(
+    path: O,
+    body: StorageOperationBody<NoInfer<O>>,
+    receive: (result: { status: number; data: unknown }) => Promise<T>,
+  ): Promise<T> {
+    const payload = { storeKey: this.opts.storeKey, ...body };
+    const request = await prepareStorageRequest(path, payload);
+    return storageTransport(
+      request,
+      {
+        url: `${this.baseUrl}${path}`,
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
+        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+        timeoutMs: RUN_STORE_TIMEOUT_MS,
+        fetch: this.fetchImpl,
+      },
+      async (res) => {
+        if (!res.ok && res.status !== 409) throw new Error(`coordinator store ${path}: HTTP ${res.status}`);
+        let data: unknown;
+        try {
+          data = await res.json();
+        } catch {
+          throw new Error(`coordinator store ${path}: non-JSON body (HTTP ${res.status})`);
+        }
+        return receive({ status: res.status, data });
+      },
+    );
   }
 
   async recordRequesterTurn(input: RequesterTurnInput): Promise<RecordRequesterTurnResult> {
-    const r = await this.post("/runs/coordinator/requester-turn/record", { input });
-    const d = r.data as { ok?: unknown; reason?: unknown; turn?: unknown };
-    if (r.status === 409 && d.reason === "conflict") return { ok: false, reason: "conflict" };
-    if (d.ok === true && d.turn && typeof d.turn === "object") return { ok: true, turn: d.turn as RequesterTurn };
-    throw new Error(`coordinator store requester-turn/record: unexpected answer (HTTP ${r.status})`);
+    return this.post(
+      "/runs/coordinator/requester-turn/record",
+      { input },
+      async (r): Promise<RecordRequesterTurnResult> => {
+        const d = r.data as { ok?: unknown; reason?: unknown; turn?: unknown };
+        if (r.status === 409 && d.reason === "conflict") return { ok: false, reason: "conflict" };
+        if (d.ok === true && d.turn && typeof d.turn === "object") return { ok: true, turn: d.turn as RequesterTurn };
+        throw new Error(`coordinator store requester-turn/record: unexpected answer (HTTP ${r.status})`);
+      },
+    );
   }
 
   async latestRequesterTurn(key: RequesterKey): Promise<RequesterTurn | null> {
-    const r = await this.post("/runs/coordinator/requester-turn/latest", { key });
-    const d = r.data as { turn?: unknown };
-    if (d.turn === null) return null;
-    if (d.turn && typeof d.turn === "object") return d.turn as RequesterTurn;
-    throw new Error(`coordinator store requester-turn/latest: unexpected answer (HTTP ${r.status})`);
+    return this.post("/runs/coordinator/requester-turn/latest", { key }, async (r): Promise<RequesterTurn | null> => {
+      const d = r.data as { turn?: unknown };
+      if (d.turn === null) return null;
+      if (d.turn && typeof d.turn === "object") return d.turn as RequesterTurn;
+      throw new Error(`coordinator store requester-turn/latest: unexpected answer (HTTP ${r.status})`);
+    });
   }
 
   async getMainTask(key: MainTaskKey): Promise<MainTaskLink | null> {
-    const r = await this.post("/runs/coordinator/main-task/get", { key });
-    const d = r.data as { link?: unknown };
-    if (d.link === null) return null;
-    if (
-      typeof d.link === "object" &&
-      d.link !== null &&
-      typeof (d.link as MainTaskLink).instanceId === "string" &&
-      typeof (d.link as MainTaskLink).unit === "string"
-    )
-      return d.link as MainTaskLink;
-    throw new Error(`coordinator store /runs/coordinator/main-task/get: unexpected answer (HTTP ${r.status})`);
+    return this.post("/runs/coordinator/main-task/get", { key }, async (r): Promise<MainTaskLink | null> => {
+      const d = r.data as { link?: unknown };
+      if (d.link === null) return null;
+      if (
+        typeof d.link === "object" &&
+        d.link !== null &&
+        typeof (d.link as MainTaskLink).instanceId === "string" &&
+        typeof (d.link as MainTaskLink).unit === "string"
+      )
+        return d.link as MainTaskLink;
+      throw new Error(`coordinator store /runs/coordinator/main-task/get: unexpected answer (HTTP ${r.status})`);
+    });
   }
 
   async claimMainTask(
@@ -1402,70 +1465,81 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     unit: CoordinatorUnit,
     authority: MainTaskAuthority,
   ): Promise<ClaimMainTaskResult> {
-    const r = await this.post("/runs/coordinator/main-task/claim", { key, instance, unit, authority });
-    const d = r.data as { ok?: unknown; created?: unknown; link?: unknown; reason?: unknown };
-    if (r.status === 409 && d.reason === "conflict") return { ok: false, reason: "conflict" };
-    if (
-      d.ok === true &&
-      typeof d.created === "boolean" &&
-      typeof d.link === "object" &&
-      d.link !== null &&
-      typeof (d.link as MainTaskLink).instanceId === "string" &&
-      typeof (d.link as MainTaskLink).unit === "string"
-    )
-      return { ok: true, created: d.created, link: d.link as MainTaskLink };
-    throw new Error(`coordinator store /runs/coordinator/main-task/claim: unexpected answer (HTTP ${r.status})`);
+    return this.post(
+      "/runs/coordinator/main-task/claim",
+      { key, instance, unit, authority },
+      async (r): Promise<ClaimMainTaskResult> => {
+        const d = r.data as { ok?: unknown; created?: unknown; link?: unknown; reason?: unknown };
+        if (r.status === 409 && d.reason === "conflict") return { ok: false, reason: "conflict" };
+        if (
+          d.ok === true &&
+          typeof d.created === "boolean" &&
+          typeof d.link === "object" &&
+          d.link !== null &&
+          typeof (d.link as MainTaskLink).instanceId === "string" &&
+          typeof (d.link as MainTaskLink).unit === "string"
+        )
+          return { ok: true, created: d.created, link: d.link as MainTaskLink };
+        throw new Error(`coordinator store /runs/coordinator/main-task/claim: unexpected answer (HTTP ${r.status})`);
+      },
+    );
   }
 
   async put(instance: CoordinatorInstance): Promise<PutInstanceResult> {
-    const r = await this.post("/runs/coordinator/put", { instance });
-    const d = r.data as { ok?: unknown; reason?: unknown };
-    if (r.status === 409 && d.reason === "exists") return { ok: false, reason: "exists" };
-    if (d.ok === true) return { ok: true };
-    throw new Error(`coordinator store /runs/coordinator/put: unexpected answer (HTTP ${r.status})`);
+    return this.post("/runs/coordinator/put", { instance }, async (r): Promise<PutInstanceResult> => {
+      const d = r.data as { ok?: unknown; reason?: unknown };
+      if (r.status === 409 && d.reason === "exists") return { ok: false, reason: "exists" };
+      if (d.ok === true) return { ok: true };
+      throw new Error(`coordinator store /runs/coordinator/put: unexpected answer (HTTP ${r.status})`);
+    });
   }
 
   async replace(instance: CoordinatorInstance): Promise<PutInstanceResult> {
-    const r = await this.post("/runs/coordinator/replace", { instance });
-    const d = r.data as { ok?: unknown; reason?: unknown };
-    if (r.status === 409 && d.reason === "exists") return { ok: false, reason: "exists" };
-    if (d.ok === true) return { ok: true };
-    throw new Error(`coordinator store /runs/coordinator/replace: unexpected answer (HTTP ${r.status})`);
+    return this.post("/runs/coordinator/replace", { instance }, async (r): Promise<PutInstanceResult> => {
+      const d = r.data as { ok?: unknown; reason?: unknown };
+      if (r.status === 409 && d.reason === "exists") return { ok: false, reason: "exists" };
+      if (d.ok === true) return { ok: true };
+      throw new Error(`coordinator store /runs/coordinator/replace: unexpected answer (HTTP ${r.status})`);
+    });
   }
 
   async confirmCreated(expected: CoordinatorInstance): Promise<ConfirmCreatedResult> {
-    const r = await this.post("/runs/coordinator/admission/confirm", { expected });
-    const d = r.data as { ok?: unknown; reason?: unknown };
-    if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
-    if (d.ok === true) return { ok: true };
-    throw new Error(`coordinator store /runs/coordinator/admission/confirm: unexpected answer (HTTP ${r.status})`);
+    return this.post("/runs/coordinator/admission/confirm", { expected }, async (r): Promise<ConfirmCreatedResult> => {
+      const d = r.data as { ok?: unknown; reason?: unknown };
+      if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
+      if (d.ok === true) return { ok: true };
+      throw new Error(`coordinator store /runs/coordinator/admission/confirm: unexpected answer (HTTP ${r.status})`);
+    });
   }
 
   async get(id: string): Promise<CoordinatorInstance | null> {
-    const r = await this.post("/runs/coordinator/get", { id });
-    const d = r.data as { instance?: unknown };
-    if (d.instance === null) return null;
-    if (!isCoordinatorInstance(d.instance))
-      throw new Error("coordinator store /runs/coordinator/get: the answer is not a coordinator instance");
-    return d.instance;
+    return this.post("/runs/coordinator/get", { id }, async (r): Promise<CoordinatorInstance | null> => {
+      const d = r.data as { instance?: unknown };
+      if (d.instance === null) return null;
+      if (!isCoordinatorInstance(d.instance))
+        throw new Error("coordinator store /runs/coordinator/get: the answer is not a coordinator instance");
+      return d.instance;
+    });
   }
   async listInstances(query: PipelineInventoryQuery): Promise<PipelineInventoryPage> {
     inventoryPosition({ limit: query.limit, ...(query.order ? { order: query.order } : {}) }, 0);
-    const result = await this.post("/runs/coordinator/list", { ...query });
-    if (result.status !== 200) throw new Error("pipeline inventory unavailable");
-    return readInventoryPage(result.data);
+    return this.post("/runs/coordinator/list", { ...query }, async (result): Promise<PipelineInventoryPage> => {
+      if (result.status !== 200) throw new Error("pipeline inventory unavailable");
+      return readInventoryPage(result.data);
+    });
   }
 
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
-    const r = await this.post("/runs/coordinator/units/put", { units });
-    const d = r.data as { ok?: unknown; reason?: unknown; diagnostic?: unknown };
-    if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
-    if (r.status === 409 && isPullBindingRefusal(d.reason)) {
-      const diagnostic = d.reason === "incomplete" ? pullOwnerReadDiagnosticFrom(d.diagnostic) : undefined;
-      return { ok: false, reason: d.reason, ...(diagnostic ? { diagnostic } : {}) };
-    }
-    if (d.ok === true) return { ok: true };
-    throw new Error(`coordinator store /runs/coordinator/units/put: unexpected answer (HTTP ${r.status})`);
+    return this.post("/runs/coordinator/units/put", { units }, async (r): Promise<PutUnitsResult> => {
+      const d = r.data as { ok?: unknown; reason?: unknown; diagnostic?: unknown };
+      if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
+      if (r.status === 409 && isPullBindingRefusal(d.reason)) {
+        const diagnostic = d.reason === "incomplete" ? pullOwnerReadDiagnosticFrom(d.diagnostic) : undefined;
+        return { ok: false, reason: d.reason, ...(diagnostic ? { diagnostic } : {}) };
+      }
+      if (d.ok === true) return { ok: true };
+      throw new Error(`coordinator store /runs/coordinator/units/put: unexpected answer (HTTP ${r.status})`);
+    });
   }
 
   async compareAndReplaceUnit(
@@ -1474,47 +1548,59 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
   ): Promise<CompareAndReplaceUnitResult> {
     // Keep the deployed wire spelling during the generic CAS transition: bot
     // and state Worker roll independently, while the seam above is truthful.
-    const r = await this.post("/runs/coordinator/units/claim-legacy-continuation", {
-      expected,
-      recovered: replacement,
-    });
-    const d = r.data as { ok?: unknown; reason?: unknown };
-    if (
-      r.status === 409 &&
-      (d.reason === "stale" || d.reason === "owned" || d.reason === "incomplete" || d.reason === "unavailable")
-    )
-      return { ok: false, reason: d.reason };
-    if (d.ok === true) return { ok: true };
-    throw new Error(
-      `coordinator store /runs/coordinator/units/claim-legacy-continuation: unexpected answer (HTTP ${r.status})`,
+    return this.post(
+      "/runs/coordinator/units/claim-legacy-continuation",
+      {
+        expected,
+        recovered: replacement,
+      },
+      async (r): Promise<CompareAndReplaceUnitResult> => {
+        const d = r.data as { ok?: unknown; reason?: unknown };
+        if (
+          r.status === 409 &&
+          (d.reason === "stale" || d.reason === "owned" || d.reason === "incomplete" || d.reason === "unavailable")
+        )
+          return { ok: false, reason: d.reason };
+        if (d.ok === true) return { ok: true };
+        throw new Error(
+          `coordinator store /runs/coordinator/units/claim-legacy-continuation: unexpected answer (HTTP ${r.status})`,
+        );
+      },
     );
   }
 
   async readMainTaskUnit(key: UnitEventKey): Promise<MainTaskUnitSnapshot | null> {
-    const r = await this.post("/runs/coordinator/units/list", { instanceId: key.instanceId });
-    return mainTaskUnitSnapshot((r.data as { units?: unknown }).units, key);
+    return this.post(
+      "/runs/coordinator/units/list",
+      { instanceId: key.instanceId },
+      async (r): Promise<MainTaskUnitSnapshot | null> => {
+        return mainTaskUnitSnapshot((r.data as { units?: unknown }).units, key);
+      },
+    );
   }
 
   async listUnits(instanceId: string): Promise<CoordinatorUnit[]> {
-    const r = await this.post("/runs/coordinator/units/list", { instanceId });
-    const d = r.data as { units?: unknown };
-    if (!Array.isArray(d.units) || !d.units.every(isCoordinatorUnit))
-      throw new Error("coordinator store /runs/coordinator/units/list: the answer is not a list of unit rows");
-    return d.units;
+    return this.post("/runs/coordinator/units/list", { instanceId }, async (r): Promise<CoordinatorUnit[]> => {
+      const d = r.data as { units?: unknown };
+      if (!Array.isArray(d.units) || !d.units.every(isCoordinatorUnit))
+        throw new Error("coordinator store /runs/coordinator/units/list: the answer is not a list of unit rows");
+      return d.units;
+    });
   }
 
   async listActiveRecoveries(): Promise<CoordinatorUnit[]> {
-    const r = await this.post("/runs/coordinator/units/list-active-recoveries", {});
-    const d = r.data as { units?: unknown };
-    if (
-      !Array.isArray(d.units) ||
-      !d.units.every(isCoordinatorUnit) ||
-      d.units.some((unit) => unit.recovery === undefined)
-    )
-      throw new Error(
-        "coordinator store /runs/coordinator/units/list-active-recoveries: the answer is not a recovery list",
-      );
-    return d.units;
+    return this.post("/runs/coordinator/units/list-active-recoveries", {}, async (r): Promise<CoordinatorUnit[]> => {
+      const d = r.data as { units?: unknown };
+      if (
+        !Array.isArray(d.units) ||
+        !d.units.every(isCoordinatorUnit) ||
+        d.units.some((unit) => unit.recovery === undefined)
+      )
+        throw new Error(
+          "coordinator store /runs/coordinator/units/list-active-recoveries: the answer is not a recovery list",
+        );
+      return d.units;
+    });
   }
 
   async reserveDecisionRecord(
@@ -1523,24 +1609,30 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     claimed: ReadonlySet<string>,
     existing?: string,
   ): Promise<ReserveDecisionRecordResult> {
-    const r = await this.post("/runs/decision-record/reserve", {
-      repo,
-      taskKey,
-      claimed: [...claimed],
-      ...(existing !== undefined ? { existing } : {}),
-    });
-    const d = r.data as { number?: unknown };
-    if (typeof d.number === "string" && /^\d{4}$/.test(d.number)) return { ok: true, number: d.number };
-    throw new Error(`coordinator store /runs/decision-record/reserve: unexpected answer (HTTP ${r.status})`);
+    return this.post(
+      "/runs/decision-record/reserve",
+      {
+        repo,
+        taskKey,
+        claimed: [...claimed],
+        ...(existing !== undefined ? { existing } : {}),
+      },
+      async (r): Promise<ReserveDecisionRecordResult> => {
+        const d = r.data as { number?: unknown };
+        if (typeof d.number === "string" && /^\d{4}$/.test(d.number)) return { ok: true, number: d.number };
+        throw new Error(`coordinator store /runs/decision-record/reserve: unexpected answer (HTTP ${r.status})`);
+      },
+    );
   }
 
   async markStopped(instanceId: string, at: number, binding?: MainTaskBinding): Promise<MarkStoppedResult> {
-    const r = await this.post("/runs/coordinator/stop", { instanceId, at, binding });
-    const d = r.data as { ok?: unknown; reason?: unknown };
-    if (r.status === 409 && d.reason === "unknown_instance") return { ok: false, reason: "unknown_instance" };
-    if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
-    if (d.ok === true) return { ok: true };
-    throw new Error(`coordinator store /runs/coordinator/stop: unexpected answer (HTTP ${r.status})`);
+    return this.post("/runs/coordinator/stop", { instanceId, at, binding }, async (r): Promise<MarkStoppedResult> => {
+      const d = r.data as { ok?: unknown; reason?: unknown };
+      if (r.status === 409 && d.reason === "unknown_instance") return { ok: false, reason: "unknown_instance" };
+      if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
+      if (d.ok === true) return { ok: true };
+      throw new Error(`coordinator store /runs/coordinator/stop: unexpected answer (HTTP ${r.status})`);
+    });
   }
 
   async appendEvent(
@@ -1556,35 +1648,48 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     // reaches that boundary as the small dropped-count row the store contract
     // promises, never as a transport-level 413.
     const capped = capThreadEvent(event);
-    const r = await this.post("/runs/coordinator/events/append", {
-      ...key,
-      event: capped,
-      requireActive,
-      binding,
-      expectedRecovery,
-      question,
-    });
-    const d = r.data as { ok?: unknown; seq?: unknown; event?: unknown; reason?: unknown };
-    if (d.ok === true && typeof d.seq === "number" && (d.event === undefined || isThreadEvent(d.event)))
-      return { ok: true, seq: d.seq, ...(d.event === undefined ? {} : { event: d.event }) };
-    if (r.status === 409 && d.reason === "ended") return { ok: false, reason: "ended" };
-    if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
-    throw new Error(`coordinator store /runs/coordinator/events/append: unexpected answer (HTTP ${r.status})`);
+    return this.post(
+      "/runs/coordinator/events/append",
+      {
+        ...key,
+        event: capped,
+        requireActive,
+        binding,
+        expectedRecovery,
+        question,
+      },
+      async (r): Promise<AppendEventResult> => {
+        const d = r.data as { ok?: unknown; seq?: unknown; event?: unknown; reason?: unknown };
+        if (d.ok === true && typeof d.seq === "number" && (d.event === undefined || isThreadEvent(d.event)))
+          return { ok: true, seq: d.seq, ...(d.event === undefined ? {} : { event: d.event }) };
+        if (r.status === 409 && d.reason === "ended") return { ok: false, reason: "ended" };
+        if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
+        throw new Error(`coordinator store /runs/coordinator/events/append: unexpected answer (HTTP ${r.status})`);
+      },
+    );
   }
 
   async listEvents(key: UnitEventKey, unconsumedOnly = false): Promise<ThreadEvent[]> {
-    const r = await this.post("/runs/coordinator/events/list", { ...key, unconsumedOnly });
-    const d = r.data as { events?: unknown };
-    if (!Array.isArray(d.events) || !d.events.every(isThreadEvent))
-      throw new Error("coordinator store /runs/coordinator/events/list: the answer is not a list of thread events");
-    return d.events;
+    return this.post("/runs/coordinator/events/list", { ...key, unconsumedOnly }, async (r): Promise<ThreadEvent[]> => {
+      const d = r.data as { events?: unknown };
+      if (!Array.isArray(d.events) || !d.events.every(isThreadEvent))
+        throw new Error("coordinator store /runs/coordinator/events/list: the answer is not a list of thread events");
+      return d.events;
+    });
   }
 
   async markConsumed(key: UnitEventKey, seqs: readonly number[], by: string): Promise<MarkConsumedResult> {
-    const r = await this.post("/runs/coordinator/events/mark-consumed", { ...key, seqs: [...seqs], by });
-    const d = r.data as { ok?: unknown };
-    if (d.ok === true) return { ok: true };
-    throw new Error(`coordinator store /runs/coordinator/events/mark-consumed: unexpected answer (HTTP ${r.status})`);
+    return this.post(
+      "/runs/coordinator/events/mark-consumed",
+      { ...key, seqs: [...seqs], by },
+      async (r): Promise<MarkConsumedResult> => {
+        const d = r.data as { ok?: unknown };
+        if (d.ok === true) return { ok: true };
+        throw new Error(
+          `coordinator store /runs/coordinator/events/mark-consumed: unexpected answer (HTTP ${r.status})`,
+        );
+      },
+    );
   }
   async answerWake(
     unit: CoordinatorUnit,
@@ -1593,12 +1698,17 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     seqs: readonly number[],
     by: string,
   ): Promise<AnswerWakeResult> {
-    const r = await this.post("/runs/coordinator/wake", { unit, waitId, answer, seqs: [...seqs], by });
-    const d = r.data as { ok?: unknown; reason?: unknown };
-    if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
-    if (r.status === 409 && isPullBindingRefusal(d.reason)) return { ok: false, reason: d.reason };
-    if (d.ok === true) return { ok: true };
-    throw new Error(`coordinator store /runs/coordinator/wake: unexpected answer (HTTP ${r.status})`);
+    return this.post(
+      "/runs/coordinator/wake",
+      { unit, waitId, answer, seqs: [...seqs], by },
+      async (r): Promise<AnswerWakeResult> => {
+        const d = r.data as { ok?: unknown; reason?: unknown };
+        if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
+        if (r.status === 409 && isPullBindingRefusal(d.reason)) return { ok: false, reason: d.reason };
+        if (d.ok === true) return { ok: true };
+        throw new Error(`coordinator store /runs/coordinator/wake: unexpected answer (HTTP ${r.status})`);
+      },
+    );
   }
 }
 

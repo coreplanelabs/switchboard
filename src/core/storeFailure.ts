@@ -1,4 +1,5 @@
 import { stateWriteFailureOf, type StateWriteFailure } from "./runStateWriteDiagnostic.js";
+import type { StorageRequestContext } from "./storageRequestContext.js";
 
 /** The `/runs/*` route answered 404: the Worker does not have this route yet. Never retried. */
 export class RouteMissingError extends Error {
@@ -18,6 +19,9 @@ export interface StoreRequestWitness {
   readonly operation: string;
   readonly payload: string;
   readonly digest: string;
+  readonly context?: StorageRequestContext;
+  readonly requestId?: string;
+  readonly diagnosticOnly?: true;
 }
 
 /** Observed transport facts and redacted operator diagnostics, never response bodies. */

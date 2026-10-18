@@ -1,3 +1,5 @@
+import { prepareStorageRequest } from "../../src/core/storeResponse.js";
+import { storageTransport } from "../../src/core/storageTransport.js";
 import { inspectResidentCredentials } from "./credentialInspection.js";
 import {
   credentialInspectionInputSchema,
@@ -284,6 +286,8 @@ function harness(
     fetch,
     AsyncLocalStorage,
     crypto: webcrypto,
+    prepareStorageRequest,
+    storageTransport,
     NativeOperationJournal,
     nativeOperationOriginSchema,
     BUILD_ID: "fixture-build",

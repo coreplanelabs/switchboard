@@ -1,3 +1,6 @@
+import { prepareStorageRequest } from "./storeResponse.js";
+import { storageTransport } from "./storageTransport.js";
+import type { StorageOperation, StorageOperationBody } from "./storageRequestContext.js";
 import type { Secrets } from "../secrets.js";
 import type { RunHistoryConfig } from "./runStore.js";
 import { DEFAULT_RUN_STORE_TOKEN_ENV, RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "./runStoreWorker.js";
@@ -12,28 +15,45 @@ import {
 export class WorkerPrivateWorkerLog implements PrivateWorkerLog {
   constructor(private readonly opts: { baseUrl: string; token: string; storeKey: string; fetch?: typeof fetch }) {}
 
-  private async post(path: string, body: Record<string, unknown>): Promise<unknown> {
-    const res = await (this.opts.fetch ?? fetch)(`${this.opts.baseUrl.replace(/\/+$/, "")}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
-      body: JSON.stringify({ storeKey: this.opts.storeKey, ...body }),
-      signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`private worker log ${path}: HTTP ${res.status}`);
-    return res.json();
+  private async post<O extends StorageOperation, T>(
+    path: O,
+    body: StorageOperationBody<NoInfer<O>>,
+    receive: (result: unknown) => Promise<T>,
+  ): Promise<T> {
+    const payload = { storeKey: this.opts.storeKey, ...body };
+    const request = await prepareStorageRequest(path, payload);
+    return storageTransport(
+      request,
+      {
+        url: `${this.opts.baseUrl.replace(/\/+$/, "")}${path}`,
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
+        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+        timeoutMs: RUN_STORE_TIMEOUT_MS,
+        exceptionDetails: false,
+        fetch: this.opts.fetch,
+      },
+      async (res) => {
+        if (!res.ok) throw new Error(`private worker log ${path}: HTTP ${res.status}`);
+        return receive(await res.json());
+      },
+    );
   }
 
   async append(threadKey: string, event: PrivateWorkerEventInput): Promise<PrivateWorkerEvent> {
-    const answer = (await this.post("/runs/private-worker/append", { threadKey, event })) as { event?: unknown };
-    if (!isPrivateWorkerEvent(answer?.event)) throw new Error("private worker log append: invalid answer");
-    return answer.event;
+    return this.post("/runs/private-worker/append", { threadKey, event }, async (value) => {
+      const answer = value as { event?: unknown };
+      if (!isPrivateWorkerEvent(answer?.event)) throw new Error("private worker log append: invalid answer");
+      return answer.event;
+    });
   }
 
   async list(threadKey: string): Promise<PrivateWorkerEvent[]> {
-    const answer = (await this.post("/runs/private-worker/list", { threadKey })) as { events?: unknown };
-    if (!Array.isArray(answer?.events) || !answer.events.every(isPrivateWorkerEvent))
-      throw new Error("private worker log list: invalid answer");
-    return answer.events;
+    return this.post("/runs/private-worker/list", { threadKey }, async (value) => {
+      const answer = value as { events?: unknown };
+      if (!Array.isArray(answer?.events) || !answer.events.every(isPrivateWorkerEvent))
+        throw new Error("private worker log list: invalid answer");
+      return answer.events;
+    });
   }
 
   async listAfter(
@@ -41,17 +61,19 @@ export class WorkerPrivateWorkerLog implements PrivateWorkerLog {
     afterSeq: number,
     limit: number,
   ): Promise<{ events: PrivateWorkerEvent[]; more: boolean }> {
-    const answer = (await this.post("/runs/private-worker/list-after", { threadKey, afterSeq, limit })) as {
-      events?: unknown;
-      more?: unknown;
-    };
-    if (
-      !Array.isArray(answer?.events) ||
-      !answer.events.every(isPrivateWorkerEvent) ||
-      typeof answer.more !== "boolean"
-    )
-      throw new Error("private worker log list-after: invalid answer");
-    return { events: answer.events, more: answer.more };
+    return this.post("/runs/private-worker/list-after", { threadKey, afterSeq, limit }, async (value) => {
+      const answer = value as {
+        events?: unknown;
+        more?: unknown;
+      };
+      if (
+        !Array.isArray(answer?.events) ||
+        !answer.events.every(isPrivateWorkerEvent) ||
+        typeof answer.more !== "boolean"
+      )
+        throw new Error("private worker log list-after: invalid answer");
+      return { events: answer.events, more: answer.more };
+    });
   }
 }
 

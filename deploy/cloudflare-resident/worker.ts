@@ -1,3 +1,5 @@
+import { prepareStorageRequest } from "../../src/core/storeResponse.js";
+import { storageTransport } from "../../src/core/storageTransport.js";
 import { captureException } from "../../src/core/runStateWriteDiagnostic.js";
 import {
   FENCE_ACQUISITION_PREFIX,
@@ -12144,13 +12146,23 @@ export class ResidentDO extends Sandbox<Env> {
       token = this.env.MEMORY_TOKEN;
     if (!url || !token) return false;
     try {
-      const response = await fetch(new URL("/runs/workspace-ack", url), {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({ storeKey: RUN_STORE_KEY, ...value.owner, revision: value.revision }),
-        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+      const storageRequest = await prepareStorageRequest("/runs/workspace-ack", {
+        storeKey: RUN_STORE_KEY,
+        ...value.owner,
+        revision: value.revision,
       });
-      return response.status === 200 && ((await response.json()) as { ok?: unknown }).ok === true;
+      return await storageTransport(
+        storageRequest,
+        {
+          url: new URL("/runs/workspace-ack", url),
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+          timeoutMs: RUN_STORE_TIMEOUT_MS,
+          exceptionDetails: false,
+          fetch,
+        },
+        async (response) => response.status === 200 && ((await response.json()) as { ok?: unknown }).ok === true,
+      );
     } catch {
       return false;
     }
@@ -12220,18 +12232,24 @@ export class ResidentDO extends Sandbox<Env> {
     const token = this.env.MEMORY_TOKEN;
     if (!url || !token || !registration.runId) return null;
     try {
-      const res = await fetch(new URL("/runs/preservation-owner", url), {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          storeKey: RUN_STORE_KEY,
-          runId: registration.runId,
-          ownerGen: registration.ownerGen,
-          ownerFence: registration.ownerFence,
-        }),
-        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+      const storageRequest = await prepareStorageRequest("/runs/preservation-owner", {
+        storeKey: RUN_STORE_KEY,
+        runId: registration.runId,
+        ownerGen: registration.ownerGen,
+        ownerFence: registration.ownerFence,
       });
-      const observed = res.ok ? await res.json() : null;
+      const observed = await storageTransport(
+        storageRequest,
+        {
+          url: new URL("/runs/preservation-owner", url),
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+          timeoutMs: RUN_STORE_TIMEOUT_MS,
+          exceptionDetails: false,
+          fetch,
+        },
+        async (response) => (response.ok ? response.json() : null),
+      );
       // Passive response levels reuse the last canonical observation. This
       // cache is only a capacity hint; admission and custody still read fresh.
       const projected = this.workloadOwnerObservation(registration, observed);
@@ -14204,21 +14222,32 @@ export class ResidentDO extends Sandbox<Env> {
         ownerMatches,
         async () => {
           if (!this.env.STATE_WORKER_URL || !this.env.MEMORY_TOKEN) return;
-          const reply = await fetch(new URL("/runs/native-retirement/prepare", this.env.STATE_WORKER_URL), {
-            method: "POST",
-            headers: { authorization: `Bearer ${this.env.MEMORY_TOKEN}`, "content-type": "application/json" },
-            body: JSON.stringify({ storeKey: RUN_STORE_KEY, target }),
-            signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+          const storageRequest = await prepareStorageRequest("/runs/native-retirement/prepare", {
+            storeKey: RUN_STORE_KEY,
+            target,
           });
-          if (!reply.ok) return;
-          const body = (await reply.json()) as { kind?: unknown; permit?: unknown };
-          const permit = nativeRetirementPermitSchema.safeParse(body.permit);
-          if (
-            body.kind === "prepared" &&
-            permit.success &&
-            nativeRetirementTargetKey(permit.data.target) === nativeRetirementTargetKey(target)
-          )
-            return permit.data;
+          return storageTransport(
+            storageRequest,
+            {
+              url: new URL("/runs/native-retirement/prepare", this.env.STATE_WORKER_URL),
+              headers: { authorization: `Bearer ${this.env.MEMORY_TOKEN}`, "content-type": "application/json" },
+              signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+              timeoutMs: RUN_STORE_TIMEOUT_MS,
+              exceptionDetails: false,
+              fetch,
+            },
+            async (reply) => {
+              if (!reply.ok) return;
+              const body = (await reply.json()) as { kind?: unknown; permit?: unknown };
+              const permit = nativeRetirementPermitSchema.safeParse(body.permit);
+              if (
+                body.kind === "prepared" &&
+                permit.success &&
+                nativeRetirementTargetKey(permit.data.target) === nativeRetirementTargetKey(target)
+              )
+                return permit.data;
+            },
+          );
         },
       );
       if ("error" in result)
@@ -17671,13 +17700,20 @@ async function readRecordedCheckSource(env: Env, selector: CheckSelector): Promi
   if (!env.STATE_WORKER_URL || !env.MEMORY_TOKEN || !checkSelectorSchema.safeParse(selector).success)
     return { kind: "unavailable" };
   try {
-    const response = await fetch(new URL("/runs/check-source", env.STATE_WORKER_URL), {
-      method: "POST",
-      headers: { authorization: `Bearer ${env.MEMORY_TOKEN}`, "content-type": "application/json" },
-      body: JSON.stringify({ storeKey: RUN_STORE_KEY, selector }),
-      signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
-    });
-    return response.ok ? checkSourceReadOf(await response.json(), selector) : { kind: "unavailable" };
+    const storageRequest = await prepareStorageRequest("/runs/check-source", { storeKey: RUN_STORE_KEY, selector });
+    return await storageTransport(
+      storageRequest,
+      {
+        url: new URL("/runs/check-source", env.STATE_WORKER_URL),
+        headers: { authorization: `Bearer ${env.MEMORY_TOKEN}`, "content-type": "application/json" },
+        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+        timeoutMs: RUN_STORE_TIMEOUT_MS,
+        exceptionDetails: false,
+        fetch,
+      },
+      async (response) =>
+        response.ok ? checkSourceReadOf(await response.json(), selector) : { kind: "unavailable" as const },
+    );
   } catch {
     return { kind: "unavailable" };
   }
@@ -17925,14 +17961,31 @@ async function handleAttach(
   };
   if (nativeProtocol)
     try {
-      const canonical = await fetch(new URL("/runs/preservation-owner", env.STATE_WORKER_URL), {
-        method: "POST",
-        headers: { authorization: `Bearer ${env.MEMORY_TOKEN}`, "content-type": "application/json" },
-        body: JSON.stringify({ storeKey: RUN_STORE_KEY, runId, ownerGen, ownerFence }),
-        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+      if (!runId) return refuseBirth("owner");
+      const storageRequest = await prepareStorageRequest("/runs/preservation-owner", {
+        storeKey: RUN_STORE_KEY,
+        runId,
+        ownerGen,
+        ownerFence,
       });
+      const canonical = await storageTransport(
+        storageRequest,
+        {
+          url: new URL("/runs/preservation-owner", env.STATE_WORKER_URL),
+          headers: { authorization: `Bearer ${env.MEMORY_TOKEN}`, "content-type": "application/json" },
+          signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+          timeoutMs: RUN_STORE_TIMEOUT_MS,
+          exceptionDetails: false,
+          fetch,
+        },
+        async (response) => ({
+          ok: response.ok,
+          status: response.status,
+          view: response.ok ? await response.json() : undefined,
+        }),
+      );
       if (!canonical.ok) return refuseBirth("http", canonical.status);
-      const view = (await canonical.json()) as {
+      const view = canonical.view as {
         kind?: string;
         row?: { runId?: string; ownerGen?: string; workspaceThreadKey?: string; residentExecution?: string };
       };

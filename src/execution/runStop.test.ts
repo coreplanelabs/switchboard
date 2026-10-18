@@ -354,13 +354,14 @@ describe("run runtime stop", () => {
           },
         ),
       ).toMatchObject({ stopped: false, refusal: { phase: "prepare", cause: "state-unreachable" } });
-      expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toEqual({
+      expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual({
         event: "run.cancellation.refused",
         phase: "prepare",
         cause: "state-unreachable",
         runId: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
         cancellationId: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
       });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("private transport body and credential");
       warn.mockClear();
       expect(
         await readCancellationPreparation(

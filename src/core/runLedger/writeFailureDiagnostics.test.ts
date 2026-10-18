@@ -15,6 +15,8 @@ import {
   STORAGE_FAILURE_DIAGNOSTIC_HEADER,
   STORAGE_REQUEST_ID_HEADER,
   storageFailureNote,
+  originalStorageFailure,
+  storageFailureWasReported,
 } from "../storageFailureDiagnostic.js";
 import { testRegistry } from "../runRegistry/testing.js";
 import type { RunEvent } from "../runEvents.js";
@@ -51,6 +53,40 @@ function response(mode: string): Response {
 }
 
 describe("original uncertain write diagnostics", () => {
+  it("keeps a rejected public stop acknowledgement on its original request without changing its error class", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const notices: Array<{ runIds: readonly string[]; diagnostic: Parameters<typeof storageFailureNote>[0] }> = [];
+    let requestId: string | null = null;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://storage.invalid",
+      token: "fixture",
+      storeKey: "runs:fixture",
+      onFailure: (value) => notices.push(value),
+      fetch: async (_url, init) => {
+        requestId = new Headers(init?.headers).get(STORAGE_REQUEST_ID_HEADER);
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      const error = await wire.requestStop(id, "hard", { destructive: true }).catch((value) => value);
+      expect(error).toMatchObject({
+        name: "PermanentStoreError",
+        message: "The history service did not confirm the Kill request.",
+      });
+      expect(originalStorageFailure(error)).toMatchObject({
+        operation: "/runs/stop",
+        requestId,
+        phase: "acknowledgement",
+        httpStatus: 200,
+      });
+      expect(storageFailureWasReported(error)).toBe(true);
+      expect(notices).toMatchObject([
+        { runIds: [id], diagnostic: { requestId, operation: "/runs/stop", httpStatus: 200 } },
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
   it("retains body evidence from the original decoder without reading a ledger response twice", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const notices: Parameters<typeof storageFailureNote>[0][] = [];
@@ -503,6 +539,9 @@ describe("original uncertain write diagnostics", () => {
         event: "storage.request.failure",
         side: "client",
         runIds: [id],
+        context: { scope: "runs" },
+        targetCounts: { total: 1, emitted: 1, omitted: 0 },
+        diagnosticDetailsOmitted: false,
         diagnostic: {
           version: 1,
           operation: "/runs/state",
