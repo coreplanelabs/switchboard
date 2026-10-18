@@ -12,10 +12,11 @@ import {
   sanitizeArtifactText,
   type ReadingDiffConfig,
 } from "./readingDiff.js";
-import { redactSecrets, type RunEvent } from "./runEvents.js";
+import type { RunEvent } from "./runEvents.js";
 import { fitRecordToBudget, storedEventSeqs, type RunRecord } from "./runRecord.js";
 import type { RunStore } from "./runStore.js";
 import { systemClock } from "./trace/clock.js";
+import { retainMeatProgress, safeMeatText, type ReadingDiffAttempt } from "./readingDiffProgress.js";
 
 // The abridged reading diff, produced on the BOT HOST after a review has
 // finished (docs/reference/specs/reading-diff.md items 5–10). ONE path:
@@ -36,9 +37,9 @@ import { systemClock } from "./trace/clock.js";
 //
 // The state machine, per run id: `absent → running → done | failed`;
 // `--force` moves `done` or `failed` back to `running`. `running` and `failed`
-// live in this process (a restart forgets them: a lost job is `absent` again
-// and re-runnable; a lost failure is retried on the next ask); `done` IS the
-// stored artifact, so it survives restarts and answers idempotently.
+// have live process ownership; progress and errors also live on the stored
+// record. A restart exposes an unfinished attempt for explicit retry, never
+// silently starts another paid job. The completed artifact is reused.
 
 export type AbridgeInput = "github-compare" | "recorded";
 
@@ -62,9 +63,9 @@ export interface AbridgeArtifactSummary {
 
 export type AbridgeState =
   | { state: "absent" }
-  | { state: "running"; startedAt: number }
-  | { state: "done"; reused: boolean; artifact: AbridgeArtifactSummary }
-  | { state: "failed"; reason: string; at: number };
+  | { state: "running"; startedAt: number; progress?: string[] }
+  | { state: "done"; reused: boolean; artifact: AbridgeArtifactSummary; progress?: string[] }
+  | { state: "failed"; reason: string; at: number; progress?: string[] };
 
 export interface AbridgeRequest {
   runId: string;
@@ -98,7 +99,6 @@ export interface AbridgerDeps {
   /** meat itself — `meatOnHost(...)` in production, a fake in tests. */
   meat: (run: MeatRun) => Promise<MeatRunResult>;
   defaultModel: () => string;
-  timeoutMs: () => number;
   clock: () => number;
   warn: (message: string) => void;
   /** Injectable for tests; default `COMPARE_DIFF_MAX_CHARS`. */
@@ -128,14 +128,14 @@ function summarize(a: ReviewArtifactEvent): AbridgeArtifactSummary {
 const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 export class ReviewAbridger {
-  private readonly jobs = new Map<string, { startedAt: number; done: Promise<AbridgeState> }>();
-  private readonly failures = new Map<string, { reason: string; at: number }>();
+  private readonly jobs = new Map<string, { attempt: ReadingDiffAttempt; done: Promise<AbridgeState> }>();
+  private readonly failures = new Map<string, { reason: string; at: number; progress?: string[] }>();
   /** The last production's final state per run — what `wait` answers once the job is gone. */
   private readonly outcomes = new Map<string, AbridgeState>();
   /** The decision in flight per run (an `abridge` reading its record before it
    *  has a job): registered SYNCHRONOUSLY before the first await, so a second
    *  call for the same run joins it instead of racing it — the check-then-act
-   *  that would otherwise start two productions (two Opus calls) for one run. */
+   *  that would otherwise start two productions (two paid model jobs) for one run. */
   private readonly deciding = new Map<string, Promise<AbridgeState>>();
 
   constructor(private readonly deps: AbridgerDeps) {}
@@ -157,11 +157,19 @@ export class ReviewAbridger {
 
   private async decide(req: AbridgeRequest): Promise<AbridgeState> {
     const job = this.jobs.get(req.runId);
-    if (job) return { state: "running", startedAt: job.startedAt };
+    if (job) return { state: "running", startedAt: job.attempt.startedAt, progress: [...job.attempt.progress] };
     const record = await this.deps.store.get(req.runId);
     if (!record) throw new AbridgeRefusal("not_found", "run not found");
     const existing = meatArtifactOf(record);
-    if (existing && !req.force) return { state: "done", reused: true, artifact: summarize(existing) };
+    if (!req.force && record.readingDiffAbridge?.state !== undefined && record.readingDiffAbridge.state !== "done")
+      return this.status(req.runId);
+    if (existing && !req.force)
+      return {
+        state: "done",
+        reused: true,
+        artifact: summarize(existing),
+        ...(record.readingDiffAbridge ? { progress: record.readingDiffAbridge.progress } : {}),
+      };
     const failed = this.failures.get(req.runId);
     if (failed && !req.force) return { state: "failed", ...failed };
     const git = gitArtifactOf(record);
@@ -170,20 +178,43 @@ export class ReviewAbridger {
     const startedAt = this.deps.clock();
     const model = req.model ?? this.deps.defaultModel();
     this.failures.delete(req.runId);
-    const done = this.produce(record, git, model).finally(() => this.jobs.delete(req.runId));
-    this.jobs.set(req.runId, { startedAt, done });
-    return { state: "running", startedAt };
+    const attempt: ReadingDiffAttempt = { state: "running", startedAt, at: startedAt, progress: [] };
+    const done = this.produce(record, git, model, attempt).finally(() => this.jobs.delete(req.runId));
+    this.jobs.set(req.runId, { attempt, done });
+    return { state: "running", startedAt, progress: [...attempt.progress] };
   }
 
   /** The state without starting anything. */
   async status(runId: string): Promise<AbridgeState> {
     const job = this.jobs.get(runId);
-    if (job) return { state: "running", startedAt: job.startedAt };
+    if (job) return { state: "running", startedAt: job.attempt.startedAt, progress: [...job.attempt.progress] };
     const failed = this.failures.get(runId);
     if (failed) return { state: "failed", ...failed };
     const record = await this.deps.store.get(runId);
+    const attempt = record?.readingDiffAbridge;
+    if (attempt?.state === "failed")
+      return {
+        state: "failed",
+        reason: attempt.reason ?? "meat failed without a recorded error.",
+        at: attempt.at,
+        progress: attempt.progress,
+      };
+    if (attempt?.state === "running")
+      return {
+        state: "failed",
+        reason: "The previous meat attempt has no active process on this bot or saved result.",
+        at: attempt.at,
+        progress: attempt.progress,
+      };
     const existing = record ? meatArtifactOf(record) : undefined;
-    return existing ? { state: "done", reused: true, artifact: summarize(existing) } : { state: "absent" };
+    return existing
+      ? {
+          state: "done",
+          reused: true,
+          artifact: summarize(existing),
+          ...(attempt ? { progress: attempt.progress } : {}),
+        }
+      : { state: "absent" };
   }
 
   /** The running job's final state, or the current state when none runs. */
@@ -222,11 +253,32 @@ export class ReviewAbridger {
     }
   }
 
-  private async produce(record: RunRecord, git: ReviewArtifactEvent, model: string): Promise<AbridgeState> {
+  private async saveAttempt(runId: string, attempt: ReadingDiffAttempt): Promise<void> {
+    const record = await this.deps.store.get(runId);
+    if (!record) throw new Error("the run's record is gone — nothing to append to");
+    const saved = await this.deps.store.put(
+      fitRecordToBudget({ ...record, readingDiffAbridge: { ...attempt, progress: [...attempt.progress] } }),
+    );
+    if (!saved.stored) throw new Error("the run store did not keep meat's progress");
+  }
+
+  private async produce(
+    record: RunRecord,
+    git: ReviewArtifactEvent,
+    model: string,
+    attempt: ReadingDiffAttempt,
+  ): Promise<AbridgeState> {
     const at = () => this.deps.clock();
+    const progress = async (message: string) => {
+      attempt.progress = retainMeatProgress(attempt.progress, message);
+      attempt.at = at();
+      await this.saveAttempt(record.id, attempt);
+    };
     try {
+      await progress("Fetching the complete review diff.");
       const input = await this.input(record, git);
-      const meat = await this.deps.meat({ diff: input.diff, model, timeoutMs: this.deps.timeoutMs() });
+      await progress(`Starting meat with ${model} (${input.bytes} input bytes).`);
+      const meat = await this.deps.meat({ diff: input.diff, model, onProgress: progress });
       if (!meat.ok) throw new Error(meat.reason);
       const capped = capDiff(sanitizeArtifactText(meat.result.diff));
       const artifact: Omit<ReviewArtifactEvent, "type" | "artifact" | "seq" | "at"> = {
@@ -244,9 +296,27 @@ export class ReviewAbridger {
         model,
       };
       const stored = await appendReviewArtifact(this.deps.store, record.id, artifact, at());
-      return this.conclude(record.id, { state: "done", reused: false, artifact: summarize(stored) });
+      attempt.state = "done";
+      await progress("Abridged diff saved.");
+      return this.conclude(record.id, {
+        state: "done",
+        reused: false,
+        artifact: summarize(stored),
+        progress: [...attempt.progress],
+      });
     } catch (err) {
-      const failed = { reason: redactSecrets(describe(err)), at: at() };
+      attempt.state = "failed";
+      attempt.at = at();
+      attempt.reason = safeMeatText(describe(err)).slice(0, 4000);
+      try {
+        await this.saveAttempt(record.id, attempt);
+      } catch (saveError) {
+        attempt.reason = `${attempt.reason}; progress was not saved: ${safeMeatText(describe(saveError))}`.slice(
+          0,
+          4000,
+        );
+      }
+      const failed = { reason: attempt.reason, at: attempt.at, progress: [...attempt.progress] };
       this.failures.set(record.id, failed);
       return this.conclude(record.id, { state: "failed", ...failed });
     }
@@ -321,7 +391,7 @@ async function appendReviewArtifact(
 /** The production abridger: the run store, GitHub's compare on the App (or
  *  `GH_TOKEN`) read credential when the process holds one, meat on this host
  *  with the bot's own Anthropic key and a cache under `<dataDir>/meat-cache`,
- *  the configured `meatModel` and `meatTimeoutS`. Config is read per call, so
+ *  the configured `meatModel`. Meat owns its deadline. Config is read per call, so
  *  a reload changes the model without a restart; a production asked for with
  *  no `-model` flag and no configured `meatModel` fails naming the key. */
 export function reviewAbridgerFromConfig(
@@ -351,7 +421,6 @@ export function reviewAbridgerFromConfig(
       if (!model) throw new Error(MEAT_MODEL_MISSING);
       return model;
     },
-    timeoutMs: () => resolved().meatTimeoutS * 1000,
     clock: systemClock,
     warn,
   });

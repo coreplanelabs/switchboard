@@ -58,6 +58,12 @@ RUN npm ci --omit=dev --workspaces=false --include-workspace-root
 # is a reviewable commit; src/deploy/botImageMeat.test.ts holds this shape.
 FROM docker.io/library/golang:1.27.1-bookworm AS meat
 RUN CGO_ENABLED=0 go install meat.dev/cmd/meat@f39f41dfe7b5b37a12b35fdfbaecc7e779855bd3
+# JSON stays on stdout; the existing turn/tool callback writes progress to stderr.
+COPY scripts/meat-progress.patch /tmp/meat-progress.patch
+RUN cp -a /go/pkg/mod/meat.dev@* /tmp/meat \
+  && chmod -R u+w /tmp/meat \
+  && cd /tmp/meat && git apply --unidiff-zero /tmp/meat-progress.patch \
+  && CGO_ENABLED=0 go install ./cmd/meat
 
 FROM node:24.21.0-slim
 RUN apt-get update \

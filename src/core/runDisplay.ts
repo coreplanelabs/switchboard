@@ -11,9 +11,13 @@ export interface RunDisplay {
 export const RUN_PROMPT_MAX = 16_000;
 export const RUN_TITLE_MAX = 60;
 
-/** Native metadata reads do not carry prompt text. */
-export function runMetadata<T extends RunDisplay>(run: T): Omit<T, "prompt"> {
-  const { prompt: _prompt, ...metadata } = run;
+/** Native metadata reads omit request and abridging text. */
+export function runMetadata<T extends RunDisplay>(run: T): Omit<T, "prompt" | "readingDiffAbridge"> {
+  const {
+    prompt: _prompt,
+    readingDiffAbridge: _readingDiffAbridge,
+    ...metadata
+  } = run as T & { readingDiffAbridge?: unknown };
   return run.title ? { ...metadata, title: wrapUntrusted(run.title) } : metadata;
 }
 

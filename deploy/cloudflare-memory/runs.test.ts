@@ -89,6 +89,36 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
 }
 
 const stubOf = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
+
+describe("reading diff attempt visibility", () => {
+  it("retains the attempt in get while summary and both list paths omit its text", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const attempt = {
+      state: "failed" as const,
+      startedAt: now - 1000,
+      at: now,
+      progress: ["meat: thinking (turn 1)"],
+      reason: "provider failed",
+    };
+    const saved = await post("/runs/put", {
+      storeKey: key,
+      record: record("attempt", now, { readingDiffAbridge: attempt }),
+    });
+    expect(saved.status).toBe(200);
+    const full = await post("/runs/get", { storeKey: key, id: "attempt" });
+    expect(full.data.record).toMatchObject({ id: "attempt", readingDiffAbridge: attempt });
+    const summary = await post("/runs/summary", { storeKey: key, id: "attempt" });
+    expect(summary.data.summary).toMatchObject({ id: "attempt" });
+    expect(summary.data.summary).not.toHaveProperty("readingDiffAbridge");
+    for (const limit of [1, 10]) {
+      const page = await post("/runs/list", { storeKey: key, limit });
+      expect(page.status).toBe(200);
+      expect(page.data.items).toMatchObject([{ id: "attempt" }]);
+      expect((page.data.items as unknown[])[0]).not.toHaveProperty("readingDiffAbridge");
+    }
+  });
+});
 /** Record every SQL statement the DO instance runs from now on (the plan check). */
 function spySql(inst: RunHistoryDO): string[] {
   const seen: string[] = [];

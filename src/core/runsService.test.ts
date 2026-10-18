@@ -118,6 +118,40 @@ describe("RunsService.getRun", () => {
     expect(await svc.getRun(run.id)).toMatchObject({ ok: true, value: { id: run.id, failureContext: null } });
   });
 
+  it("omits attempt text from persisted and merged views even when a legacy store summary includes it", async () => {
+    const { reg, store, svc } = setup();
+    const attempt = {
+      state: "failed" as const,
+      startedAt: NOW - 1000,
+      at: NOW,
+      progress: ["private progress"],
+      reason: "private failure",
+    };
+    const run = reg.create("review");
+    reg.finish(run.id, "completed");
+    reg.markPersisted(run.id);
+    const records = [
+      record("stored-only", NOW - 1000, { readingDiffAbridge: attempt }),
+      record(run.id, NOW, { readingDiffAbridge: attempt }),
+    ];
+    for (const saved of records) await store!.put(saved);
+    const summaries = records.map(({ events: _events, ...summary }) => summary);
+    vi.spyOn(store!, "getSummary").mockImplementation(
+      async (id) => summaries.find((summary) => summary.id === id) ?? null,
+    );
+    vi.spyOn(store!, "list").mockResolvedValue(summaries);
+    const page = await svc.listRuns({ status: "all", visibleTo: ALL });
+    expect(page.runs.map((item) => item.id).sort()).toEqual(["id-1", "stored-only"]);
+    expect(JSON.stringify(page)).not.toContain("readingDiffAbridge");
+    for (const id of ["stored-only", run.id]) {
+      for (const include of [undefined, "messages"] as const) {
+        const response = await svc.getRun(id, { include });
+        expect(response).toMatchObject({ ok: true, value: { id, finished: true } });
+        expect(JSON.stringify(response)).not.toContain("readingDiffAbridge");
+      }
+    }
+    expect((await store!.get("stored-only"))?.readingDiffAbridge).toEqual(attempt);
+  });
   it("refuses cached reads when shared deletion state is unavailable", async () => {
     const { reg, store } = setup();
     const warnings: string[] = [];

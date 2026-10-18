@@ -7,7 +7,6 @@ import { parseDeliveryConfig, SNAPSHOT_EVERY_MINUTES } from "./delivery.js";
 import { maxChildrenOf } from "./dispatch/spawnConfig.js";
 import { DEFAULT_SCOPE_CAP } from "./memory/engine.js";
 import { DEFAULT_MEMORY_LIMIT, DEFAULT_MEMORY_TOKENS } from "./memory/scorer.js";
-import { MEAT_TIMEOUT_S_DEFAULT } from "./readingDiff.js";
 import { DEFAULT_RETENTION_POLICY } from "./runRecord.js";
 import { resolveShipCaps } from "./shipPipeline.js";
 
@@ -212,13 +211,6 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
       undefined,
       "config",
       "the model meat abridges with — required with provider: meat, no built-in model",
-    ),
-    row(
-      "review.readingDiff.meatTimeoutS",
-      readingDiff?.meatTimeoutS,
-      MEAT_TIMEOUT_S_DEFAULT,
-      "config",
-      "meat's budget on the host, in seconds",
     ),
   );
 

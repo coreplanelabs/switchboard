@@ -246,6 +246,7 @@ export function toListItem(record: RunRecord, bytes: number): RunListItem {
     workspaceAllocation: _workspaceAllocation,
     workspaceDisposition: _workspaceDisposition,
     events: _events,
+    readingDiffAbridge: _readingDiffAbridge,
     branchPublication: _branchPublication,
     reviewPublication: _reviewPublication,
     branchPushReceipts: _branchPushReceipts,

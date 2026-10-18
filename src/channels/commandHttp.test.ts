@@ -4,6 +4,8 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:
 import { CommandRegistry, bindCommands, type CommandInvoker } from "../core/commandRegistry.js";
 import { toSurfaceNames } from "../core/commandSurface.js";
 import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
+import { registerReviewCommands, type ReviewCommandDeps } from "../core/commands/review.js";
+import { ReviewAbridger } from "../core/reviewAbridge.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
@@ -17,6 +19,7 @@ import { secretsFrom } from "../secrets.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { ALL_GRANTS, grantsFor, parseGrantsConfig, type GrantsConfig } from "../core/authz/grants.js";
 import { NO_GRANTS } from "../core/authz/types.js";
+import { wrapUntrusted } from "../core/untrusted.js";
 
 /** A parsed `grants` block (config.yaml's shape) — throws on a malformed fixture. */
 const native = (cfg: GrantsConfig) => {
@@ -219,6 +222,52 @@ describe("isCommandPath (the ONE gate predicate)", () => {
 });
 
 describe("createCommandHttpHandler — read commands", () => {
+  it("GET review.status carries retained meat progress and the final error through HTTP JSON", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    await store.put(
+      record("rev-1", NOW - 1000, {
+        agent: "review",
+        readingDiffAbridge: {
+          state: "failed",
+          startedAt: NOW - 240_000,
+          at: NOW,
+          progress: ["meat: thinking (turn 1)", "meat: model generate: context deadline exceeded"],
+          reason: "meat exited 1: context deadline exceeded",
+        },
+      }),
+    );
+    const registry = new CommandRegistry<ReviewCommandDeps>({ audit: () => {} });
+    registerReviewCommands(registry);
+    const abridger = new ReviewAbridger({
+      store,
+      github: () => undefined,
+      meat: async () => {
+        throw new Error("a status GET must not run meat");
+      },
+      defaultModel: () => "configured-test-model",
+      clock: () => NOW,
+      warn: () => {},
+    });
+    const runs = createRunsService({ registry: new RunRegistry(), store });
+    const commands = bindCommands(registry, { review: { abridger: async () => abridger, runs: async () => runs } });
+    const handler = createCommandHttpHandler(commands, {
+      grantsFor: () => ({ ...NO_GRANTS, actions: new Set(["runs:read"]) }),
+    });
+    const request = fakeReqRes({ method: "GET", url: "/api/review.status?id=rev-1" });
+    await handler(request.req, request.res, browser);
+    expect(request.status).toBe(200);
+    expect(request.headers["cache-control"]).toBe("no-store");
+    expect(request.json()).toEqual({
+      id: "rev-1",
+      state: "failed",
+      at: NOW,
+      reason: "meat exited 1: context deadline exceeded",
+      progress: [
+        wrapUntrusted("meat: thinking (turn 1)"),
+        wrapUntrusted("meat: model generate: context deadline exceeded"),
+      ],
+    });
+  });
   it("GET /api/runs.list?status=all → 200 JSON with Cache-Control: no-store and no token", async () => {
     const { handler, commands } = await fixture();
     const t = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
