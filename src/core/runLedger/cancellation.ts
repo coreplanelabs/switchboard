@@ -94,10 +94,24 @@ const CANCELLATION_REFUSAL_CAUSES = [
   "runtime-unconfirmed",
   "runtime-http-refusal",
 ] as const;
-export interface CancellationRefusal {
-  phase: CancellationPhase;
-  cause: (typeof CANCELLATION_REFUSAL_CAUSES)[number];
-}
+/** A closed local target check is valid only on its prepare-stage refusal. */
+export type CancellationRefusal =
+  | { phase: CancellationPhase; cause: (typeof CANCELLATION_REFUSAL_CAUSES)[number]; custody?: never }
+  | { phase: "prepare"; cause: "custody-unverified"; custody: CancellationCustodyFailure };
+const CANCELLATION_CUSTODY_FAILURES = [
+  "hosted",
+  "binding-unrecorded",
+  "binding-invalid",
+  "backend-unsupported",
+  "sandbox-target-unverified",
+  "resident-route-unverified",
+  "resident-identity-incomplete",
+  "owner-generation-mismatch",
+  "owner-fence-invalid",
+  "resident-repository-missing",
+  "host-process",
+] as const;
+export type CancellationCustodyFailure = (typeof CANCELLATION_CUSTODY_FAILURES)[number];
 export interface CancellationObservation {
   step: "initial-kill" | "final-kill";
   phase: "guard" | "launch" | "exit";
@@ -156,13 +170,19 @@ export function cancellationRefusalOf(value: unknown): CancellationRefusal | und
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const v = value as Record<string, unknown>;
   if (
-    Object.keys(v).some((key) => !["phase", "cause"].includes(key)) ||
+    Object.keys(v).some((key) => !["phase", "cause", "custody"].includes(key)) ||
     typeof v.phase !== "string" ||
     !["prepare", "sandbox", "resident"].includes(v.phase) ||
-    !CANCELLATION_REFUSAL_CAUSES.includes(v.cause as CancellationRefusal["cause"])
+    !CANCELLATION_REFUSAL_CAUSES.includes(v.cause as CancellationRefusal["cause"]) ||
+    (v.custody !== undefined &&
+      (v.phase !== "prepare" ||
+        v.cause !== "custody-unverified" ||
+        !CANCELLATION_CUSTODY_FAILURES.includes(v.custody as CancellationCustodyFailure)))
   )
     return;
-  return { phase: v.phase as CancellationPhase, cause: v.cause as CancellationRefusal["cause"] };
+  return v.custody === undefined
+    ? { phase: v.phase as CancellationPhase, cause: v.cause as CancellationRefusal["cause"] }
+    : { phase: "prepare", cause: "custody-unverified", custody: v.custody as CancellationCustodyFailure };
 }
 
 export function cancellationFailureMessage(
@@ -186,6 +206,10 @@ export function cancellationFailureMessage(
     case "state-not-prepared":
       return "The recorded stop could not be verified.";
     case "custody-unverified":
+      if (refusal.custody === "owner-generation-mismatch")
+        return "The recorded workspace owner does not match the run owner. Shutdown is not confirmed.";
+      if (refusal.custody === "owner-fence-invalid")
+        return "The workspace ownership fence could not be verified. Shutdown is not confirmed.";
       return "The run's workspace could not be verified.";
     case "operations-busy":
       return "The run still has operations in progress.";
@@ -394,34 +418,41 @@ export async function readCancellationPreparation(
 
 /** A cancellation fence is irreversible by ordinary execution; select only a scoped runtime. */
 export function cancellationRuntimeSupported(row: LiveRunRow): boolean {
+  return cancellationRuntimeCustodyFailure(row) === undefined;
+}
+
+/** The support predicate and its refusal use the same original-target checks. */
+export function cancellationRuntimeCustodyFailure(row: LiveRunRow): CancellationCustodyFailure | undefined {
   const b = row.state.binding;
   if (b === undefined)
-    return (
-      row.meta.profile?.machine === "none" ||
+    return row.meta.profile?.machine === "none" ||
       unboundNativeReview(row) ||
       (!row.meta.hosted &&
         row.meta.selection === "resident" &&
         typeof row.meta.repo === "string" &&
         row.meta.repo.length > 0)
-    );
-  if (!b || typeof b !== "object" || Array.isArray(b)) return false;
+      ? undefined
+      : "binding-unrecorded";
+  if (!b || typeof b !== "object" || Array.isArray(b)) return "binding-invalid";
   const binding = b as Record<string, unknown>;
   if (binding.backend === "sandbox")
-    return typeof binding.sandboxKey === "string" && binding.sandboxKey.endsWith(`:${row.runId}`);
-  return (
-    binding.backend === "resident" &&
-    residentRouteOf(binding) !== null &&
-    typeof binding.user === "string" &&
-    binding.user.length > 0 &&
-    typeof binding.container === "string" &&
-    binding.container.length > 0 &&
-    typeof binding.workspace === "string" &&
-    binding.workspace.length > 0 &&
-    binding.ownerGen === row.ownerGen &&
-    typeof binding.ownerFence === "number" &&
-    Number.isSafeInteger(binding.ownerFence) &&
-    binding.ownerFence > 0
-  );
+    return typeof binding.sandboxKey === "string" && binding.sandboxKey.endsWith(`:${row.runId}`)
+      ? undefined
+      : "sandbox-target-unverified";
+  if (binding.backend !== "resident") return "backend-unsupported";
+  if (residentRouteOf(binding) === null) return "resident-route-unverified";
+  if (
+    typeof binding.user !== "string" ||
+    binding.user.length === 0 ||
+    typeof binding.container !== "string" ||
+    binding.container.length === 0 ||
+    typeof binding.workspace !== "string" ||
+    binding.workspace.length === 0
+  )
+    return "resident-identity-incomplete";
+  if (binding.ownerGen !== row.ownerGen) return "owner-generation-mismatch";
+  if (typeof binding.ownerFence !== "number" || !Number.isSafeInteger(binding.ownerFence) || binding.ownerFence <= 0)
+    return "owner-fence-invalid";
 }
 
 /** Null explicitly requests discovery; absence never bypasses a stored target. */

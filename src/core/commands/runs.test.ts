@@ -23,6 +23,8 @@ import { RunRegistry } from "../runRegistry.js";
 import { InMemoryRunStore } from "../runStore.js";
 import { PermanentStoreError, TransientStoreError } from "../runStoreWorker.js";
 import { rememberStorageFailure } from "../storageFailureDiagnostic.js";
+import { createRunStop } from "../../execution/runStop.js";
+import { secretsFrom } from "../../secrets.js";
 import { createRunsService } from "../runsService.js";
 import { registerRunsCommands, runsCommands, type RunReadDenied, type RunsCommandDeps, wrapEvent } from "./runs.js";
 
@@ -1396,6 +1398,150 @@ describe("runs.stop", () => {
       error: "not_found",
     });
   });
+
+  async function staleOwnerWorld(sinkFails = false) {
+    const { reg, registry, store } = await setup();
+    let now = NOW;
+    const ledger = new InMemoryRunLedger(() => now);
+    const id = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+    const threadKey = "mcp:X:original";
+    await ledger.claim({
+      runId: id,
+      threadKey,
+      gen: "current-owner",
+      leaseMs: 1,
+      startedAt: NOW,
+      meta: {
+        agent: "review",
+        channelId: "mcp:X",
+        userId: "mcp:reader",
+        threadKey,
+        repo: "acme/api",
+        selection: "resident",
+      },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    await ledger.setState(id, "current-owner", {
+      binding: {
+        backend: "resident",
+        workspace: "/private/checkout",
+        user: "private-user",
+        container: "private-container",
+        ownerGen: "old-owner",
+        ownerFence: 7,
+      },
+    });
+    now += 2;
+    const warnings: unknown[] = [];
+    const fetch = vi.fn(async () => {
+      throw new Error("must not contact an unverified runtime");
+    });
+    const runs = createRunsService({
+      registry: reg,
+      store,
+      ledger,
+      clock: () => now,
+      stopRuntime: createRunStop(
+        { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+        secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+        fetch,
+      ),
+      warn: (line) => {
+        if (sinkFails) throw new Error("sink unavailable");
+        warnings.push(JSON.parse(line));
+      },
+    });
+    return { id, registry, ledger, runs, warnings, fetch, deps: { runs: async () => runs } };
+  }
+
+  it("reads a fresh shutdown check without changing the target or borrowing another resource", async () => {
+    const { id, registry, ledger, warnings, fetch, deps } = await staleOwnerWorld();
+    const input = { args: [id], options: { include: "shutdown" } };
+    expect(value<{ shutdown: unknown }>(await registry.invoke("runs.get", input, cli, deps)).shutdown).toEqual({
+      status: "observed",
+      source: "live-ledger",
+      ownerGen: "current-owner",
+      stopIntent: null,
+      targetCheck: "refused",
+      refusal: { phase: "prepare", cause: "custody-unverified", custody: "owner-generation-mismatch" },
+      runtimeContacted: false,
+      confirmation: "not-checked",
+    });
+    expect(
+      value<{ shutdown?: unknown }>(await registry.invoke("runs.get", { args: [id], options: {} }, cli, deps)).shutdown,
+    ).toBeUndefined();
+    expect(await registry.invoke("runs.get", input, unpinned, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+      message: "no run found",
+    });
+    const row = ledger.live.get(id)!;
+    await ledger.setState(id, "current-owner", {
+      binding: { ...(row.state.binding as object), ownerGen: "current-owner" },
+    });
+    expect(value<{ shutdown: unknown }>(await registry.invoke("runs.get", input, cli, deps)).shutdown).toEqual({
+      status: "observed",
+      source: "live-ledger",
+      ownerGen: "current-owner",
+      stopIntent: null,
+      targetCheck: "eligible",
+      runtimeContacted: false,
+      confirmation: "not-checked",
+    });
+    const current = ledger.live.get(id)!;
+    ledger.live.set(id, { ...current, meta: { ...current.meta, channelId: "mcp:Y" } });
+    expect(value<{ shutdown: unknown }>(await registry.invoke("runs.get", input, cli, deps)).shutdown).toEqual({
+      status: "unavailable",
+    });
+    vi.spyOn(ledger, "listLive").mockRejectedValueOnce(new Error("private source detail"));
+    expect(value<{ shutdown: unknown }>(await registry.invoke("runs.get", input, cli, deps)).shutdown).toEqual({
+      status: "unavailable",
+    });
+    expect(ledger.live.get(id)?.stop).toBeNull();
+    expect(warnings).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "keeps a stale-owner Stop refused with safe evidence when diagnostic delivery fails=%s",
+    async (sinkFails) => {
+      const { id, registry, ledger, warnings, fetch, deps } = await staleOwnerWorld(sinkFails);
+      expect(await registry.invoke("runs.stop", { args: [id], options: {} }, cli, deps)).toEqual({
+        ok: false,
+        error: "unavailable",
+        status: 503,
+        decidedBy: "handler",
+        message: "The recorded workspace owner does not match the run owner. Shutdown is not confirmed.",
+      });
+      expect(warnings).toEqual(
+        sinkFails
+          ? []
+          : [
+              {
+                event: "run.cancellation.refused",
+                runId: id,
+                ownerGen: "current-owner",
+                mode: "hard",
+                stage: "target-check",
+                phase: "prepare",
+                cause: "custody-unverified",
+                custody: "owner-generation-mismatch",
+                stopIntentRecorded: true,
+                shutdownConfirmed: false,
+              },
+            ],
+      );
+      expect(ledger.live.get(id)).toMatchObject({
+        ownerGen: "current-owner",
+        stop: "hard",
+        state: { binding: { ownerGen: "old-owner", ownerFence: 7 } },
+      });
+      expect(ledger.finished.has(id)).toBe(false);
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
 
   it("reports the original machine identity refusal from a validated shutdown observation", async () => {
     const { reg, registry, deps } = await setup();

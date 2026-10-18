@@ -3,7 +3,7 @@ import { workspaceBindingOf } from "./factory.js";
 import { processSecrets, type Secrets } from "../secrets.js";
 import type { LiveRunRow } from "../core/runLedger/types.js";
 import {
-  cancellationRuntimeSupported,
+  cancellationRuntimeCustodyFailure,
   unboundNativeReview,
   cancellationRefusalOf,
   cancellationObservationOf,
@@ -31,12 +31,14 @@ export function createRunStop(
     };
   };
   const unavailable = (row: LiveRunRow): CancellationRefusal | undefined => {
-    if (row.meta.hosted) return { phase: "prepare", cause: "custody-unverified" };
+    if (row.meta.hosted) return { phase: "prepare", cause: "custody-unverified", custody: "hosted" };
     const binding = workspaceBindingOf(row.state.binding);
-    if (!cancellationRuntimeSupported(row) || (binding?.backend === "resident" && !row.meta.repo))
-      return { phase: "prepare", cause: "custody-unverified" };
+    const custody = cancellationRuntimeCustodyFailure(row);
+    if (custody) return { phase: "prepare", cause: "custody-unverified", custody };
+    if (binding?.backend === "resident" && !row.meta.repo)
+      return { phase: "prepare", cause: "custody-unverified", custody: "resident-repository-missing" };
     if (row.state.binding === undefined && row.meta.profile?.machine === "none")
-      return { phase: "prepare", cause: "custody-unverified" };
+      return { phase: "prepare", cause: "custody-unverified", custody: "host-process" };
     if (unboundNativeReview(row)) {
       for (const resident of [true, false]) {
         const { url, token } = target(resident);
@@ -52,7 +54,7 @@ export function createRunStop(
       (!binding && row.meta.selection !== "resident") ||
       (binding && binding.backend !== "resident" && binding.backend !== "sandbox")
     )
-      return { phase: "prepare", cause: "custody-unverified" };
+      return { phase: "prepare", cause: "custody-unverified", custody: "backend-unsupported" };
     const { url, token } = target(binding?.backend === "resident" || (!binding && row.meta.selection === "resident"));
     if (!url || !token)
       return {

@@ -350,21 +350,40 @@ describe("original promotion hold diagnosis", () => {
       UnknownAllocationClaimError,
     );
     const ids: string[] = [];
+    const warnings: unknown[] = [];
     let stopped = false;
     const service = createRunsService({
       registry: new RunRegistry(),
       store: null,
       ledger: w.store,
       generation: "g2",
+      warn: (line) => warnings.push(JSON.parse(line)),
       stopRuntime: async (_row, cancellation) => {
         ids.push(cancellation.id);
-        return stopped ? { stopped: true, disposition: "processes-stopped" } : { stopped: false };
+        return stopped
+          ? { stopped: true, disposition: "processes-stopped" }
+          : { stopped: false, refusal: { phase: "resident", cause: "operations-busy" } };
       },
     });
     expect(await service.stopRun(w.req.runId, "hard", { kind: "chat", id: "slack:operator" })).toEqual({
       ok: false,
       error: "unavailable",
+      refusal: { phase: "resident", cause: "operations-busy" },
     });
+    expect(warnings).toEqual([
+      {
+        event: "run.cancellation.refused",
+        runId: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+        ownerGen: "g1",
+        mode: "hard",
+        stage: "runtime-result",
+        phase: "resident",
+        cause: "operations-busy",
+        cancellationId: ids[0],
+        stopIntentRecorded: true,
+        shutdownConfirmed: false,
+      },
+    ]);
     expect((await w.store.listLive())[0]).toMatchObject({
       runId: w.req.runId,
       stop: "hard",
