@@ -14,11 +14,31 @@ import { SingleShotIO } from "./singleShotDispatch.js";
 import { readBody } from "./http.js";
 import { callerIdFor, originAllowed } from "./commandHttp.js";
 import { FORM_PAGE_CSP, WEB_HTML_HEADERS } from "./webShell.js";
-import { escapeHtml } from "./liveView/html.js";
+import { renderMcpApprovalPage, type ApprovalOffer } from "./mcpApprovalPage.js";
+import { defaultRunRegistry } from "../core/runRegistry.js";
+import { privateWorkerRun, runResource } from "../core/runsService.js";
 
 export interface McpApprovalViewOptions extends McpOptions {
+  /** The dashboard's built stylesheet includes its fonts and theme tokens. */
+  stylesheets?: readonly string[];
   /** Trusted host lookup of the exact original source under current authority. */
   resolveApprovalSource?(identity: AccessIdentity, row: Confirmation): Promise<ConfirmationSource | undefined>;
+}
+
+/** Optional display context reads only the process's cache, never run storage. */
+function cachedRunContext(core: CoreDeps, row: Confirmation, actor: Actor): ApprovalOffer["run"] {
+  if (row.kind !== "run" || (row.command !== "runs.stop" && row.command !== "runs.kill")) return;
+  if (!authorize(actor, "runs:read", { type: "command", id: "runs.get" }).allow) return;
+  const runId = row.input.args?.[0];
+  if (typeof runId !== "string") return;
+  const registry = core.runRegistry ?? defaultRunRegistry;
+  const run = registry.getById(runId);
+  if (!run || privateWorkerRun(run) || !authorize(actor, "runs:read", runResource(run)).allow) return;
+  if (!run.label && !run.repo && !run.agent) return;
+  let pr: number | undefined;
+  for (const event of registry.snapshotById(runId)?.events ?? [])
+    if (event.type === "run_meta") pr = event.repo === run.repo ? event.pr : undefined;
+  return { label: run.label, repo: run.repo, agent: run.agent, pr };
 }
 
 /** The existing dashboard verifier proves the browser; the core owns every execution. */
@@ -26,15 +46,13 @@ export function createMcpApprovalView(core: CoreDeps, options: McpApprovalViewOp
   return (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity, viewer?: Actor): boolean => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== MCP_APPROVAL_PATH) return false;
-    const page = (status: number, text: string, form = "") => {
+    const page = (status: number, text: string, offer?: ApprovalOffer) => {
       res.writeHead(status, {
         ...WEB_HTML_HEADERS,
         "content-security-policy": FORM_PAGE_CSP,
         "referrer-policy": "same-origin",
       });
-      res.end(
-        `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approve action · Switchboard</title><body><h1>Approve action</h1><pre>${escapeHtml(text)}</pre>${form}</body></html>`,
-      );
+      res.end(renderMcpApprovalPage(text, options.stylesheets ?? [], offer));
     };
     if (viewer?.viewingAs && (req.method ?? "GET").toUpperCase() !== "GET") {
       page(403, "Leave Person view before confirming an action.");
@@ -120,11 +138,13 @@ export function createMcpApprovalView(core: CoreDeps, options: McpApprovalViewOp
       }
       if (row.expiresAt <= (core.clock?.() ?? systemClock())) return page(410, "This offer expired; nothing ran.");
       if (req.method === "GET")
-        return page(
-          200,
-          `${line}\n${risk}\nExpires: ${new Date(row.expiresAt).toISOString()}`,
-          `<form method="post" action="${MCP_APPROVAL_PATH}?id=${encodeURIComponent(id)}"><button name="action" value="approve">Confirm saved action</button><button name="action" value="cancel">Cancel</button></form>`,
-        );
+        return page(200, "", {
+          action: `${MCP_APPROVAL_PATH}?id=${encodeURIComponent(id)}`,
+          line,
+          risk,
+          expiresAt: row.expiresAt,
+          run: cachedRunContext(core, row, actor),
+        });
       if (req.method !== "POST") return page(405, "Use GET or POST.");
       if (!req.headers.origin || !originAllowed(req, { publicBaseUrl: options.publicBaseUrl }))
         return page(403, "This form must be submitted from Switchboard.");

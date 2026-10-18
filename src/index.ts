@@ -2052,6 +2052,7 @@ export async function runBot(): Promise<void> {
       publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined,
     });
     const mcpApproval = createMcpApprovalView(deps, {
+      stylesheets: greenAssets.entry.css,
       personalApprovalPin: () =>
         accessConfig && capabilities.dashboardAuth === "access"
           ? {
