@@ -35,6 +35,16 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 
 <!-- generated:chat-commands · npm run docs:gen — generated from the code, do not edit by hand -->
 
+### `maintenance`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `maintenance status` | Read the durable maintenance episode, notice result, and work in flight. Does not prove resident idleness. | admins |
+| `maintenance announce [--scopes <string>] [--reason <string>] [--channel <string>] [--starts-at <string>] [--timing <string>]` | Announce scoped maintenance in Slack and return the exact activation call for the client's scheduler. Installs no timer. | admins |
+| `maintenance start [--id <string>] [--scopes <string>] [--reason <string>] [--channel <string>]` | Close access for new requests for an announced episode by ID, or start immediate maintenance. Existing work is not killed. No automatic expiry. | admins |
+| `maintenance end --id <string> [--without-notice]` | Restore access for exactly one maintenance episode, or cancel its announcement, and post in its notice thread. | admins |
+| `maintenance update --id <string> --message <string>` | Post one explicit update in the verified maintenance thread. A repeat posts another update; do not retry an unknown delivery. | admins |
+
 ### `help`
 
 | Command | What it does | Who can run it |

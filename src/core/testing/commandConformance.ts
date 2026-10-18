@@ -512,6 +512,23 @@ export const COMMAND_FIXTURES: Readonly<
     }
   >
 > = {
+  "maintenance.announce": {
+    hints: { scopes: "all", startsAt: "2026-01-01T17:00:00-08:00" },
+    why: "scopes are capability names and a scheduled start requires an offset-bearing timestamp",
+  },
+  "maintenance.start": {
+    hints: { scopes: "all", id: "12345678-1234-4234-8234-123456789abc" },
+    variants: { "all-options-set": { omit: ["scopes", "reason", "channel"] } },
+    why: "activation by episode ID cannot replace the saved scope, reason, or announcement channel",
+  },
+  "maintenance.end": {
+    hints: { id: "12345678-1234-4234-8234-123456789abc" },
+    why: "ending quotes an exact episode UUID",
+  },
+  "maintenance.update": {
+    hints: { id: "12345678-1234-4234-8234-123456789abc" },
+    why: "updates quote an exact episode UUID",
+  },
   "deploy.plan": {
     variants: {
       "all-options-set": { omit: ["retainMaintenance"] },

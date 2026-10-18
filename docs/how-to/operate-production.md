@@ -1,5 +1,7 @@
 # Operate production
 
+Use [maintenance controls](maintenance.md) to announce a hold, close selected user access, and restore it explicitly.
+
 ## A/B testing thread replies
 
 Compare the configured fast model with Jev using a stable split of threads.

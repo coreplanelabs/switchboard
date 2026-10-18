@@ -1,4 +1,5 @@
 import { observeAdmission } from "../core/organization/admissionTrace.js";
+import { agentMaintenanceRefusal } from "../core/maintenance.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { conversationRetentionFor } from "../config.js";
@@ -822,6 +823,12 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
   };
   const dispatchSlack: typeof dispatch = async (core, msg, io, opts) => {
     if (!msg.channelId.startsWith("slack:D")) return dispatch(core, msg, io, opts);
+    const maintenance = await agentMaintenanceRefusal(core.maintenance);
+    if (maintenance) {
+      await io.reply(`${maintenance} Use CLI or MCP for maintenance controls.`);
+      opts?.trace?.root.end("ok", { status: "refused" });
+      return { status: "refused", cause: "system", refusal: "maintenance" };
+    }
     if (!installation || !native || !msg.directAudience || msg.postedBy || msg.authenticatedAs) {
       await io.reply("This private conversation is unavailable. No work started.");
       opts?.trace?.root.end("ok", { status: "refused" });

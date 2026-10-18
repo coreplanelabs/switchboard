@@ -17,6 +17,7 @@ export const COMMAND_GROUPS = [
   "deploy",
   "help",
   "status",
+  "maintenance",
   "env",
   "setup",
   "contract",

@@ -490,6 +490,8 @@ export interface AuditEntry {
 }
 
 export interface CommandRegistryOptions {
+  /** Shared operational admission after authorization, before any command effect. */
+  admission?: (command: CommandDef<unknown>, caller: Caller) => Promise<string | undefined>;
   /** One process binding resolves the configured approval class for every surface. */
   confirmationClass?: (caller: Caller) => ConfirmClass | Promise<ConfirmClass>;
   /** Defaults to one JSON line on console.log. */
@@ -512,6 +514,7 @@ const SURFACE_FOR_KIND: Readonly<Record<Caller["kind"], SurfaceName>> = {
 };
 
 export class CommandRegistry<D> {
+  private readonly admission?: CommandRegistryOptions["admission"];
   private readonly confirmationClass: NonNullable<CommandRegistryOptions["confirmationClass"]>;
   private readonly commands = new Map<string, CommandDef<D>>();
   private readonly audit: (entry: AuditEntry) => void;
@@ -519,6 +522,7 @@ export class CommandRegistry<D> {
   private readonly capabilities: Capabilities;
 
   constructor(opts: CommandRegistryOptions = {}) {
+    this.admission = opts.admission;
     this.confirmationClass = opts.confirmationClass ?? (() => BUILT_IN_CONFIRM);
     this.audit = opts.audit ?? ((entry) => console.log(JSON.stringify({ audit: "command", ...entry })));
     this.logError = opts.logError ?? ((commandId, err) => console.error(`[command] ${commandId} failed:`, err));
@@ -623,6 +627,8 @@ export class CommandRegistry<D> {
     if (!parsed.ok) return done(fail("invalid_input", parsed.message));
 
     try {
+      const maintenance = await this.admission?.(cmd as CommandDef<unknown>, caller);
+      if (maintenance) return done(fail("unavailable", maintenance));
       const held = await commandConfirmationGate(cmd, input, parsed, caller, () => this.confirmationClass(caller));
       if (held) return done(held, "confirmation");
       await commandExecutionStarted();

@@ -1,4 +1,5 @@
 import { preapprovedCaller } from "./callers.js";
+import type { MaintenanceSnapshot } from "../maintenance.js";
 // The conformance suite's world, shared. `src/core/commandConformance.test.ts`
 // (docs/reference/specs/command-registry.md item 25) drives every command × variant ×
 // surface against ONE generic in-memory fixture — `fixture()` here: a
@@ -519,6 +520,20 @@ export function fakeMcpService(): McpService {
 }
 
 export function fakeDeps(s: Stubs): CoreCommandDeps {
+  const maintenanceState = (phase: "announced" | "active" | "ended"): MaintenanceSnapshot => ({
+    version: 1,
+    episode: {
+      id: "12345678-1234-4234-8234-123456789abc",
+      phase,
+      scopes: ["all"],
+      reason: "Service maintenance",
+      channel: "COPS",
+      timing: "in a few minutes",
+      actor: "service:maintenance",
+      updatedAt: NOW,
+      notice: { status: "sent" },
+    },
+  });
   // `deploy images` copied the sandbox image into this fixture's registry (the listing then shows it).
   let imagesCopied = false;
   const exec = <T>(what: string, value: T): T => {
@@ -791,6 +806,16 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       agents: () =>
         Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description, door: presetDoor(a) })),
       commands: () => s.commands(),
+    },
+    maintenance: {
+      store: { read: async () => maintenanceState("active"), write: async () => maintenanceState("active") },
+      service: {
+        announce: async () => exec("maintenance.announce", maintenanceState("announced")),
+        start: async () => exec("maintenance.start", maintenanceState("active")),
+        end: async () => exec("maintenance.end", maintenanceState("ended")),
+        update: async () => exec("maintenance.update", maintenanceState("active")),
+      },
+      inFlight: () => 1,
     },
     status: {
       snapshot: () => ({

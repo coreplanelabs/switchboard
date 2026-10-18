@@ -3,6 +3,7 @@ import {
   admissionExceptionKindOf,
   type RequestContextSelection,
 } from "../core/organization/admissionTrace.js";
+import { agentMaintenanceRefusal } from "../core/maintenance.js";
 import type { TraceOptions } from "../core/trace/types.js";
 import { operatorModeOf } from "../config.js";
 import { historyFailure } from "../core/organization/ownerFailure.js";
@@ -750,6 +751,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     return write.actual.authentication;
   }
   const organization = new OrganizationService({
+    admissionAvailable: async () => !(await agentMaintenanceRefusal(options.core.maintenance)),
     store: options.store,
     directory: options.store.directory,
     mappings: options.mappings,

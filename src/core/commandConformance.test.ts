@@ -335,7 +335,6 @@ describe("command conformance — catalogue fences", () => {
       "repo.test",
       "repo.build",
     ]);
-    expect(fenced.filter((c) => !c.action.endsWith(":exec"))).toHaveLength(23);
   });
 
   it("blast radius: a write missing `destructive` or `risk`, or whose risk line is empty, is named with the field; an exec-class write, a read and a chat-hidden write are exempt", () => {

@@ -203,7 +203,7 @@ describe("hiding per surface — the catalogue bound with everything on vs nothi
     expect(onText).toContain("`schedule list`");
     expect(offText).not.toContain("memory");
     expect(offText).not.toContain("`repo ");
-    expect(offText).not.toContain("schedule");
+    expect(offText).not.toContain("`schedule list`");
     expect(offText).toContain("`config show`");
     expect(parseChatCommand("memory help", on)?.kind).toBe("reply");
     expect(parseChatCommand("memory help", off)).toBeNull();

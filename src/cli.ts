@@ -70,6 +70,7 @@ import { installationPath } from "./deploy/operatorRoot.js";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
 import { parseConfigLocation } from "./configDocument.js";
 import { buildCoreCommands, unstampedStatus } from "./core/commandCatalogue.js";
+import { buildMaintenanceStore } from "./core/maintenance.js";
 import { coreCommandGroups } from "./core/commands/all.js";
 import { CLI_ACTOR } from "./core/authz/actor.js";
 import { ALL_CAPABILITIES, capabilitiesFrom, type Capabilities } from "./core/capabilities.js";
@@ -879,6 +880,7 @@ async function main(): Promise<void> {
     ),
   };
   const deps: CoreDeps = {
+    maintenance: buildMaintenanceStore(config.config, processSecrets),
     config,
     completions,
     runBearers,

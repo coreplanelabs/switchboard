@@ -53,6 +53,11 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 
 | Route | Methods | Action | What it does |
 |---|---|---|---|
+| `/api/maintenance.status` | `GET`, `POST` | `maintenance:read` | Read the durable maintenance episode, notice result, and work in flight. Does not prove resident idleness. |
+| `/api/maintenance.announce` | `POST` | `maintenance:write` | Announce scoped maintenance in Slack and return the exact activation call for the client's scheduler. Installs no timer. |
+| `/api/maintenance.start` | `POST` | `maintenance:write` | Close access for new requests for an announced episode by ID, or start immediate maintenance. Existing work is not killed. No automatic expiry. |
+| `/api/maintenance.end` | `POST` | `maintenance:write` | Restore access for exactly one maintenance episode, or cancel its announcement, and post in its notice thread. |
+| `/api/maintenance.update` | `POST` | `maintenance:write` | Post one explicit update in the verified maintenance thread. A repeat posts another update; do not retry an unknown delivery. |
 | `/api/identity.challenge` | `POST` | `identity:exec` | Complete challenge through fresh two-sided account verification. |
 | `/api/identity.list` | `GET`, `POST` | `identity:read` | Read your verified identity operation. |
 | `/api/identity.link` | `POST` | `identity:exec` | Complete link through fresh two-sided account verification. |

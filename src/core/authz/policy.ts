@@ -239,6 +239,8 @@ export const POLICY: readonly Rule[] = [
   // ── help / schedules / deploy / env / setup ──────────────────────────────────────
   { action: "help:read", resource: "command", when: [grant("help:read")] },
   { action: "status:read", resource: "command", when: [grant("status:read")] },
+  { action: "maintenance:read", resource: "command", when: [grant("maintenance:read")] },
+  { action: "maintenance:write", resource: "command", when: [grant("maintenance:write")] },
   // `delivery report` reads GitHub with the App's token and the caller's own
   // visible runs: the grant admits the command (browsers through the read
   // baseline, tokens minted with it); which runs join is the `runs:read` predicate.

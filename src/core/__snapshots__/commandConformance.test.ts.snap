@@ -935,6 +935,145 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "maintenance:write",
+    "args": [],
+    "effect": "write",
+    "id": "maintenance.announce",
+    "options": [
+      {
+        "name": "scopes",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "reason",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "startsAt",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "timing",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "maintenance:write",
+    "args": [],
+    "effect": "write",
+    "id": "maintenance.end",
+    "options": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "withoutNotice",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "maintenance:write",
+    "args": [],
+    "effect": "write",
+    "id": "maintenance.start",
+    "options": [
+      {
+        "name": "id",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "scopes",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "reason",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "maintenance:read",
+    "args": [],
+    "effect": "read",
+    "id": "maintenance.status",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "maintenance:write",
+    "args": [],
+    "effect": "write",
+    "id": "maintenance.update",
+    "options": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "message",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "mcp:write",
     "args": [
       {

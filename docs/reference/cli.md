@@ -36,6 +36,16 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 <!-- generated:cli-commands · npm run docs:gen — generated from the code, do not edit by hand -->
 
+### `maintenance`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `maintenance status` | Read the durable maintenance episode, notice result, and work in flight. Does not prove resident idleness. | every surface |
+| `maintenance announce [--scopes <string>] [--reason <string>] [--channel <string>] [--starts-at <string>] [--timing <string>]` | Announce scoped maintenance in Slack and return the exact activation call for the client's scheduler. Installs no timer. | every surface |
+| `maintenance start [--id <string>] [--scopes <string>] [--reason <string>] [--channel <string>]` | Close access for new requests for an announced episode by ID, or start immediate maintenance. Existing work is not killed. No automatic expiry. | every surface |
+| `maintenance end --id <string> [--without-notice]` | Restore access for exactly one maintenance episode, or cancel its announcement, and post in its notice thread. | every surface |
+| `maintenance update --id <string> --message <string>` | Post one explicit update in the verified maintenance thread. A repeat posts another update; do not retry an unknown delivery. | every surface |
+
 ### `identity`
 
 | Command | What it does | Surfaces |

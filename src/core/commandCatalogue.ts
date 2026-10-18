@@ -1,4 +1,7 @@
 import { commandConfirmationMessage } from "./commandConfirmations.js";
+import { buildMaintenanceStore, MaintenanceService, MAINTENANCE_UNAVAILABLE } from "./maintenance.js";
+import { commandMaintenanceRefusal, maintenanceRecoveryCommand } from "./maintenanceAdmission.js";
+import type { MaintenanceCommandDeps } from "./commands/maintenance.js";
 import { effectiveConfirm } from "../config/profile.js";
 import { createRunStop } from "../execution/runStop.js";
 import { createRunCheck } from "../execution/runCheck.js";
@@ -60,6 +63,7 @@ import {
 } from "./deliverySnapshotStore.js";
 import {
   CommandRegistry,
+  CommandError,
   bindCommands,
   type Caller,
   type CommandInvoker,
@@ -103,6 +107,7 @@ import { channelVisibilityOf } from "./dispatch/record.js";
 
 /** How an in-process binding reaches the catalogue's deps. */
 export interface CoreCommandWiring {
+  maintenance?: MaintenanceCommandDeps["maintenance"];
   credentialInspection?: CredentialsCommandDeps["credentials"]["inspect"];
   /** The live registry — `defaultRunRegistry` in every real process, so the
    *  commands see the runs the dispatcher creates. */
@@ -264,7 +269,31 @@ export function buildCoreCommands(
   store: Provided<RunStore | null>,
   wiring: CoreCommandWiring,
 ): CommandInvoker {
+  const cfg = once(config);
+  const maintenance = once(async () => {
+    if (wiring.maintenance) return wiring.maintenance;
+    const store = buildMaintenanceStore((await cfg()).config, wiring.secrets);
+    return store ? { store, service: new MaintenanceService({ store }) } : undefined;
+  });
+  const requireMaintenance = async () => {
+    const binding = await maintenance();
+    if (!binding)
+      throw new CommandError(
+        "unavailable",
+        "Maintenance needs the durable state Worker. Connect the CLI to the hosted service or configure its state Worker.",
+      );
+    return binding;
+  };
   const registry = new CommandRegistry<CoreCommandDeps>({
+    admission: async (command, caller) => {
+      if (maintenanceRecoveryCommand(command, caller) || command.surfaces?.mcp === false) return;
+      try {
+        return commandMaintenanceRefusal((await maintenance())?.store, command, caller);
+      } catch (error) {
+        if (error instanceof CommandError) throw error;
+        return MAINTENANCE_UNAVAILABLE;
+      }
+    },
     confirmationClass: async (caller) => {
       const current = await cfg();
       const message = commandConfirmationMessage();
@@ -279,7 +308,6 @@ export function buildCoreCommands(
     ...(wiring.capabilities ? { capabilities: wiring.capabilities } : {}),
   });
   registerCoreCommands(registry);
-  const cfg = once(config);
   const runStore = once(store);
   const ledger = once(async () => wiring.frictionLedger ?? selectFrictionLedger(await runStore()));
   // A process binding its own service (the CLI) reads live runs, unit rows and
@@ -422,6 +450,19 @@ export function buildCoreCommands(
     },
   }));
   const deps: CoreCommandDeps = {
+    maintenance: {
+      store: {
+        read: async () => (await requireMaintenance()).store.read(),
+        write: async (version, document) => (await requireMaintenance()).store.write(version, document),
+      },
+      service: {
+        announce: async (...args) => (await requireMaintenance()).service.announce(...args),
+        start: async (...args) => (await requireMaintenance()).service.start(...args),
+        end: async (...args) => (await requireMaintenance()).service.end(...args),
+        update: async (...args) => (await requireMaintenance()).service.update(...args),
+      },
+      ...(wiring.maintenance?.inFlight ? { inFlight: wiring.maintenance.inFlight } : {}),
+    },
     help: {
       agents: () =>
         Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description, door: presetDoor(a) })),

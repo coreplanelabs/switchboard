@@ -1,4 +1,5 @@
 import { finishAdmission, failedAdmission } from "../core/organization/admissionTrace.js";
+import { agentMaintenanceRefusal } from "../core/maintenance.js";
 import type { TraceOptions } from "../core/trace/types.js";
 import { digestBearer } from "../mcp/personalTokens.js";
 import { timingSafeEqual, createHash, randomUUID } from "node:crypto";
@@ -359,6 +360,8 @@ async function handleAuthorized(
   options: IngressOptions,
   credentialDigest: string,
 ): Promise<IngressResponse> {
+  const maintenance = await agentMaintenanceRefusal(deps.maintenance);
+  if (maintenance) return { status: 503, body: { error: "maintenance", message: maintenance } };
   const parsed = parseBody(body);
   if ("error" in parsed) {
     return { status: 400, body: { error: parsed.error } };
