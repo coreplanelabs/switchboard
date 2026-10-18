@@ -10,7 +10,12 @@ import { analyzeRunFriction } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
 import type { CoordinatorInstance, CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import type { ChildHandoff } from "../../src/core/dispatch/handoff.ts";
-import type { RunRecord } from "../../src/core/runRecord.ts";
+import { isRunRecord, type RunRecord } from "../../src/core/runRecord.ts";
+import { writeTombstone, type RecordDeps } from "../../src/core/dispatch/record.ts";
+import { RunRegistry } from "../../src/core/runRegistry.ts";
+import { getAgent } from "../../src/agents/registry.ts";
+import { declaredProfile } from "../../src/config/profile.ts";
+import type { ResolvedRequest } from "../../src/config.ts";
 import type { ContextDependencies } from "../../src/core/references/contextDependencies.ts";
 import { sourceHash, type SessionSources } from "../../src/core/references/receipts.ts";
 import { RunHistoryDO } from "./worker.ts";
@@ -488,6 +493,131 @@ describe("checkpoint input gate failures", () => {
     expect(result.refused).toEqual({ ok: false, reason: "fenced" });
     expect(result.source).toMatchObject({ receipt: result.saved.ok ? result.saved.receipt : undefined });
   });
+});
+
+describe("initial ordinary tombstone archive", () => {
+  async function fixture(supplied = true) {
+    const f = await checkpointFixture();
+    const committed = await post("/runs/session/checkpoint", { storeKey: f.storeKey, ...f.request });
+    expect(committed).toMatchObject({
+      status: 200,
+      data: { ok: true, receipt: { runId: "current", ownerGen: "g1", membershipCount: 1 } },
+    });
+    const receipt = committed.data.receipt as ContextCheckpointReceipt;
+    expect((await claim(f.storeKey, "sibling", `${f.threadKey}:sibling`)).data).toMatchObject({ ok: true });
+    const stub = env.RUNS.get(env.RUNS.idFromName(f.storeKey));
+    await runInDurableObject(stub, (owner) => {
+      (owner as unknown as { tombstoneIdentity: string }).tombstoneIdentity = "original-object";
+    });
+    const owners = await sql(f.storeKey, "SELECT run_id, owner_gen, state_json FROM live_runs ORDER BY run_id");
+    const seed = (await post("/runs/session/read", { key: f.key, from: 0, to: 0 })).data;
+    const agent = getAgent("coding");
+    const now = Date.now();
+    const registry = new RunRegistry({ genId: () => "current", genToken: () => "fixture", now: () => now });
+    const message = { userId: "slack:UALICE", channelId: "slack:C1", threadKey: f.threadKey, text: "retained source" };
+    const run = registry.create("ordinary fixture", { ...message, agent: "coding" });
+    registry.publish(run.id, { type: "input", messageId: "m1", text: "retained source", at: now });
+    const writes: Array<{ record: RunRecord; opts?: { provisional?: boolean } }> = [];
+    writeTombstone(
+      {
+        runHistoryWriter: {
+          write: (record: RunRecord, opts?: { provisional?: boolean }) => void writes.push({ record, opts }),
+        } as unknown as RecordDeps["runHistoryWriter"],
+      },
+      {
+        msg: message,
+        agent,
+        profile: declaredProfile(agent),
+        resolved: { agentName: "coding", modelRef: "test/coding-model" } as ResolvedRequest,
+        repoCtx: {},
+        channelVisibility: "public",
+        run,
+        registry,
+        resume: undefined,
+        ...(supplied ? { session: session(f.key, f.threadKey) } : {}),
+      },
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0].opts).toEqual({ provisional: true });
+    expect(writes[0].record).toMatchObject({
+      id: "current",
+      agent: "coding",
+      provisional: true,
+      status: "interrupted",
+      startedAt: now,
+      finishedAt: now,
+    });
+    expect(isRunRecord(writes[0].record)).toBe(true);
+    if (!supplied) expect(writes[0].record.session).toBeUndefined();
+    return { ...f, receipt, owners, seed, tombstone: writes[0].record };
+  }
+
+  async function preservesCustody(f: Awaited<ReturnType<typeof fixture>>) {
+    expect(await sql(f.storeKey, "SELECT run_id, owner_gen, state_json FROM live_runs ORDER BY run_id")).toEqual(
+      f.owners,
+    );
+    expect((await post("/runs/session/read", { key: f.key, from: 0, to: 0 })).data).toEqual(f.seed);
+    expect(
+      await runInDurableObject(
+        env.RUNS.get(env.RUNS.idFromName(f.storeKey)),
+        (owner) => (owner as unknown as { tombstoneIdentity: string }).tombstoneIdentity,
+      ),
+    ).toBe("original-object");
+    expect(f.owners).toContainEqual(expect.objectContaining({ run_id: "sibling", owner_gen: "g1" }));
+  }
+
+  it("stores the admitted producer start record beside its committed checkpoint", async () => {
+    const f = await fixture();
+    const observed = await post("/runs/put", { storeKey: f.storeKey, record: f.tombstone });
+    console.info("ordinary tombstone response", JSON.stringify({ mode: "unmodified", ...observed }));
+    await preservesCustody(f);
+    if (observed.status !== 200)
+      expect(await sql(f.storeKey, "SELECT run_id FROM runs WHERE run_id='current'")).toEqual([]);
+    expect(observed).toEqual({ status: 200, data: { ok: true, retained: 1, stored: true, rewritten: false } });
+  });
+
+  it("stores the same producer record when only its exact session is supplied", async () => {
+    const f = await fixture(false);
+    const observed = await post("/runs/put", {
+      storeKey: f.storeKey,
+      record: { ...f.tombstone, session: session(f.key, f.threadKey) },
+    });
+    console.info("ordinary tombstone response", JSON.stringify({ mode: "matching-session", ...observed }));
+    expect(observed).toEqual({ status: 200, data: { ok: true, retained: 1, stored: true, rewritten: false } });
+    const archived = (await post("/runs/get", { storeKey: f.storeKey, id: "current" })).data.record;
+    expect(archived).toMatchObject({
+      id: "current",
+      provisional: true,
+      status: "interrupted",
+      startedAt: f.tombstone.startedAt,
+      finishedAt: f.tombstone.startedAt,
+      contextCheckpointReceipt: f.receipt,
+    });
+    await preservesCustody(f);
+  });
+
+  it.each(["foreign-requester", "foreign-range", "foreign-receipt-owner"] as const)(
+    "refuses %s without replacing canonical custody or resetting its sibling",
+    async (mode) => {
+      const f = await fixture();
+      let candidate: RunRecord = { ...f.tombstone, session: session(f.key, f.threadKey) };
+      if (mode === "foreign-requester") candidate = { ...candidate, userId: "slack:UOTHER" };
+      if (mode === "foreign-range")
+        candidate = { ...candidate, session: { ...candidate.session!, range: { from: 1, to: 1 } } };
+      if (mode === "foreign-receipt-owner")
+        candidate = {
+          ...candidate,
+          contextDependencies: f.receipt.normalized,
+          contextCheckpointReceipt: { ...f.receipt, ownerGen: "foreign-gen" },
+        };
+      expect(isRunRecord(candidate)).toBe(true);
+      const observed = await post("/runs/put", { storeKey: f.storeKey, record: candidate });
+      console.info("ordinary tombstone response", JSON.stringify({ mode, ...observed }));
+      expect(observed).toEqual({ status: 500, data: { error: "storage request failed" } });
+      expect(await sql(f.storeKey, "SELECT run_id FROM runs WHERE run_id='current'")).toEqual([]);
+      await preservesCustody(f);
+    },
+  );
 });
 
 describe("unified sessions — durable owner and retention lifecycle", () => {
