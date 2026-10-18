@@ -41,8 +41,7 @@ import {
 } from "../../src/lib/runPageModel";
 import { createPrReviewCollector } from "../../src/lib/prReviewCollector";
 import { createReviewAbridge } from "../../src/lib/reviewAbridge";
-import PrReviewPanel from "../../src/modules/pr-review/PrReviewPanel.vue";
-import { panelTitle } from "../../src/modules/pr-review/types";
+import PrReviewSlideover from "../../src/components/PrReviewSlideover.vue";
 import { durationTone, heatStyle } from "../../src/lib/durationTone";
 import { formatClock, formatDateTime, formatDuration, formatLocalIso, formatUsd } from "../../src/lib/format";
 import { githubCommitUrl, githubPrUrl, githubRepoUrl, githubTreeUrl, shortSha } from "../../src/lib/githubLinks";
@@ -1097,31 +1096,17 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       />
     </div>
 
-    <!-- The PR-review slideout: the pr-review module rendering the adapter's
-         state. Nearly the viewport, because a diff beside its file list is the
-         content; the body's padding and scroll go — the panel scrolls its own
-         content under its header and tab row. The overlay and the content sit
-         above the shell's sticky header (z-20), which would otherwise paint
-         over the panel's title row. -->
-    <USlideover
-      v-model:open="prPanelOpen"
-      :title="panelTitle(prReview.state)"
-      :ui="{ overlay: 'z-30', content: 'z-30 w-[min(96vw,90rem)] max-w-none' }"
-    >
-      <template #content="{ close }">
-        <div class="flex min-h-0 h-full flex-col">
-          <div class="border-b border-default p-3">
-            <RouterLink
-              v-if="seed"
-              class="green-button"
-              :to="{ path: `/runs/${encodeURIComponent(seed.id)}`, query: { ...route.query, view: 'pull-request' } }"
-              @click="close()"
-              ><UIcon name="i-lucide-panel-top" />Open pull request in main pane</RouterLink
-            >
-          </div>
-          <PrReviewPanel :data="prReview.state" :abridge="abridge" closable @close="close()" />
-        </div>
+    <!-- The shared portal keeps the diff above the navigation at every width. -->
+    <PrReviewSlideover v-model:open="prPanelOpen" :data="prReview.state" :abridge="abridge">
+      <template #actions="{ close }">
+        <RouterLink
+          v-if="seed"
+          class="green-button"
+          :to="{ path: `/runs/${encodeURIComponent(seed.id)}`, query: { ...route.query, view: 'pull-request' } }"
+          @click="close()"
+          ><UIcon name="i-lucide-panel-top" />Open pull request in main pane</RouterLink
+        >
       </template>
-    </USlideover>
+    </PrReviewSlideover>
   </div>
 </template>

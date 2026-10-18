@@ -1969,8 +1969,8 @@ describe("PR-review panel wiring", { timeout: PANEL_BUDGET_MS }, () => {
     // slideover keeps from its `title`, which `aria-labelledby` points at.
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).not.toBeNull();
-    // Above the shell's sticky header (z-20), which would otherwise paint over the panel's title row.
-    expect(dialog!.className).toContain("z-30");
+    // Above the navigation (z-40), which must not cover the shared slideout.
+    expect(dialog!.className).toContain("z-50");
     const labelledBy = dialog!.getAttribute("aria-labelledby");
     expect(labelledBy).toBeTruthy();
     expect(document.getElementById(labelledBy!)?.textContent).toContain("acme/api#42");
