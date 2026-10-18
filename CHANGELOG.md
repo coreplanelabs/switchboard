@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.305.1](https://github.com/coreplanelabs/switchboard/compare/v1.305.0...v1.305.1) (2026-10-18)
+
+
+### Bug fixes
+
+* **core:** bind source folds to their current run target ([#3282](https://github.com/coreplanelabs/switchboard/issues/3282)) ([9964f3a](https://github.com/coreplanelabs/switchboard/commit/9964f3aec7f91b22ff59dbdcc9bf7d56f874a790))
+* **core:** match inbox evidence to its stored source ([#3277](https://github.com/coreplanelabs/switchboard/issues/3277)) ([910b056](https://github.com/coreplanelabs/switchboard/commit/910b056f824f8d13310dbc0482371f6659a9f88e))
+* **resident:** retain owned background operation endings ([#3276](https://github.com/coreplanelabs/switchboard/issues/3276)) ([b024c05](https://github.com/coreplanelabs/switchboard/commit/b024c05f477eb8603fc90723de3b00ffdb0d5428))
+* **runs:** preserve admitted sessions in initial records ([#3278](https://github.com/coreplanelabs/switchboard/issues/3278)) ([af5c6cd](https://github.com/coreplanelabs/switchboard/commit/af5c6cdcc02dde46250bbfb5ae3e94efb7face4c))
+
+
+### Documentation
+
+* **ship:** separate PR authorship from repair authority ([#3283](https://github.com/coreplanelabs/switchboard/issues/3283)) ([767404e](https://github.com/coreplanelabs/switchboard/commit/767404ea79df134f2adb1d74028f7bd7f8ea1719))
+
 ## [1.305.0](https://github.com/coreplanelabs/switchboard/compare/v1.304.1...v1.305.0) (2026-10-17)
 
 
