@@ -4,18 +4,19 @@ import { delimiter, join } from "node:path";
 import type { Secret } from "../secrets.js";
 import { redactSecrets } from "./runEvents.js";
 import { parseMeatJson, type MeatResult } from "./readingDiff.js";
+import { safeMeatText } from "./readingDiffProgress.js";
 
 // meat.dev on the BOT host (docs/reference/specs/reading-diff.md items 5–6). The
 // abridged reading diff is one child process per production: `meat -json -model
 // <m>` with the unified diff on its stdin — meat reads stdin whenever it is not
 // a terminal (cmd/meat/main.go) — and exactly four environment variables. The
 // binary is spawned HERE and nowhere else (meatProcess.test.ts holds that): one
-// environment, one failure vocabulary, one way to spend an Opus call.
+// environment, one failure vocabulary, one paid model job.
 //
 // The child's environment is built, not inherited: PATH and HOME so the binary
 // resolves and Go's own defaults hold, MEAT_CACHE so meat's result cache (keyed
 // by the hash of model + diff, so the same review abridged twice costs one
-// call) lives under the bot's data dir, and ANTHROPIC_API_KEY — the bot's own
+// job) lives under the bot's data dir, and ANTHROPIC_API_KEY — the bot's own
 // credential, read through the one getter the Anthropic provider uses. None of
 // the bot's other secrets (Slack, GitHub, the Workers' bearers) reach meat.
 
@@ -46,8 +47,8 @@ export interface MeatRun {
   /** The unified diff meat abridges — written whole to its stdin. */
   diff: string;
   model: string;
-  /** meat's budget; past it the child is killed and the run fails by name. */
-  timeoutMs: number;
+  /** Progress is delivered in order before the process result settles. */
+  onProgress?: (message: string) => void | Promise<void>;
 }
 
 export type MeatRunResult = { ok: true; result: MeatResult } | { ok: false; reason: string };
@@ -68,8 +69,8 @@ export interface MeatHost {
 
 /** A runner over one host: `(run) → the parsed result or a named failure`,
  *  never a throw. Failures: no credential (before the spawn), the binary
- *  missing (`ENOENT`), a nonzero exit (its code + meat's first stderr line),
- *  output that is not meat's JSON, the budget passing (the child is killed).
+ *  missing (`ENOENT`), a nonzero exit (its code + meat's final stderr line),
+ *  output that is not meat's JSON. Meat owns its runtime deadline.
  *  Every reason is redacted — stderr is remote-shaped text. */
 export function meatOnHost(host: MeatHost): (run: MeatRun) => Promise<MeatRunResult> {
   return async (run) => {
@@ -82,7 +83,13 @@ export function meatOnHost(host: MeatHost): (run: MeatRun) => Promise<MeatRunRes
       // The one boundary the key crosses: the child process's environment.
       ANTHROPIC_API_KEY: key.reveal(),
     };
-    const raw = await collect(host.binary ?? MEAT_BINARY, ["-json", "-model", run.model], run.diff, env, run.timeoutMs);
+    const raw = await collect(
+      host.binary ?? MEAT_BINARY,
+      ["-json", "-model", run.model],
+      run.diff,
+      env,
+      run.onProgress,
+    );
     if (!raw.ok) return raw;
     try {
       return { ok: true, result: parseMeatJson(raw.stdout) };
@@ -97,27 +104,49 @@ function collect(
   args: string[],
   stdin: string,
   env: Record<string, string>,
-  timeoutMs: number,
+  onProgress?: MeatRun["onProgress"],
 ): Promise<{ ok: true; stdout: string } | { ok: false; reason: string }> {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
+    let pendingLine = "";
+    let oversizedLine = false;
+    let deliveries = Promise.resolve();
+    let deliveryError: unknown;
+    let deliveryFailed = false;
+    const safe = (text: string) => safeMeatText(text.replaceAll(env.ANTHROPIC_API_KEY, "«redacted»"));
+    const publish = (line: string) => {
+      const message = safe(line);
+      if (!message || !onProgress) return;
+      deliveries = deliveries
+        .then(() => onProgress(message))
+        .catch((err: unknown) => {
+          deliveryFailed = true;
+          deliveryError ??= err;
+        });
+    };
     let settled = false;
     const finish = (r: { ok: true; stdout: string } | { ok: false; reason: string }) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       resolve(r.ok ? r : { ok: false, reason: redactSecrets(r.reason) });
     };
     const child = spawn(binary, args, { env, stdio: ["pipe", "pipe", "pipe"] });
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish({ ok: false, reason: `meat did not finish within ${timeoutMs / 1000}s` });
-    }, timeoutMs);
-    timer.unref?.();
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
-      if (stderr.length < STDERR_CAP) stderr += chunk.slice(0, STDERR_CAP - stderr.length);
+      stderr = (stderr + chunk).slice(-STDERR_CAP * 2);
+      for (const part of chunk.split(/(?<=\n)/)) {
+        pendingLine += part;
+        if (pendingLine.length > STDERR_CAP * 2) {
+          oversizedLine = true;
+          pendingLine = "";
+        }
+        if (part.endsWith("\n")) {
+          publish(oversizedLine ? "meat: oversized progress line omitted" : pendingLine);
+          pendingLine = "";
+          oversizedLine = false;
+        }
+      }
     });
     child.on("error", (err: NodeJS.ErrnoException) => {
       finish({
@@ -129,9 +158,17 @@ function collect(
       });
     });
     child.on("close", (code, signal) => {
-      if (code === 0) return finish({ ok: true, stdout });
-      const first = stderr.trim().split("\n", 1)[0] ?? "";
-      finish({ ok: false, reason: `meat exited ${code ?? signal ?? "?"}${first ? `: ${first}` : ""}` });
+      if (pendingLine || oversizedLine) publish(oversizedLine ? "meat: oversized progress line omitted" : pendingLine);
+      void deliveries.then(() => {
+        const last = safe(stderr.trim().split("\n").at(-1) ?? "").slice(0, STDERR_CAP);
+        const failure = code === 0 ? undefined : `meat exited ${code ?? signal ?? "?"}${last ? `: ${last}` : ""}`;
+        const progressFailure = deliveryFailed
+          ? `meat progress could not be stored: ${safe(String(deliveryError))}`
+          : undefined;
+        if (failure || progressFailure)
+          return finish({ ok: false, reason: [failure, progressFailure].filter(Boolean).join("; ") });
+        finish({ ok: true, stdout });
+      });
     });
     // A closed stdin (the child exited before reading) is not an error of ours.
     child.stdin.on("error", () => undefined);

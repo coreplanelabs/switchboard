@@ -223,7 +223,7 @@ function wrapStorageFailure(
   };
 }
 
-function wrapRunView<T extends RunView>(view: T): Omit<T, "prompt"> {
+function wrapRunView<T extends RunView>(view: T): Omit<T, "prompt" | "readingDiffAbridge"> {
   // Listings stay metadata-only. A prompt is available through explicit message reads.
   const metadata = runMetadata(view);
   return view.operator ? { ...metadata, operator: wrapOperator(view.operator) } : metadata;

@@ -29,19 +29,13 @@ export interface ReadingDiffConfig {
    *  for a diff that is actually abridged, and the choice is the operator's,
    *  never a literal in the code. */
   meatModel?: string;
-  /** meat's own runtime budget in seconds, enforced on the host process (the
-   *  child is killed past it; a `failed` state, never a wait in a review). Default 240. */
-  meatTimeoutS?: number;
 }
 
 export interface ResolvedReadingDiff {
   provider: ReadingDiffProviderName;
   /** Set only when `review.readingDiff.meatModel` names one. */
   meatModel?: string;
-  meatTimeoutS: number;
 }
-
-export const MEAT_TIMEOUT_S_DEFAULT = 240;
 
 /** The sentence every meat path without a configured model fails with — the
  *  missing key by name, never a model literal the code chose itself. */
@@ -64,12 +58,8 @@ export function resolveReadingDiff(
   const envChoice = envRaw === "git" || envRaw === "meat" || envRaw === "off" ? envRaw : undefined;
   const choice = envChoice ?? cfg?.provider ?? "git";
   if (choice === "off") return null;
-  const timeout =
-    typeof cfg?.meatTimeoutS === "number" && cfg.meatTimeoutS > 0
-      ? Math.floor(cfg.meatTimeoutS)
-      : MEAT_TIMEOUT_S_DEFAULT;
   const meatModel = cfg?.meatModel || undefined;
-  return { provider: choice, meatTimeoutS: timeout, ...(meatModel ? { meatModel } : {}) };
+  return { provider: choice, ...(meatModel ? { meatModel } : {}) };
 }
 
 /** The env flip (`SWITCHBOARD_READING_DIFF=meat`) is applied at resolution,

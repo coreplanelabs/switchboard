@@ -378,7 +378,6 @@ export function fakeAbridger(store: InMemoryRunStore): ReviewAbridger {
       },
     }),
     defaultModel: () => "claude-opus-5",
-    timeoutMs: () => 240_000,
     clock: () => NOW,
     warn: () => {},
   });

@@ -56,6 +56,7 @@ import {
 import { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN, UNIT_PATTERN } from "./coordinator/contract.js";
 import { isPipelineSummaryShape, type PipelineSummary } from "./pipelineStanding.js";
 import { RESTART_CLAIM_GRACE_MS } from "./budgets.js";
+import { isReadingDiffAttempt, type ReadingDiffAttempt } from "./readingDiffProgress.js";
 import {
   FRICTION_CATEGORIES,
   type CategoryTotals,
@@ -141,6 +142,7 @@ export function branchPushReceiptsOf(value: unknown): BranchPushReceipt[] | unde
 export interface RunRecord {
   /** Last observed request failure; null means its origin was unavailable. */
   failureContext?: FailureContext | null;
+  readingDiffAbridge?: ReadingDiffAttempt;
   /** The original producer and required cleanup acknowledged shutdown. Absent means unknown. */
   runtimeShutdownConfirmed?: true;
   /** A negative execution outcome; supplies no promotion or source-release authority. */
@@ -916,6 +918,7 @@ export function confirmRuntimeShutdownRecord(current: RunRecord | null, original
 export type RunListItem = Omit<
   RunRecord,
   | "events"
+  | "readingDiffAbridge"
   | "sourceReads"
   | "githubSource"
   | "orchestratorDecisions"
@@ -1353,6 +1356,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
     return false;
   if (!isRunWorkOwner(v)) return false;
   const r = v as RunWorkOwner & Record<string, unknown>;
+  if (r.readingDiffAbridge !== undefined && !isReadingDiffAttempt(r.readingDiffAbridge)) return false;
   if (r.runtimeShutdownConfirmed !== undefined && r.runtimeShutdownConfirmed !== true) return false;
   if (r.cancellation !== undefined) {
     const receipt = r.cancellation as RunRecord["cancellation"];

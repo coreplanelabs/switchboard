@@ -45,10 +45,9 @@ review:
   readingDiff:
     provider: meat # git (default): on demand only · off: no reading diff at all
     meatModel: claude-opus-5 # required with provider: meat (no built-in model); an Opus-class model is the floor that actually abridges
-    meatTimeoutS: 240
 ```
 
-Cost: one Opus-class call per review (meat caches by model + diff, so a repeat is free). It never delays the review: the abridging runs after the record is written, and a restart mid-run simply leaves the run to be abridged on demand. Needs `runHistory` (the record it is appended to) and the GitHub App or `GH_TOKEN` (the compare diff; a whole recorded diff is the fallback). `SWITCHBOARD_READING_DIFF=git|meat|off` overrides `provider` on a deployed bot.
+Cost: a paid model job per review (meat caches by model + diff, so a repeat is free). It never delays the review: the abridging runs after the record is written, and a restart mid-run simply leaves the run to be abridged on demand. Needs `runHistory` (the record it is appended to) and the GitHub App or `GH_TOKEN` (the compare diff; a whole recorded diff is the fallback). `SWITCHBOARD_READING_DIFF=git|meat|off` overrides `provider` on a deployed bot.
 
 `memory.worker`, `runHistory.worker`, `schedules.worker` and `runtimeOverrides.worker` all name the state Worker, same `MEMORY_TOKEN`; deploy it once. The delivery page's snapshot rides whichever of them is set (no block of its own) and stays in memory without one.
 

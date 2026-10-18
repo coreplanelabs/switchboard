@@ -30,7 +30,7 @@ import { runResource, type RunsService } from "../runsService.js";
 // decided here.
 //
 // Two rules about the caller: the command's action is `review:write` (it
-// spends one Opus-class call and rewrites a stored record — admins through
+// runs a paid model job and rewrites a stored record — admins through
 // `all`, anyone granted it by name, never a baseline), and the run itself must
 // be one the caller may SEE (`runs:read` on the run's own attributes, like every
 // `runs.*` point read — a deny is `not_found`, byte-identical to a missing run).
@@ -82,11 +82,28 @@ export function abridgeOutput(id: string, state: AbridgeState): JsonValue {
     case "absent":
       return { id, state: "absent" };
     case "running":
-      return { id, state: "running", startedAt: state.startedAt };
+      return {
+        id,
+        state: "running",
+        startedAt: state.startedAt,
+        ...(state.progress ? { progress: state.progress.map(wrapUntrusted) } : {}),
+      };
     case "failed":
-      return { id, state: "failed", reason: state.reason, at: state.at };
+      return {
+        id,
+        state: "failed",
+        reason: state.reason,
+        at: state.at,
+        ...(state.progress ? { progress: state.progress.map(wrapUntrusted) } : {}),
+      };
     case "done":
-      return { id, state: "done", reused: state.reused, artifact: artifactJson(state.artifact) };
+      return {
+        id,
+        state: "done",
+        reused: state.reused,
+        artifact: artifactJson(state.artifact),
+        ...(state.progress ? { progress: state.progress.map(wrapUntrusted) } : {}),
+      };
   }
 }
 
@@ -164,9 +181,9 @@ export const reviewAbridge = defineCommand({
   action: "review:write",
   effect: "write",
   // A stored abridgement is answered, not recomputed, so a repeat changes nothing more.
-  annotations: { destructive: false, idempotent: true, risk: () => "spends one model call" },
+  annotations: { destructive: false, idempotent: true, risk: () => "runs a paid model job" },
   describe:
-    "Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed.",
+    "Abridge a finished PR review's reading diff with meat.dev on the bot host (a paid model job) and store it on the run; idempotent — a stored one is answered, not recomputed.",
   render: renderAbridge,
   handler: async ({ args, options, caller, deps }) => {
     await assertVisible(deps, args.id, caller);

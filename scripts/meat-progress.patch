@@ -1,0 +1,15 @@
+--- a/cmd/meat/main.go
++++ b/cmd/meat/main.go
+@@ -113,3 +113,2 @@
+-	// Progress feedback is strictly interactive: only when BOTH stdout and
+-	// stderr are terminals (so `meat > file` and `meat 2> log` stay clean),
+-	// and never in -json mode.
++	// Human progress stays interactive. JSON mode writes progress to stderr
++	// and reserves stdout for the result; redirected human output stays clean.
+@@ -118 +117,5 @@
+-	if interactive {
++	if *jsonOut {
++		progress = func(msg string) {
++			fmt.Fprintf(os.Stderr, "meat: %s\n", msg)
++		}
++	} else if interactive {

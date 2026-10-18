@@ -101,7 +101,6 @@ function harness(over: Partial<AbridgerDeps> = {}, meatAnswers: MeatRunResult[] 
     github: () => github,
     meat: meat.impl,
     defaultModel: () => "claude-opus-5",
-    timeoutMs: () => 240_000,
     clock: () => NOW,
     warn: (m) => warnings.push(m),
     ...over,
@@ -110,13 +109,79 @@ function harness(over: Partial<AbridgerDeps> = {}, meatAnswers: MeatRunResult[] 
 }
 
 describe("ReviewAbridger.abridge — the one path", () => {
+  it("retains live progress and the final error on the record, including after a new abridger starts", async () => {
+    let finish!: (result: MeatRunResult) => void;
+    const h = harness({
+      meat: async (run) => {
+        await run.onProgress?.("meat: thinking (turn 1)");
+        await run.onProgress?.("meat: model generate: context deadline exceeded");
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+    await h.store.put(reviewRecord("r1"));
+    await h.abridger.abridge({ runId: "r1" });
+    await vi.waitFor(() => expect(typeof finish).toBe("function"));
+    const progress = [
+      "Fetching the complete review diff.",
+      "Starting meat with claude-opus-5 (110 input bytes).",
+      "meat: thinking (turn 1)",
+      "meat: model generate: context deadline exceeded",
+    ];
+    expect(await h.abridger.status("r1")).toEqual({ state: "running", startedAt: NOW, progress });
+    expect((await h.store.get("r1"))?.readingDiffAbridge).toEqual({
+      state: "running",
+      startedAt: NOW,
+      at: NOW,
+      progress,
+    });
+    finish({ ok: false, reason: "meat exited 1: context deadline exceeded" });
+    const failed = { state: "failed", at: NOW, reason: "meat exited 1: context deadline exceeded", progress };
+    expect(await h.abridger.wait("r1")).toMatchObject(failed);
+    const restarted = harness({
+      store: h.store,
+      meat: async () => {
+        throw new Error("must not run on a status read");
+      },
+    }).abridger;
+    expect(await restarted.status("r1")).toEqual(failed);
+    expect(await restarted.abridge({ runId: "r1" })).toEqual(failed);
+    expect((await h.store.get("r1"))?.events.filter(isReadingDiff).map((event) => event.poweredBy)).toEqual(["git"]);
+  });
+
+  it("keeps bounded redacted progress and names an unfinished attempt after restart", async () => {
+    const h = harness({
+      meat: async (run) => {
+        for (let n = 0; n < 40; n++)
+          await run.onProgress?.(`turn ${n}: ghp_${"A".repeat(36)} \u001b[31m${"x".repeat(600)}`);
+        return { ok: false, reason: "provider failed" };
+      },
+    });
+    await h.store.put(reviewRecord("r1"));
+    await h.abridger.abridge({ runId: "r1" });
+    await h.abridger.wait("r1");
+    const record = (await h.store.get("r1"))!;
+    expect(record.readingDiffAbridge?.progress).toHaveLength(32);
+    expect(record.readingDiffAbridge?.progress[0]).toBe(`turn 8: «redacted-github-token» ${"x".repeat(480)}`);
+    expect(JSON.stringify(record.readingDiffAbridge)).not.toContain("ghp_A");
+    await h.store.put({
+      ...record,
+      readingDiffAbridge: { ...record.readingDiffAbridge!, state: "running", reason: undefined },
+    });
+    expect(await harness({ store: h.store }).abridger.status("r1")).toMatchObject({
+      state: "failed",
+      reason: "The previous meat attempt has no active process on this bot or saved result.",
+      progress: record.readingDiffAbridge?.progress,
+    });
+  });
   it("absent → running: starts the job and answers the in-progress marker; the job appends a meat artifact fed the GitHub compare diff", async () => {
     const h = harness();
     await h.store.put(reviewRecord("r1"));
     expect(await h.abridger.status("r1")).toEqual({ state: "absent" });
     const first = await h.abridger.abridge({ runId: "r1" });
-    expect(first).toEqual({ state: "running", startedAt: NOW });
-    expect(await h.abridger.status("r1")).toEqual({ state: "running", startedAt: NOW });
+    expect(first).toEqual({ state: "running", startedAt: NOW, progress: ["Fetching the complete review diff."] });
+    expect(await h.abridger.status("r1")).toMatchObject({ state: "running", startedAt: NOW });
     const done = await h.abridger.wait("r1");
     expect(done).toMatchObject({
       state: "done",
@@ -130,7 +195,7 @@ describe("ReviewAbridger.abridge — the one path", () => {
         meatTokens: { input: 10, output: 2 },
       },
     });
-    expect(h.meat.runs).toEqual([{ diff: GH_DIFF, model: "claude-opus-5", timeoutMs: 240_000 }]);
+    expect(h.meat.runs).toEqual([{ diff: GH_DIFF, model: "claude-opus-5", onProgress: expect.any(Function) }]);
     const stored = (await h.store.get("r1"))!;
     const meat = meatArtifactOf(stored)!;
     expect(meat).toMatchObject({
@@ -166,6 +231,7 @@ describe("ReviewAbridger.abridge — the one path", () => {
     expect(await h.abridger.abridge({ runId: "r1", force: true, model: "claude-sonnet-5" })).toEqual({
       state: "running",
       startedAt: NOW,
+      progress: ["Fetching the complete review diff."],
     });
     await h.abridger.wait("r1");
     expect(h.meat.runs).toHaveLength(2);
@@ -184,9 +250,14 @@ describe("ReviewAbridger.abridge — the one path", () => {
     const slow = new Promise<MeatRunResult>((r) => (release = r));
     const h = harness({ meat: vi.fn(() => slow) });
     await h.store.put(reviewRecord("r1"));
-    expect(await h.abridger.abridge({ runId: "r1" })).toEqual({ state: "running", startedAt: NOW });
-    expect(await h.abridger.abridge({ runId: "r1", force: true })).toEqual({ state: "running", startedAt: NOW });
+    expect(await h.abridger.abridge({ runId: "r1" })).toEqual({
+      state: "running",
+      startedAt: NOW,
+      progress: ["Fetching the complete review diff."],
+    });
+    expect(await h.abridger.abridge({ runId: "r1", force: true })).toMatchObject({ state: "running", startedAt: NOW });
     expect(h.abridger.running()).toEqual(["r1"]);
+    await vi.waitFor(() => expect(typeof release).toBe("function"));
     release({ ok: true, result: { diff: "a", summary: "s" } });
     expect(await h.abridger.wait("r1")).toMatchObject({ state: "done" });
     expect(h.abridger.running()).toEqual([]);
@@ -203,9 +274,10 @@ describe("ReviewAbridger.abridge — the one path", () => {
       h.abridger.abridge({ runId: "r1" }),
       h.abridger.abridge({ runId: "r1", force: true }),
     ]);
-    expect(a).toEqual({ state: "running", startedAt: NOW });
+    expect(a).toEqual({ state: "running", startedAt: NOW, progress: ["Fetching the complete review diff."] });
     expect(b).toEqual(a);
     expect(h.abridger.running()).toEqual(["r1"]);
+    await vi.waitFor(() => expect(typeof release).toBe("function"));
     release({ ok: true, result: { diff: "a", summary: "s" } });
     expect(await h.abridger.wait("r1")).toMatchObject({ state: "done", reused: false });
     expect(meat).toHaveBeenCalledTimes(1);
@@ -258,7 +330,7 @@ describe("ReviewAbridger — input completeness (compare first, recorded only wh
     });
     await h.store.put(reviewRecord("r1", {}, { truncated: true, diff: GIT_DIFF + "…[500 more chars]" }));
     await h.abridger.abridge({ runId: "r1" });
-    expect(await h.abridger.wait("r1")).toEqual({
+    expect(await h.abridger.wait("r1")).toMatchObject({
       state: "failed",
       reason: "diff unavailable: GitHub compare failed (406) and the recorded diff is truncated",
       at: NOW,
@@ -278,7 +350,7 @@ describe("ReviewAbridger — input completeness (compare first, recorded only wh
     const h2 = harness({ github: () => github, compareMaxChars: 1000 });
     await h2.store.put(reviewRecord("r2", {}, { truncated: true }));
     await h2.abridger.abridge({ runId: "r2" });
-    expect(await h2.abridger.wait("r2")).toEqual({
+    expect(await h2.abridger.wait("r2")).toMatchObject({
       state: "failed",
       reason: "diff unavailable: GitHub compare diff exceeds 1000 chars and the recorded diff is truncated",
       at: NOW,
@@ -310,7 +382,7 @@ describe("ReviewAbridger — input completeness (compare first, recorded only wh
       }),
     );
     await h2.abridger.abridge({ runId: "r2" });
-    expect(await h2.abridger.wait("r2")).toEqual({
+    expect(await h2.abridger.wait("r2")).toMatchObject({
       state: "failed",
       reason: "diff unavailable: the run records no repo and head to compare and the recorded diff is truncated",
       at: NOW,
@@ -335,17 +407,17 @@ describe("ReviewAbridger — input completeness (compare first, recorded only wh
 });
 
 describe("ReviewAbridger — failures and the append", () => {
-  it("meat failing is `failed` with meat's reason, remembered until --force; the record is untouched", async () => {
+  it("meat failing is `failed` with meat's reason, remembered until --force; the error and progress stay on the record", async () => {
     const h = harness({}, [{ ok: false, reason: "meat exited 1: no LLM credentials" }]);
     await h.store.put(reviewRecord("r1"));
     await h.abridger.abridge({ runId: "r1" });
     const failed = { state: "failed", reason: "meat exited 1: no LLM credentials", at: NOW };
-    expect(await h.abridger.wait("r1")).toEqual(failed);
-    expect(await h.abridger.status("r1")).toEqual(failed);
-    expect(await h.abridger.abridge({ runId: "r1" })).toEqual(failed); // no second spend
+    expect(await h.abridger.wait("r1")).toMatchObject(failed);
+    expect(await h.abridger.status("r1")).toMatchObject(failed);
+    expect(await h.abridger.abridge({ runId: "r1" })).toMatchObject(failed); // no second spend
     expect(h.meat.runs).toHaveLength(1);
     expect(meatArtifactOf((await h.store.get("r1"))!)).toBeUndefined();
-    expect(await h.abridger.abridge({ runId: "r1", force: true })).toEqual({ state: "running", startedAt: NOW });
+    expect(await h.abridger.abridge({ runId: "r1", force: true })).toMatchObject({ state: "running", startedAt: NOW });
     expect(await h.abridger.wait("r1")).toMatchObject({ state: "done" });
   });
 
@@ -377,11 +449,13 @@ describe("ReviewAbridger — failures and the append", () => {
     const h = harness({ meat: vi.fn(() => new Promise<MeatRunResult>((r) => (release = r))) });
     await h.store.put(reviewRecord("r1"));
     await h.abridger.abridge({ runId: "r1" });
+    await vi.waitFor(() => expect(typeof release).toBe("function"));
     await h.store.delete("r1");
     release({ ok: true, result: { diff: "a" } });
-    expect(await h.abridger.wait("r1")).toEqual({
+    expect(await h.abridger.wait("r1")).toMatchObject({
       state: "failed",
-      reason: "the run's record is gone — nothing to append to",
+      reason:
+        "the run's record is gone — nothing to append to; progress was not saved: the run's record is gone — nothing to append to",
       at: NOW,
     });
     expect(await h.store.get("r1")).toBeNull();
@@ -390,14 +464,18 @@ describe("ReviewAbridger — failures and the append", () => {
   it("a rewrite the store answers `stored: false` (the record fell outside retention in its own write) is a named failure", async () => {
     const inner = new InMemoryRunStore({ now: () => NOW });
     const store = Object.assign(Object.create(inner) as InMemoryRunStore, {
-      put: async (r: RunRecord) => ({ ...(await inner.put(r)), stored: false }),
+      put: async (r: RunRecord) => ({
+        ...(await inner.put(r)),
+        stored: !r.events.some((e) => isReadingDiff(e) && e.poweredBy === "meat"),
+      }),
     });
     const h = harness({ store });
     await inner.put(reviewRecord("r1"));
     await h.abridger.abridge({ runId: "r1" });
-    expect(await h.abridger.wait("r1")).toEqual({
+    expect(await h.abridger.wait("r1")).toMatchObject({
       state: "failed",
-      reason: "the run's record fell outside the retention window; nothing was stored",
+      reason:
+        "the run's record fell outside the retention window; nothing was stored; progress was not saved: the run store did not keep meat's progress",
       at: NOW,
     });
   });

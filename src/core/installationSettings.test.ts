@@ -41,7 +41,6 @@ review:
   readingDiff:
     provider: meat
     meatModel: claude-opus-5
-    meatTimeoutS: 120
 selfImprovement:
   repo: acme/switchboard
   label: self-improvement

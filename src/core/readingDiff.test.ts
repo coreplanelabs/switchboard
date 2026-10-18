@@ -22,45 +22,39 @@ import { createTracer } from "./trace/tracer.js";
 
 describe("resolveReadingDiff (config + env)", () => {
   it("defaults to git with meat's default runtime budget when nothing is configured", () => {
-    expect(resolveReadingDiff(undefined, {})).toEqual({ provider: "git", meatTimeoutS: 240 });
+    expect(resolveReadingDiff(undefined, {})).toEqual({ provider: "git" });
   });
 
-  it("config selects the provider, the meat model, and meat's budget (floored, positive)", () => {
-    expect(resolveReadingDiff({ provider: "meat", meatModel: "claude-opus-4-8", meatTimeoutS: 300.9 }, {})).toEqual({
+  it("config selects the provider, the meat model, without a second runtime budget", () => {
+    expect(resolveReadingDiff({ provider: "meat", meatModel: "claude-opus-4-8" }, {})).toEqual({
       provider: "meat",
       meatModel: "claude-opus-4-8",
-      meatTimeoutS: 300,
     });
     expect(resolveReadingDiff({ provider: "off" }, {})).toBeNull();
   });
 
   it("meat without a configured model names none — the code carries no built-in model, and the missing-key sentence names review.readingDiff.meatModel", () => {
-    expect(resolveReadingDiff({ provider: "meat", meatTimeoutS: -5 }, {})).toEqual({
+    expect(resolveReadingDiff({ provider: "meat" }, {})).toEqual({
       provider: "meat",
-      meatTimeoutS: 240,
     });
     expect(MEAT_MODEL_MISSING).toContain("review.readingDiff.meatModel");
     expect(resolveReadingDiff({ provider: "git", meatModel: "claude-opus-4-8" }, {})).toEqual({
       provider: "git",
       meatModel: "claude-opus-4-8",
-      meatTimeoutS: 240,
     });
   });
 
   it("SWITCHBOARD_READING_DIFF overrides config: git | meat | off", () => {
     expect(resolveReadingDiff({ provider: "meat" }, { SWITCHBOARD_READING_DIFF: "git" })).toEqual({
       provider: "git",
-      meatTimeoutS: 240,
     });
     expect(resolveReadingDiff({ provider: "off" }, { SWITCHBOARD_READING_DIFF: "meat" })).toEqual({
       provider: "meat",
-      meatTimeoutS: 240,
     });
     expect(resolveReadingDiff({ provider: "git" }, { SWITCHBOARD_READING_DIFF: "off" })).toBeNull();
     // an unknown env value is ignored, never a crash
     expect(resolveReadingDiff({ provider: "git" }, { SWITCHBOARD_READING_DIFF: "bogus" })).toEqual({
       provider: "git",
-      meatTimeoutS: 240,
     });
   });
 

@@ -11097,6 +11097,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         return null;
     }
     const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
+    let readingDiffAbridge: unknown;
     let sourceReads: unknown;
     let githubSource: unknown;
     let orchestratorDecisions: unknown;
@@ -11109,6 +11110,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     let contextCheckpointReceipt: unknown;
     let directAudience: unknown;
     try {
+      readingDiffAbridge = (parseStoredJson(row.summary_json) as Record<string, unknown>).readingDiffAbridge;
       branchPublication = (parseStoredJson(row.summary_json) as Record<string, unknown>).branchPublication;
       if (branchPublication !== undefined && !branchPublicationOf(branchPublication, summary.repo)) return null;
       reviewPublication = (parseStoredJson(row.summary_json) as Record<string, unknown>).reviewPublication;
@@ -11142,6 +11144,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const record = {
       ...summary,
       events,
+      ...(readingDiffAbridge === undefined ? {} : { readingDiffAbridge }),
       ...(branchPublication === undefined ? {} : { branchPublication }),
       ...(reviewPublication === undefined ? {} : { reviewPublication }),
       ...(branchPushReceipts === undefined ? {} : { branchPushReceipts }),
@@ -11611,6 +11614,7 @@ function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
     if (typeof parsed !== "object" || parsed === null) return null;
     const {
       branchPublication: _branchPublication,
+      readingDiffAbridge: _readingDiffAbridge,
       orchestratorDecisions: _orchestratorDecisions,
       githubSource: _githubSource,
       reviewPublication: _reviewPublication,
