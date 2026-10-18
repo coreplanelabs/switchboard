@@ -128,6 +128,18 @@ export function planStagingRecreation(
   const names = WORKER_KINDS.map((kind) => profile.workers[kind]?.script);
   if (names.some((name) => !name?.includes("staging")) || new Set(names).size !== 4)
     throw new Error("recreation requires four distinct staging Workers");
+  return planInstallationRecreation(profile, profile.account, inventory, source);
+}
+
+/** Shared ownership plan; callers provide their own environment guard. */
+export function planInstallationRecreation(
+  profile: DeploymentProfile,
+  account: string,
+  inventory: StagingRecreationInventory,
+  source: { commit: string; configSha256: string },
+): StagingRecreationPlan {
+  if (profile.account !== account) throw new Error("installation account differs");
+  const names = WORKER_KINDS.map((kind) => profile.workers[kind]?.script);
   const allowed = new Set(names as string[]);
   const scripts = nativeInventoryRows(inventory.scripts);
   const applications = nativeInventoryRows(inventory.applications);
