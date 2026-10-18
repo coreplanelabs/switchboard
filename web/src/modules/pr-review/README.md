@@ -12,8 +12,7 @@ This folder is a self-contained module intended to be abstracted out and
 shared into another product later:
 
 - **Props-only.** `PrReviewPanel` takes one `PrReviewData` object (see
-  `types.ts`) and, optionally, an `AbridgeControl` — the state of an abridging
-  the host can run, and a `start()` to ask for it. Nothing here reads seeds,
+  `types.ts`) and, optionally, an `AbridgeControl` — the saved job state, an optional read-only `refresh()` and a `start()` to ask for model work. The panel checks status when it mounts; only an explicit click starts or retries work. Nothing here reads seeds,
   streams, stores, routes, or the network.
 - **No app imports, one exception.** Allowed dependencies: `vue`, Nuxt UI
   components, `@vueuse/core` (the colour mode and an element's size),
@@ -45,10 +44,11 @@ fills it, scrolling the content under the header and the tabs.
   `truncatedExplanation`, through `LabelTip`); at the right, the actions:
   **View on GitHub** (a ghost button), then — while only the full diff exists
   and the host passed an `abridge` control — the one solid button, **Abridge
-  with meat** (a tooltip says what it does and that it costs one model call),
+  with meat** (a tooltip says what it does and that it uses a paid model),
   or the running note (spinner, "Abridging… usually 1–3 minutes"), or the
-  failure (the reason, a Retry); once the abridged diff arrives in
-  `readingDiffs` its tab takes the control's place. Last, for a `closable`
+  failure (the reason, a Retry). Saved status is checked even when an
+  abridged artifact exists. A newer running or failed attempt remains visible
+  beside that artifact; completion hides the action and retains progress. Last, for a `closable`
   host, a close control that emits `close`.
 - **Tab row** — one tab per diff on record, **Files changed** for the full
   diff and **Reading diff** for the abridged one (the reader lands on the

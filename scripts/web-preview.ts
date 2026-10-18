@@ -227,6 +227,9 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
   row({
     id: "review-1",
     label: 'review · acme/api · "review the webhook retry PR"',
+    repo: "acme/api",
+    pr: { number: 57, url: "https://github.com/acme/api/pull/57" },
+    sourceUrl: "https://example.slack.com/archives/C1/p2",
     finished: true,
     persisted: true,
     startedAt: NOW - 7 * 3_600_000,
@@ -2969,6 +2972,19 @@ createServer((req, res) => {
     return;
   }
   if (url.pathname === "/runs/live-1/events") return serveLiveStream(res, snapshot);
+  if (
+    req.method === "GET" &&
+    url.searchParams.get("id") === "review-1" &&
+    ["/api/review.status", "/api/runs.events"].includes(url.pathname)
+  ) {
+    const body =
+      url.pathname === "/api/review.status"
+        ? { state: "done", progress: ["Fetching PR diff.", "Abridged diff saved."].map(wrapUntrusted) }
+        : { events: REVIEW_STREAM };
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.end(JSON.stringify(body));
+    return;
+  }
   // A listed run's stored replay (live-view item 28), as the bot's tokenless
   // events route writes a finished record: what a row's timeline folds.
   const replay = /^\/runs\/([^/]+)\/events$/.exec(url.pathname);

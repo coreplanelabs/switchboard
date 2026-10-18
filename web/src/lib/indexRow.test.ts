@@ -266,6 +266,24 @@ describe("feed reconciliation", () => {
     expect(withOwn.status).toBe("failed");
     expect(withOwn.finishedAt).toBe(42);
   });
+
+  it("an explicit incoming PR or review outcome replaces the saved target", () => {
+    const kept = finished("completed", {
+      repo: "acme/api",
+      persisted: true,
+      pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+      reviewPost: { posted: true, target: { repo: "acme/api", number: 42 }, head: "abc1234" },
+    });
+    const merged = mergeRow(
+      kept,
+      finished("completed", {
+        pr: { number: 43, url: "https://github.com/acme/api/pull/43" },
+        reviewPost: { posted: false, reason: "opted-out" },
+      }),
+    );
+    expect(merged.pr).toEqual({ number: 43, url: "https://github.com/acme/api/pull/43" });
+    expect(merged.reviewPost).toEqual({ posted: false, reason: "opted-out" });
+  });
 });
 
 // Feature: docs/reference/specs/live-view.md item 32 — the stall

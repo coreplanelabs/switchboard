@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import MarkdownText from "../../components/MarkdownText.vue";
 import FilesChanged from "./FilesChanged.vue";
 import LabelTip from "./LabelTip.vue";
+import meatIcon from "./meatdev.png";
 import type { AbridgeControl, PrReviewData, ReadingDiff } from "./types";
 import {
   descriptionNote,
@@ -20,8 +21,8 @@ import {
 //
 // Shape, top to bottom: a header (the title; one line of facts — the
 // reference, the head, the base, the producer; the actions — View on GitHub,
-// the abridge control when the host offers one and the full diff stands
-// alone, the close control for a host that asks), a tab row (one tab per
+// the host's abridge action or current job status, the close control for a
+// host that asks), a tab row (one tab per
 // diff on record, the Description when the host knows it; at the right, the
 // Inline / Side by side choice, remembered per browser), then the tab's
 // content: the Files changed view for a diff, the prose for the description.
@@ -94,6 +95,7 @@ const DIFF_STYLES = [
 ];
 const diffStyle = ref<"unified" | "split">("unified");
 onMounted(() => {
+  props.abridge?.refresh?.();
   try {
     if (localStorage.getItem(DIFF_STYLE_KEY) === "split") diffStyle.value = "split";
   } catch {
@@ -109,17 +111,15 @@ function setDiffStyle(style: string | number) {
   }
 }
 
-/** The abridge control shows while the full diff stands alone and the host
- *  offers one; once the abridged diff arrives its tab takes the control's place. */
-const abridgeShown = computed(
-  () =>
-    props.abridge !== undefined &&
-    props.abridge.state.state !== "done" &&
-    gitDiff.value !== undefined &&
-    !meatDiff.value,
-);
+/** A recorded artifact can outlive a newer attempt. Keep that attempt's state
+ *  visible; offer initial model work only when the full diff stands alone. */
+const abridgeShown = computed(() => {
+  if (!props.abridge) return false;
+  const state = props.abridge.state.state;
+  return state === "absent" ? gitDiff.value !== undefined && !meatDiff.value : state !== "done";
+});
 const ABRIDGE_EXPLANATION =
-  "Abridge the full diff with meat.dev: a model keeps the concepts and drops what a reviewer need not read. One model call; usually a minute or three.";
+  "Abridge the full diff with meat.dev: a model keeps the concepts and drops what a reviewer need not read. Uses a paid model; usually a minute or three.";
 </script>
 
 <template>
@@ -164,7 +164,14 @@ const ABRIDGE_EXPLANATION =
             <template v-if="shown">
               <span title="the base the diff is against">against origin/{{ shown.baseRef }}</span>
               <LabelTip :text="poweredByExplanation(shown.poweredBy)">
-                <span data-testid="producer-label">{{ poweredByLabel(shown.poweredBy) }}</span>
+                <span class="inline-flex items-center gap-1.5" data-testid="producer-label"
+                  ><img
+                    v-if="shown.poweredBy === 'meat'"
+                    :src="meatIcon"
+                    alt=""
+                    class="size-5 shrink-0 object-contain"
+                  />{{ poweredByLabel(shown.poweredBy) }}</span
+                >
               </LabelTip>
               <LabelTip v-if="shown.truncated" :text="truncatedExplanation(shown.diff.length)">
                 <span class="inline-flex items-center gap-1 text-(--ui-warning)" data-testid="truncated-label">
@@ -174,7 +181,7 @@ const ABRIDGE_EXPLANATION =
             </template>
           </div>
         </div>
-        <div class="flex shrink-0 flex-wrap items-center gap-2">
+        <div class="flex max-w-full shrink-0 flex-wrap items-center gap-2">
           <UButton
             v-if="links.pr"
             label="View on GitHub"
@@ -187,14 +194,18 @@ const ABRIDGE_EXPLANATION =
             data-testid="github-button"
           />
           <template v-if="abridgeShown && abridge">
-            <LabelTip v-if="abridge.state.state === 'absent'" :text="ABRIDGE_EXPLANATION">
-              <UButton
-                label="Abridge with meat"
-                icon="i-lucide-scissors"
-                size="sm"
-                data-testid="abridge-button"
-                @click="abridge.start()"
-              />
+            <span
+              v-if="abridge.state.state === 'checking'"
+              class="inline-flex items-center gap-1.5 text-xs text-muted"
+              role="status"
+              data-testid="abridge-checking"
+            >
+              <UIcon name="i-lucide-loader-circle" class="size-3.5 animate-spin" />Checking abridged diff…
+            </span>
+            <LabelTip v-else-if="abridge.state.state === 'absent'" :text="ABRIDGE_EXPLANATION">
+              <UButton label="Abridge with meat" size="sm" data-testid="abridge-button" @click="abridge.start()"
+                ><template #leading><img :src="meatIcon" alt="" class="size-5 shrink-0 object-contain" /></template
+              ></UButton>
             </LabelTip>
             <span
               v-else-if="abridge.state.state === 'running'"
@@ -205,12 +216,28 @@ const ABRIDGE_EXPLANATION =
               Abridging… usually 1–3 minutes
             </span>
             <span
+              v-else-if="abridge.state.state === 'unavailable'"
+              class="inline-flex min-w-0 items-center gap-1.5 text-xs text-(--ui-warning)"
+              role="status"
+              data-testid="abridge-unavailable"
+            >
+              <span class="min-w-0 break-words">Could not check abridged diff: {{ abridge.state.reason }}</span>
+              <UButton
+                v-if="abridge.refresh"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                label="Check status"
+                @click="abridge.refresh()"
+              />
+            </span>
+            <span
               v-else-if="abridge.state.state === 'failed'"
-              class="inline-flex min-w-0 shrink items-center gap-1.5 text-xs text-(--ui-error)"
+              class="inline-flex min-w-0 shrink flex-wrap items-center gap-1.5 text-xs text-(--ui-error)"
               data-testid="abridge-failed"
             >
               <UIcon name="i-lucide-circle-alert" class="size-3.5 shrink-0" />
-              <span class="truncate" :title="abridge.state.reason">Abridging failed: {{ abridge.state.reason }}</span>
+              <span class="min-w-0 break-words">Abridging failed: {{ abridge.state.reason }}</span>
               <UButton
                 size="xs"
                 color="neutral"
@@ -254,6 +281,18 @@ const ABRIDGE_EXPLANATION =
       />
     </div>
     <div class="min-h-0 flex-1 overflow-y-auto">
+      <details
+        v-if="abridge?.progress?.length"
+        class="border-b border-default px-4 py-3 text-xs sm:px-6"
+        data-testid="abridge-progress"
+      >
+        <summary class="cursor-pointer text-muted">Progress ({{ abridge.progress.length }})</summary>
+        <ol
+          class="mt-2 max-h-[min(30dvh,12rem)] list-inside list-decimal overflow-auto whitespace-pre-wrap text-muted [overflow-wrap:anywhere]"
+        >
+          <li v-for="(line, index) in abridge.progress" :key="index">{{ line }}</li>
+        </ol>
+      </details>
       <FilesChanged v-if="shown" :key="shown.poweredBy" :diff="shown.diff" :notes="notes" :diff-style="diffStyle" />
       <div
         v-else-if="tab === 'description' && description"

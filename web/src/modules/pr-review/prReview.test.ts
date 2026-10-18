@@ -503,6 +503,52 @@ describe("the abridge control", () => {
   /** A host's control as the test drives it: the state is written from outside. */
   const control = (state: AbridgeState = { state: "absent" }) => reactive({ state, start: vi.fn() });
 
+  it.each(["running", "failed", "done"] as const)(
+    "reads saved %s status even with an existing meat artifact",
+    async (state) => {
+      const c = reactive({
+        state: { state: "absent" } as AbridgeState,
+        start: vi.fn(),
+        progress: [] as string[],
+        refresh() {
+          c.state = state === "failed" ? { state, reason: "new attempt failed" } : { state };
+          c.progress = ["New attempt started", "Turn 1: inspect changes"];
+        },
+      });
+      const w = await mountPanel({ data: data(), abridge: c });
+      expect(
+        w
+          .get('[data-testid="abridge-progress"]')
+          .findAll("li")
+          .map((line) => line.text()),
+      ).toEqual(["New attempt started", "Turn 1: inspect changes"]);
+      expect(activeTab(w, "panel-tabs")).toBe("Reading diff");
+      if (state === "running") expect(w.get('[data-testid="abridge-running"]').text()).toContain("Abridging…");
+      if (state === "failed") expect(w.get('[data-testid="abridge-failed"]').text()).toContain("new attempt failed");
+      expect(w.find('[data-testid="abridge-button"]').exists()).toBe(false);
+      expect(c.start).not.toHaveBeenCalled();
+      w.unmount();
+    },
+  );
+
+  it("shows recorded progress as expandable plain text after failure and completion", async () => {
+    const c = reactive({
+      state: { state: "failed", reason: "provider request failed" } as AbridgeState,
+      start: vi.fn(),
+      progress: ["Fetching PR diff", '<img src=x onerror="alert(1)">'],
+    });
+    const w = await mountPanel({ data: data({ readingDiffs: [gitDiff] }), abridge: c });
+    const log = w.get('[data-testid="abridge-progress"]');
+    expect(log.get("summary").text()).toBe("Progress (2)");
+    await log.get("summary").trigger("click");
+    expect(log.findAll("li").map((row) => row.text())).toEqual(["Fetching PR diff", '<img src=x onerror="alert(1)">']);
+    expect(log.find("img").exists()).toBe(false);
+    c.state = { state: "done" };
+    await nextTick();
+    expect(log.findAll("li").map((row) => row.text())).toEqual(["Fetching PR diff", '<img src=x onerror="alert(1)">']);
+    w.unmount();
+  });
+
   it("without a control nothing renders (the deployment cannot abridge); with both producers nothing renders either", async () => {
     const off = await mountPanel({ data: data({ readingDiffs: [gitDiff] }) });
     expect(off.find('[data-testid^="abridge"]').exists()).toBe(false);

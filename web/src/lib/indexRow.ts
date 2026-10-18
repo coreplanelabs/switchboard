@@ -365,6 +365,11 @@ export function mergeRow(prev: IndexRow | undefined, run: IndexRow): IndexRow {
   const merged: IndexRow = { ...run };
   if (merged.finishedAt === undefined && prev.finishedAt !== undefined) merged.finishedAt = prev.finishedAt;
   if (merged.status === undefined && prev.status !== undefined) merged.status = prev.status;
+  // Registry summaries omit the saved PR identity and store confirmation.
+  if (merged.repo === undefined && prev.repo !== undefined) merged.repo = prev.repo;
+  if (merged.pr === undefined && prev.pr !== undefined) merged.pr = prev.pr;
+  if (merged.reviewPost === undefined && prev.reviewPost !== undefined) merged.reviewPost = prev.reviewPost;
+  if (merged.persisted === undefined && prev.persisted !== undefined) merged.persisted = prev.persisted;
   // The tracing stamps (docs/reference/specs/tracing.md) ride the record, not a registry upsert.
   if (merged.receivedAt === undefined && prev.receivedAt !== undefined) merged.receivedAt = prev.receivedAt;
   if (merged.sealedAt === undefined && prev.sealedAt !== undefined) merged.sealedAt = prev.sealedAt;
