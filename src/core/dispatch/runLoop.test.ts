@@ -12637,9 +12637,13 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     try {
       const running = runLoop(s.deps, ctx);
       await waiting;
-      const result = Promise.race([running, new Promise((resolve) => setTimeout(() => resolve("still waiting"), 41))]);
       await vi.advanceTimersByTimeAsync(41);
-      expect(await result).toMatchObject({ kind: "answered", reviewPost: { posted: false, uncertain: true } });
+      // The publication deadline must end the run while the admission read is
+      // still stalled (it is released only below), so the run settles here
+      // because its budget ran out. Await the run itself: a sentinel timer
+      // fires on fake time, while the run's teardown after the deadline runs
+      // on real time and loses that race on a loaded machine.
+      expect(await running).toMatchObject({ kind: "answered", reviewPost: { posted: false, uncertain: true } });
       expect(s.registry.getById(s.run.id)).toMatchObject({ finished: true, status: "completed" });
       release();
       await vi.advanceTimersByTimeAsync(0);
