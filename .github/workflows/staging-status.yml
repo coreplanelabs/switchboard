@@ -1,0 +1,115 @@
+name: staging acceptance
+
+# Updates commit statuses only; never checks out candidate code or artifacts.
+on: # zizmor: ignore[dangerous-triggers]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
+  workflow_run:
+    workflows: [deploy staging]
+    types: [requested, in_progress, completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: staging-status-${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: ${{ github.event_name == 'pull_request' && 'staging / Review E2E' || 'staging / publish Review result' }}
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 5
+    steps:
+      - name: publish release acceptance from the trusted controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+          const repo = process.env.GITHUB_REPOSITORY;
+          const branch = 'release-please--branches--main--components--switchboard';
+          const path = '.github/workflows/deploy-staging.yml';
+          const isRelease = pull => pull.state === 'open' && pull.head.ref === branch &&
+            pull.head.repo.full_name === repo && pull.base.repo.full_name === repo && pull.base.ref === 'main';
+          const origin = event.workflow_run;
+          if (origin && (origin.path !== path || origin.head_branch !== branch ||
+              origin.repository.full_name !== repo || origin.head_repository.full_name !== repo)) process.exit(0);
+          if (!origin && !isRelease(event.pull_request)) {
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, 'Not required for an ordinary PR.\n');
+            process.exit(0);
+          }
+          const sha = origin?.head_sha ?? event.pull_request.head.sha;
+          if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('Missing exact release head');
+          function api(endpoint, body) {
+            const args = ['api', `repos/${repo}/${endpoint}`];
+            if (body) args.push('--method', 'POST', '--input', '-');
+            return JSON.parse(execFileSync('gh', args, { encoding: 'utf8', input: body && JSON.stringify(body) }));
+          }
+          function publish(state, description, source) {
+            api(`statuses/${sha}`, { context: 'staging / Review E2E', state, description,
+              ...(source && { target_url: `${source.html_url}/attempts/${source.run_attempt}` }) });
+          }
+          // Invalidate prior success before any read that can fail.
+          publish('pending', 'Refreshing release staging acceptance');
+          const pulls = origin
+            ? api(`pulls?state=open&head=${repo.split('/')[0]}:${branch}&per_page=100`)
+            : [api(`pulls/${event.pull_request.number}`)];
+          if (!pulls.some(pull => isRelease(pull) && pull.head.sha === sha)) process.exit(0);
+          const workflow = api('actions/workflows/deploy-staging.yml');
+          function newest() {
+            const history = api(`actions/workflows/deploy-staging.yml/runs?head_sha=${sha}&per_page=100`);
+            if (!Number.isInteger(history.total_count) || history.total_count !== history.workflow_runs.length)
+              throw new Error('Controller history is incomplete');
+            const runs = history.workflow_runs.filter(run => run.head_branch === branch && run.head_sha === sha &&
+              run.workflow_id === workflow.id && run.path === path &&
+              run.repository.full_name === repo && run.head_repository.full_name === repo &&
+              !(run.event === 'pull_request_target' && run.display_title === 'Staging label ignored'));
+            for (const run of runs) {
+              if (!Number.isFinite(Date.parse(run.run_started_at ?? run.created_at)))
+                throw new Error('Controller execution time is missing');
+            }
+            runs.sort((a, b) => Date.parse(b.run_started_at ?? b.created_at) - Date.parse(a.run_started_at ?? a.created_at));
+            if (runs.length > 1 && (runs[0].run_started_at ?? runs[0].created_at) === (runs[1].run_started_at ?? runs[1].created_at))
+              throw new Error('Controller execution order is ambiguous');
+            return runs[0];
+          }
+          let source;
+          try {
+            source = newest();
+          } catch (error) {
+            // Incomplete evidence must remain a merge refusal.
+            publish('failure', 'Controller history cannot establish release acceptance');
+            throw error;
+          }
+          let state = 'failure';
+          let description = 'No trusted release staging acceptance';
+          if (source?.event === 'pull_request_target' && source.display_title === 'Staging requested') {
+            if (source.status !== 'completed') {
+              state = 'pending';
+              description = 'Newest staging controller is still running';
+            } else if (source.conclusion === 'success') {
+              const jobs = api(`actions/runs/${source.id}/attempts/${source.run_attempt}/jobs?per_page=100`);
+              const accepted = jobs.jobs.find(job => job.name === 'staging / live Review');
+              if (jobs.total_count === jobs.jobs.length && accepted?.status === 'completed' && accepted.conclusion === 'success') {
+                state = 'success';
+                description = 'Release staging Review acceptance passed';
+              }
+            }
+          }
+          // A concurrent start or rerun must not receive an earlier execution's result.
+          const latest = newest();
+          const current = source && api(`actions/runs/${source.id}`);
+          if (latest?.id !== source?.id || latest?.run_attempt !== source?.run_attempt ||
+              current?.run_attempt !== source?.run_attempt || current?.status !== source?.status) {
+            state = 'pending';
+            description = 'Staging controller execution changed during verification';
+          }
+          publish(state, description, source);
+          NODE
