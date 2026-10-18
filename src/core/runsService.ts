@@ -15,6 +15,12 @@ import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecisi
 import { matchesPredicate } from "./authz/predicate.js";
 import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
 import { sanitizeActor, type RunActor, type RunEvent, type StopMode } from "./runEvents.js";
+import { captureException } from "./runStateWriteDiagnostic.js";
+import {
+  originalStorageFailure,
+  storageFailureWasReported,
+  type StorageFailureDiagnostic,
+} from "./storageFailureDiagnostic.js";
 import { systemClock } from "./trace/clock.js";
 import { RUN_KILL_SETTLE_MS } from "./budgets.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
@@ -1733,8 +1739,49 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         try {
           await store?.delete(id, { destructive: true });
         } catch (err) {
-          warn(`[runs] kill deletion unconfirmed for ${id}: ${describe(err)}`);
-          return { ok: false, error: "unavailable" };
+          const failure = originalStorageFailure(err);
+          if (!storageFailureWasReported(err))
+            warn(
+              JSON.stringify({
+                event: "run.kill.deletion_reply_failed",
+                runId: found.value.id,
+                storageFailure: failure,
+                exception: captureException(err),
+              }),
+            );
+          // Deletion can commit before cleanup or its reply fails. Original
+          // shutdown is already proved; reconcile only this deletion's marker.
+          let markerUnreadable = false;
+          let markerFailure: StorageFailureDiagnostic | undefined;
+          const deleted = await store?.deleted([id]).then(
+            (ids) => ids.includes(id),
+            (error: unknown) => {
+              markerUnreadable = true;
+              markerFailure = originalStorageFailure(error);
+              if (!storageFailureWasReported(error))
+                warn(
+                  JSON.stringify({
+                    event: "run.kill.deletion_marker_unreadable",
+                    runId: found.value.id,
+                    storageFailure: markerFailure,
+                    exception: captureException(error),
+                  }),
+                );
+              return false;
+            },
+          );
+          warn(
+            JSON.stringify({
+              event: "run.kill.deletion_reconciliation",
+              runId: found.value.id,
+              outcome: deleted ? "deleted" : "unconfirmed",
+              reason: deleted ? "marker-present" : markerUnreadable ? "marker-unreadable" : "marker-absent",
+              requestId: failure?.requestId,
+              requestDigest: failure?.requestDigest,
+              markerRequestId: markerFailure?.requestId,
+            }),
+          );
+          if (!deleted) return { ok: false, error: "unavailable" };
         }
         const removed = found.value;
         registry.discard(id, true, {

@@ -1,6 +1,8 @@
 import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { UncertainStoreError } from "./storeFailure.js";
 import { storeRequestWitness } from "./storeResponse.js";
+import { WorkerRunStore } from "./runStoreWorker.js";
+import { rememberStorageFailure, type StorageFailureNotice } from "./storageFailureDiagnostic.js";
 import { seedCoordinatorInstance } from "./testing/coordinatorInstance.js";
 // Feature: docs/reference/specs/run-history.md — `RunsService`: the one async
 // service behind every `runs.*` read and stop. It merges the live registry with
@@ -2160,6 +2162,193 @@ describe("RunsService.stopRun", () => {
       value: { id, mode: "hard", state: "deleted" },
     });
     expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it.each(["committed", "not-committed", "confirmation-unavailable"] as const)(
+    "Kill reconciles a failed deletion reply: %s",
+    async (outcome) => {
+      const { reg, store } = setup();
+      const warnings: string[] = [];
+      const svc = createRunsService({ registry: reg, store, warn: (message) => warnings.push(message) });
+      const { id, control } = reg.create();
+      reg.finish(id, "completed");
+      reg.seal(id);
+      control.confirmRuntimeShutdown();
+      await store!.put(record(id, NOW, { runtimeShutdownConfirmed: true }));
+      reg.markPersisted(id);
+      const remove = store!.delete.bind(store);
+      const deleted = store!.deleted.bind(store);
+      let attempted = false;
+      const removal = vi.spyOn(store!, "delete").mockImplementation(async (target, options) => {
+        attempted = true;
+        if (outcome !== "not-committed") await remove(target, options);
+        throw new Error("deletion acknowledgement lost");
+      });
+      vi.spyOn(store!, "deleted").mockImplementation(async (targets) => {
+        if (attempted && outcome === "confirmation-unavailable") throw new Error("deletion result unavailable");
+        return deleted(targets);
+      });
+
+      expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual(
+        outcome === "committed"
+          ? { ok: true, value: { id, mode: "hard", state: "deleted" } }
+          : { ok: false, error: "unavailable" },
+      );
+      expect(await store!.get(id)).toEqual(
+        outcome === "not-committed" ? record(id, NOW, { runtimeShutdownConfirmed: true }) : null,
+      );
+      expect(await deleted([id])).toEqual(outcome === "not-committed" ? [] : [id]);
+      expect(reg.getById(id)?.id).toEqual(outcome === "committed" ? undefined : id);
+      expect(removal).toHaveBeenCalledTimes(1);
+      expect(warnings.map((message) => JSON.parse(message).event)).toEqual(
+        outcome === "confirmation-unavailable"
+          ? [
+              "run.kill.deletion_reply_failed",
+              "run.kill.deletion_marker_unreadable",
+              "run.kill.deletion_reconciliation",
+            ]
+          : ["run.kill.deletion_reply_failed", "run.kill.deletion_reconciliation"],
+      );
+      expect(JSON.parse(warnings.at(-1)!)).toMatchObject({
+        runId: id,
+        outcome: outcome === "committed" ? "deleted" : "unconfirmed",
+        reason:
+          outcome === "committed"
+            ? "marker-present"
+            : outcome === "not-committed"
+              ? "marker-absent"
+              : "marker-unreadable",
+      });
+      expect(JSON.parse(warnings[0])).toMatchObject({
+        runId: id,
+        exception: { message: "deletion acknowledgement lost" },
+      });
+      if (outcome === "confirmation-unavailable")
+        expect(JSON.parse(warnings[1])).toMatchObject({
+          runId: id,
+          exception: { message: "deletion result unavailable" },
+        });
+    },
+  );
+
+  it("Kill keeps the real history client's request facts after a committed HTTP failure", async () => {
+    const backing = new InMemoryRunStore({ now: () => NOW });
+    const saved = record("kill-worker", NOW, { runtimeShutdownConfirmed: true });
+    await backing.put(saved);
+    const warnings: string[] = [];
+    const transportWarnings: string[] = [];
+    const failures: StorageFailureNotice[] = [];
+    let deleteCalls = 0;
+    let deletionRequestId: string | null = null;
+    const store = new WorkerRunStore({
+      baseUrl: "https://memory.example",
+      token: "fixture-secret",
+      storeKey: "runs:default",
+      onFailure: (notice) => failures.push(notice),
+      fetch: async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        if (path === "/runs/summary") return Response.json({ summary: await backing.getSummary(saved.id) });
+        if (path === "/runs/deleted") return Response.json({ ids: await backing.deleted([saved.id]) });
+        if (path === "/runs/delete") {
+          expect(JSON.parse(String(init?.body))).toEqual({
+            storeKey: "runs:default",
+            id: "kill-worker",
+            destructive: true,
+          });
+          deleteCalls++;
+          deletionRequestId = new Headers(init?.headers).get("x-switchboard-storage-request-id");
+          await backing.delete(saved.id, { destructive: true });
+          return Response.json({ error: "cleanup failed" }, { status: 500 });
+        }
+        throw new Error(`Unexpected route: ${path}`);
+      },
+    });
+    const { reg } = testRegistry();
+    const svc = createRunsService({ registry: reg, store, warn: (message) => warnings.push(message) });
+
+    const primaryWarn = vi.spyOn(console, "warn").mockImplementation((line) => transportWarnings.push(String(line)));
+    let stopped;
+    try {
+      stopped = await svc.stopRun(saved.id, "hard", actor, { destructive: true });
+    } finally {
+      primaryWarn.mockRestore();
+    }
+    expect(stopped).toEqual({
+      ok: true,
+      value: { id: "kill-worker", mode: "hard", state: "deleted" },
+    });
+    expect(await backing.get(saved.id)).toBeNull();
+    expect(await backing.deleted([saved.id])).toEqual(["kill-worker"]);
+    expect(deleteCalls).toBe(1);
+    expect(deletionRequestId).toEqual(
+      expect.stringMatching(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/),
+    );
+    expect(failures).toMatchObject([
+      {
+        runIds: ["kill-worker"],
+        diagnostic: {
+          operation: "/runs/delete",
+          requestId: deletionRequestId,
+          requestDigest: "d806f435b43bb1ba0a0df2a3599a4eb0daedbad1eb1d48bfb0e775fb37286686",
+          phase: "http",
+          httpStatus: 500,
+        },
+      },
+    ]);
+    expect(transportWarnings.map((message) => JSON.parse(message).event)).toEqual(["storage.request.failure"]);
+    expect(JSON.parse(transportWarnings[0])).toMatchObject({
+      side: "client",
+      runIds: ["kill-worker"],
+      diagnostic: {
+        operation: "/runs/delete",
+        requestId: deletionRequestId,
+        requestDigest: "d806f435b43bb1ba0a0df2a3599a4eb0daedbad1eb1d48bfb0e775fb37286686",
+        phase: "http",
+        httpStatus: 500,
+      },
+    });
+    expect(warnings.map((message) => JSON.parse(message).event)).toEqual(["run.kill.deletion_reconciliation"]);
+    expect(JSON.parse(warnings[0])).toEqual({
+      event: "run.kill.deletion_reconciliation",
+      runId: "kill-worker",
+      outcome: "deleted",
+      reason: "marker-present",
+      requestId: deletionRequestId,
+      requestDigest: "d806f435b43bb1ba0a0df2a3599a4eb0daedbad1eb1d48bfb0e775fb37286686",
+    });
+    expect(JSON.stringify([transportWarnings, warnings, failures])).not.toContain("fixture-secret");
+  });
+
+  it("Kill still reports an error when only its metadata was remembered", async () => {
+    const backing = new InMemoryRunStore({ now: () => NOW });
+    const saved = record("metadata-only", NOW, { runtimeShutdownConfirmed: true });
+    await backing.put(saved);
+    const warnings: string[] = [];
+    const failure = new Error("deletion reply lost");
+    rememberStorageFailure(failure, {
+      version: 1,
+      operation: "/runs/delete",
+      requestDigest: "a".repeat(64),
+      phase: "transport",
+    });
+    const remove = backing.delete.bind(backing);
+    vi.spyOn(backing, "delete").mockImplementation(async (id, options) => {
+      await remove(id, options);
+      throw failure;
+    });
+    const svc = createRunsService({
+      registry: testRegistry().reg,
+      store: backing,
+      warn: (message) => warnings.push(message),
+    });
+    expect(await svc.stopRun(saved.id, "hard", actor, { destructive: true })).toEqual({
+      ok: true,
+      value: { id: "metadata-only", mode: "hard", state: "deleted" },
+    });
+    expect(warnings.map((message) => JSON.parse(message).event)).toEqual([
+      "run.kill.deletion_reply_failed",
+      "run.kill.deletion_reconciliation",
+    ]);
   });
 
   it("Kill waits for the terminal record as well as original shutdown", async () => {
