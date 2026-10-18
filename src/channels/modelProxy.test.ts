@@ -1960,6 +1960,43 @@ describe("current model source guard", () => {
     },
   );
 
+  it("uses current source proof after an admitted request waits for its body", async () => {
+    const h = harness();
+    const token = h.bearers.mint(h.grant("run-1"), { sourceGuardRequired: true });
+    let allowed = true;
+    h.bearers.bindSourceGuard("run-1", async () => allowed);
+    const original = request({ headers: bearer(token), json: anthropicRequest({ stream: false }) }).req;
+    expect((await handleModelProxyRequest(original, h.deps)).status).toBe(200);
+    const json = JSON.stringify(anthropicRequest({ stream: false }));
+    let entered!: () => void, release!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = handleModelProxyRequest(
+      {
+        ...request({ headers: bearer(token), json: anthropicRequest({ stream: false }) }).req,
+        body: (async function* () {
+          yield Buffer.from(json.slice(0, 4));
+          entered();
+          await held;
+          yield Buffer.from(json.slice(4));
+        })(),
+      },
+      h.deps,
+    );
+    await reading;
+    allowed = false;
+    release();
+    const refused = await pending;
+    expect([refused.status, errorType(refused)]).toEqual([403, "source_unavailable"]);
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0].body.model).toBe("claude-opus-5");
+    expect(h.bearers.grantOf("run-1")?.turns).toBe(1);
+  });
+
   it.each(["retained", "revoke", "remint", "expire"] as const)(
     "rechecks the original entry after an asynchronous source proof: %s",
     async (change) => {

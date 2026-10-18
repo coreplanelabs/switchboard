@@ -9,7 +9,7 @@ import { isDelegatedMainRequester } from "./coordinator/mainStart.js";
 import { envelopeSchema } from "./organization/contract.js";
 import { nativeMediaDigest } from "./nativeMedia.js";
 import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
-import { isPrivateConversation, markPrivateConversation } from "./dispatch/privateConversation.js";
+import { markPrivateConversation } from "./dispatch/privateConversation.js";
 import {
   isOrganizationPrivateAudience,
   copyPrivateSourceFacts,
@@ -4131,7 +4131,7 @@ export async function dispatch(
       throw new Error("the coordinator coding unit has no durable branch target");
     const bearer = mintRunBearer(deps, {
       runId,
-      sourceGuardRequired: privateAudienceRequired(msg) || isPrivateConversation(msg) || !!msg.nativeMediaDigest,
+      sourceGuardRequired: true,
       agent,
       ...(modelCard ? { card: modelCard } : {}),
       profile,
