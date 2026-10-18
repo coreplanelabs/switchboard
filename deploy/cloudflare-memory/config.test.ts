@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { env, runInDurableObject } from "cloudflare:test";
 import { ConfigDO } from "./worker.ts";
+import { resetSettingsRoute } from "./resetSettingsRoutes.ts";
 import { baseConfigDocument, ConfigDocumentClient, type ConfigPublicationSnapshot } from "../../src/configDocument.ts";
 import { fetchMemoryTest } from "./testFetch.ts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // Feature: docs/reference/specs/routing-and-config.md item 12 — the ConfigDO: versioned
 // runtime config documents (the bot's chat-set `overrides`). Runs in workerd
@@ -29,6 +30,158 @@ async function post(path: string, body: unknown, headers: Record<string, string>
 }
 
 describe("ConfigDO routes", () => {
+  it("keeps maintenance closed when another settings object cannot verify restoration", async () => {
+    const operation = randomUUID();
+    const source = env.CONFIG.get(env.CONFIG.idFromName(`verify-source-${operation}`));
+    const target = env.CONFIG.get(env.CONFIG.idFromName(`verify-target-${operation}`));
+    const maintenance = { episode: { id: operation, phase: "active", scopes: ["all"] } };
+    await source.put("maintenance", maintenance, 0, 1);
+    const snapshot = await source.resetSettings("freeze", operation);
+    if (!snapshot || !("tables" in snapshot)) throw new Error("snapshot unavailable");
+    await target.resetSettings("restore", operation, snapshot);
+    const configNamespace = new Proxy(env.CONFIG, {
+      get(namespace, property) {
+        if (property === "get") return () => target;
+        const value = Reflect.get(namespace, property);
+        return typeof value === "function" ? value.bind(namespace) : value;
+      },
+    });
+    const organizationNamespace = new Proxy(env.ORGANIZATIONS, {
+      get(namespace, property) {
+        if (property === "get")
+          return () => ({
+            resetSettings: async () => {
+              throw new Error("private fixture setting");
+            },
+          });
+        const value = Reflect.get(namespace, property);
+        return typeof value === "function" ? value.bind(namespace) : value;
+      },
+    });
+    const body = JSON.stringify({ action: "verify", operation, installations: [randomUUID()] });
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "error").mockImplementation((value) => {
+      logs.push(String(value));
+    });
+    let result: Response;
+    try {
+      result = await resetSettingsRoute(
+        new Request(`${BASE}/installation-reset/settings`, {
+          method: "POST",
+          headers: { "content-length": String(new TextEncoder().encode(body).length) },
+          body,
+        }),
+        { ...env, CONFIG: configNamespace, ORGANIZATIONS: organizationNamespace },
+      );
+    } finally {
+      log.mockRestore();
+    }
+    expect(result.status).toBe(409);
+    expect(JSON.parse(logs[0])).toEqual({
+      event: "installation.reset.settings.failure",
+      operation,
+      action: "verify",
+      object: { kind: "organization", index: 0 },
+      exception: { name: "Error" },
+    });
+    expect(logs.join("\n")).not.toContain("private fixture setting");
+    expect(await target.resetSettings("status")).toEqual({ operation, phase: "restoring" });
+    expect(await target.put("maintenance", { episode: null }, 1, 2)).toEqual({ ok: false, version: 1 });
+  });
+  it("reports a reset write refusal without private keys or changing the result when telemetry fails", async () => {
+    const operation = randomUUID();
+    const stub = env.CONFIG.get(env.CONFIG.idFromName(`reset-refusal-${operation}`));
+    const result = await runInDurableObject(stub, async (instance: ConfigDO) => {
+      await instance.put("private-setting-key", { private: "original value" }, 0, 1);
+      await instance.put("maintenance", { episode: { id: operation, phase: "active", scopes: ["all"] } }, 0, 1);
+      instance.resetSettings("freeze", operation);
+      const lines: string[] = [];
+      const original = console.log;
+      try {
+        console.log = (line: string) => {
+          lines.push(line);
+        };
+        const refused = await instance.put("private-setting-key", { private: "candidate value" }, 1, 2);
+        console.log = () => {
+          throw new Error("telemetry unavailable");
+        };
+        const loggingFailure = await instance.put("private-setting-key", {}, 1, 3);
+        return { lines, refused, loggingFailure, saved: await instance.get("private-setting-key") };
+      } finally {
+        console.log = original;
+      }
+    });
+    expect(result.refused).toEqual({ ok: false, version: 1 });
+    expect(result.loggingFailure).toEqual({ ok: false, version: 1 });
+    expect(result.saved).toEqual({ version: 1, document: { private: "original value" } });
+    expect(result.lines.map((line) => JSON.parse(line))).toEqual([
+      {
+        event: "installation.reset.config_write_refused",
+        operation,
+        phase: "frozen",
+        document: "settings",
+      },
+    ]);
+  });
+
+  it("fences resumed settings writes and keeps restored maintenance closed until verification", async () => {
+    const operation = randomUUID();
+    const source = env.CONFIG.get(env.CONFIG.idFromName(`reset-source-${operation}`));
+    const target = env.CONFIG.get(env.CONFIG.idFromName(`reset-target-${operation}`));
+    const maintenance = { episode: { id: operation, phase: "active", scopes: ["all"] } };
+    await source.put("overrides", { users: { operator: { repo: "acme/api" } } }, 0, 1);
+    await source.put("maintenance", maintenance, 0, 1);
+    const captured = await source.resetSettings("freeze", operation);
+    expect(await source.put("overrides", { users: {} }, 1, 2)).toEqual({ ok: false, version: 1 });
+    expect(await source.get("overrides")).toEqual({
+      version: 1,
+      document: { users: { operator: { repo: "acme/api" } } },
+    });
+    if (!("tables" in captured)) throw new Error("settings were not captured");
+    const restored = await target.resetSettings("restore", operation, captured);
+    expect(restored).toEqual(captured);
+    expect(await target.put("maintenance", { episode: { ...maintenance.episode, phase: "ended" } }, 1, 2)).toEqual({
+      ok: false,
+      version: 1,
+    });
+    expect(await target.put("maintenance", { episode: null }, 1, 2)).toEqual({ ok: false, version: 1 });
+    expect(await target.get("maintenance")).toEqual({ version: 1, document: maintenance });
+    expect(await target.resetSettings("verify", operation)).toEqual({ operation, phase: "verified" });
+    expect(await target.put("maintenance", { episode: { ...maintenance.episode, phase: "ended" } }, 1, 2)).toEqual({
+      ok: true,
+      version: 2,
+    });
+    const repeat = await runInDurableObject(target, (instance: ConfigDO) => {
+      try {
+        instance.resetSettings("restore", operation, captured);
+        return "replaced";
+      } catch {
+        return "not empty";
+      }
+    });
+    expect(repeat).toBe("not empty");
+    await target.put("maintenance", maintenance, 2, 3);
+    expect(await target.resetSettings("freeze", randomUUID())).toMatchObject({ kind: "config" });
+  });
+
+  it("previews reset settings without exporting publication history or pending actions", async () => {
+    const preservedKey = key();
+    await post("/config/put", { key: preservedKey, expectedVersion: 0, document: { repo: "acme/api" } });
+    const result = await post("/installation-reset/settings", { action: "preview", installations: [] });
+    expect(result.status).toBe(200);
+    const settings = result.data.config as { tables: Record<string, Record<string, unknown>[]> };
+    expect(settings.tables.documents.find((row) => row.key === preservedKey)).toMatchObject({
+      key: preservedKey,
+      version: 1,
+      body: JSON.stringify({ repo: "acme/api" }),
+    });
+    expect(Object.keys(settings.tables)).toEqual(["documents", "secrets", "personal_tokens"]);
+    expect((await post("/config/get", { key: preservedKey })).data).toMatchObject({
+      version: 1,
+      document: { repo: "acme/api" },
+    });
+  });
+
   it("counts input-source drift without private bytes or changing a refusal when telemetry fails", async () => {
     const sourceKey = key();
     const targetKey = key();

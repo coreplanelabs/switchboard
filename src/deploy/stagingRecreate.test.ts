@@ -65,6 +65,21 @@ function fixture() {
 }
 
 describe("staging installation recreation", () => {
+  it("refuses extra installation applications or Workflows before planning deletion", () => {
+    for (const kind of ["application", "Workflow"] as const) {
+      const h = fixture();
+      if (kind === "application")
+        h.inventory.applications.result.push({
+          id: "44444444-4444-4444-8444-444444444444",
+          name: "switchboard-staging-resident-legacy",
+          durable_objects: { namespace_id: "3".repeat(32) },
+        });
+      else h.inventory.workflows.result.push({ name: "legacy-refresh", script_name: "switchboard-staging-resident" });
+      expect(() => planStagingRecreation(h.profile, h.production, h.inventory, source)).toThrow(
+        `reset found an unclassified installation ${kind}`,
+      );
+    }
+  });
   it("retains bounded dependency field shapes without provider values when an unknown field refuses", () => {
     const h = fixture();
     h.inventory.dependencies["switchboard-staging"].references = {

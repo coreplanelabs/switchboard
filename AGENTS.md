@@ -43,10 +43,10 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run cli` | Runs operator commands and sends asks through the dispatcher. | Smoke tests, deploys, config and run history. |
 | `npm run resident:archive` | Captures a retained resident and checks its offline restore. | Reviewed disposable rehearsal; verify the binding and builds. |
 | `npm run emoji:sync` | Downloads custom Slack emoji. | Manual; emoji:read. |
-| `npm run verify` | Runs every CI check across the repo and workspaces. | Local sessions before review; CI selects affected checks on each push. |
+| `npm run verify` | Runs all repository and workspace CI checks. | Local human checks; CI selects affected checks. |
 | `npm run verify:root` | Runs the bot package's CI gates. | Bot changes; agents use affected checks. |
 | `npm run check:consistency` | The sub-second checks that generated and declared things equal the code, this table included. | After touching a generated or declared artifact; one CI leg. |
-| `npm run ci:gate` | Reads the `needs` context of a CI fan-out and accepts only successful legs or an explicitly planned skip. | CI only — the `bot`, `workers` and `image` gate jobs. |
+| `npm run ci:gate` | Accepts successful CI legs or planned skips. | CI fan-out gates. |
 | `npm run ci:plan` | Selects checks and builds from the full diff; uncertainty runs all. | CI; locally with `-- --base <ref>`. |
 | `npm run fix` | Regenerates every generated artifact and repairs lint and formatting. | Before committing; whenever `check:consistency` reports drift. |
 | `npm run deploy:gen` | Renders each Worker's gitignored `wrangler.jsonc` from its template and the profile in force. | `test`, each Worker's `verify` and `deploy all` run it; by hand before `wrangler dev`. |
@@ -67,7 +67,7 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run format` | Prettier over the whole tree (not Markdown). | Part of `fix`. |
 | `npm run format:check` | Prettier in check mode. | Part of `verify:root`. |
 | `npm run check:dist` | Builds the bot, rejects test files in dist/, and checks required runtime files. | Local checks and the CI image build. |
-| `npm run check:site` | Every page the dashboard links to is in the built site, and its home page reads `displayName`. | After a docs change; part of `verify`. |
+| `npm run check:site` | Checks dashboard links against the built site. | Docs changes; part of verify. |
 | `npm run check:image` | Builds every Worker's image. | After touching a Dockerfile; needs Docker. One CI leg per image. |
 | `npm run skills:sync` | Vendors the skills listed in `skills/manifest.yaml`. | After changing the manifest; part of `fix`. |
 | `npm run skills:check` | The vendored skills match the manifest byte for byte. | Part of `check:consistency`. |
@@ -83,8 +83,8 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run vocabulary:check` | No internal word prints on a user surface; the baseline only shrinks. | Part of `check:consistency`; a hit is rewritten in the user's nouns. |
 | `npm run vocabulary:gen` | Records the remaining internal words; refuses growth unless `-- --force`. | Part of `fix`. |
 | `npm run user-message:check` | No user-facing statement delegates recovery. | Part of `check:consistency`; the baseline only shrinks. |
-| `npm run docs:changed` | Reports whether HEAD^ changed a docs site input. | Local one-commit diagnostics; CI uses `ci:plan`. |
-| `npm run deploy:targets` | Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment. | CI only — the `deploy targets` job. |
+| `npm run docs:changed` | Reports changed docs inputs. | One-commit diagnostics; CI uses ci:plan. |
+| `npm run deploy:targets` | Reports Workers selected by the diff. | CI summary and release PR comment. |
 | `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs; `-- --port <n>` picks the port. |
 | `npm run docs:build` | Builds the docs site to `docs/.vitepress/dist`. | Rarely by hand; `verify -w docs` and the docs Worker's deploy run it. |
 | `npm run web:preview` | Serves the dashboard bundle over fixtures for a visual check. | After a `web/` change. |
@@ -93,6 +93,8 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run load` | Load harness for infrastructure and route checks. | Model capacity receipts. |
 | `npm run smoke:ingress` | Checks three deployment capability families; --check makes no network request. | Configured disposable scope; release acceptance. |
 | `npm run staging:deploy` | Deploys isolated staging; --recreate plans explicit recreation. | Staging CI and explicit operator setup. |
+| `npm run installation:reset` | Resets data; keeps settings. | Preview, then approved apply. |
+| `npm run staging:reset` | Tests two staging resets. | Manual staging CI. |
 | `npm run staging:validate` | Checks PR eligibility before staging. | Staging CI and queued-head recheck. |
 | `npm run check:native-scope` | Tests the native gate and kill. | Docker; see the containment plan. |
 | `npm run staging:bootstrap-held` | Installs Resident support and keeps maintenance held. | Manual staging CI; separate readiness artifact. |

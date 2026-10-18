@@ -9,10 +9,32 @@ import {
 } from "../../src/core/organization/directoryTransport.js";
 import { SqliteOrganizationStore } from "../../src/core/organization/sqlite.js";
 import { systemClock } from "../../src/core/trace/clock.js";
+import {
+  readResetSettings,
+  freezeResetSettings,
+  restoreResetSettings,
+  verifyResetSettings,
+  resetSettingsStatus,
+  type SettingsSnapshot,
+} from "./resetSettings.js";
 
 /** One installation database keeps identity bindings and admission fences atomic. */
 export class OrganizationDO extends DurableObject<Env> {
   private readonly store: SqliteOrganizationStore;
+  resetSettings(
+    action: "preview" | "freeze" | "restore" | "verify" | "status",
+    operation?: string,
+    snapshot?: SettingsSnapshot,
+  ) {
+    if (action === "status") return resetSettingsStatus(this.ctx.storage);
+    if (action === "preview") return readResetSettings(this.ctx.storage, "organization");
+    if (action === "freeze") return freezeResetSettings(this.ctx.storage, "organization", operation!);
+    if (action === "restore") {
+      if (snapshot?.kind !== "organization") throw new Error("invalid organization reset settings");
+      return restoreResetSettings(this.ctx.storage, snapshot, operation!);
+    }
+    return verifyResetSettings(this.ctx.storage, operation!);
+  }
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.store = new SqliteOrganizationStore(ctx.storage, systemClock);

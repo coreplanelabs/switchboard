@@ -1,0 +1,163 @@
+name: installation reset
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Preview, or apply the previously inspected plan
+        type: choice
+        options: [preview, apply]
+        default: preview
+      account:
+        description: Exact production account ID
+        required: true
+        type: string
+      profile:
+        description: github:// profile pinned to a 40-character commit
+        required: true
+        type: string
+      version:
+        description: Released source tag (vX.Y.Z)
+        required: true
+        type: string
+      commit:
+        description: Exact 40-character commit of that release
+        required: true
+        type: string
+      plan:
+        description: Apply only, SHA-256 of the inspected preview
+        type: string
+      maintenance:
+        description: Apply only, active all-scope maintenance episode UUID
+        type: string
+      qualification:
+        description: Apply only, successful staging run with two resets at this exact commit
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  reset:
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 120
+    environment: production
+    concurrency:
+      group: deploy-production
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: validate the original main controller and released source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCOUNT: ${{ inputs.account }}
+          EXPECTED_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          PROFILE: ${{ inputs.profile }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          ACTION: ${{ inputs.action }}
+          PLAN: ${{ inputs.plan }}
+          MAINTENANCE: ${{ inputs.maintenance }}
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] && [ "$GITHUB_RUN_ATTEMPT" = 1 ] || { echo '::error::Reset requires one original main dispatch'; exit 1; }
+          [[ "$ACCOUNT" =~ ^[0-9a-f]{32}$ ]] && [ "$ACCOUNT" = "$EXPECTED_ACCOUNT" ] || { echo '::error::Production account pin differs'; exit 1; }
+          [[ "$PROFILE" =~ ^github://[^@[:space:]]+@[0-9a-f]{40}$ ]] || { echo '::error::Profile must have an immutable commit'; exit 1; }
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Exact release source is required'; exit 1; }
+          [ "$(git rev-parse "$VERSION^{commit}")" = "$COMMIT" ] && git merge-base --is-ancestor "$COMMIT" origin/main || { echo '::error::Release source differs'; exit 1; }
+          gh release view "$VERSION" --json isDraft --jq 'select(.isDraft == false) | .isDraft' | { read -r draft; [ "$draft" = false ]; }
+          case "$ACTION" in
+            preview) ;;
+            apply) [[ "$PLAN" =~ ^[0-9a-f]{64}$ ]] && [[ "$MAINTENANCE" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || { echo '::error::Apply needs the inspected plan and maintenance episode'; exit 1; } ;;
+            *) exit 1 ;;
+          esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          path: candidate
+          persist-credentials: false
+      - name: require exact-source staging reset and product proof before apply
+        if: inputs.action == 'apply'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION: ${{ inputs.qualification }}
+          COMMIT: ${{ inputs.commit }}
+          STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+        run: |
+          [[ "$QUALIFICATION" =~ ^[1-9][0-9]*$ ]] || { echo '::error::Apply requires a staging qualification run'; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION" --jq 'select(.path == ".github/workflows/deploy-staging.yml" and .event == "workflow_dispatch" and .run_attempt == 1 and .conclusion == "success") | .id' | { read -r id; [ "$id" = "$QUALIFICATION" ]; }
+          gh run download "$QUALIFICATION" --name "staging-deploy-$QUALIFICATION-1" --dir "$RUNNER_TEMP/reset-qualification"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'reset-qualification'
+          def one(name):
+              paths = list(root.rglob(name))
+              assert len(paths) == 1, 'Missing qualification receipt'
+              return json.loads(paths[0].read_text())
+          reset = one('staging-reset-e2e.json')
+          assert reset['commit'] == os.environ['COMMIT'] and reset['account'] == os.environ['STAGING_ACCOUNT'], 'Reset source or account differs'
+          assert [row['cycle'] for row in reset['cycles']] == [1, 2] and all(row['outcome'] == 'passed' for row in reset['cycles']), 'Two reset cycles are unproved'
+          smoke = one('staging-e2e.json')
+          assert smoke['build']['commit'] == os.environ['COMMIT'] and smoke['capabilityOutcome'] == 'passed', 'Final build acceptance differs'
+          assert len(smoke['scenarios']) == 3 and all(row['outcome'] == 'passed' for row in smoke['scenarios']), 'Product scenarios are unproved'
+          PY
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: candidate/.nvmrc
+      - run: npm ci
+        working-directory: candidate
+      - name: read the original configuration
+        id: config-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}
+          owner: ${{ vars.CONFIG_REPO_OWNER }}
+          repositories: ${{ vars.CONFIG_REPO_NAME }}
+          permission-contents: read
+      - name: prepare the original secret source
+        working-directory: candidate
+        env:
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ inputs.profile }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          RESET_ENVIRONMENT: production
+          RESET_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          RESET_RUNTIME_SECRETS_JSON: ${{ secrets.RESET_RUNTIME_SECRETS_JSON }}
+          MEMORY_TOKEN: ${{ secrets.MEMORY_TOKEN }}
+          SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
+          RESIDENT_READ_TOKEN: ${{ secrets.RESIDENT_READ_TOKEN }}
+          RESIDENT_DRAIN_TOKEN: ${{ secrets.RESIDENT_DRAIN_TOKEN }}
+        run: npm run --silent installation:reset -- --account "$RESET_ACCOUNT" --prepare-secrets
+      - name: preview or apply the exact reset
+        working-directory: candidate
+        env:
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ inputs.profile }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN }}
+          RESET_ENVIRONMENT: production
+          RESET_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          RESET_ACTION: ${{ inputs.action }}
+          RESET_PLAN: ${{ inputs.plan }}
+          RESET_MAINTENANCE: ${{ inputs.maintenance }}
+          CI: "1"
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          args=(--account "$RESET_ACCOUNT" --plan "$RUNNER_TEMP/reset-plan.json")
+          if [ "$RESET_ACTION" = preview ]; then
+            npm run --silent installation:reset -- "${args[@]}" --seal-plan
+          else
+            npm run --silent installation:reset -- "${args[@]}"
+            npm run --silent installation:reset -- "${args[@]}" --apply "$RESET_PLAN" --maintenance "$RESET_MAINTENANCE" --receipt "$RUNNER_TEMP/reset-execution.jsonl"
+          fi
+      - name: retain the encrypted preview
+        if: always() && inputs.action == 'preview'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reset-preview-${{ github.run_id }}
+          path: ${{ runner.temp }}/reset-plan.json.sealed.json
+          if-no-files-found: ignore

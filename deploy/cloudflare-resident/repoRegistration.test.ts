@@ -1,5 +1,7 @@
+import { assertRepositorySettingsWritable, resetRepositorySettings } from "../../src/execution/registrySettings.js";
 import {
   residentMembers,
+  residentAddress,
   residentPoolOf,
   reservedResidentCount,
   planResidentPool,
@@ -23,6 +25,91 @@ const handler = (name: string) => {
 };
 
 describe("metadata-only repo routes", () => {
+  it("retains partial reset restoration progress and propagates the original initialization failure", async () => {
+    const start =
+      source.indexOf('case "/installation-reset/settings": {') + 'case "/installation-reset/settings": {'.length;
+    const end = source.indexOf('\n          }\n          case "/register":', start);
+    expect(start).toBeGreaterThan(40);
+    expect(end).toBeGreaterThan(start);
+    const compiled = ts.transpileModule(`async function route(env, body) { ${source.slice(start, end)} }\nroute`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const events: object[] = [];
+    const initialized: string[] = [];
+    const failure = new Error("original initialization failed");
+    const route = runInNewContext(compiled, {
+      registryStub: () => ({
+        resetSettings: async () => ({
+          schema: 1,
+          records: [
+            { resource: "repo:acme/a" },
+            { resource: "repo:acme/b" },
+            { resource: "repo:acme/cold", noResident: true },
+          ],
+        }),
+      }),
+      residentMembers,
+      residentAddress,
+      residentStub: (_env: unknown, address: string) => ({
+        initResident: async () => {
+          if (address === "repo:acme/b") throw failure;
+          initialized.push(address);
+        },
+      }),
+      json: (body: unknown) => body,
+      console: { log: (line: string) => events.push(JSON.parse(line)) },
+    });
+    await expect(route({}, { action: "restore", operation: "11111111-1111-4111-8111-111111111111" })).rejects.toBe(
+      failure,
+    );
+    expect(initialized).toEqual(["repo:acme/a"]);
+    expect(events).toEqual([
+      {
+        event: "installation.reset.repositories",
+        action: "restore",
+        operation: "11111111-1111-4111-8111-111111111111",
+        registrations: 3,
+        resource: "repo:acme/a",
+        residentId: "repo:acme/a",
+        outcome: "initializing",
+        initialized: 0,
+      },
+      {
+        event: "installation.reset.repositories",
+        action: "restore",
+        operation: "11111111-1111-4111-8111-111111111111",
+        registrations: 3,
+        resource: "repo:acme/a",
+        residentId: "repo:acme/a",
+        outcome: "initialized",
+        initialized: 1,
+      },
+      {
+        event: "installation.reset.repositories",
+        action: "restore",
+        operation: "11111111-1111-4111-8111-111111111111",
+        registrations: 3,
+        resource: "repo:acme/b",
+        residentId: "repo:acme/b",
+        outcome: "initializing",
+        initialized: 1,
+      },
+    ]);
+  });
+  it("keeps an empty watchdog read-only so a fresh registry can receive saved registrations", async () => {
+    const compiled = ts.transpileModule(`${handler("runWatchdog")}\nrunWatchdog`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const watchdog = runInNewContext(compiled, {
+      registryStub: () => ({ list: async () => [], limits: async () => ({ cap: 5 }) }),
+      BUILD_ID: "test",
+      workerVersionId: () => "test-version",
+      beginTrackedDeployAdmission: async () => {
+        throw new Error("empty watchdog created work");
+      },
+    });
+    expect(await watchdog({})).toEqual({ cap: 5, count: 0, results: [] });
+  });
   it("admits five residents, refuses a sixth, accepts cold metadata, and preserves existing residents above the cap", async () => {
     const cap = source.match(/^const RESIDENT_CAP = [^;]+;/m)?.[0];
     if (!cap) throw new Error("resident cap declaration missing");
@@ -31,6 +118,7 @@ describe("metadata-only repo routes", () => {
       { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
     ).outputText;
     const Registry = runInNewContext(`${compiled}\nRegistry`, {
+      assertRepositorySettingsWritable,
       registerRepository,
       residentRecords,
       residentMembers,
@@ -95,6 +183,28 @@ describe("metadata-only repo routes", () => {
       error: "staging maintenance blocks registration",
     });
     expect(rows.has("resident:repo:acme/new-cold")).toBe(false);
+    const snapshot = await resetRepositorySettings(
+      instance.ctx.storage,
+      "freeze",
+      "11111111-1111-4111-8111-111111111111",
+      undefined,
+      (record) => {
+        if (typeof record.resource !== "string") throw new Error("invalid registration");
+      },
+    );
+    expect(snapshot.records.map((record) => record.resource)).toEqual([
+      "repo:acme/cold",
+      "repo:acme/repo-1",
+      "repo:acme/repo-2",
+      "repo:acme/repo-3",
+      "repo:acme/repo-4",
+      "repo:acme/repo-5",
+      "repo:acme/repo-6",
+    ]);
+    await expect(instance.onboard({ resource: "repo:acme/after-reset-freeze", noResident: true })).rejects.toThrow(
+      "repository settings are frozen for reset",
+    );
+    expect(await instance.listRepositories()).toHaveLength(7);
   });
 
   it("checks registration before status touches a resident and skips provisioning for cold onboarding", () => {
@@ -139,6 +249,7 @@ describe("primary resident placement", () => {
     ).outputText;
     let uuid = 0;
     const Registry = runInNewContext(`${compiled}\nRegistry`, {
+      assertRepositorySettingsWritable,
       residentPoolOf,
       reservedResidentCount,
       planResidentPool,

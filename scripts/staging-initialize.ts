@@ -39,6 +39,7 @@ import { publishedImagesFrom } from "../src/deploy/images.js";
 import { executionImageInputTags } from "../src/deploy/imageInputs.js";
 import { RUN_STORE_KEY } from "../src/core/runStoreConstants.js";
 import { LIVE_GATE_POLL_MS, LIVE_GATE_DEADLINE_MS, servedCommit } from "../src/deploy/liveGate.js";
+import { restoreHostingConfig, type ResetHostingCapture } from "../src/deploy/resetHosting.js";
 
 /** First installation only: native absence replaces update preconditions, never a failed health read. */
 export async function initializeOnHost(
@@ -49,6 +50,13 @@ export async function initializeOnHost(
     resumeMemory?: string;
     continuation?: StagingContinuation;
     checkOnly?: boolean;
+    reset?: {
+      account: string;
+      planSha256: string;
+      hosting: ResetHostingCapture;
+      restoreSettings(): Promise<void>;
+      restoreRepositories?(): Promise<void>;
+    };
   } = {},
 ) {
   const run = (cmd: string, args: string[], cwd = process.cwd(), env = process.env, capture = false) => {
@@ -79,7 +87,10 @@ export async function initializeOnHost(
   if (!token || process.env.SWITCHBOARD_DEPLOY_FORCE)
     throw new Error("first installation requires its staging token and refuses force");
   const source = profile.secretsSource?.replace(/^~\//, `${homedir()}/`);
-  if (!source || source.includes("://") || !source.includes("staging"))
+  const reset = options.reset;
+  if (reset && (reset.account !== profile.account || !/^[a-f0-9]{64}$/.test(reset.planSha256)))
+    throw new Error("installation reset account or plan differs");
+  if (!source || source.includes("://") || (!reset && !source.includes("staging")))
     throw new Error("first installation requires a staging secret directory");
   const manifest = parseManifest(JSON.parse(readFileSync("deploy/secrets.manifest.json", "utf8")));
   if (!manifest.ok) throw new Error(manifest.problems.join("\n"));
@@ -149,6 +160,7 @@ export async function initializeOnHost(
   };
   const rendered = renderWorkerConfigs(profile, readSource, images);
   if (!rendered.ok) throw new Error(rendered.problems.join("\n"));
+  if (reset) for (const file of rendered.files) file.text = restoreHostingConfig(file.text, reset.hosting);
   if (options.checkOnly) return;
   const directory = mkdtempSync(join(tmpdir(), "switchboard-initialize-"));
   const operation = basename(directory);
@@ -237,6 +249,7 @@ export async function initializeOnHost(
     const created: Partial<Record<WorkerKind, string>> = {};
     let fullMemory = false;
     const result = await initializeStaging(commit, {
+      ...(reset ? { restoreSettings: reset.restoreSettings, restoreRepositories: reset.restoreRepositories } : {}),
       ...(options.resumeMemory
         ? {
             resume: {
