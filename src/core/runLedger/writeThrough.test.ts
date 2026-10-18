@@ -7,6 +7,7 @@ import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import { UncertainStoreError } from "../storeFailure.js";
 import { storeRequestWitness } from "../storeResponse.js";
+import { rememberStorageFailure } from "../storageFailureDiagnostic.js";
 import * as receipts from "../references/receipts.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import { WorkerRunLedger } from "../runLedgerWorker.js";
@@ -2861,6 +2862,74 @@ describe("events, state, heartbeat", () => {
     }
   });
 
+  it.each([false, true])(
+    "reports an unconfirmed append range and still sends the next batch when its sink throws: %s",
+    async (brokenSink) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      const notices: unknown[] = [];
+      const request = await storeRequestWitness("/runs/append", "private request");
+      const error = new UncertainStoreError("private append error", request, {
+        diagnosis: { kind: "http", status: 503 },
+      });
+      rememberStorageFailure(error, {
+        version: 1,
+        operation: "/runs/append",
+        requestDigest: request.digest,
+        phase: "http",
+        httpStatus: 503,
+      });
+      let appends = 0;
+      const t = timers();
+      const wt = createLedgerWriteThrough({
+        ledger: overriding(inner, {
+          append: async (...args) => {
+            if (++appends === 1) throw error;
+            return inner.append(...args);
+          },
+        }),
+        gen: "gen-A",
+        fallback: { put: async () => {}, abandoned: () => {} },
+        warn: (line) => {
+          notices.push(JSON.parse(line));
+          if (brokenSink) throw new Error("private sink error");
+        },
+        ...t,
+      });
+      const run = (await openRun(wt, openReq()))!;
+      run.event({ type: "assistant", text: "private first event", at: 1 }, 215);
+      run.event({ type: "assistant", text: "private second event", at: 2 }, 216);
+      await t.flushTimers();
+      run.event({ type: "assistant", text: "later event", at: 3 }, 217);
+      await t.flushTimers();
+      expect(notices).toEqual([
+        {
+          event: "ledger.append_unconfirmed",
+          runId: "r1",
+          ownerGen: "gen-A",
+          firstSeq: 215,
+          lastSeq: 216,
+          count: 2,
+          finished: false,
+          localRetention: "released",
+          outcome: "unconfirmed",
+          failure: "uncertain",
+          storage: {
+            version: 1,
+            operation: "/runs/append",
+            requestDigest: request.digest,
+            phase: "http",
+            httpStatus: 503,
+          },
+        },
+      ]);
+      expect(inner.events.get("r1")).toEqual([{ type: "assistant", text: "later event", at: 3, seq: 217 }]);
+      expect(appends).toBe(2);
+      expect(run.tracked()).toBe(true);
+      expect(JSON.stringify(notices)).not.toContain("private");
+      await run.close();
+    },
+  );
+
   it("events are appended in batches with the registry seq, on the flush timer or at the batch size; nothing after the finish", async () => {
     const { ledger, wt, t } = harness();
     const run = (await openRun(wt, openReq()))!;
@@ -3607,6 +3676,169 @@ describe("finishing and finish", () => {
     });
     await openRun(down.wt, openReq());
     expect(await down.wt.handoff()).toEqual({ marked: [], failed: "HTTP 503" });
+  });
+
+  it.each([false, true])(
+    "reports the exact failed pause stage even when its warning sink throws: %s",
+    async (brokenSink) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      const request = await storeRequestWitness("/runs/handoff", "private request");
+      const error = new UncertainStoreError("private error", request, { diagnosis: { kind: "http", status: 503 } });
+      rememberStorageFailure(error, {
+        version: 1,
+        operation: "/runs/handoff",
+        requestDigest: request.digest,
+        requestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ownerGen: "gen-A",
+        phase: "http",
+        httpStatus: 503,
+      });
+      const notices: unknown[] = [];
+      const t = timers();
+      const wt = createLedgerWriteThrough({
+        ledger: overriding(inner, {
+          handoff: async () => {
+            throw error;
+          },
+        }),
+        gen: "gen-A",
+        fallback: { put: async () => {}, abandoned: () => {} },
+        warn: (line) => {
+          notices.push(JSON.parse(line));
+          if (brokenSink) throw new Error("private sink error");
+        },
+        ...t,
+      });
+      const run = (await openRun(wt, openReq()))!;
+      expect(await run.pauseForRetry()).toBe(false);
+      expect(notices).toEqual([
+        {
+          event: "recovery.pause",
+          observation: "before-dispatch-cleanup",
+          runId: "r1",
+          ownerGen: "gen-A",
+          stage: "handoff",
+          outcome: "threw",
+          handedOff: false,
+          tracked: true,
+          resumable: true,
+          heartbeat: "active",
+          recoveryMode: "current-generation-held",
+          pauseRetained: false,
+          pauseStopped: false,
+          failure: "uncertain",
+          storage: {
+            version: 1,
+            operation: "/runs/handoff",
+            requestDigest: request.digest,
+            requestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            ownerGen: "gen-A",
+            phase: "http",
+            httpStatus: 503,
+          },
+        },
+      ]);
+      expect(run.handedOff).toBe(false);
+      expect(t.heartbeats()).toBe(1);
+      expect(inner.live.get("r1")).toMatchObject({ ownerGen: "gen-A", phase: "live" });
+      expect(JSON.stringify(notices)).not.toContain("private");
+      await run.close();
+    },
+  );
+
+  it("retains the original checkpoint request in an unconfirmed pause boundary", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const request = await storeRequestWitness("/runs/state", "private state");
+    const error = new UncertainStoreError("private exception", request, { diagnosis: { kind: "http", status: 503 } });
+    rememberStorageFailure(error, {
+      version: 1,
+      operation: "/runs/state",
+      requestDigest: request.digest,
+      requestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      ownerGen: "gen-A",
+      phase: "http",
+      httpStatus: 503,
+    });
+    const { wt, warnings, t } = harness({
+      ledger: overriding(inner, {
+        setState: async () => {
+          throw error;
+        },
+      }),
+    });
+    const run = (await openRun(wt, openReq()))!;
+    expect(await run.setStateAndFlush({ notepad: "private checkpoint" })).toBe(false);
+    expect(run.writeBoundaryFailure).toMatchObject({
+      kind: "state",
+      requestDigest: request.digest,
+      storageDiagnostic: { requestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", httpStatus: 503 },
+    });
+    expect(await run.pauseForRetry()).toBe(false);
+    expect(JSON.parse(warnings.at(-1)!)).toMatchObject({
+      event: "recovery.pause",
+      stage: "boundary",
+      outcome: "unconfirmed",
+      handedOff: false,
+      heartbeat: "active",
+      recoveryMode: "current-generation-held",
+      boundary: {
+        kind: "state",
+        requestDigest: request.digest,
+        diagnosis: "operation=/runs/state failure=http status=503",
+        storage: { requestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", httpStatus: 503 },
+      },
+    });
+    expect(inner.live.get("r1")).toMatchObject({ phase: "live", ownerGen: "gen-A" });
+    expect(t.heartbeats()).toBe(1);
+    expect(warnings.join("\n")).not.toContain("private");
+    await run.close();
+  });
+
+  it("reports confirmed pause custody after a failed retention read", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const { wt, warnings, t } = harness({
+      ledger: overriding(inner, {
+        listLive: async () => {
+          throw new Error("private retention error");
+        },
+      }),
+    });
+    const run = (await openRun(wt, openReq()))!;
+    expect(await run.pauseForRetry()).toBe(true);
+    const notices = warnings.map((line) => JSON.parse(line));
+    expect(notices).toMatchObject([
+      {
+        event: "recovery.pause",
+        stage: "stop",
+        outcome: "threw",
+        handedOff: true,
+        heartbeat: "stopped",
+        recoveryMode: "next-generation",
+        failure: "unclassified",
+      },
+      {
+        event: "recovery.pause",
+        stage: "retention",
+        outcome: "threw",
+        handedOff: true,
+        heartbeat: "stopped",
+        recoveryMode: "next-generation",
+        failure: "unclassified",
+      },
+      {
+        event: "recovery.pause",
+        stage: "complete",
+        outcome: "confirmed",
+        handedOff: true,
+        heartbeat: "stopped",
+        recoveryMode: "next-generation",
+        pauseRetained: false,
+        pauseStopped: false,
+      },
+    ]);
+    expect(t.heartbeats()).toBe(0);
+    expect(inner.live.get("r1")).toMatchObject({ phase: "handoff", state: { pausedForRetry: true } });
+    expect(JSON.stringify(notices)).not.toContain("private");
   });
 
   it("pauses only one resumed run for readiness retry and preserves its workspace binding for the next generation", async () => {

@@ -70,6 +70,7 @@ import {
 } from "../runLedger/writeThrough.js";
 import { PermanentStoreError, TransientStoreError } from "../runStoreWorker.js";
 import { UncertainStoreError } from "../storeFailure.js";
+import { rememberStorageFailure } from "../storageFailureDiagnostic.js";
 import type { PublicationSettlement } from "../publicationSettlement.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { planResume, transcriptSource } from "../runLedger/resume.js";
@@ -694,89 +695,212 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       expect(decisions).toEqual([!invalidate]);
     },
   );
-  it.each(["first", "repeated", "varied", "unavailable", "unknown", "thrown", "native"] as const)(
-    "holds the original run when its %s tool recovery checkpoint is unconfirmed",
-    async (mode) => {
-      const s = endingIn(async (_deps, run) => {
-        const recovery = run.toolContext.recovery!;
-        if (mode === "native") {
-          // Native bridge notifications enqueue saves without awaiting them.
-          void recovery.record("one", "read", { path: "missing" }, { text: "file does not exist" });
-          void recovery.record("two", "read", { path: "missing" }, { text: "file does not exist" });
-          recovery.throwIfStopped();
-        }
-        if (mode === "repeated") await recovery.record("one", "submit_verdict", {}, { text: "error: invalid finding" });
-        if (mode === "varied")
-          for (let i = 0; i < 5; i++) await recovery.record("call" + i, "tool" + i, {}, { text: "error: refused" });
-        await recovery.record(
-          "last",
-          "submit_verdict",
-          {},
-          {
-            text: "error: invalid finding",
-            ...(mode === "unavailable"
-              ? { detail: { code: "capability_unavailable" as const, recovery: "stop" as const } }
-              : mode === "unknown"
-                ? { detail: { code: "outcome_unknown" as const, recovery: "stop" as const } }
-                : {}),
-          },
-        );
-        return sessionAnswering("Partial work.");
-      });
-      const inner = new InMemoryRunLedger(() => NOW);
-      const ledger = createLedgerWriteThrough({ ledger: inner, gen: "gen-T", fallback: s.store, warn: () => {} });
-      const opened = await ledger.open({
-        runId: s.run.id,
-        threadKey: s.ctx.msg.threadKey,
-        startedAt: NOW,
-        meta: {
-          agent: "coding",
-          channelId: s.ctx.msg.channelId,
-          userId: s.ctx.msg.userId,
-          threadKey: s.ctx.msg.threadKey,
-        },
-        card: null,
-        system: "test",
-        tools: [],
-        seed: { messages: [{ role: "user", content: [{ type: "text", text: "work" }] }], budgetMs: 60_000 },
-      });
-      if (opened.kind !== "tracked") throw new Error("Expected a tracked run");
-      const save = opened.run.setStateAndFlush.bind(opened.run);
-      vi.spyOn(opened.run, "setStateAndFlush").mockImplementation((state) =>
-        state.toolRecovery === undefined ||
-        (state.toolRecovery as { failures: { count: number }[] }).failures.reduce((n, f) => n + f.count, 0) <
-          (mode === "repeated" || mode === "native" ? 2 : mode === "varied" ? 6 : 1)
-          ? save(state)
-          : mode === "thrown"
-            ? Promise.reject(new Error("private checkpoint payload"))
-            : Promise.resolve(false),
-      );
-      const spanLog = createSpanLog();
-      const root = startRequestRoot(
-        { clock: () => NOW, spanLog },
-        { channel: "slack", receivedAt: NOW, attrs: { runId: s.run.id } },
-      ).root;
-      const result = await runLoop(s.deps, { ...s.ctx, root, ledgerRun: opened.run });
-      const checkpoints = spanLog.read({ runId: s.run.id, span: "recovery.checkpoint" }).lines;
-      expect(checkpoints.filter((line) => line.status === "error")).toMatchObject([
+  it.each([
+    "first",
+    "repeated",
+    "varied",
+    "unavailable",
+    "unknown",
+    "thrown",
+    "native",
+    "opening",
+    "brokenSink",
+  ] as const)("holds the original run when its %s tool recovery checkpoint is unconfirmed", async (mode) => {
+    const s = endingIn(async (_deps, run) => {
+      const recovery = run.toolContext.recovery!;
+      if (mode === "native") {
+        // Native bridge notifications enqueue saves without awaiting them.
+        void recovery.record("one", "read", { path: "missing" }, { text: "file does not exist" });
+        void recovery.record("two", "read", { path: "missing" }, { text: "file does not exist" });
+        recovery.throwIfStopped();
+      }
+      if (mode === "repeated") await recovery.record("one", "submit_verdict", {}, { text: "error: invalid finding" });
+      if (mode === "varied")
+        for (let i = 0; i < 5; i++) await recovery.record("call" + i, "tool" + i, {}, { text: "error: refused" });
+      await recovery.record(
+        "last",
+        "submit_verdict",
+        {},
         {
-          span: mode === "native" ? "recovery.checkpoint.read" : "recovery.checkpoint.submit_verdict",
-          errorKind: "infra",
-          errorCode: mode === "thrown" ? "state_write_threw" : "ack_unconfirmed",
+          text: "error: invalid finding",
+          ...(mode === "unavailable"
+            ? { detail: { code: "capability_unavailable" as const, recovery: "stop" as const } }
+            : mode === "unknown"
+              ? { detail: { code: "outcome_unknown" as const, recovery: "stop" as const } }
+              : {}),
         },
-      ]);
-      expect(checkpoints.at(-1)).not.toHaveProperty("errorMessage");
-      expect(JSON.stringify(checkpoints)).not.toContain("private checkpoint payload");
-      expect(result).toMatchObject({
-        kind: "paused",
-        reason: "checkpoint_unavailable",
-        message: "The tool recovery checkpoint could not be confirmed; original work remains held.",
+      );
+      if (mode === "opening") {
+        const error = new UncertainStoreError(
+          "private opening error",
+          {
+            version: 1,
+            operation: "/runs/step",
+            payload: "private request",
+            digest: "a".repeat(64),
+          },
+          { diagnosis: { kind: "http", status: 503 } },
+        );
+        rememberStorageFailure(error, {
+          version: 1,
+          operation: "/runs/step",
+          requestDigest: "a".repeat(64),
+          requestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          ownerGen: "gen-T",
+          phase: "http",
+          httpStatus: 503,
+        });
+        throw error;
+      }
+      return sessionAnswering("Partial work.");
+    });
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({ ledger: inner, gen: "gen-T", fallback: s.store, warn: () => {} });
+    const opened = await ledger.open({
+      runId: s.run.id,
+      threadKey: s.ctx.msg.threadKey,
+      startedAt: NOW,
+      meta: {
+        agent: "coding",
+        channelId: s.ctx.msg.channelId,
+        userId: s.ctx.msg.userId,
+        threadKey: s.ctx.msg.threadKey,
+      },
+      card: null,
+      system: "test",
+      tools: [],
+      seed: { messages: [{ role: "user", content: [{ type: "text", text: "work" }] }], budgetMs: 60_000 },
+    });
+    if (opened.kind !== "tracked") throw new Error("Expected a tracked run");
+    const save = opened.run.setStateAndFlush.bind(opened.run);
+    vi.spyOn(opened.run, "setStateAndFlush").mockImplementation((state) =>
+      state.toolRecovery === undefined ||
+      (state.toolRecovery as { failures: { count: number }[] }).failures.reduce((n, f) => n + f.count, 0) <
+        (mode === "repeated" || mode === "native" ? 2 : mode === "varied" ? 6 : 1)
+        ? save(state)
+        : mode === "thrown"
+          ? Promise.reject(new Error("private checkpoint payload"))
+          : Promise.resolve(false),
+    );
+    const spanLog = createSpanLog();
+    const root = startRequestRoot(
+      { clock: () => NOW, spanLog },
+      { channel: "slack", receivedAt: NOW, attrs: { runId: s.run.id } },
+    ).root;
+    const notices: Array<Record<string, unknown>> = [];
+    const log = vi.spyOn(console, "warn").mockImplementation((line) => {
+      notices.push(JSON.parse(String(line)));
+      if (mode === "brokenSink") throw new Error("private sink error");
+    });
+    let result: RunLoopOutcome;
+    try {
+      result = await runLoop(s.deps, { ...s.ctx, root, ledgerRun: opened.run });
+    } finally {
+      log.mockRestore();
+    }
+    expect(notices).toMatchObject([
+      {
+        event: "recovery.checkpoint.failure",
+        runId: "run-l",
+        ownerGen: "gen-T",
+        tool: mode === "native" ? "read" : "submit_verdict",
+        outcome: mode === "thrown" ? "threw" : "unconfirmed",
+      },
+      {
+        event: "recovery.checkpoint.hold",
+        runId: "run-l",
+        ownerGen: "gen-T",
+        opening: { kind: mode === "opening" ? "uncertain-store" : "tool-recovery" },
+      },
+    ]);
+    if (mode === "opening")
+      expect(notices[1]).toMatchObject({
+        opening: {
+          kind: "uncertain-store",
+          storage: {
+            operation: "/runs/step",
+            requestDigest: "a".repeat(64),
+            requestId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            httpStatus: 503,
+          },
+        },
       });
-      expect(s.releases).toEqual([]);
-      expect((await inner.listLive())[0]?.runId).toBe("run-l");
-      expect(s.registry.getById("run-l")).toBeNull();
-    },
-  );
+    expect(JSON.stringify(notices)).not.toContain("private");
+    const checkpoints = spanLog.read({ runId: s.run.id, span: "recovery.checkpoint" }).lines;
+    expect(checkpoints.filter((line) => line.status === "error")).toMatchObject([
+      {
+        span: mode === "native" ? "recovery.checkpoint.read" : "recovery.checkpoint.submit_verdict",
+        errorKind: "infra",
+        errorCode: mode === "thrown" ? "state_write_threw" : "ack_unconfirmed",
+      },
+    ]);
+    expect(checkpoints.at(-1)).not.toHaveProperty("errorMessage");
+    expect(JSON.stringify(checkpoints)).not.toContain("private checkpoint payload");
+    expect(result).toMatchObject({
+      kind: "paused",
+      reason: "checkpoint_unavailable",
+      message: "The tool recovery checkpoint could not be confirmed; original work remains held.",
+    });
+    expect(s.releases).toEqual([]);
+    expect((await inner.listLive())[0]?.runId).toBe("run-l");
+    expect(s.registry.getById("run-l")).toBeNull();
+  });
+  it("reports a direct model-context checkpoint hold without a tool recovery stop", async () => {
+    const s = setup("Completed work.");
+    const inner = new InMemoryRunLedger(() => NOW);
+    const original = inner.setState.bind(inner);
+    inner.setState = async (id, gen, state) => {
+      if (state.contextCheckpoint) throw new TransientStoreError("private context checkpoint error");
+      return original(id, gen, state);
+    };
+    const ledger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-T",
+      fallback: s.store,
+      warn: () => {},
+      sleep: async () => {},
+    });
+    s.deps.runLedger = ledger;
+    const opened = await ledger.open({
+      runId: s.run.id,
+      threadKey: s.ctx.msg.threadKey,
+      startedAt: NOW,
+      meta: {
+        agent: "general",
+        channelId: s.ctx.msg.channelId,
+        userId: s.ctx.msg.userId,
+        threadKey: s.ctx.msg.threadKey,
+      },
+      card: null,
+      system: "test",
+      tools: [],
+      seed: { messages: [{ role: "user", content: [{ type: "text", text: "work" }] }], budgetMs: 60_000 },
+    });
+    if (opened.kind !== "tracked") throw new Error("Expected a tracked run");
+    const notices: unknown[] = [];
+    const log = vi.spyOn(console, "warn").mockImplementation((line) => notices.push(JSON.parse(String(line))));
+    let result: RunLoopOutcome;
+    try {
+      result = await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run });
+    } finally {
+      log.mockRestore();
+      await opened.run.close();
+    }
+    expect(result).toMatchObject({ kind: "paused", reason: "checkpoint_unavailable", handedOff: true });
+    expect(notices).toMatchObject([
+      {
+        event: "recovery.checkpoint.hold",
+        runId: "run-l",
+        ownerGen: "gen-T",
+        reason: "model-context",
+        checkpoint: { outcome: "unconfirmed", checkpointFailure: "state-unavailable" },
+        opening: { kind: "context-checkpoint" },
+      },
+    ]);
+    expect(JSON.stringify(notices)).not.toContain("private");
+    expect(s.releases).toEqual([]);
+  });
+
   it("preserves a hard stop already honored after repeated tool refusals", async () => {
     const s = endingIn(async (_deps, run) => {
       await run.toolContext.recovery!.record("one", "submit_verdict", {}, { text: "error: invalid finding" });
