@@ -366,6 +366,7 @@ export function childHandoffRunIds(handoff: ChildHandoff): string[] {
         ...(source.snapshotRunId ? [source.snapshotRunId] : []),
         ...(source.dependencies?.value?.mcp ?? []).map((read) => read.runId),
         ...(source.dependencies?.value?.origins ?? []).map((origin) => origin.runId),
+        ...(source.dependencies?.value?.sourceInputs ?? []).map((ref) => ref.root.runId),
         ...(source.assetRuns ?? []).map((run) => run.runId),
         ...source.assets.map((asset) => asset.runId),
       ]),
