@@ -1,4 +1,5 @@
 import { NativeMediaHeldError } from "../harness/nativeMedia.js";
+import { RefusalError } from "../refusal.js";
 import { RequiredTranscriptError } from "../runLedger/transcript.js";
 import {
   candidateSmokeDiagnostic,
@@ -2651,7 +2652,7 @@ export async function runOperator(
           model({ ...prompt, retries: turns }, { maxTokens: maxOutputTokens, signal, observe }),
         );
       } catch (err) {
-        if (err instanceof NativeMediaHeldError) throw err;
+        if (err instanceof NativeMediaHeldError || err instanceof RefusalError) throw err;
         // A cap cut is recoverable shape, not a provider refusal: retry once
         // with a materially larger ceiling. A second cut ends at the door.
         if (err instanceof OutputCapError) {
@@ -2870,7 +2871,7 @@ export async function runOperator(
       return answered(turn.decision);
     }
   } catch (err) {
-    if (err instanceof NativeMediaHeldError) throw err;
+    if (err instanceof NativeMediaHeldError || err instanceof RefusalError) throw err;
     // Parse, catalogue and fulfillment-check failures end at the door.
     // The routing call returns its typed provider refusal above; an unavailable
     // fulfillment call cannot authorize a terminal command here.
@@ -3785,6 +3786,8 @@ export async function executeOperatorDecision(
     validateContext?: () => Promise<AudienceCheck>;
     /** The immutable consumed envelope saved with a reusable decision. */
     contextDependencies?: ContextDependencies;
+    /** Keep a runless decision on the admitted request's canonical producer. */
+    ingressRunId?: string;
     /** The thread's runs, newest first (the dispatcher's one read). */
     thread?: readonly { agent?: string }[];
     /** The thread's owner, when a live run, an idle unit or an ended pipeline
@@ -3816,7 +3819,10 @@ export async function executeOperatorDecision(
   };
   const recordDecision = async () => {
     await checkContext();
-    await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace, decisionOptions);
+    await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace, {
+      ...decisionOptions,
+      ...(ctx.ingressRunId ? { ingressRunId: ctx.ingressRunId } : {}),
+    });
   };
   const reply = async (text: string) => {
     await checkContext();

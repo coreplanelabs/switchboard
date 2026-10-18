@@ -102,6 +102,66 @@ async function sendBrowser(service: OrganizationService, authentication = browse
 }
 
 describe("organization authenticated service", () => {
+  it("finds scoped MCP history beyond a full page of newer unrelated conversations", async () => {
+    const store = new InMemoryOrganizationStore(() => 1);
+    const service = new OrganizationService({
+      store,
+      directory: store.directory,
+      mappings,
+      limits: { ...limits, pendingPerActor: 1000, pendingPerSource: 1000, pendingPerOrganization: 1000 },
+      authorize: async () => true,
+      currentIdentityRead: async () => "allowed",
+      sourceInReadScope: (_identity, reference, reader) => reference?.threadKey === reader.sourceReference?.threadKey,
+    });
+    const account: OrganizationAuthentication = {
+      source: "mcp",
+      identity: { issuer: "token:test", tenant: null, subject: "alice" },
+      kind: "human",
+      organizations: ["org:test"],
+      sourceReference: {
+        actorId: "access:alice",
+        userId: "access:alice",
+        channelId: "mcp:default",
+        threadKey: "mcp:default:thread-A",
+      },
+    };
+    expect(await service.admit(account, { ...input("thread-A"), content: "Earlier decision in A" })).toMatchObject({
+      status: "receipt",
+    });
+    const other = { ...account, sourceReference: { ...account.sourceReference!, threadKey: "mcp:default:thread-B" } };
+    for (let i = 0; i < 201; i++)
+      expect(await service.admit(other, { ...input(`other-${i}`), content: "Unrelated conversation" })).toMatchObject({
+        status: "receipt",
+      });
+    const read = await service.streamTail(account);
+    expect(
+      read.status === "stream_tail"
+        ? read.entries.filter((entry) => entry.role === "user").map((entry) => entry.content)
+        : read,
+    ).toEqual(["Earlier decision in A"]);
+    expect(read).toMatchObject({ status: "stream_tail", hasMore: false, scopeExcluded: 201 });
+    expect(await service.streamTail(account, 0)).toEqual({ status: "invalid" });
+    const execute = store.execute.bind(store);
+    store.execute = async (request) => {
+      const result = await execute(request);
+      return request.action === "tail" && request.before !== undefined && result.status === "stream_tail"
+        ? { ...result, beforeCursor: request.before }
+        : result;
+    };
+    expect(await service.streamTail(account)).toEqual({ status: "unavailable" });
+    store.execute = async (request) =>
+      request.action === "tail"
+        ? {
+            status: "stream_tail",
+            revision: 1,
+            entries: [],
+            cursor: 10000,
+            beforeCursor: (request.before ?? 10000) - 1,
+            hasMore: true,
+          }
+        : execute(request);
+    expect(await service.streamTail(account)).toEqual({ status: "unavailable" });
+  });
   it("reads only the exact current source's original receipt without replaying or returning its private body", async () => {
     let allowed = true;
     const { store, service } = setup(async () => allowed);

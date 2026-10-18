@@ -154,6 +154,7 @@ export interface AttrDomain {
   admissionExceptionKind: AdmissionExceptionKind;
   admissionSource: OrganizationSource;
   requestContextSelection: RequestContextSelection;
+  epochScopeExcluded: number;
   credentialRelation: "same" | "different" | "unknown";
   receiptObserved: boolean;
   buildCommit: string;
@@ -351,6 +352,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   admissionExceptionKind: "string",
   admissionSource: "string",
   requestContextSelection: "string",
+  epochScopeExcluded: "number",
   credentialRelation: "string",
   receiptObserved: "boolean",
   buildCommit: "string",

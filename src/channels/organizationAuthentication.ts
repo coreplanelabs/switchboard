@@ -55,6 +55,8 @@ export interface ResolvedOrganizationAuthentication {
   authentication: OrganizationAuthentication;
   privateSource: boolean;
   policyFingerprint: string;
+  /** Current read policy, independent of the credential that proves the reader. */
+  readPolicyFingerprint: string;
 }
 export type OrganizationAuthenticationResult =
   ResolvedOrganizationAuthentication | { status: "fenced" | "unavailable" };
@@ -440,6 +442,21 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         msg,
         authentication,
         privateSource,
+        // Match the source-authority group: request-specific repository selections
+        // still get their own access check, but must not rotate the group policy.
+        readPolicyFingerprint: digestBearer(
+          JSON.stringify([
+            "source-read-policy-v1",
+            evidence.source,
+            identity,
+            reference.channelId,
+            reference.threadKey,
+            policy(actor),
+            privateSource,
+            msg.directAudience ?? null,
+            binding.status === "bound" ? [binding.binding.personId, binding.binding.revision] : binding.status,
+          ]),
+        ),
         policyFingerprint: digestBearer(
           JSON.stringify([
             policy(actor),
@@ -554,6 +571,20 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
   return {
     resolveNative,
     resolveEnvelope,
+    sourceInReadScope(
+      identity: ExternalIdentity,
+      reference: OrganizationSourceReference | undefined,
+      reader: OrganizationAuthentication,
+    ): boolean {
+      const receiver = reader.sourceReference;
+      if (reader.source !== "mcp" || reader.kind !== "human" || !reference || !receiver) return true;
+      return (
+        identityKey(identity) === identityKey(reader.identity) &&
+        reference.userId === receiver.userId &&
+        reference.channelId === receiver.channelId &&
+        reference.threadKey === receiver.threadKey
+      );
+    },
     /** Only underlying native reads are shared within this metadata phase.
      * Policy and message attribution are rebuilt for each exact original source.
      * A new phase must be created for the final emission fence. */
@@ -642,11 +673,12 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         return denied("unavailable");
       }
     },
-    /** No same-subject credential substitution when reading a retained source. */
+    /** Current-reader proof is read-only. Original execution authentication never uses it. */
     evaluateSourceIdentity: async (
       identity: ExternalIdentity,
       reference?: OrganizationSourceReference,
       onBehalfOf?: ExternalIdentity | null,
+      reader?: OrganizationAuthentication,
     ): Promise<{ status: "allowed"; policyFingerprint: string } | { status: "denied" | "unavailable" }> => {
       const sources = [
         ...new Set(
@@ -663,15 +695,55 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
       // A bare saved subject cannot prove the original private reply address
       // or exact credential. The retained server origin supplies both.
       if (!reference) return { status: "unavailable" };
-      const ref = reference;
+      let ref = reference;
+      if (
+        source === "mcp" &&
+        reader?.source === "mcp" &&
+        reader.kind === "human" &&
+        !onBehalfOf &&
+        !reader.onBehalfOf &&
+        identityKey(reader.identity) === identityKey(identity)
+      ) {
+        const receiver = reader.sourceReference;
+        if (!receiver || !sourceReferenceSchema.safeParse(reference).success) return { status: "unavailable" };
+        const proof = await resolve(
+          { ...receiver, text: "" },
+          { source: "mcp", identity: reader.identity, credentialDigest: receiver.credentialDigest },
+          receiver,
+        );
+        if (proof.status !== "resolved") return { status: proof.status === "fenced" ? "denied" : "unavailable" };
+        if (
+          !proof.privateSource ||
+          proof.actor.viewingAs ||
+          proof.actor.onBehalfOf ||
+          proof.actor.id !== reference.actorId ||
+          reference.userId !== proof.actor.id ||
+          reference.authenticatedAs !== proof.actor.id ||
+          reference.postedBy ||
+          reference.questionOwnership
+        )
+          return { status: "denied" };
+        // Check the historical scope with today's credential, without changing
+        // the saved origin or registering a verifier for its old credential.
+        ref = {
+          ...reference,
+          credentialDigest: receiver.credentialDigest,
+          approvalConnection: receiver.approvalConnection,
+        };
+      }
       const current = await resolve(
         { ...ref, text: "" },
         { source, identity, credentialDigest: ref.credentialDigest, ...(onBehalfOf ? { onBehalfOf } : {}) },
         ref,
       );
       if (current.status !== "resolved") return { status: current.status === "fenced" ? "denied" : "unavailable" };
+      if (ref.sourceRepository) {
+        const [owner, name] = ref.sourceRepository.split("/");
+        if (!owner || !name || !authorize(current.actor, "repo:use", { type: "repo", owner, name }).allow)
+          return { status: "denied" };
+      }
       return authorize(current.actor, "organization:read", { type: "organization", id: options.organization }).allow
-        ? { status: "allowed", policyFingerprint: current.policyFingerprint }
+        ? { status: "allowed", policyFingerprint: current.readPolicyFingerprint }
         : { status: "denied" };
     },
     resolveBrowser: (identity: ExternalIdentity, msg: IncomingMessage, attestation?: unknown) =>

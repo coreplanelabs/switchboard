@@ -448,50 +448,118 @@ function buildContextAccess(
           return denied("context_invalid");
       }
       if (dependencies.executionGithub?.length) {
-        if (!executionConsumer) return denied("execution_consumer_missing");
-        const current = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === executionConsumer.runId);
-        if (!current) return denied("execution_owner_missing");
-        if (current.ownerGen !== executionConsumer.gen) return denied("execution_generation_mismatch");
-        if (current.meta.agent === "orchestrator") return denied("execution_agent_mismatch");
-        if (current.meta.userId !== msg.userId) return denied("execution_requester_mismatch");
-        if (current.meta.channelId !== msg.channelId) return denied("execution_channel_mismatch");
-        if (current.meta.threadKey !== msg.threadKey) return denied("execution_thread_mismatch");
-        if (current.meta.authenticatedAs !== msg.authenticatedAs) return denied("execution_authentication_mismatch");
-        if (current.meta.postedBy !== msg.postedBy) return denied("execution_relay_mismatch");
-        if ((await executionAdmissionHash(current.meta)) !== executionConsumer.admissionHash)
-          return denied("execution_admission_mismatch");
-        if (!current.meta.session?.key) return denied("execution_session_missing");
-        const retained = await deps.runLedger.readSession(current.meta.session.key, current.meta.session.seedFrom);
-        if (!retained.complete) return denied("execution_session_incomplete");
-        const receipts = Array.isArray(current.state.sourceResults)
-          ? current.state.sourceResults.filter(isSourceResultReceipt)
-          : [];
-        const github = githubCapabilityFor(deps, actor());
-        for (const ref of dependencies.executionGithub) {
-          if (ref.runId !== current.runId) return denied("execution_receipt_owner_mismatch");
-          if (ref.admissionHash !== executionConsumer.admissionHash)
-            return denied("execution_receipt_admission_mismatch");
-          const receipt = receipts.find(
-            (r) =>
-              r.version === 2 &&
-              r.runId === ref.runId &&
-              r.callId === ref.callId &&
-              r.resultHash === ref.resultHash &&
-              r.admissionHash === ref.admissionHash,
-          );
+        const historical = dependencies.executionGithub.filter((ref) => ref.runId !== executionConsumer?.runId);
+        for (const ref of historical) {
+          if ((await deps.runLedger.readLiveRuns()).some((row) => row.runId === ref.runId))
+            return denied("execution_receipt_owner_mismatch");
+          const source = await deps.runStore.get(ref.runId);
+          if (!source) return denied("origin_record_missing");
+          if (source.id !== ref.runId) return denied("origin_identity_mismatch");
+          if (source.provisional || source.restarting || source.status === "interrupted")
+            return denied("execution_owner_changed");
+          if (!source.agent) return denied("execution_agent_mismatch");
+          const origin = {
+            runId: source.id,
+            requester: source.userId,
+            channelId: source.channelId,
+            threadKey: source.threadKey,
+          };
+          const allowed = await originDecision(origin);
+          if (!allowed.ok) return allowed;
+          const canonical = source.contextDependencies;
+          if (
+            !isContextDependencies(canonical) ||
+            canonical.status !== "known" ||
+            !canonical.executionGithub?.some((saved) => JSON.stringify(saved) === JSON.stringify(ref))
+          )
+            return denied("execution_receipt_missing");
+          const session = source.session;
+          if (
+            !session ||
+            session.range === "broken" ||
+            typeof session.range.to !== "number" ||
+            !Number.isSafeInteger(session.range.to) ||
+            session.range.to < session.seedFrom
+          )
+            return denied("execution_session_incomplete");
+          const retained = await deps.runLedger.readSession(session.key, session.seedFrom, session.range.to);
+          if (!retained.complete) return denied("execution_session_incomplete");
+          const receipt = retained.messages
+            .flatMap((message) => message.sourceResults ?? [])
+            .find(
+              (saved) =>
+                isSourceResultReceipt(saved) &&
+                saved.version === 2 &&
+                saved.runId === ref.runId &&
+                saved.callId === ref.callId &&
+                saved.resultHash === ref.resultHash &&
+                saved.admissionHash === ref.admissionHash,
+            );
           if (!receipt) return denied("execution_receipt_missing");
-          const original = await recordedGithubRead(retained.messages, receipt);
-          if (!original) return denied("execution_call_result_unproved");
-          const access = await currentGithubReadCapability(receipt, original, github, current.meta.agent!);
+          const input = await recordedGithubRead(retained.messages, receipt);
+          if (!input) return denied("execution_call_result_unproved");
+          if (receipt.repos.some((repo) => !deps.config.canUseRepo(actor(), repo)))
+            return denied("github_repository_unproved");
+          const access = await currentGithubReadCapability(
+            receipt,
+            input,
+            githubCapabilityFor(deps, actor()),
+            source.agent,
+          );
           if (!access.ok) return { ...denied("execution_github_access_unproved"), githubAccess: access.githubAccess };
+          if ((await deps.runLedger.readLiveRuns()).some((row) => row.runId === ref.runId))
+            return denied("execution_owner_changed");
+          if (receipt.repos.some((repo) => !deps.config.canUseRepo(actor(), repo)))
+            return denied("github_repository_unproved");
+          const final = await originDecision(origin);
+          if (!final.ok) return final;
         }
-        const final = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === current.runId);
-        if (
-          !final ||
-          final.ownerGen !== executionConsumer.gen ||
-          (await executionAdmissionHash(final.meta)) !== executionConsumer.admissionHash
-        )
-          return denied("execution_owner_changed");
+        if (historical.length !== dependencies.executionGithub.length) {
+          if (!executionConsumer) return denied("execution_consumer_missing");
+          const current = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === executionConsumer.runId);
+          if (!current) return denied("execution_owner_missing");
+          if (current.ownerGen !== executionConsumer.gen) return denied("execution_generation_mismatch");
+          if (current.meta.agent === "orchestrator") return denied("execution_agent_mismatch");
+          if (current.meta.userId !== msg.userId) return denied("execution_requester_mismatch");
+          if (current.meta.channelId !== msg.channelId) return denied("execution_channel_mismatch");
+          if (current.meta.threadKey !== msg.threadKey) return denied("execution_thread_mismatch");
+          if (current.meta.authenticatedAs !== msg.authenticatedAs) return denied("execution_authentication_mismatch");
+          if (current.meta.postedBy !== msg.postedBy) return denied("execution_relay_mismatch");
+          if ((await executionAdmissionHash(current.meta)) !== executionConsumer.admissionHash)
+            return denied("execution_admission_mismatch");
+          if (!current.meta.session?.key) return denied("execution_session_missing");
+          const retained = await deps.runLedger.readSession(current.meta.session.key, current.meta.session.seedFrom);
+          if (!retained.complete) return denied("execution_session_incomplete");
+          const receipts = Array.isArray(current.state.sourceResults)
+            ? current.state.sourceResults.filter(isSourceResultReceipt)
+            : [];
+          const github = githubCapabilityFor(deps, actor());
+          for (const ref of dependencies.executionGithub) {
+            if (ref.runId !== current.runId) continue;
+            if (ref.admissionHash !== executionConsumer.admissionHash)
+              return denied("execution_receipt_admission_mismatch");
+            const receipt = receipts.find(
+              (r) =>
+                r.version === 2 &&
+                r.runId === ref.runId &&
+                r.callId === ref.callId &&
+                r.resultHash === ref.resultHash &&
+                r.admissionHash === ref.admissionHash,
+            );
+            if (!receipt) return denied("execution_receipt_missing");
+            const original = await recordedGithubRead(retained.messages, receipt);
+            if (!original) return denied("execution_call_result_unproved");
+            const access = await currentGithubReadCapability(receipt, original, github, current.meta.agent!);
+            if (!access.ok) return { ...denied("execution_github_access_unproved"), githubAccess: access.githubAccess };
+          }
+          const final = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === current.runId);
+          if (
+            !final ||
+            final.ownerGen !== executionConsumer.gen ||
+            (await executionAdmissionHash(final.meta)) !== executionConsumer.admissionHash
+          )
+            return denied("execution_owner_changed");
+        }
       }
 
       for (const status of dependencies.unitStatuses ?? [])

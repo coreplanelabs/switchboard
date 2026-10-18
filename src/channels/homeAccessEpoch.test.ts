@@ -15,6 +15,7 @@ import { JwksCache, type AccessJwk } from "./accessAuth.js";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { NO_GRANTS } from "../core/authz/types.js";
+import { createTracer } from "../core/trace/tracer.js";
 import { digestBearer, InMemoryPersonalTokenStore } from "../mcp/personalTokens.js";
 import type { HomeRuntimeContext } from "./homeRuntime.js";
 async function fixture(currentBrowser?: Parameters<typeof createOrganizationAuthentication>[0]["currentBrowser"]) {
@@ -139,6 +140,7 @@ async function fixture(currentBrowser?: Parameters<typeof createOrganizationAuth
       content: "private fixture",
     });
     expect(result.status).toBe("receipt");
+    return { actor: current.actor, authentication: current.authentication };
   }
   return {
     store,
@@ -366,6 +368,17 @@ describe("complete Home access epoch", () => {
     const revoked = await h.epoch(h.context);
     expect(revoked).toMatch(/^[0-9a-f]{64}$/);
     expect(revoked).not.toBe(before);
+  });
+  it("counts out-of-scope sources across epoch catalogue pages", async () => {
+    const h = await fixture();
+    const reader = await h.send("kept", "mcp:alice:kept");
+    for (let i = 0; i < 201; i++) await h.send(`excluded-${i}`, `mcp:alice:other-${i}`);
+    vi.spyOn(h.authentication, "sourceInReadScope").mockImplementation(
+      (_identity, reference) => reference?.threadKey === "mcp:alice:kept",
+    );
+    const span = createTracer({ clock: () => 1 }).start("request", { sinks: [] });
+    expect(await h.epoch(reader, { span })).toMatch(/^[0-9a-f]{64}$/);
+    expect(span.record().attrs).toEqual({ epochScopeExcluded: 201 });
   });
 
   it("delivers an already accepted owner reply after another valid scope is added and fences it after revocation", async () => {

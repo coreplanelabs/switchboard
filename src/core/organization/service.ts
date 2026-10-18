@@ -13,6 +13,9 @@ import {
   type OrganizationSourceReference,
 } from "./contract.js";
 
+const CONVERSATION_HISTORY_PAGE_SIZE = 200;
+const CONVERSATION_HISTORY_MAX_PAGES = 32;
+
 /** Facts from an authenticated adapter, never values taken from a message body. */
 export interface OrganizationAuthentication {
   /** Set by the trusted adapter. Never copied from admission input. */
@@ -104,10 +107,16 @@ export class OrganizationService {
       limits: OrganizationLimits;
       authorize: (input: OrganizationAuthorization) => Promise<boolean>;
       admissionAvailable?: () => Promise<boolean>;
+      sourceInReadScope?: (
+        identity: ExternalIdentity,
+        reference: OrganizationSourceReference | undefined,
+        reader: OrganizationAuthentication,
+      ) => boolean;
       currentIdentityRead?: (
         identity: ExternalIdentity,
         reference?: OrganizationSourceReference,
         onBehalfOf?: ExternalIdentity | null,
+        reader?: OrganizationAuthentication,
       ) => Promise<
         | "allowed"
         | "denied"
@@ -344,10 +353,15 @@ export class OrganizationService {
     if ((await payloadDigest(compared.data)) !== original.receipt.digest) return { status: "conflict" };
     return { status: "receipt", receipt: original.receipt, duplicate: true };
   }
-  private async filterSources(resolved: ResolvedOrganization, result: OrganizationResult): Promise<OrganizationResult> {
+  private async filterSources(
+    resolved: ResolvedOrganization,
+    result: OrganizationResult,
+    reader: OrganizationAuthentication,
+  ): Promise<OrganizationResult> {
     if (result.status !== "stream" && result.status !== "stream_tail") return result;
     if (!this.options.currentIdentityRead) return { status: "unavailable" };
     const entries: typeof result.entries = [];
+    let scopeExcluded = 0;
     for (const entry of result.entries) {
       const original = await this.options.store.execute({
         action: "provenance",
@@ -355,10 +369,21 @@ export class OrganizationService {
         receiptId: entry.receiptId,
       });
       if (original.status !== "provenance") return { status: "unavailable" };
+      if (
+        this.options.sourceInReadScope?.(
+          original.provenance.actor.identity,
+          original.provenance.sourceReference,
+          reader,
+        ) === false
+      ) {
+        scopeExcluded++;
+        continue;
+      }
       const decision = await this.options.currentIdentityRead(
         original.provenance.actor.identity,
         original.provenance.sourceReference,
         original.provenance.actor.onBehalfOf,
+        reader,
       );
       const status = typeof decision === "string" ? decision : decision.status;
       if (status === "unavailable") return { status: "unavailable" };
@@ -368,7 +393,7 @@ export class OrganizationService {
         entries.push({ ...stored, ...(authorId ? { authorId } : {}) });
       }
     }
-    return { ...result, entries };
+    return { ...result, entries, ...(scopeExcluded ? { scopeExcluded } : {}) };
   }
   async stream(authentication: OrganizationAuthentication, after = 0, limit = 100): Promise<OrganizationResult> {
     return this.readStream(authentication, "stream", after, limit);
@@ -409,6 +434,13 @@ export class OrganizationService {
       if (result.status !== "identities") return { status: "unavailable" };
       identities = result.identities;
     }
+    const scopedTail =
+      action === "tail" &&
+      authentication.source === "mcp" &&
+      authentication.kind === "human" &&
+      this.options.sourceInReadScope !== undefined;
+    if (scopedTail && (!Number.isSafeInteger(limit) || limit < 1 || limit > CONVERSATION_HISTORY_PAGE_SIZE))
+      return { status: "invalid" };
     const result = await this.options.store.execute({
       ...(action === "tail"
         ? { action: "tail", ...(position !== undefined ? { before: position } : {}) }
@@ -416,10 +448,41 @@ export class OrganizationService {
       organization: resolved.organization,
       stream: resolved.actor.stream,
       actor: resolved.actor,
-      limit,
+      limit: scopedTail ? CONVERSATION_HISTORY_PAGE_SIZE : limit,
       identities,
     });
-    return this.filterSources(resolved, result);
+    const first = await this.filterSources(resolved, result, authentication);
+    if (!scopedTail || result.status !== "stream_tail" || first.status !== "stream_tail") return first;
+    const entries = [...first.entries];
+    let scopeExcluded = first.scopeExcluded ?? 0;
+    let page = result;
+    for (let pages = 1; entries.length < limit && page.hasMore; pages++) {
+      if (pages >= CONVERSATION_HISTORY_MAX_PAGES || !Number.isSafeInteger(page.beforeCursor) || page.beforeCursor <= 0)
+        return { status: "unavailable" };
+      const older = await this.options.store.execute({
+        action: "tail",
+        organization: resolved.organization,
+        stream: resolved.actor.stream!,
+        actor: resolved.actor,
+        before: page.beforeCursor,
+        limit: CONVERSATION_HISTORY_PAGE_SIZE,
+        identities,
+      });
+      if (older.status !== "stream_tail" || older.beforeCursor >= page.beforeCursor) return { status: "unavailable" };
+      const checked = await this.filterSources(resolved, older, authentication);
+      if (checked.status !== "stream_tail") return checked;
+      scopeExcluded += checked.scopeExcluded ?? 0;
+      entries.unshift(...checked.entries);
+      page = older;
+    }
+    const kept = entries.slice(-limit);
+    return {
+      ...first,
+      entries: kept,
+      ...(scopeExcluded ? { scopeExcluded } : {}),
+      beforeCursor: entries.length > limit ? kept[0]!.sequence : page.beforeCursor,
+      hasMore: page.hasMore || entries.length > limit,
+    };
   }
   async streamForIdentities(
     authentication: OrganizationAuthentication,
@@ -460,7 +523,7 @@ export class OrganizationService {
       limit,
       identities: eligible,
     });
-    return this.filterSources(resolved, result);
+    return this.filterSources(resolved, result, authentication);
   }
   async delete(authentication: OrganizationAuthentication, receiptId: string): Promise<OrganizationResult> {
     const resolved = await this.resolve(authentication);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { requestOnlyPrTarget, isRequestOnlyPrDecision } from "./requestOnlyPr.js";
+import { requestOnlyPrTarget, isRequestOnlyPrDecision, freshReviewRequested } from "./requestOnlyPr.js";
 
 const request = "agent:review model:openai/request-model effort:high https://github.com/acme/api/pull/7";
 const bind = {
@@ -14,6 +14,25 @@ const bind = {
   ],
 };
 describe("request-only PR qualification", () => {
+  it("uses fresh context only when the current authored prefix asks for it", () => {
+    expect(freshReviewRequested("agent:review review-context:fresh https://github.com/acme/api/pull/7")).toBe(true);
+    expect(
+      requestOnlyPrTarget(
+        "agent:review review-context:fresh model:anthropic/general-model effort:high https://github.com/acme/api/pull/7",
+      ),
+    ).toEqual({ repo: "acme/api", number: 7, preset: "review" });
+    expect(freshReviewRequested("agent:ship review-context:fresh review https://github.com/acme/api/pull/7")).toBe(
+      true,
+    );
+    for (const text of [
+      request,
+      request + " review-context:fresh",
+      "> agent:review review-context:fresh acme/api#7",
+      "agent:review review-context:invalid acme/api#7",
+      "agent:review review-context:fresh review-context:fresh acme/api#7",
+    ])
+      expect(freshReviewRequested(text)).toBe(false);
+  });
   it("binds only the requested Ship review stage on the current authored PR", () => {
     const text = request.replace("agent:review", "agent:ship review");
     const ship = { ...bind, binds: [{ ...bind.binds[0]!, preset: "ship", shipEntry: "review" }] };

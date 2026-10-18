@@ -181,7 +181,7 @@ export function uncoveredSourceResult(
       (writerRunId === undefined || receipt.runId === writerRunId) &&
       (receipt.version === 1
         ? receipt.repos.every((repo) => context?.githubRepos?.includes(repo))
-        : context?.version === 2 &&
+        : (context?.version === 2 || context?.version === 3) &&
           context.executionGithub?.some(
             (ref) =>
               ref.runId === receipt.runId &&

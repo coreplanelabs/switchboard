@@ -854,7 +854,131 @@ describe("message-bound context access", () => {
       check: "execution_call_result_unproved",
     });
   });
-  it("distinguishes an absent execution controller from a missing live owner", async () => {
+  it("reuses a finished review's verified GitHub evidence under current read access", async () => {
+    const f = setup();
+    const input = { repo: "acme/api", path: "src/x.ts" };
+    const result = "earlier source";
+    const receipt: SourceResultReceipt = {
+      version: 2,
+      runId: origin.runId,
+      callId: "earlier-read",
+      tool: "github_file",
+      repos: ["acme/api"],
+      resultHash: await sourceHash(result),
+      inputHash: await sourceHash(input),
+      admissionHash: "a".repeat(64),
+    };
+    const context: ContextDependencies = {
+      ...clean,
+      version: 2,
+      executionGithub: [
+        {
+          runId: origin.runId,
+          callId: receipt.callId,
+          resultHash: receipt.resultHash,
+          admissionHash: receipt.admissionHash!,
+        },
+      ],
+    };
+    Object.assign(f.record, {
+      agent: "review",
+      status: "completed",
+      runtimeShutdownConfirmed: true,
+      contextDependencies: context,
+      session: { key: "earlier-session", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+    });
+    const messages: ChatMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: receipt.callId, name: receipt.tool, input }] },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: receipt.callId, content: result }],
+        sourceResults: [receipt],
+      },
+    ];
+    f.deps.runLedger.readSession = async () => ({ complete: true, messages, turns: messages.length, compactions: [] });
+    const github = new InMemoryGithubApi({ "acme/api": { private: true, files: { "src/x.ts": "current source" } } });
+    f.deps.githubApi = github;
+    f.deps.config.canUseRepo = () => true;
+    expect(await f.access.validateDependencies(context)).toEqual({ ok: true });
+    const media = {
+      executionRunId: origin.runId,
+      executionSequence: 1,
+      reference: {
+        version: 1 as const,
+        kind: "original" as const,
+        sourceRunId: origin.runId,
+        sourceSequence: 1,
+        sourceDigest: "b".repeat(64),
+        intentDigest: "c".repeat(64),
+      },
+    };
+    const mixed: ContextDependencies = { ...context, version: 3, nativeMediaSources: [media] };
+    f.record.contextDependencies = mixed;
+    let mediaReadable = true;
+    const mediaReaders: string[] = [];
+    f.deps.revalidateNativeMediaSource = async (_source, consumer) => {
+      mediaReaders.push(consumer.actor.id);
+      return mediaReadable;
+    };
+    expect(await f.access.validateDependencies(mixed)).toEqual({ ok: true });
+    expect(mediaReaders).toEqual(["slack:UA"]);
+    mediaReadable = false;
+    expect(await f.access.validateDependencies(mixed)).toMatchObject({ ok: false, check: "context_invalid" });
+    expect(await f.access.validateDependencies({ ...mixed, version: 4, sourceInputs: [testSourceInput()] })).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "source_input_access_unproved",
+    });
+    f.record.contextDependencies = context;
+    f.record.status = "interrupted";
+    expect(await f.access.validateDependencies(context)).toMatchObject({ ok: false, check: "execution_owner_changed" });
+    f.record.status = "completed";
+    f.record.provisional = true;
+    expect(await f.access.validateDependencies(context)).toMatchObject({ ok: false, check: "execution_owner_changed" });
+    delete f.record.provisional;
+    f.record.restarting = true;
+    expect(await f.access.validateDependencies(context)).toMatchObject({ ok: false, check: "execution_owner_changed" });
+    delete f.record.restarting;
+    const session = f.record.session!;
+    f.record.session = { ...session, range: { from: 0 } };
+    expect(await f.access.validateDependencies(context)).toMatchObject({
+      ok: false,
+      check: "execution_session_incomplete",
+    });
+    f.record.session = session;
+    f.live.push({ runId: origin.runId } as LiveRunRow);
+    expect(await f.access.validateDependencies(context)).toMatchObject({
+      ok: false,
+      check: "execution_receipt_owner_mismatch",
+    });
+    f.live.pop();
+    f.record.contextDependencies = clean;
+    expect(await f.access.validateDependencies(context)).toMatchObject({
+      ok: false,
+      check: "execution_receipt_missing",
+    });
+    f.record.contextDependencies = context;
+    f.deps.config.canUseRepo = () => false;
+    expect(await f.access.validateDependencies(context)).toMatchObject({
+      ok: false,
+      check: "github_repository_unproved",
+    });
+    f.deps.config.canUseRepo = () => true;
+    messages[1]!.content = [{ type: "tool_result", toolUseId: receipt.callId, content: "altered source" }];
+    expect(await f.access.validateDependencies(context)).toMatchObject({
+      ok: false,
+      check: "execution_call_result_unproved",
+    });
+    messages[1]!.content = [{ type: "tool_result", toolUseId: receipt.callId, content: result }];
+    github.readFile = async () => {
+      throw new Error("access revoked");
+    };
+    expect(await f.access.validateDependencies(context)).toMatchObject({
+      ok: false,
+      check: "execution_github_access_unproved",
+    });
+  });
+  it("distinguishes a missing historical source from a missing live owner", async () => {
     const f = setup();
     const context: ContextDependencies = {
       ...clean,
@@ -871,7 +995,7 @@ describe("message-bound context access", () => {
     expect(await f.access.validateDependencies(context)).toEqual({
       ok: false,
       code: "saved-context-unproved",
-      check: "execution_consumer_missing",
+      check: "origin_record_missing",
     });
     const execution = contextAccessForExecution(f.deps, {
       msg,

@@ -52,6 +52,11 @@ export interface HomeHostOptions {
     request: Omit<OrganizationExecutionRequest, "io">,
     role: "user" | "assistant",
   ): Promise<import("../core/references/contextDependencies.js").ContextDependencies | undefined>;
+  normalizeHistory?(
+    reader: HomeRuntimeContext,
+    request: Omit<OrganizationExecutionRequest, "io">,
+    turns: TextTurn[],
+  ): Promise<TextTurn[]>;
   prepareAdmission?(
     context: HomeRuntimeContext,
     input: OrganizationAdmissionInput,
@@ -169,6 +174,9 @@ export function createHomeHost(options: HomeHostOptions) {
         ...(context ? { context } : {}),
       });
     }
+    const normalized = options.normalizeHistory
+      ? await options.normalizeHistory({ actor: final.actor, authentication: final.authentication }, request, turns)
+      : turns;
     // Context metadata can await source reads after the earlier epoch check.
     const complete = await options.authentication.resolveEnvelope(request.envelope);
     if (
@@ -178,7 +186,7 @@ export function createHomeHost(options: HomeHostOptions) {
         captured !== (await currentEpoch({ actor: complete.actor, authentication: complete.authentication })))
     )
       throw historyFailure("history_after_context_unavailable", "The private conversation is unavailable.");
-    return turns;
+    return normalized;
   }
   async function originalInput(
     message: IncomingMessage,

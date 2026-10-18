@@ -21,6 +21,7 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
   const readEpoch = async (
     context: HomeRuntimeContext,
     note: (gap: AdmissionObservation) => void,
+    trace?: TraceOptions,
   ): Promise<string | undefined> => {
     let gap: AdmissionObservation = { reason: "receiver-unavailable" };
     let complete = false;
@@ -104,6 +105,7 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
           .digest("hex");
       }
       const observations = new Map<string, string | null>();
+      let scopeExcluded = 0;
       let snapshotRevision: number | undefined;
       let accessRevision: number | undefined;
       let after: string | undefined;
@@ -122,16 +124,30 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
         gap = { reason: "catalogue-changed" };
         if (catalogue.revision !== snapshotRevision || catalogue.accessRevision !== accessRevision) return;
         const decisions = await mapLimit(catalogue.entries, HOME_PRIVATE_READ_CONCURRENCY, async (source) => {
+          if (
+            !options.authentication.sourceInReadScope(
+              source.actor.identity,
+              source.sourceReference,
+              current.authentication,
+            )
+          )
+            return;
           const decision = source.allowed
             ? await options.authentication.evaluateSourceIdentity(
                 source.actor.identity,
                 source.sourceReference,
                 source.actor.onBehalfOf,
+                current.authentication,
               )
             : { status: "denied" as const };
           return { source, decision };
         });
-        for (const { source, decision } of decisions) {
+        for (const checked of decisions) {
+          if (!checked) {
+            scopeExcluded++;
+            continue;
+          }
+          const { source, decision } = checked;
           if (decision.status === "unavailable") {
             const original = source.sourceReference?.credentialDigest;
             const receiver = context.authentication.sourceReference?.credentialDigest;
@@ -202,9 +218,19 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
       )
         return;
       const epoch = createHash("sha256")
-        .update(JSON.stringify([current.policyFingerprint, accessRevision, nativePolicy]))
+        .update(
+          JSON.stringify([
+            ...(current.authentication.source === "mcp" && current.authentication.kind === "human"
+              ? ["mcp-thread-context-v1", reference.channelId, reference.threadKey]
+              : []),
+            current.policyFingerprint,
+            accessRevision,
+            nativePolicy,
+          ]),
+        )
         .digest("hex");
       complete = true;
+      observeAdmission(trace, { epochScopeExcluded: scopeExcluded });
       return epoch;
     } catch {
       gap = { reason: "epoch-exception" };
@@ -218,9 +244,13 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
     // A scope may register while its predecessor is being checked. Restart the
     // complete scan, without treating ordinary traffic as permission loss.
     for (let attempt = 0; attempt < 3; attempt++) {
-      const epoch = await readEpoch(context, (gap) => {
-        lastGap = gap;
-      });
+      const epoch = await readEpoch(
+        context,
+        (gap) => {
+          lastGap = gap;
+        },
+        trace,
+      );
       if (epoch !== undefined) return epoch;
     }
     observeAdmission(trace, lastGap ?? { reason: "epoch-unavailable" });

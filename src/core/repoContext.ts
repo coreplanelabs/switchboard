@@ -478,7 +478,10 @@ function contextCueOf(later: { before: string; after: string }): boolean {
   // A cue in an earlier clause cannot turn a separately requested PR into
   // reference material. Within a clause, the nearest action wins: "see the
   // failure and review <PR>" requests that PR.
-  const clause = later.before.split(/[;\n]/).at(-1) ?? later.before;
+  const clause = (later.before.split(/[;\n]/).at(-1) ?? later.before).replace(
+    /(?:^|\s)review-context[:=]fresh(?=\s|$)/g,
+    " ",
+  );
   const action = [
     ...clause.matchAll(/\b(?:re-?review|review|see|context|example|reference|related|compare|background|packages)\b/gi),
   ]

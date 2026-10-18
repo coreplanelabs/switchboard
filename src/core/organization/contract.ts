@@ -416,6 +416,7 @@ export const resultSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("stream_tail"),
+      scopeExcluded: z.number().int().nonnegative().optional(),
       revision,
       entries: z.array(streamReadEntrySchema),
       cursor: revision,
@@ -433,6 +434,7 @@ export const resultSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("stream"),
+      scopeExcluded: z.number().int().nonnegative().optional(),
       revision,
       entries: z.array(streamReadEntrySchema),
       cursor: revision,

@@ -8,8 +8,7 @@ import type { TraceOptions } from "../core/trace/types.js";
 import { operatorModeOf } from "../config.js";
 import { historyFailure } from "../core/organization/ownerFailure.js";
 import { contextAccessForMessage } from "../core/dispatch/contextAccess.js";
-import { COMMAND_RUN_AGENT } from "../core/runOwner.js";
-import { isContextDependencies } from "../core/references/contextDependencies.js";
+import { isContextDependencies, mergeContextDependencies } from "../core/references/contextDependencies.js";
 import { SingleShotIO } from "./singleShotDispatch.js";
 import { withChatActor } from "../core/authz/actor.js";
 import type { CommandInvoker } from "../core/commandRegistry.js";
@@ -68,7 +67,7 @@ import { parsePrivateWorkerThreadKey, type PrivateWorkerLog } from "../core/priv
 import { privateWorkerAudienceFor } from "./privateWorker.js";
 import { isUnitContext } from "../core/dispatch/unitContext.js";
 import { ownerOf, readThread as readOwnedThread } from "../core/dispatch/thread.js";
-import { requestOnlyPrTarget } from "../core/dispatch/requestOnlyPr.js";
+import { requestOnlyPrTarget, freshReviewRequested } from "../core/dispatch/requestOnlyPr.js";
 import { nativeMediaDigest, nativeMediaSchema, matchesNativeMedia } from "../core/nativeMedia.js";
 import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js";
 import type { HomeAnswerTarget, HomeMergeAction } from "./homeSeed.js";
@@ -761,6 +760,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     },
     authorize: (input) => host.authorize(input),
     currentIdentityRead: options.authentication.evaluateSourceIdentity,
+    sourceInReadScope: options.authentication.sourceInReadScope,
   });
   // Receipt metadata is bodyless. Only the protected original ledger request
   // can restore input bytes; neither a pending client nor a completed offer may supply them.
@@ -1514,8 +1514,18 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       if (provenance.status !== "provenance")
         throw historyFailure("history_provenance_unavailable", "The history source could not be verified.");
       const ref = provenance.provenance.sourceReference;
-      if (!ref?.messageId) return;
-      const key = provenance.provenance.source === "slack" ? `${ref.channelId}:${ref.messageId}` : ref.messageId;
+      if (!ref?.messageId) {
+        if (role === "assistant")
+          throw historyFailure("history_provenance_unavailable", "The history source could not be verified.");
+        return;
+      }
+      const source = provenance.provenance.source;
+      const key =
+        source === "slack"
+          ? `${ref.channelId}:${ref.messageId}`
+          : source === "browser" && ref.messageId.startsWith("browser:")
+            ? ref.messageId.slice("browser:".length)
+            : ref.messageId;
       const original = await options.store.execute({
         action: "submission",
         organization: options.organizationId,
@@ -1523,22 +1533,20 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
         source: provenance.provenance.source,
         key,
       });
-      if (original.status !== "submission" || original.receipt.id !== receiptId || !original.receipt.ownerRunId) return;
+      if (original.status !== "submission" || original.receipt.id !== receiptId || !original.receipt.ownerRunId) {
+        if (role === "assistant")
+          throw historyFailure("history_producer_unavailable", "The retained history producer could not be verified.");
+        return;
+      }
       const runId = original.receipt.ownerRunId;
       const live = (await core.runLedger.readLiveRuns()).find((row) => row.runId === runId);
       const stored = live ? undefined : await core.runStore.get(runId);
-      const context = live?.state.contextDependencies ?? stored?.contextDependencies;
+      let context = live?.state.contextDependencies ?? stored?.contextDependencies;
       const marked =
         original.envelope.nativeMediaDigest !== undefined || original.envelope.continuation?.kind === "confirm";
       if (role === "assistant" && !live && !stored)
         throw historyFailure("history_producer_unavailable", "The retained history producer could not be verified.");
-      const modelProducer = (live?.meta.agent ?? stored?.agent) !== COMMAND_RUN_AGENT;
-      if (
-        marked &&
-        role === "assistant" &&
-        modelProducer &&
-        (!isContextDependencies(context) || !context.nativeMediaSources?.length)
-      )
+      if (marked && role === "assistant" && (!isContextDependencies(context) || !context.nativeMediaSources?.length))
         throw historyFailure("history_context_unavailable", "The retained history source could not be verified.");
       const pointer = live?.meta.request?.originalOrganizationInput as
         import("../core/dispatch/originalOrganizationInput.js").OriginalOrganizationDispatch | undefined;
@@ -1551,7 +1559,23 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
         throw historyFailure("history_context_unavailable", "The saved history source could not be verified.");
       if (pointer?.savedNativeMediaSource && (!isContextDependencies(context) || !context.nativeMediaSources?.length))
         throw historyFailure("history_context_unavailable", "The saved history source could not be verified.");
-      if (!isContextDependencies(context) || !context.nativeMediaSources?.length) return;
+      if (role === "assistant") {
+        const producer = live?.meta ?? stored;
+        if (!producer || !isContextDependencies(context) || context.status !== "known")
+          throw historyFailure("history_context_unavailable", "The saved history source could not be verified.");
+        context = mergeContextDependencies(context, {
+          version: 1,
+          status: "known",
+          revision: 0,
+          slack: [],
+          mcp: [],
+          origins: [
+            { runId, requester: producer.userId, channelId: producer.channelId, threadKey: producer.threadKey },
+          ],
+        });
+      } else if (!isContextDependencies(context) || !context.nativeMediaSources?.length) return;
+      if (!isContextDependencies(context))
+        throw historyFailure("history_context_unavailable", "The saved history source could not be verified.");
       const consumer = withOriginalOrganizationDispatch(withChatActor(request.msg, reader.actor), {
         ingressRunId: request.runId,
         organizationSequence: request.receipt.revision,
@@ -1561,6 +1585,19 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       // Carry the same canonical envelope so the later execution keeps and
       // rechecks this provenance through compaction, tools and publication.
       return context;
+    },
+    normalizeHistory: async (reader, request, turns) => {
+      const consumer = withOriginalOrganizationDispatch(withChatActor(request.msg, reader.actor), {
+        ingressRunId: request.runId,
+        organizationSequence: request.receipt.revision,
+      });
+      const contexts = turns.flatMap((turn) => (turn.context ? [turn.context] : []));
+      const normalized = await contextAccessForMessage(core, {
+        msg: consumer,
+        io: sink(request),
+      }).normalizeDependencies(contexts, contexts);
+      let index = 0;
+      return turns.map((turn) => (turn.context ? { ...turn, context: normalized[index++]! } : turn));
     },
     ledger: options.ledger,
     store: options.store,
@@ -1712,6 +1749,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       if (continuation) return "continuation";
       if (hasMedia) return "media";
       if (operatorModeOf(core.config.config) !== "on") return "routing";
+      if (!freshReviewRequested(msg.text)) return "context";
       independent = requestOnlyPrTarget(msg.text);
       return independent ? "selected" : "target";
     };
