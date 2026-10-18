@@ -1,3 +1,5 @@
+import { readRequesterName } from "./runRequester.js";
+import { namesOf } from "../core/names.js";
 import { mapLimit } from "../core/mapLimit.js";
 import { HOME_PRIVATE_READ_CONCURRENCY } from "../core/budgets.js";
 import { hasWorkViewScope, workReadPredicate, workViewScopeOf } from "./workViewScope.js";
@@ -16,7 +18,7 @@ import {
   type Predicate,
   type Resource,
 } from "../core/authz/index.js";
-import { deletionAwareIndexFeed, readableRuns, visibleIndexFeed } from "./liveView/viewer.js";
+import { deletionAwareIndexFeed, namedIndexFeed, readableRuns, visibleIndexFeed } from "./liveView/viewer.js";
 export { readableRuns, visibleIndexFeed } from "./liveView/viewer.js";
 import type { RunEvent, StopMode } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
@@ -256,6 +258,8 @@ export interface LiveViewDeps {
    *  in the background, so a paint never waits on the store or Slack — merged with the page's own
    *  requesters. Absent, the picker offers the page's requesters alone. */
   people?: () => readonly ViewablePerson[];
+  /** Current display label. This does not change the run's requester or authority. */
+  requesterName?: (id: string) => Promise<string | undefined>;
   /** Receives one entry per allowed page/events history read and per refused
    *  tokenless read. Default: console.log. */
   audit?: (entry: HistoryReadAudit) => void;
@@ -618,13 +622,16 @@ export function createLiveViewHandler(
       if (url.searchParams.get("stream") === "1") {
         const openFeed = (initial: readonly RunView[], complete = true) =>
           serveIndexEvents(
-            visibleIndexFeed(
-              deletionAwareIndexFeed(
-                (onEvent) => index.subscribeIndex(onEvent),
-                async (ids) => service.deletedRuns(ids),
-                initial,
+            namedIndexFeed(
+              visibleIndexFeed(
+                deletionAwareIndexFeed(
+                  (onEvent) => index.subscribeIndex(onEvent),
+                  async (ids) => service.deletedRuns(ids),
+                  initial,
+                ),
+                visibleTo,
               ),
-              visibleTo,
+              deps.requesterName,
             ),
             nodeSseSink(req, res),
             () => startSseHeartbeat(req, res),
@@ -643,7 +650,15 @@ export function createLiveViewHandler(
         return true;
       }
       const live = index.listActive().filter((s) => !privateWorkerRun(s) && matchesPredicate(visibleTo, s));
-      const render = (page: IndexPage) => {
+      const render = async (page: IndexPage) => {
+        const labels = await namesOf(
+          (id) => readRequesterName(deps.requesterName, id),
+          page.rows.flatMap((row) => (row.userId ? [row.userId] : [])),
+        );
+        const rows = page.rows.map((row) => {
+          const userName = row.userId ? labels.get(row.userId) : undefined;
+          return userName ? { ...row, userName } : row;
+        });
         // A session holding `all` may view the dashboard as a person (record 0053): the picker
         // offers the installation's people as the source last computed them and the page's
         // requesters — a cache read, so the paint waits on nothing; the seed says nothing to
@@ -661,7 +676,7 @@ export function createLiveViewHandler(
           ...(people ? { viewAs: { people } } : {}),
           retentionDays: deps.retention ? deps.retention.retentionDays : null,
           now: now(),
-          rows: [...page.rows],
+          rows,
           ...(page.storeUnavailable ? { storeUnavailable: STORE_UNAVAILABLE_BANNER } : {}),
           ...(page.olderHref ? { olderHref: page.olderHref } : {}),
           ...(page.olderThan !== undefined ? { olderThan: page.olderThan } : {}),

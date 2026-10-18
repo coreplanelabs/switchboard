@@ -132,77 +132,34 @@ describe("RunRow", () => {
     ).toBe(false);
   });
 
-  it("says who asked, always visible (record 0042, the runs page): the resolved name, else the id suffix, never a raw platform id; its hover is the source mark's sentence", () => {
-    const named = mountRow(row({ userName: "alice" }));
-    expect(named.find(".who .name").text()).toBe("alice");
-    expect(named.find(".who").attributes("data-user-id")).toBe("slack:UACME1");
-    expect(named.find(".who").classes()).not.toContain("opacity-0"); // not a hover reveal
-    const unnamed = mountRow(row());
-    expect(unnamed.find(".who .name").text()).toBe("UACME1");
-    expect(unnamed.html()).not.toContain(">slack:UACME1<");
-    const nobody = mountRow(row({ userId: undefined, channelId: undefined }));
-    expect(nobody.find(".who").exists()).toBe(true); // the empty cell keeps the columns aligned
-    expect(nobody.find(".who").text()).toBe("");
+  it("shows a person's label in the metadata line and hides raw account ids", () => {
+    const named = mountRow(row({ userName: "Alice Chen" }));
+    expect(named.find(".metadata .who .name").text()).toBe("Alice Chen");
+    expect(named.find(".metadata a.repo").text()).toBe("acme/web");
+    expect(named.find(".primary .snippet").text()).toBe("fix the build");
+    expect(mountRow(row()).find(".who .name").text()).toBe("Unknown user");
+    expect(
+      mountRow(row({ userId: "access:71509dfc-2d1c-5490-b018-321f42d20ca1" }))
+        .find(".who .name")
+        .text(),
+    ).toBe("Unknown user");
+    expect(
+      mountRow(row({ channelId: "cli:local", userId: "cli:alice" }))
+        .find(".who .name")
+        .text(),
+    ).toBe("alice");
   });
 
-  it("the requester cell is a fixed-width column from sm (item 29): a long name truncates in the same 14em every row gets, and the full name is the hover; a nameless row keeps the same width", () => {
-    const long = mountRow(row({ userName: "Aleksandr Diamantopoulos" })).find(".who");
-    expect(long.find(".name").text()).toBe("Aleksandr Diamantopoulos");
-    expect(long.classes()).toContain("sm:w-[14em]");
-    expect(long.classes()).toContain("truncate");
-    expect(long.classes()).not.toContain("sm:max-w-[9em]"); // no longer content-sized
-    const nobody = mountRow(row({ userId: undefined, channelId: undefined })).find(".who");
-    expect(nobody.classes()).toContain("sm:w-[14em]");
-  });
-
-  // authorization.md item 15: one person arrives over several credentials; a
-  // text label naming the surface leads the requester cell so their rows read
-  // apart without a hover — and without a glyph legend (the ⁙ ⌁ ◈ >_ marks
-  // were not understandable at a glance).
-  it("leads the requester with the surface's name as a text label — the channel id's prefix word, readable text, never a glyph — so the same person's Slack, HTTP and CLI runs read apart", () => {
-    const slack = mountRow(row({ userName: "ada" }));
-    expect(slack.find(".who .surface").text()).toBe("slack");
-    // one width for every surface word, so the name after it starts at the same x on every row
-    expect(slack.find(".who .surface").classes()).toEqual(
-      expect.arrayContaining(["inline-block", "w-[3.6em]", "text-center"]),
-    );
-    expect(slack.find(".who .surface").attributes("aria-hidden")).toBeUndefined(); // real text, read by everyone
-    expect(slack.find(".who").attributes("data-surface")).toBe("slack");
-    expect(slack.find(".who .glyph").exists()).toBe(false);
-    expect(slack.find(".who").text()).not.toMatch(/[⁙⌁◈○]/);
-    const http = mountRow(
-      row({
-        userName: "ada",
-        channelId: "http:default",
-        userId: "slack:UACME1",
-        authenticatedAs: "http:ada-ingress",
-      }),
-    );
-    expect(http.find(".who .surface").text()).toBe("http");
-    expect(http.find(".who .name").text()).toBe("ada");
-    expect(http.find(".who").attributes("data-surface")).toBe("http");
-    const cli = mountRow(row({ userName: "ada", channelId: "cli:local" }));
-    expect(cli.find(".who .surface").text()).toBe("cli");
-    const mcp = mountRow(row({ userName: "ada", channelId: "mcp:default", userId: "mcp:ada" }));
-    expect(mcp.find(".who .surface").text()).toBe("mcp");
-    const odd = mountRow(row({ channelId: "weird" }));
-    expect(odd.find(".who .surface").text()).toBe("unknown"); // an unknown prefix reads as the word, never a placeholder glyph
-  });
-
-  it("the source mark is the ↗ link for a run with a thread and nothing visible otherwise — the requester cell already names the surface; a javascript: url never links", () => {
+  it("shows the Slack icon on the row with a source link and a descriptive accessible label", () => {
     const linked = mountRow(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "alice" }));
     const a = linked.find("a.source");
-    expect(a.text()).toBe("↗");
+    expect(a.find('svg[aria-label="Slack"]').exists()).toBe(true);
+    expect(a.text()).not.toContain("↗");
     expect(a.attributes("href")).toBe("https://acme.slack.com/archives/C1/p1");
     expect(a.attributes("target")).toBe("_blank");
     expect(a.attributes("aria-label")).toBe("open the Slack thread (new tab)");
     const plain = mountRow(row());
-    expect(plain.find("a.source").exists()).toBe(false);
-    expect(plain.find("span.source").text()).toBe(""); // the cell keeps its width, shows nothing
-    expect(plain.find("span.source").attributes("aria-hidden")).toBe("true");
-    const cli = mountRow(row({ channelId: "cli:local", userId: "cli:alice" }));
-    expect(cli.find("span.source").text()).toBe("");
-    expect(cli.html()).not.toContain(">_");
+    expect(plain.find('span.source svg[aria-label="Slack"]').exists()).toBe(true);
     const hostile = mountRow(row({ sourceUrl: "javascript:alert(1)" }));
     expect(hostile.find("a.source").exists()).toBe(false);
     expect(hostile.html()).not.toContain("javascript:");
@@ -340,10 +297,12 @@ describe("RunRow", () => {
   // Feature: docs/reference/specs/live-view.md item 32 — the row
   // carries the stall signal: the pace cell, the `stalled` badge, and the
   // bound-exceeded mark, so a hung bash and a slow suite read apart at a glance.
-  it("a healthy live row shows its pace — events per minute over the last five minutes — and no stalled badge", () => {
+  it("keeps event rate off a healthy row and retains duration and event count", () => {
     const w = mountRow(row({ eventsLast5m: 14, lastToolCallAt: NOW - 9_000 }));
     // The row is 252 s old — younger than the window — so 14 events rate over its own age: 3.3/min.
-    expect(w.find(".pace").text()).toBe("3.3/min");
+    expect(w.find(".pace").exists()).toBe(false);
+    expect(w.find(".elapsed").text()).toBe("4m 12s");
+    expect(w.find(".count").text()).toBe("4 events");
     expect(w.find(".stalled").exists()).toBe(false);
   });
 

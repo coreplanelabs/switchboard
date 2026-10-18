@@ -52,10 +52,7 @@ const conn = ref<{ tone: "green" | "blue" | "red"; text: string }>({ tone: "blue
 // below newer healthy ones — then newest-first by the head's start stamp
 // (immutable; the sort is stable, so a repaint only reorders when a row's
 // stall state changes).
-const showBookkeeping = ref(false);
-const visibleRows = computed(() =>
-  [...rows.values()].filter((r) => showBookkeeping.value || (r.agent !== "command" && r.agent !== "door")),
-);
+const visibleRows = computed(() => [...rows.values()].filter((r) => r.agent !== "command" && r.agent !== "door"));
 const groups = computed(() => groupRuns(visibleRows.value, now.value));
 const liveCount = computed(() => visibleRows.value.filter((r) => !r.finished).length);
 
@@ -87,7 +84,7 @@ watch(
 );
 
 function onToggleCompleted(ev: Event): void {
-  // The toggles switch the server view: a change is remembered and navigates, keeping the other toggle.
+  // Remember the completed view before navigation.
   const on = (ev.target as HTMLInputElement).checked;
   browser.writePref(RUNS_PREF.all, on ? "1" : "0");
   browser.navigate(viewHref(on));
@@ -155,8 +152,6 @@ onUnmounted(() => {
     <span class="text-xs text-muted">{{ liveCount }} running</span
     ><label class="text-xs flex items-center gap-2 min-h-10"
       ><input type="checkbox" :checked="showAll" @change="onToggleCompleted" />Include completed</label
-    ><label class="text-xs flex items-center gap-2 min-h-10"
-      ><input v-model="showBookkeeping" type="checkbox" />Include system runs</label
     >
   </div>
   <p v-if="seed?.storeUnavailable" class="green-notice green-warning" role="status">{{ seed.storeUnavailable }}</p>
@@ -173,24 +168,26 @@ onUnmounted(() => {
     <ul v-else-if="groups.length" id="runs" class="list-none p-0 m-0">
       <template v-for="group in beforeDivider" :key="group.head.id"
         ><RunRow :run="group.head" :now="now" :retention-ms="retentionMs" :children="group.children" /><RunRow
-          v-for="child in group.children"
+          v-for="(child, childIndex) in group.children"
           :key="child.id"
           :run="child"
           :now="now"
           :retention-ms="retentionMs"
           :nested-under="group.head.id"
+          :last-nested="childIndex === group.children.length - 1"
       /></template>
       <li v-if="afterDivider.length" class="p-4 text-xs text-warn">
         The following retained runs expire within one day.
       </li>
       <template v-for="group in afterDivider" :key="group.head.id"
         ><RunRow :run="group.head" :now="now" :retention-ms="retentionMs" :children="group.children" /><RunRow
-          v-for="child in group.children"
+          v-for="(child, childIndex) in group.children"
           :key="child.id"
           :run="child"
           :now="now"
           :retention-ms="retentionMs"
           :nested-under="group.head.id"
+          :last-nested="childIndex === group.children.length - 1"
       /></template>
     </ul>
     <EmptyState

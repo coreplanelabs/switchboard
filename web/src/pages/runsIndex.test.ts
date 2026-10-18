@@ -80,7 +80,7 @@ describe("RunsIndexPage — the completed preference", () => {
     vi.spyOn(browser, "search").mockReturnValue("?all=0");
     mountIndex(seed([]));
     expect(nav).not.toHaveBeenCalled();
-    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(2);
+    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(1);
     expect(wrapper.text()).not.toContain("Only mine");
   });
 });
@@ -94,27 +94,19 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect(wrapper.find("h1").text()).toBe("Run details");
   });
 
-  it("hides command and door rows by default; the named toggle reveals the bookkeeping runs", async () => {
-    const { wrapper } = mountIndex(
+  it("hides system runs from the seed and feed without offering a system toggle", async () => {
+    const { wrapper, es } = mountIndex(
       seed([
         live("ordinary", { agent: "coding", startedAt: 9 }),
         live("command-row", { agent: "command", startedAt: 8 }),
         live("door-row", { agent: "door", startedAt: 7 }),
       ]),
     );
+    es().emitMessage({ type: "upsert", run: live("later-command", { agent: "command", startedAt: 10 }) });
+    await wrapper.vm.$nextTick();
     expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual(["ordinary"]);
     expect(wrapper.find(".green-toolbar > span").text()).toBe("1 running");
-
-    const toggle = checkbox(wrapper, "Include system runs");
-    expect(toggle.element.parentElement?.textContent?.trim()).toBe("Include system runs");
-    await toggle.setValue(true);
-
-    expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual([
-      "ordinary",
-      "command-row",
-      "door-row",
-    ]);
-    expect(wrapper.find(".green-toolbar > span").text()).toBe("3 running");
+    expect(wrapper.findAll(".green-toolbar label").map((label) => label.text())).toEqual(["Include completed"]);
   });
 
   // Feature: docs/reference/specs/live-view.md item 32 — stalled
@@ -158,7 +150,7 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
   // Feature: docs/reference/specs/live-view.md item 32 — the hosted head's
   // pace cell borrows its newest live child's pace, and reads `waiting on the
   // runner` when no child on the page lends one.
-  it("a hosted head's pace cell borrows the newest live child's pace; with no live child it reads `waiting on the runner`; a finished head shows nothing", () => {
+  it("a hosted head hides event rate; with no live child it reads `waiting on the runner`; a finished head shows nothing", () => {
     const now = 1_252_000;
     const ship = live("ship", { startedAt: 10, hosted: true, instanceId: "wf-1" });
     const kid = live("kid", {
@@ -168,8 +160,8 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
       lastToolCallAt: now - 9_000,
     });
     const { wrapper } = mountIndex(seed([ship, kid]));
-    expect(wrapper.find('[data-run-id="ship"] .pace').text()).toBe("2.8/min");
-    expect(wrapper.find('[data-run-id="kid"] .pace').text()).toBe("2.8/min");
+    expect(wrapper.find('[data-run-id="ship"] .pace').exists()).toBe(false);
+    expect(wrapper.find('[data-run-id="kid"] .pace').exists()).toBe(false);
 
     const idle = live("ship2", { startedAt: 10, hosted: true, instanceId: "wf-2" });
     const doneKid = done("oldkid", { startedAt: 20, parentInstanceId: "wf-2" });

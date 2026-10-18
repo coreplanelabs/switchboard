@@ -1,3 +1,4 @@
+import { readRequesterName } from "../runRequester.js";
 import { RUN_VIEW_POLL_MS } from "../../core/budgets.js";
 import type { IndexRunIdentity } from "../../core/runRegistry/indexFeed.js";
 import { hasWorkViewScope, workReadPredicate } from "../workViewScope.js";
@@ -108,5 +109,37 @@ export function visibleIndexFeed(
       } else if (!shown.delete(ev.id)) return;
       onEvent(ev);
     });
+  };
+}
+
+/** Resolve labels only after visibility filtering. Serialize updates so a slow
+ * name lookup cannot resurrect a row after its removal. */
+export function namedIndexFeed(
+  subscribe: (onEvent: IndexSubscriber) => Unsubscribe,
+  name?: (id: string) => Promise<string | undefined>,
+): (onEvent: IndexSubscriber) => Unsubscribe {
+  if (!name) return subscribe;
+  return (onEvent) => {
+    let closed = false;
+    let tail = Promise.resolve();
+    const names = new Map<string, Promise<string | undefined>>();
+    const unsubscribe = subscribe((event) => {
+      if (closed) return;
+      const id = event.type === "upsert" ? event.run.userId : undefined;
+      // Start replay lookups together; each requester shares one bounded read.
+      if (id && !names.has(id)) names.set(id, readRequesterName(name, id));
+      const label = id ? names.get(id) : undefined;
+      tail = tail
+        .then(async () => {
+          const userName = await label;
+          if (closed) return;
+          onEvent(event.type === "upsert" && userName ? { ...event, run: { ...event.run, userName } } : event);
+        })
+        .catch(() => undefined);
+    });
+    return () => {
+      closed = true;
+      unsubscribe();
+    };
   };
 }

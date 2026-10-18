@@ -191,11 +191,11 @@ describe("tooltips", () => {
     );
   });
 
-  it("the source tip: via <surface> · <resolved identity>, falling back to the id suffix", () => {
+  it("the source tip names the surface and person without exposing raw ids", () => {
     expect(sourceTip(row({ userName: "alice" }))).toBe("via Slack · alice");
-    expect(sourceTip(row())).toBe("via Slack · UACME1");
+    expect(sourceTip(row())).toBe("via Slack · Unknown user");
     expect(sourceTip(row({ channelId: "cli:local", userId: "cli:alice" }))).toBe("via CLI · alice");
-    expect(sourceTip(row({ channelId: "weird" }))).toBe("via unknown · UACME1");
+    expect(sourceTip(row({ channelId: "weird" }))).toBe("via unknown · Unknown user");
   });
 });
 

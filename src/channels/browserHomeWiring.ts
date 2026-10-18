@@ -1,3 +1,4 @@
+import { requesterName } from "./runRequester.js";
 import { observeAdmission } from "../core/organization/admissionTrace.js";
 import { agentMaintenanceRefusal } from "../core/maintenance.js";
 import { createHash } from "node:crypto";
@@ -131,6 +132,7 @@ export interface BrowserHomeWiringOptions {
   page: PageSender;
   people(): readonly ViewablePerson[];
   channelsOf(actorId: string): Promise<ReadonlySet<string> | "unknown">;
+  requesterLabel?(id: string): Promise<string | undefined>;
   /** Trusted provider email facts narrow personal discovery, without linking private streams. */
   personByEmail?: PersonLookup;
   emailOf?(actorId: string): Promise<string | undefined>;
@@ -939,6 +941,17 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     context,
     tokenPageActor,
     currentTokenPageActor,
+    requesterName: (id: string) =>
+      requesterName(id, {
+        organization: org,
+        store: installationStore,
+        browserIssuer: native?.browserIssuer,
+        mcpIssuer: native?.mcpIssuer,
+        slackTeam,
+        name: (userId) => options.requesterLabel?.(userId) ?? Promise.resolve(undefined),
+        tokens: options.auth().tokens,
+        personByEmail: options.personByEmail,
+      }),
     attentionRecipients: owners,
     page: sendPage,
     emoji,

@@ -1343,6 +1343,7 @@ export async function runBot(): Promise<void> {
       nativePage(...args);
     },
     people: () => nativePeople(),
+    requesterLabel: (id) => names.person(id),
     channelsOf,
     now: systemClock,
     owner: generation,
@@ -1998,6 +1999,7 @@ export async function runBot(): Promise<void> {
         return unit;
       },
       index: defaultRunRegistry,
+      requesterName: (id) => browserWiring?.requesterName(id) ?? names.person(id),
       // The view-as picker's people (record 0053): the cache `viewAsPeople` keeps.
       people: () => viewAsPeople.current(),
       retention:
