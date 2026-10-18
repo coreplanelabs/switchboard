@@ -1,6 +1,6 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import RunPage from "../../green/pages/Run.vue";
-import { flushPromises } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises } from "@vue/test-utils";
 import { ALL_ON, mountApp, type MountAppOptions } from "../testing/mount";
 import { loadDiffs } from "../modules/pr-review/diffsLibrary";
 import { browser } from "../lib/browser";
@@ -95,12 +95,16 @@ function mountLive() {
   return { wrapper, es: () => created[0], created };
 }
 
+enableAutoUnmount(afterEach);
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
 });
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+afterAll(() => {
+  expect(document.querySelector("#state")).toBeNull();
 });
 
 // Feature: docs/reference/specs/live-view.md item 25 — the timeline reads the spans and the
