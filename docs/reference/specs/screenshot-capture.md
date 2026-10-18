@@ -1,5 +1,7 @@
 # Screenshot capture infrastructure
 
+Website maintenance is paused by `websiteMaintenance: false` in `project.json`. Screenshot generation, manifest checks, and the repository freshness test skip while paused. Keep the existing captures and manifests. The capture contracts below apply when maintenance is enabled. Use the [one-PR refresh procedure](../../../CONTRIBUTING.md#how-changes-are-made) to resume.
+
 This prerequisite extends the default capture contract in [Docs site](docs-site.md), item 20. It changes no product route, component, fixture data or organization behavior. Existing surfaces keep their desktop light/dark outputs. A future isolated preview registers its own server and inputs; it does not extend the legacy fixture server merely to register a capture.
 
 - **Code**: [`scripts/screenshots.mts`](../../../scripts/screenshots.mts), [`scripts/screenshot-output-worker.mts`](../../../scripts/screenshot-output-worker.mts), [`scripts/web-preview.ts`](../../../scripts/web-preview.ts), [`src/docs/screenshotManifest.ts`](../../../src/docs/screenshotManifest.ts), [`src/docs/screenshotOutput.ts`](../../../src/docs/screenshotOutput.ts), [`src/docs/screenshotOutputPinned.ts`](../../../src/docs/screenshotOutputPinned.ts), [`src/docs/screenshotRenderedInputs.ts`](../../../src/docs/screenshotRenderedInputs.ts).

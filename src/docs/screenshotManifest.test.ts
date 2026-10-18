@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import { websiteMaintenanceEnabled } from "../../scripts/website-maintenance.mjs";
 import {
   expectedFiles,
   resolveCaptures,
@@ -412,7 +413,7 @@ describe("renderManifest", () => {
   });
 });
 
-describe("the repository's screenshots", () => {
+describe.skipIf(!websiteMaintenanceEnabled)("the repository's screenshots", () => {
   // The same rule `npm run screenshots:check` applies, so `npm test` says
   // before CI does that a dashboard change needs `npm run screenshots:gen`.
   it("each surface's manifest inputs equal the tree's, and every picture is present", () => {

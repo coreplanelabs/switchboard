@@ -4,19 +4,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { baseForEvent, fixtureRegistrationOnly, planForDiff, planForPaths } from "../scripts/ci-plan.mjs";
+import { baseForEvent, fixtureRegistrationOnly, fullPlan, planForDiff, planForPaths } from "../scripts/ci-plan.mjs";
+
+import { websiteMaintenanceEnabled } from "../scripts/website-maintenance.mjs";
 
 describe("selective CI", () => {
-  it("runs the docs build, but no runtime or package build, for a docs page", () => {
+  it("selects website work for a docs page only when enabled", () => {
     expect(planForPaths(["docs/how-to/example.md"])).toEqual({
       botChecks: ["check:consistency"],
       botTests: false,
       web: false,
-      docs: true,
+      docs: websiteMaintenanceEnabled,
       package: false,
       workers: ["none"],
       images: ["none"],
     });
+  });
+
+  it.skipIf(websiteMaintenanceEnabled)("keeps website work paused for site inputs and the fallback plan", () => {
+    for (const path of [
+      "docs/.vitepress/config.ts",
+      "deploy/cloudflare-docs/package.json",
+      "scripts/docs-gen.ts",
+      "project.json",
+    ]) {
+      expect(planForPaths([path]).docs, path).toBe(false);
+    }
+    expect(fullPlan()).toMatchObject({ docs: false, web: true, botTests: true, package: true });
   });
 
   it("runs repository lint for code in every workspace", () => {
@@ -176,11 +190,12 @@ describe("selective CI", () => {
     expect(planForPaths(["packages/switchboard/smoke.test.mts"]).images).toEqual(["none"]);
   });
 
-  it("runs every leg for unknown paths and shared dependency changes", () => {
+  it("runs every enabled leg for unknown paths and shared dependency changes", () => {
     for (const path of ["new-surface/file.ts", "package-lock.json", ".depot/workflows/ci.yml", "scripts/ci-plan.mjs"]) {
       const plan = planForPaths([path]);
       expect(plan.botChecks).toEqual(["check:consistency", "typecheck", "lint", "format:check"]);
-      expect(plan.botTests && plan.web && plan.docs && plan.package).toBe(true);
+      expect(plan.botTests && plan.web && plan.package).toBe(true);
+      expect(plan.docs).toBe(websiteMaintenanceEnabled);
       expect(plan.workers).toHaveLength(4);
       expect(plan.images).toHaveLength(3);
     }
