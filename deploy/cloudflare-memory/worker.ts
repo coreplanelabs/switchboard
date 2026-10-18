@@ -16,6 +16,14 @@ import {
 } from "./resetSettings.js";
 import { resetSettingsRoute } from "./resetSettingsRoutes.js";
 import {
+  LIVE_EVENT_PAGE_BYTES,
+  LIVE_EVENT_PAGE_ROWS,
+  liveEventSnapshotOf,
+  sameLiveEventSnapshot,
+  type LiveEventSnapshot,
+  type LiveEventPage,
+} from "../../src/core/runLedger/eventPage.js";
+import {
   nativeRetirementTargetSchema,
   nativeRetirementTargetKey,
   nativeRetirementPermitSchema,
@@ -2743,6 +2751,32 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
     `);
     this.migrateRunsTable();
+    // Mutation revisions cover every SQL writer, including replacement inserts.
+    // Existing histories initialize lazily from their indexed sequence metadata.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS run_event_versions (
+        run_id TEXT PRIMARY KEY, high_water INTEGER NOT NULL, version INTEGER NOT NULL
+      );
+      CREATE TRIGGER IF NOT EXISTS run_events_insert_version AFTER INSERT ON run_events BEGIN
+        INSERT INTO run_event_versions(run_id,high_water,version) VALUES(NEW.run_id,NEW.seq,0)
+        ON CONFLICT(run_id) DO UPDATE SET
+          version=version+CASE WHEN NEW.seq<=high_water THEN 1 ELSE 0 END,
+          high_water=MAX(high_water,NEW.seq);
+      END;
+      CREATE TRIGGER IF NOT EXISTS run_events_update_version AFTER UPDATE ON run_events BEGIN
+        INSERT INTO run_event_versions(run_id,high_water,version) VALUES(OLD.run_id,OLD.seq,1)
+        ON CONFLICT(run_id) DO UPDATE SET version=version+1;
+        INSERT INTO run_event_versions(run_id,high_water,version)
+          SELECT NEW.run_id,NEW.seq,1 WHERE NEW.run_id<>OLD.run_id
+        ON CONFLICT(run_id) DO UPDATE SET version=version+1;
+        UPDATE run_event_versions SET high_water=MAX(high_water,NEW.seq) WHERE run_id=NEW.run_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS run_events_delete_version AFTER DELETE ON run_events BEGIN
+        INSERT INTO run_event_versions(run_id,high_water,version) VALUES(OLD.run_id,OLD.seq,1)
+        ON CONFLICT(run_id) DO UPDATE SET version=version+1;
+      END;
+    `);
+
     // Derived candidates never grant authority. Source writes invalidate them
     // in the same SQLite transaction, including legacy imports and deletions.
     this.sql.exec(`
@@ -7184,11 +7218,9 @@ export class RunHistoryDO extends DurableObject<Env> {
             );
           });
 
-        for (const entry of this.sql
-          .exec<{ allocation_json: string }>(
-            "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
-          )
-          .toArray()) {
+        for (const entry of this.sql.exec<{ allocation_json: string }>(
+          "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+        )) {
           const archive = workspaceDurabilityArchiveOf(parseStoredJson(entry.allocation_json));
           if (!archive) throw new Error("workspace allocation authority is unreadable");
           const allocation = archive.allocation;
@@ -9731,8 +9763,81 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** The events a live run has appended so far (item 30), in seq order — what
    *  a reclaim closes an unresumable run's record with. The finished-runs
    *  reads never see a live run, so this is the one way at its events. */
-  async liveEvents(runId: string): Promise<StoredRunEvent[]> {
-    return parseEventRows(this.eventRows(runId, 0, Number.MAX_SAFE_INTEGER));
+  async liveEvents(
+    runId: string,
+    afterSeq?: number,
+    expected?: LiveEventSnapshot,
+  ): Promise<
+    | ({ ok: true } & LiveEventPage)
+    | { ok: false; reason: "snapshot-changed" | "event-too-large" | "pagination-required" }
+  > {
+    const maximum = this.sql
+      .exec<{ seq: number }>("SELECT COALESCE(MAX(seq),0) AS seq FROM run_events WHERE run_id=?", runId)
+      .one().seq;
+    this.sql.exec(
+      "INSERT INTO run_event_versions(run_id,high_water,version) VALUES(?,?,0) ON CONFLICT(run_id) DO UPDATE SET high_water=excluded.high_water WHERE excluded.high_water>run_event_versions.high_water",
+      runId,
+      maximum,
+    );
+    const version = this.sql
+      .exec<{ version: number }>("SELECT version FROM run_event_versions WHERE run_id=?", runId)
+      .one().version;
+    const live = this.sql
+      .exec<{ owner_gen: string; phase: string; started_at: number }>(
+        "SELECT owner_gen,phase,started_at FROM live_runs WHERE run_id=?",
+        runId,
+      )
+      .toArray()[0];
+    const stored = live
+      ? undefined
+      : this.sql
+          .exec<{ status: string; started_at: number }>("SELECT status,started_at FROM runs WHERE run_id=?", runId)
+          .toArray()[0];
+    const snapshot: LiveEventSnapshot = {
+      version,
+      through: expected?.through ?? maximum,
+      ownerGen: live?.owner_gen ?? null,
+      phase: live?.phase ?? stored?.status ?? null,
+      startedAt: live?.started_at ?? stored?.started_at ?? null,
+    };
+    if (
+      (afterSeq !== undefined && afterSeq > snapshot.through) ||
+      (expected && (!sameLiveEventSnapshot(snapshot, expected) || expected.through > maximum))
+    )
+      return { ok: false, reason: "snapshot-changed" };
+    const rows: EventRow[] = [];
+    let bytes = 0,
+      more = false;
+    for (const row of this.sql.exec<EventRow>(
+      "SELECT seq,json FROM run_events WHERE run_id=? AND seq>? AND seq<=? ORDER BY seq",
+      runId,
+      afterSeq ?? 0,
+      snapshot.through,
+    )) {
+      const size = utf8ByteLength(row.json);
+      if (size > LIVE_EVENT_PAGE_BYTES) return { ok: false, reason: "event-too-large" };
+      if (
+        rows.length === (afterSeq === undefined ? RUN_EVENTS_MAX_PAGE : LIVE_EVENT_PAGE_ROWS) ||
+        bytes + size > LIVE_EVENT_PAGE_BYTES
+      ) {
+        more = true;
+        break;
+      }
+      rows.push(row);
+      bytes += size;
+    }
+    // Older clients do not understand cursors. Never return a partial success.
+    if (afterSeq === undefined && more) {
+      console.warn(JSON.stringify({ event: "live_events.pagination_required", operation: "/runs/live-events", runId }));
+      return { ok: false, reason: "pagination-required" };
+    }
+    return {
+      ok: true,
+      events: parseEventRows(rows),
+      snapshot,
+      readThrough: rows.at(-1)?.seq ?? afterSeq ?? 0,
+      ...(more ? { nextAfterSeq: rows[rows.length - 1].seq } : {}),
+    };
   }
 
   // ---- the intake receipts (run-history item 59) -------------------------------
@@ -10814,11 +10919,79 @@ export class RunHistoryDO extends DurableObject<Env> {
       .map((row) => row.run_id);
   }
 
+  /** Capture before deletion removes the reference index. Missing authority
+   * retains pins; a narrow delete must never substitute a global prune. */
+  private deletionPinKeys(id: string): string[] {
+    try {
+      const keys = new Set(
+        this.sql
+          .exec<{ session_key: string }>(
+            "SELECT DISTINCT session_key FROM context_refs WHERE session_key != '' AND (holder_run_id = ? OR source_run_id = ?)",
+            id,
+            id,
+          )
+          .toArray()
+          .map((row) => row.session_key),
+      );
+      const saved = this.sql
+        .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id = ?", id)
+        .toArray()[0];
+      const record = saved ? parseSummary(saved) : undefined;
+      if (saved && (!record || record.id !== id)) throw new Error("unreadable run");
+      if (record?.session) {
+        if (record.session.range === "broken") throw new Error("unreadable session");
+        keys.add(record.session.key);
+      }
+      const raw = this.allocationArchive(id);
+      if (raw !== undefined) {
+        const archive = workspaceDurabilityArchiveOf(raw);
+        if (!archive || archive.runId !== id) throw new Error("unreadable allocation");
+        const allocation = archive.allocation;
+        if (allocation?.kind === "exclusive-scratch") {
+          if (record && (record.startedAt !== archive.startedAt || !allocationMatchesRecord(allocation, record)))
+            throw new Error("allocation owner changed");
+          keys.add(contextThreadSessionKey(allocation.threadKey));
+        }
+        const custody =
+          archive.disposition?.kind === "scratch-custody-closed" ? archive.disposition.custody : undefined;
+        if (custody) {
+          if (
+            record &&
+            (custody.sessionKey !== record.session?.key ||
+              record.session?.range === "broken" ||
+              record.session?.range.to !== custody.through)
+          )
+            throw new Error("custody owner changed");
+          keys.add(custody.sessionKey);
+          keys.add(custody.threadReport.key);
+        }
+        const session = archive.promotion ? promotionBodyOf(archive.promotion.bodyJson)?.meta.session : undefined;
+        if (session) {
+          if (session.range === "broken") throw new Error("unreadable original session");
+          keys.add(session.key);
+        }
+      }
+      if ([...keys].some((key) => !parseSessionKey(key).ok)) throw new Error("unreadable pin key");
+      return [...keys];
+    } catch {
+      console.warn(
+        JSON.stringify({
+          event: "range_pins.retained",
+          operation: "/runs/delete",
+          runId: id,
+          reason: "pin_coverage_unavailable",
+        }),
+      );
+      return [];
+    }
+  }
+
   /** Remove a run and its events. Returns whether a run row existed. */
   async delete(
     id: string,
     destructive = false,
   ): Promise<boolean | { ok: false; reason: "publication_pending" | "live" }> {
+    let pinKeys: string[] = [];
     const result = await this.observeInputGate("delete", id, async () => {
       let deleted = false;
       let refused = false;
@@ -10841,13 +11014,14 @@ export class RunHistoryDO extends DurableObject<Env> {
           this.sql.exec("DELETE FROM plane_queue WHERE run_id=?", id);
           this.sql.exec("DELETE FROM plane_reservations WHERE run_id=?", id);
         }
+        pinKeys = this.deletionPinKeys(id);
         this.deleteRuns([id], true);
       });
       if (refused)
         return { ok: false as const, reason: this.liveRow(id) ? ("live" as const) : ("publication_pending" as const) };
       return deleted;
     });
-    if (typeof result === "boolean") await this.syncRangePins();
+    if (typeof result === "boolean" && pinKeys.length > 0) await this.syncRangePins(pinKeys);
     return result;
   }
 
@@ -15390,7 +15564,37 @@ async function handleLedger(
     if (typeof b.message !== "object" || b.message === null) return json({ error: "message must be an object" }, 400);
     return json(await stub.pushInbox(runId.value, b.message as Record<string, unknown>));
   }
-  if (pathname === "/runs/live-events") return json({ events: await stub.liveEvents(runId.value) });
+  if (pathname === "/runs/live-events") {
+    const snapshot = b.snapshot === undefined ? undefined : liveEventSnapshotOf(b.snapshot);
+    if (
+      (b.afterSeq !== undefined && (!Number.isSafeInteger(b.afterSeq) || Number(b.afterSeq) < 0)) ||
+      (b.snapshot !== undefined && (!snapshot || b.afterSeq === undefined || Number(b.afterSeq) > snapshot.through))
+    )
+      return json({ error: "invalid live event cursor" }, 400);
+    const result = await stub.liveEvents(runId.value, b.afterSeq as number | undefined, snapshot);
+    if (!result.ok) {
+      if (result.reason !== "pagination-required")
+        console.warn(
+          JSON.stringify({
+            event: "live_events.refused",
+            operation: "/runs/live-events",
+            runId: runId.value,
+            reason: result.reason,
+          }),
+        );
+      return json({ error: result.reason }, result.reason === "snapshot-changed" ? 409 : 413);
+    }
+    return json(
+      b.afterSeq === undefined
+        ? { events: result.events }
+        : {
+            events: result.events,
+            snapshot: result.snapshot,
+            readThrough: result.readThrough,
+            ...(result.nextAfterSeq !== undefined ? { nextAfterSeq: result.nextAfterSeq } : {}),
+          },
+    );
+  }
   if (pathname === "/runs/inbox/read") {
     const after = b.afterSeq === undefined ? 0 : b.afterSeq;
     if (typeof after !== "number" || !Number.isInteger(after) || after < 0) {

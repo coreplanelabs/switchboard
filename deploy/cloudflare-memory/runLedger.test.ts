@@ -3578,6 +3578,46 @@ describe("original workspace durability in real SQLite", () => {
       }
     },
   );
+  it("deletion finds a prepared original session after its live and record rows are absent", async () => {
+    const key = storeKey(),
+      req = request(key);
+    const sessionKey = `${req.run.meta.threadKey}:prepared`;
+    Object.assign(req.run.meta, { session: { key: sessionKey, seedFrom: 0, request: 0, range: { from: 0 } } });
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (url, init) => fetchMemoryTest(String(url), init),
+    });
+    expect(await client.claim(req.run)).toMatchObject({ ok: true });
+    expect((await client.preparePromotion(JSON.stringify({ ...req, run: { ...req.run, phase: "live" } }))).kind).toBe(
+      "prepared",
+    );
+    const keys = [sessionKey, contextThreadSessionKey(req.run.meta.threadKey)];
+    for (const name of keys) {
+      const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(name));
+      await log.setOwner(id, "g1");
+      await log.write(
+        "g1",
+        [{ idx: 0, part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "saved" } }) }],
+        [],
+      );
+      expect((await log.protectRanges(id, [{ from: 0, to: 0 }])).ok).toBe(true);
+    }
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_owner, state) => {
+      state.storage.sql.exec("DELETE FROM live_runs WHERE run_id=?", id);
+      state.storage.sql.exec("DELETE FROM context_refs WHERE holder_run_id=? OR source_run_id=?", id, id);
+    });
+    expect((await post("/runs/delete", { storeKey: key, id, destructive: true })).status).toBe(200);
+    for (const name of keys) {
+      const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(name));
+      expect(
+        await runInDurableObject(log, (owner) =>
+          (owner as unknown as { rangePins(): Record<string, unknown> }).rangePins(),
+        ),
+      ).toEqual({});
+    }
+  });
   it("retains first contract or legacy absence through abandon and refuses replacement", async () => {
     for (const original of [allocation, null]) {
       const key = storeKey();
@@ -3921,6 +3961,33 @@ describe("original workspace durability in real SQLite", () => {
           disposition: { kind: kind === "admit" || kind === "steer" ? "scratch-custody-closed" : "retained" },
         });
       });
+    }
+  });
+  it("deletion releases canonical custody session and report pins without a reference index", async () => {
+    const key = storeKey(),
+      ended = await closure(key);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await stub.finish(id, "g1", ended);
+    const keys = [ended.session!.key, contextThreadSessionKey(ended.threadKey)];
+    for (const name of keys) {
+      const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(name));
+      expect(
+        await runInDurableObject(log, (owner) =>
+          Object.hasOwn((owner as unknown as { rangePins(): Record<string, unknown> }).rangePins(), id),
+        ),
+      ).toBe(true);
+    }
+    await runInDurableObject(stub, (_owner, state) => {
+      state.storage.sql.exec("DELETE FROM context_refs WHERE holder_run_id=? OR source_run_id=?", id, id);
+    });
+    expect((await post("/runs/delete", { storeKey: key, id, destructive: true })).status).toBe(200);
+    for (const name of keys) {
+      const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(name));
+      expect(
+        await runInDurableObject(log, (owner) =>
+          Object.hasOwn((owner as unknown as { rangePins(): Record<string, unknown> }).rangePins(), id),
+        ),
+      ).toBe(false);
     }
   });
   it("retains both custody pins through actual maintenance before and after finish", async () => {
@@ -19245,5 +19312,367 @@ describe("source-input context readers in SQLite", () => {
         .toArray(),
     );
     expect(pins).toEqual([{ source_run_id: "source-root" }]);
+  });
+});
+
+describe("bounded run-history deletion", () => {
+  it("leaves unrelated session pin revisions unchanged when deleting a missing run", async () => {
+    const key = storeKey();
+    const sessionKey = `${key}:unrelated`;
+    const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey));
+    await log.setOwner("unrelated", "g1");
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_owner, state) => {
+      state.storage.sql.exec("INSERT INTO sessions(key,thread_key) VALUES(?,?)", sessionKey, "slack:C1:unrelated");
+    });
+    const before = await log.custodyPinRevision();
+    expect((await post("/runs/delete", { storeKey: key, id: "absent" })).data).toMatchObject({
+      ok: true,
+      deleted: false,
+    });
+    expect(await log.custodyPinRevision()).toEqual(before);
+  });
+});
+
+describe("bounded live event snapshots", () => {
+  async function fixture(count = 140, bytes = 4) {
+    const key = storeKey(),
+      runId = "paged-events";
+    const wire = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (url, init) => fetchMemoryTest(String(url), init),
+    });
+    expect(await wire.claim(claimBody(key, runId, `${key}:thread`).run)).toMatchObject({ ok: true });
+    const events: AppendableEvent[] = Array.from({ length: count }, (_, index) => ({
+      type: "assistant",
+      text: "x".repeat(bytes),
+      seq: index + 1,
+    }));
+    expect(await wire.append(runId, "g1", events)).toEqual({ ok: true });
+    const first = await post("/runs/live-events", { storeKey: key, runId, afterSeq: 0 });
+    return { key, runId, wire, events, first, stub: env.RUNS.get(env.RUNS.idFromName(key)) };
+  }
+
+  it("reads more than the RPC return ceiling through bounded HTTP pages including a valid large artifact", async () => {
+    const f = await fixture(560, 60 * 1024);
+    const artifact: AppendableEvent = {
+      type: "review_artifact",
+      artifact: "reading_diff",
+      poweredBy: "git",
+      baseRef: "origin/main",
+      diff: "a".repeat(1_400_000),
+      truncated: false,
+      seq: 561,
+    };
+    expect(await f.wire.append(f.runId, "g1", [artifact])).toEqual({ ok: true });
+    const sizes: number[] = [];
+    const reader = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: f.key,
+      fetch: (url, init) =>
+        fetchMemoryTest(String(url), init, async (response) => {
+          const raw = await response.text();
+          if (String(url).endsWith("/runs/live-events")) sizes.push(new TextEncoder().encode(raw).byteLength);
+          return new Response(raw, { status: response.status, headers: response.headers });
+        }),
+    });
+    expect(await reader.readEvents(f.runId)).toEqual([...f.events, artifact]);
+    expect(sizes.length).toBeGreaterThan(1);
+    expect(sizes.every((size) => size <= 2 * 1024 * 1024 + 1024)).toBe(true);
+    const warning = vi.spyOn(console, "warn");
+    try {
+      expect((await post("/runs/live-events", { storeKey: f.key, runId: f.runId })).status).toBe(413);
+      expect(warning.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            event: "live_events.pagination_required",
+            operation: "/runs/live-events",
+            runId: "paged-events",
+          }),
+        ],
+      ]);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("logs a bounded snapshot refusal at the HTTP boundary", async () => {
+    const f = await fixture();
+    expect(await f.wire.append(f.runId, "g1", [{ type: "assistant", text: "changed", seq: 1 }])).toEqual({ ok: true });
+    const warning = vi.spyOn(console, "warn");
+    try {
+      const response = await post("/runs/live-events", {
+        storeKey: f.key,
+        runId: f.runId,
+        afterSeq: f.first.data.nextAfterSeq,
+        snapshot: f.first.data.snapshot,
+      });
+      expect(response).toEqual({ status: 409, data: { error: "snapshot-changed" } });
+      expect(warning.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            event: "live_events.refused",
+            operation: "/runs/live-events",
+            runId: "paged-events",
+            reason: "snapshot-changed",
+          }),
+        ],
+      ]);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("logs an injected oversized-event refusal at the HTTP boundary", async () => {
+    const f = await fixture(1);
+    // SQLite's row ceiling is no larger than this page's byte budget. Inject
+    // the defensive DO result; exercise the real HTTP status and diagnostic.
+    let original!: RunHistoryDO["liveEvents"];
+    await runInDurableObject(f.stub, (owner: RunHistoryDO) => {
+      const prototype = Object.getPrototypeOf(owner) as RunHistoryDO;
+      original = prototype.liveEvents;
+      prototype.liveEvents = async () => ({ ok: false, reason: "event-too-large" });
+    });
+    const warning = vi.spyOn(console, "warn");
+    try {
+      const response = await post("/runs/live-events", { storeKey: f.key, runId: f.runId, afterSeq: 0 });
+      expect(response).toEqual({ status: 413, data: { error: "event-too-large" } });
+      expect(warning.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            event: "live_events.refused",
+            operation: "/runs/live-events",
+            runId: "paged-events",
+            reason: "event-too-large",
+          }),
+        ],
+      ]);
+    } finally {
+      warning.mockRestore();
+      await runInDurableObject(f.stub, (owner: RunHistoryDO) => {
+        (Object.getPrototypeOf(owner) as RunHistoryDO).liveEvents = original;
+      });
+    }
+  });
+
+  it("excludes later tail appends from the first snapshot", async () => {
+    const f = await fixture();
+    expect(await f.wire.append(f.runId, "g1", [{ type: "assistant", text: "later", seq: 141 }])).toEqual({ ok: true });
+    const page = await post("/runs/live-events", {
+      storeKey: f.key,
+      runId: f.runId,
+      afterSeq: f.first.data.nextAfterSeq,
+      snapshot: f.first.data.snapshot,
+    });
+    expect(page.status).toBe(200);
+    expect(page.data.events).toEqual(f.events.slice(128));
+    expect(page.data.readThrough).toBe(140);
+  });
+
+  it.each(["replace", "update", "delete", "recreate"] as const)(
+    "refuses continuation after %s changes the original history",
+    async (mutation) => {
+      const f = await fixture();
+      if (mutation === "replace") {
+        expect(await f.wire.append(f.runId, "g1", [{ type: "assistant", text: "replaced", seq: 1 }])).toEqual({
+          ok: true,
+        });
+      } else {
+        await runInDurableObject(f.stub, (_owner, state) => {
+          if (mutation === "update")
+            state.storage.sql.exec(
+              "UPDATE run_events SET json=? WHERE run_id=? AND seq=1",
+              JSON.stringify({ type: "assistant", text: "edited", seq: 1 }),
+              f.runId,
+            );
+          if (mutation === "delete") state.storage.sql.exec("DELETE FROM run_events WHERE run_id=? AND seq=1", f.runId);
+          if (mutation === "recreate") {
+            const row = state.storage.sql
+              .exec<Record<string, SqlStorageValue>>("SELECT * FROM live_runs WHERE run_id=?", f.runId)
+              .one();
+            state.storage.sql.exec("DELETE FROM live_runs WHERE run_id=?", f.runId);
+            row.started_at = Number(row.started_at) + 1;
+            const columns = Object.keys(row);
+            state.storage.sql.exec(
+              `INSERT INTO live_runs(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`,
+              ...Object.values(row),
+            );
+          }
+        });
+      }
+      expect(
+        (
+          await post("/runs/live-events", {
+            storeKey: f.key,
+            runId: f.runId,
+            afterSeq: f.first.data.nextAfterSeq,
+            snapshot: f.first.data.snapshot,
+          })
+        ).status,
+      ).toBe(409);
+    },
+  );
+
+  it("initializes an existing large history from indexed sequence metadata on its first page", async () => {
+    const key = storeKey(),
+      runId = "legacy-event-history";
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, (_owner, state) => {
+      state.storage.transactionSync(() => {
+        for (let seq = 1; seq <= 20_000; seq++)
+          state.storage.sql.exec(
+            "INSERT INTO run_events(run_id,seq,json) VALUES(?,?,?)",
+            runId,
+            seq,
+            JSON.stringify({ type: "assistant", text: "legacy", seq }),
+          );
+        state.storage.sql.exec("DELETE FROM run_event_versions WHERE run_id=?", runId);
+        // The first post-upgrade mutation may touch an old low sequence.
+        state.storage.sql.exec(
+          "INSERT OR REPLACE INTO run_events(run_id,seq,json) VALUES(?,1,?)",
+          runId,
+          JSON.stringify({ type: "assistant", text: "before paging", seq: 1 }),
+        );
+      });
+    });
+    const page = await post("/runs/live-events", { storeKey: key, runId, afterSeq: 0 });
+    expect(page.status).toBe(200);
+    expect(page.data.snapshot).toEqual({ version: 0, through: 20_000, ownerGen: null, phase: null, startedAt: null });
+    expect((page.data.events as AppendableEvent[]).map((event) => event.seq)).toEqual(
+      Array.from({ length: 128 }, (_, index) => index + 1),
+    );
+    expect(page.data.nextAfterSeq).toBe(128);
+    const changes = () =>
+      runInDurableObject(
+        stub,
+        (_owner, state) => state.storage.sql.exec<{ count: number }>("SELECT total_changes() AS count").one().count,
+      );
+    const beforeRead = await changes();
+    expect((await post("/runs/live-events", { storeKey: key, runId, afterSeq: 0 })).data).toEqual(page.data);
+    expect(await changes()).toBe(beforeRead);
+    await runInDurableObject(stub, (_owner, state) => {
+      state.storage.sql.exec(
+        "INSERT OR REPLACE INTO run_events(run_id,seq,json) VALUES(?,129,?)",
+        runId,
+        JSON.stringify({ type: "assistant", text: "changed after paging", seq: 129 }),
+      );
+    });
+    expect(
+      (await post("/runs/live-events", { storeKey: key, runId, afterSeq: 128, snapshot: page.data.snapshot })).status,
+    ).toBe(409);
+  });
+
+  it("refuses continuation after terminal finish rewrites the event rows", async () => {
+    const f = await fixture();
+    const closed = { ...record(f.runId, `${f.key}:thread`), events: f.events, eventCount: 140, storedEventCount: 140 };
+    expect(await f.wire.finish(f.runId, "g1", closed)).toMatchObject({ ok: true });
+    expect(
+      (
+        await post("/runs/live-events", {
+          storeKey: f.key,
+          runId: f.runId,
+          afterSeq: f.first.data.nextAfterSeq,
+          snapshot: f.first.data.snapshot,
+        })
+      ).status,
+    ).toBe(409);
+  });
+  it("advances past corrupt rows without looping or including them", async () => {
+    const f = await fixture();
+    await runInDurableObject(f.stub, (_owner, state) => {
+      state.storage.sql.exec("UPDATE run_events SET json='broken' WHERE run_id=? AND seq=129", f.runId);
+    });
+    expect(await f.wire.readEvents(f.runId)).toEqual(f.events.filter((event) => event.seq !== 129));
+  });
+});
+
+describe("deletion pin coverage", () => {
+  it("releases the deleted holder and preserves another holder on the same log", async () => {
+    const key = storeKey(),
+      target = "delete-pin-target",
+      survivor = "delete-pin-survivor";
+    const source = `${key}:source`,
+      unrelated = `${key}:unrelated`;
+    const logs = [source, unrelated].map((name) => env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(name)));
+    for (const log of logs) {
+      await log.setOwner("source", "g1");
+      await log.write(
+        "g1",
+        [{ idx: 0, part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "saved" } }) }],
+        [],
+      );
+      expect((await log.protectRanges(target, [{ from: 0, to: 0 }])).ok).toBe(true);
+    }
+    expect((await logs[0].protectRanges(survivor, [{ from: 0, to: 0 }])).ok).toBe(true);
+    expect((await post("/runs/put", { storeKey: key, record: record(target, "slack:C1:target") })).status).toBe(200);
+    expect((await post("/runs/put", { storeKey: key, record: record(survivor, "slack:C1:survivor") })).status).toBe(
+      200,
+    );
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_owner, state) => {
+      for (const holder of [target, survivor])
+        state.storage.sql.exec(
+          "INSERT INTO context_refs(holder_run_id,source_run_id,session_key) VALUES(?,?,?)",
+          holder,
+          survivor,
+          source,
+        );
+      state.storage.sql.exec("INSERT INTO sessions(key,thread_key) VALUES(?,?)", unrelated, "slack:C1:unrelated");
+    });
+    const unrelatedRevision = await logs[1].custodyPinRevision();
+    expect((await post("/runs/delete", { storeKey: key, id: target, destructive: true })).status).toBe(200);
+    const pins = await runInDurableObject(logs[0], (log) =>
+      (log as unknown as { rangePins(): Record<string, unknown> }).rangePins(),
+    );
+    expect(pins).toEqual({ [survivor]: [{ from: 0, to: 0 }] });
+    expect(await logs[1].custodyPinRevision()).toEqual(unrelatedRevision);
+  });
+
+  it("retains pins when the deleted record has unreadable canonical metadata", async () => {
+    const key = storeKey(),
+      target = "delete-unreadable",
+      sessionKey = `${key}:source`;
+    const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey));
+    await log.setOwner("source", "g1");
+    await log.write(
+      "g1",
+      [{ idx: 0, part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "saved" } }) }],
+      [],
+    );
+    expect((await log.protectRanges(target, [{ from: 0, to: 0 }])).ok).toBe(true);
+    expect((await post("/runs/put", { storeKey: key, record: record(target, "slack:C1:target") })).status).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_owner, state) => {
+      state.storage.sql.exec("UPDATE runs SET summary_json='broken' WHERE run_id=?", target);
+      state.storage.sql.exec(
+        "INSERT INTO context_refs(holder_run_id,source_run_id,session_key) VALUES(?,?,?)",
+        target,
+        target,
+        sessionKey,
+      );
+    });
+    const before = await log.custodyPinRevision();
+    const warning = vi.spyOn(console, "warn");
+    try {
+      expect((await post("/runs/delete", { storeKey: key, id: target, destructive: true })).status).toBe(200);
+      expect(warning.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            event: "range_pins.retained",
+            operation: "/runs/delete",
+            runId: target,
+            reason: "pin_coverage_unavailable",
+          }),
+        ],
+      ]);
+    } finally {
+      warning.mockRestore();
+    }
+    expect(await log.custodyPinRevision()).toEqual(before);
+    expect(
+      await runInDurableObject(log, (owner) =>
+        (owner as unknown as { rangePins(): Record<string, unknown> }).rangePins(),
+      ),
+    ).toEqual({ [target]: [{ from: 0, to: 0 }] });
   });
 });
