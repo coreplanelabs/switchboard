@@ -92,6 +92,8 @@ deploy/cloudflare-memory/wrangler.template.jsonc	"compatibility_date": "2026-08-
 deploy/cloudflare-resident/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
 deploy/cloudflare-sandbox/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
 deploy/cloudflare/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+src/deploy/resetCloudflare.test.ts	compatibility_date: "2026-08-01",
+src/deploy/resetHosting.test.ts	compatibility_date: "2026-08-01",
 
 # The example profile's placeholder account id: src/deploy/profile.ts requires exactly 32 hex characters, so the placeholder keeps the shape.
 deploy/profile.example.json	"account": "00000000000000000000000000000000",

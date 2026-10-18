@@ -38,6 +38,25 @@ function fixture() {
 }
 
 describe("staging first installation", () => {
+  it("restores closed access and repository settings before any Bot can start", async () => {
+    const { io } = fixture();
+    const restored = { maintenance: "missing", repositories: [] as string[] };
+    const upload = io.upload;
+    io.upload = async (worker, provisional) => {
+      if (worker === "bot" && (restored.maintenance !== "active" || restored.repositories[0] !== "acme/api"))
+        throw new Error("Bot would start without restored settings");
+      await upload(worker, provisional);
+    };
+    io.restoreSettings = async () => {
+      restored.maintenance = "active";
+    };
+    io.restoreRepositories = async () => {
+      restored.repositories = ["acme/api"];
+    };
+    expect(await initializeStaging(commit, io)).toEqual({ commit, status: "installed" });
+    expect(restored).toEqual({ maintenance: "active", repositories: ["acme/api"] });
+  });
+
   it("creates a fresh stack, then replaces provisional Memory and proves all four Workers", async () => {
     const { io, state } = fixture();
     expect(await initializeStaging(commit, io)).toEqual({ commit, status: "installed" });

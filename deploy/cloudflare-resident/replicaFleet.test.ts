@@ -1,3 +1,4 @@
+import { assertRepositorySettingsWritable } from "../../src/execution/registrySettings.js";
 import { randomUUID } from "node:crypto";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -60,6 +61,7 @@ function registry(rows = new Map<string, unknown>([[`resident:${resource}`, { re
   const Registry = runInNewContext(`${compiled}\nRegistry`, {
     console,
     residentMembers,
+    assertRepositorySettingsWritable,
     residentPoolOf,
     reservedResidentCount,
     planResidentPool,

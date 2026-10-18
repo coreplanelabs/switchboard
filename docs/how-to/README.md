@@ -26,6 +26,7 @@
 
 - [Deploy](deploy.md): the profile, the secrets, `deploy all`, the optional Workers, CI.
 - [Operate production](operate-production.md): a deploy or config change outside a release; the span log.
+- [Reset application data](reset-installation.md): preview storage, preserve settings and users, then reset under the deployment lock.
 - [Rotate a secret](rotate-a-secret.md): a put and a restart.
 - [Ship a release](ship-a-release.md): read the release PR's plan, merge, confirm it is live.
 - [Configure the repository](configure-the-repository.md): the GitHub settings a fork reproduces.

@@ -6,6 +6,16 @@ import {
   type UnitGroup,
 } from "../../src/core/coordinator/unitGroups.js";
 import {
+  readResetSettings,
+  freezeResetSettings,
+  restoreResetSettings,
+  verifyResetSettings,
+  resetSettingsStatus,
+  resetConfigWriteAllowed,
+  type SettingsSnapshot,
+} from "./resetSettings.js";
+import { resetSettingsRoute } from "./resetSettingsRoutes.js";
+import {
   nativeRetirementTargetSchema,
   nativeRetirementTargetKey,
   nativeRetirementPermitSchema,
@@ -1275,6 +1285,21 @@ function isJsonObject(v: unknown): v is Record<string, unknown> {
 export class ConfigDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
 
+  resetSettings(
+    action: "preview" | "freeze" | "restore" | "verify" | "status",
+    operation?: string,
+    snapshot?: SettingsSnapshot,
+  ) {
+    if (action === "status") return resetSettingsStatus(this.ctx.storage);
+    if (action === "preview") return readResetSettings(this.ctx.storage, "config");
+    if (action === "freeze") return freezeResetSettings(this.ctx.storage, "config", operation!);
+    if (action === "restore") {
+      if (snapshot?.kind !== "config") throw new Error("invalid config reset settings");
+      return restoreResetSettings(this.ctx.storage, snapshot, operation!);
+    }
+    return verifyResetSettings(this.ctx.storage, operation!);
+  }
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
@@ -1664,6 +1689,23 @@ export class ConfigDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       const row = this.sql.exec<{ version: number }>(`SELECT version FROM documents WHERE key = ?`, key).toArray()[0];
       const current = row?.version ?? 0;
+      if (!resetConfigWriteAllowed(this.ctx.storage, key, document)) {
+        const hold = resetSettingsStatus(this.ctx.storage);
+        try {
+          console.log(
+            JSON.stringify({
+              event: "installation.reset.config_write_refused",
+              operation: hold?.operation ?? null,
+              phase: hold?.phase ?? null,
+              document: key === "maintenance" ? "maintenance" : "settings",
+            }),
+          );
+        } catch {
+          // Keep the known refusal if the telemetry sink is unavailable.
+        }
+        outcome = { ok: false, version: current };
+        return;
+      }
       if (source) {
         const sourceRow = this.sql
           .exec<{ version: number }>(`SELECT version FROM documents WHERE key = ?`, source.key)
@@ -15690,6 +15732,7 @@ async function handleRuns(
 }
 
 const ROUTES = new Set([
+  "/installation-reset/settings",
   "/organization/execute",
   "/organization/directory",
   ...CONFIG_ROUTES,
@@ -15733,7 +15776,7 @@ interface Admission {
  *  dataset (run-metrics.md item 5) — the name from the `RUN_METRICS_DATASET`
  *  var rendered beside the binding, so the probe can compare it to the bot's. */
 export function featuresOf(env: Pick<Env, "RUN_METRICS" | "RUN_METRICS_DATASET">): string[] {
-  const features = ["memory", "schedules", "runs", "config", "delivery", "costs", "plane"];
+  const features = ["memory", "schedules", "runs", "config", "delivery", "costs", "plane", "installationReset:v1"];
   if (env.RUN_METRICS !== undefined) features.push(`runMetrics:${env.RUN_METRICS_DATASET ?? "unknown"}`);
   return features;
 }
@@ -15746,6 +15789,8 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
   if (!admission.known) return json({ error: "not found" }, 404);
   if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
   if (!admission.authorized) return json({ error: "unauthorized" }, 401);
+
+  if (url.pathname === "/installation-reset/settings") return resetSettingsRoute(request, env);
 
   // Size fence BEFORE parsing: a caller holding a valid bearer still can't
   // make us JSON-parse an oversized body just to be told 400 by the field

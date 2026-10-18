@@ -1,5 +1,6 @@
 import { prepareStorageRequest } from "../../src/core/storeResponse.js";
 import { storageTransport } from "../../src/core/storageTransport.js";
+import { assertRepositorySettingsWritable, resetRepositorySettings } from "../../src/execution/registrySettings.js";
 import { captureException } from "../../src/core/runStateWriteDiagnostic.js";
 import {
   FENCE_ACQUISITION_PREFIX,
@@ -1962,6 +1963,21 @@ const IMAGE_RECONCILE_KEY = "imageReconcile";
 type OnboardResult = { ok: true; record: ResidentRecord } | { ok: false; status: number; error: string };
 
 export class ResidentRegistryDO extends DurableObject<Env> {
+  async resetSettings(action: "preview" | "freeze" | "restore", operation?: string, records?: ResidentRecord[]) {
+    return resetRepositorySettings(this.ctx.storage, action, operation, records, (record) => {
+      if (
+        !record ||
+        "error" in parseResource(record.resource) ||
+        "error" in parseCommands(record.commands) ||
+        "error" in parseDefaultRef(record.defaultRef) ||
+        "error" in parseResidentLimits({ ...record }) ||
+        record.offboarding
+      )
+        throw new Error("repository reset settings are invalid");
+      residentPoolOf(record);
+    });
+  }
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     if (env.RESIDENT_MAINTENANCE_POLICY !== undefined)
@@ -2290,6 +2306,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   async onboard(record: ResidentRecord): Promise<OnboardResult> {
     const { cap } = await this.limits();
     return this.ctx.storage.transaction(async (txn) => {
+      await assertRepositorySettingsWritable(txn, "onboard");
       if ((await this.getStagingMaintenance(txn))?.state === "held")
         return { ok: false, status: 409, error: "staging maintenance blocks registration" };
       return registerRepository<ResidentRecord>(txn, record, cap);
@@ -2328,6 +2345,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  already onboarded; the cap check is the same as onboard's. */
   async replace(evict: string, record: ResidentRecord): Promise<OnboardResult> {
     return this.ctx.storage.transaction(async (txn) => {
+      await assertRepositorySettingsWritable(txn, "replace");
       if ((await this.getStagingMaintenance(txn))?.state === "held")
         return { ok: false, status: 409, error: "staging maintenance blocks replacement" };
       if ((await this.getRepository(evict))?.pool)
@@ -2415,6 +2433,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       () => `resident-${crypto.randomUUID()}`,
     );
     return this.ctx.storage.transaction(async (txn) => {
+      await assertRepositorySettingsWritable(txn, "requestWarmReplicas");
       const record = await txn.get<ResidentRecord>(registryKey(resource));
       if (!record || record.noResident || record.offboarding)
         return { ok: false, status: 404, error: `${resource} has no resident` };
@@ -2469,6 +2488,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   ): Promise<{ ok: true; after?: string; done: boolean } | { ok: false }> {
     const identities = page?.threads.map(() => crypto.randomUUID()) ?? [];
     return this.ctx.storage.transaction(async (txn) => {
+      await assertRepositorySettingsWritable(txn, "importPrimaryPlacements");
       if (
         !replicaMaintenanceFence(
           await txn.get(DRAIN_KEY),
@@ -2550,6 +2570,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     >,
   ): Promise<ResidentRecord | null> {
     return this.ctx.storage.transaction(async (txn) => {
+      await assertRepositorySettingsWritable(txn, "updateConfig");
       if ((await this.getStagingMaintenance(txn))?.state === "held")
         throw new Error("staging maintenance blocks configuration changes");
       const key = registryKey(resource);
@@ -2568,11 +2589,15 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   }
 
   async remove(resource: string): Promise<boolean> {
-    return this.ctx.storage.delete(registryKey(resource));
+    return this.ctx.storage.transaction(async (txn) => {
+      await assertRepositorySettingsWritable(txn, "remove");
+      return txn.delete(registryKey(resource));
+    });
   }
 
   async beginPoolOffboard(resource: string, revision: string): Promise<ResidentRecord | undefined> {
     return this.ctx.storage.transaction(async (txn) => {
+      await assertRepositorySettingsWritable(txn, "beginPoolOffboard");
       const record = await txn.get<ResidentRecord>(registryKey(resource));
       if (!record?.pool || record.pool.revision !== revision) return undefined;
       const held = { ...record, offboarding: true as const };
@@ -2586,6 +2611,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   async finishPoolOffboard(resource: string, revision: string): Promise<boolean> {
     for (;;) {
       const result = await this.ctx.storage.transaction(async (txn) => {
+        await assertRepositorySettingsWritable(txn, "finishPoolOffboard");
         const record = await txn.get<ResidentRecord>(registryKey(resource));
         if (!record?.offboarding || record.pool?.revision !== revision) return "refused";
         const pool = residentPoolOf(record)!;
@@ -2609,6 +2635,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     receipt: { backupObjectsDeleted: number; r2ObjectsDeleted: number },
   ): Promise<boolean> {
     return this.ctx.storage.transaction(async (txn) => {
+      await assertRepositorySettingsWritable(txn, "recordPoolRemoval");
       const record = await txn.get<ResidentRecord>(registryKey(resource));
       const pool = record && residentPoolOf(record);
       if (
@@ -15934,6 +15961,7 @@ function parseResidentLimits(
 // ---------------------------------------------------------------------------
 
 const ROUTES: Record<string, { scope: Scope; method: string }> = {
+  "/installation-reset/settings": { scope: "admin", method: "POST" },
   "/register": { scope: "admin", method: "POST" },
   "/onboard": { scope: "admin", method: "POST" },
   "/offboard": { scope: "admin", method: "POST" },
@@ -16105,6 +16133,48 @@ export default {
     const res = await (async (): Promise<Response> => {
       try {
         switch (url.pathname) {
+          case "/installation-reset/settings": {
+            const action = body.action;
+            if (!["preview", "freeze", "restore"].includes(String(action)))
+              return json({ error: "invalid repository reset action" }, 400);
+            const result = await registryStub(env).resetSettings(
+              action as "preview" | "freeze" | "restore",
+              body.operation as string | undefined,
+              body.records as ResidentRecord[] | undefined,
+            );
+            if (action === "restore") {
+              let initialized = 0;
+              for (const member of residentMembers(result.records)) {
+                const context = {
+                  event: "installation.reset.repositories",
+                  action,
+                  operation: body.operation,
+                  registrations: result.records.length,
+                  resource: member.resource,
+                  residentId: residentAddress(member),
+                };
+                console.log(JSON.stringify({ ...context, outcome: "initializing", initialized }));
+                await residentStub(env, residentAddress(member)).initResident(
+                  member.resource,
+                  member.provisioningTimeoutMs,
+                  false,
+                  residentAddress(member),
+                );
+                console.log(JSON.stringify({ ...context, outcome: "initialized", initialized: ++initialized }));
+              }
+              console.log(
+                JSON.stringify({
+                  event: "installation.reset.repositories",
+                  action,
+                  operation: body.operation,
+                  registrations: result.records.length,
+                  initialized,
+                  outcome: "complete",
+                }),
+              );
+            }
+            return json(result);
+          }
           case "/register":
             if ((await registryStub(env).getStagingMaintenance())?.state === "held")
               return json({ error: "staging maintenance blocks registration" }, 409);
@@ -18623,6 +18693,10 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
  *  due (item 7). */
 async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummary> {
   const registry = registryStub(env);
+  // An empty installation has no work to admit. Keep its Registry untouched
+  // so restoration can install saved registrations before lifecycle work starts.
+  if (!(await registry.list()).some((record) => !record.offboarding))
+    return { cap: (await registry.limits()).cap, count: 0, results: [] };
   const admission = await beginTrackedDeployAdmission(registry, {
     kind: "watchdog",
     component: parent ? "scheduler" : "http",

@@ -14,6 +14,8 @@ export interface BootstrapIO {
   verify(worker: WorkerKind): Promise<void>;
   prepare(): Promise<{ key: string; priorVersion: number; legacyVersion: number; send(): Promise<void> }>;
   admission(phase: "pending" | "landed"): Promise<void>;
+  restoreSettings?(): Promise<void>;
+  restoreRepositories?(): Promise<void>;
 }
 
 /** No failed read, old serving process, or partial installation authorizes creation. */
@@ -34,6 +36,7 @@ export async function initializeStaging(commit: string, io: BootstrapIO) {
     await io.provision("memory");
   }
   await io.verify("memory");
+  await io.restoreSettings?.();
   for (const worker of ["resident", "sandbox"] as const) {
     if (!completed.includes(worker)) {
       await io.absent([worker]);
@@ -42,6 +45,7 @@ export async function initializeStaging(commit: string, io: BootstrapIO) {
     }
     await io.verify(worker);
   }
+  await io.restoreRepositories?.();
   await io.admission("pending");
   const prepared = await io.prepare();
   if (prepared.priorVersion !== 0 || prepared.legacyVersion !== 0)

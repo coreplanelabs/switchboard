@@ -48,6 +48,172 @@ async function post(command: unknown, token = "test-token") {
   );
 }
 describe("OrganizationDO routes", () => {
+  it("ignores idle reconciliation during reset capture and verification while detecting access and identity changes", async () => {
+    const initial = client();
+    const source = env.ORGANIZATIONS.get(env.ORGANIZATIONS.idFromName(`organization:v1:${initial.installation}`));
+    const preview = await source.resetSettings("preview");
+    const idle = async (store: WorkerOrganizationStore) => {
+      const claimed = await store.execute({
+        action: "claim",
+        organization: "org:test",
+        owner: "idle-process",
+        leaseMs: 30_000,
+      });
+      if (claimed.status !== "state" || !claimed.state.lease) throw new Error("idle claim unavailable");
+      expect(
+        await store.execute({
+          action: "complete",
+          organization: "org:test",
+          owner: "idle-process",
+          generation: claimed.state.lease.generation,
+          through: claimed.state.lease.through,
+        }),
+      ).toMatchObject({ status: "state" });
+    };
+    await idle(initial.store);
+    expect(await source.resetSettings("preview")).toEqual(preview);
+    await idle(initial.store);
+    const operation = crypto.randomUUID();
+    const captured = await source.resetSettings("freeze", operation);
+    expect(captured).toEqual(preview);
+    const replacement = client();
+    const target = env.ORGANIZATIONS.get(env.ORGANIZATIONS.idFromName(`organization:v1:${replacement.installation}`));
+    if (!("tables" in captured)) throw new Error("snapshot unavailable");
+    expect(await target.resetSettings("restore", operation, captured)).toEqual(captured);
+    await idle(replacement.store);
+    expect(await target.resetSettings("preview")).toEqual(captured);
+    expect(await target.resetSettings("verify", operation)).toEqual({ operation, phase: "verified" });
+    expect(
+      await replacement.store.execute({ action: "access", organization: "org:test", identity, allowed: false }),
+    ).toEqual({ status: "ok", removed: 0 });
+    const accessChanged = await target.resetSettings("preview");
+    expect(accessChanged).not.toEqual(captured);
+    const person = await replacement.store.directory.createPerson();
+    if (person.status !== "created") throw new Error("person unavailable");
+    expect(
+      await replacement.store.directory.change({
+        action: "link",
+        identity: { ...identity, subject: "bob" },
+        personId: person.person.id,
+        expectedRevision: 0,
+        actor: identity,
+        proof: { method: "dual-authentication", version: 1 },
+      }),
+    ).toMatchObject({ status: "changed" });
+    expect(await target.resetSettings("preview")).not.toEqual(accessChanged);
+  });
+  it("preserves identity and access cutoffs through a reset while discarding history and leases", async () => {
+    const initial = client();
+    await initial.store.execute({ action: "claim", organization: "org:test", owner: "old-process", leaseMs: 30_000 });
+    const source = env.ORGANIZATIONS.get(env.ORGANIZATIONS.idFromName(`organization:v1:${initial.installation}`));
+    await runInDurableObject(source, (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE organization_rows SET body = json_set(body, '$.streamSequence', 100, '$.wakeSequence', 3, '$.reconciledSequence', 1) WHERE kind = 'state'",
+      );
+    });
+    const created = await initial.store.directory.createPerson();
+    if (created.status !== "created") throw new Error("person unavailable");
+    const peer = { ...identity, subject: "bob" };
+    for (const sourceIdentity of [identity, peer])
+      expect(
+        await initial.store.directory.change({
+          action: "link",
+          identity: sourceIdentity,
+          personId: created.person.id,
+          expectedRevision: 0,
+          actor: sourceIdentity,
+          proof: { method: "dual-authentication", version: 1 },
+        }),
+      ).toMatchObject({ status: "changed" });
+    const operation = crypto.randomUUID();
+    const beforeIdle = await source.resetSettings("preview");
+    const idleState = await initial.store.execute({ action: "get", organization: "org:test" });
+    if (idleState.status !== "state" || !idleState.state.lease) throw new Error("original lease unavailable");
+    expect(
+      await initial.store.execute({
+        action: "complete",
+        organization: "org:test",
+        owner: "old-process",
+        generation: idleState.state.lease.generation,
+        through: idleState.state.lease.through,
+      }),
+    ).toMatchObject({ status: "state" });
+    expect(await source.resetSettings("preview")).toEqual(beforeIdle);
+    const snapshot = await source.resetSettings("freeze", operation);
+    expect(snapshot).toEqual(beforeIdle);
+    expect(await initial.store.directory.createPerson()).toEqual({ status: "unavailable" });
+    const replacement = client();
+    const target = env.ORGANIZATIONS.get(env.ORGANIZATIONS.idFromName(`organization:v1:${replacement.installation}`));
+    if (!snapshot || !("tables" in snapshot)) throw new Error("snapshot unavailable");
+    expect(await target.resetSettings("restore", operation, snapshot)).toEqual(snapshot);
+    expect(await replacement.store.directory.resolve(peer)).toMatchObject({
+      status: "bound",
+      binding: { personId: created.person.id },
+    });
+    expect(await replacement.store.execute({ action: "get", organization: "org:test" })).toMatchObject({
+      status: "state",
+      state: { streamSequence: 100, wakeSequence: 0, reconciledSequence: 0, lease: null, laneCursor: null },
+    });
+    const startup = await replacement.store.execute({
+      action: "claim",
+      organization: "org:test",
+      owner: "startup",
+      leaseMs: 30_000,
+    });
+    if (startup.status !== "state" || !startup.state.lease) throw new Error("startup lease unavailable");
+    expect(
+      await replacement.store.execute({
+        action: "complete",
+        organization: "org:test",
+        owner: "startup",
+        generation: startup.state.lease.generation,
+        through: startup.state.lease.through,
+      }),
+    ).toMatchObject({ status: "state" });
+    expect(await target.resetSettings("preview")).toEqual(snapshot);
+    const issued = await replacement.service.issue(auth, 30_000);
+    if (issued.status !== "key") throw new Error("key unavailable");
+    const admitted = await replacement.service.admit(auth, {
+      key: issued.key,
+      sourceEvent: "after-reset",
+      content: "New request",
+      destination: { kind: "broad" },
+      workload: "message",
+      target: null,
+      context: [],
+    });
+    if (admitted.status !== "receipt") throw new Error("receipt unavailable");
+    const claimed = await replacement.store.execute({
+      action: "claim",
+      organization: "org:test",
+      owner: "new-process",
+      leaseMs: 30_000,
+    });
+    if (claimed.status !== "state" || !claimed.state.lease) throw new Error("lease unavailable");
+    expect(
+      await replacement.store.execute({
+        action: "settle",
+        organization: "org:test",
+        owner: "new-process",
+        generation: claimed.state.lease.generation,
+        receiptId: admitted.receipt.id,
+        status: "accepted",
+        ownerRunId: "new-run",
+        reason: null,
+        reply: "New answer",
+        contentTtlMs: 90_000,
+      }),
+    ).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+    const tail = await replacement.service.streamTail({ ...auth, identity: peer });
+    expect(
+      tail.status === "stream_tail"
+        ? tail.entries.map((entry) => ({ sequence: entry.sequence, content: entry.content }))
+        : null,
+    ).toEqual([
+      { sequence: 101, content: "New request" },
+      { sequence: 102, content: "New answer" },
+    ]);
+  });
   it("keeps pre-link requests and their late replies private through native SQLite client replacement", async () => {
     for (const delivery of ["settlement", "owner"] as const) {
       const initial = client();

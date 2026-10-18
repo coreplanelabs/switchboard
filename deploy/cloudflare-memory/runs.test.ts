@@ -1079,7 +1079,7 @@ describe("run history routes", () => {
     expect(health).toEqual({
       ok: true,
       build: { commit: "unknown" },
-      features: ["memory", "schedules", "runs", "config", "delivery", "costs", "plane"],
+      features: ["memory", "schedules", "runs", "config", "delivery", "costs", "plane", "installationReset:v1"],
     });
   });
 
@@ -2380,10 +2380,13 @@ describe("run metrics — the point, the guard and the emission rule", () => {
   });
 
   it("features names the dataset only when the binding is present", () => {
-    expect(featuresOf({})).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs", "plane"]);
+    expect(featuresOf({}).filter((feature) => feature.startsWith("runMetrics:"))).toEqual([]);
     expect(
-      featuresOf({ RUN_METRICS: { writeDataPoint() {} } as AnalyticsEngineDataset, RUN_METRICS_DATASET: "swb_runs" }),
-    ).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs", "plane", "runMetrics:swb_runs"]);
+      featuresOf({
+        RUN_METRICS: { writeDataPoint() {} } as AnalyticsEngineDataset,
+        RUN_METRICS_DATASET: "swb_runs",
+      }).filter((feature) => feature.startsWith("runMetrics:")),
+    ).toEqual(["runMetrics:swb_runs"]);
   });
 
   // Record 0097, "Rows and columns": the review row, written by the store from

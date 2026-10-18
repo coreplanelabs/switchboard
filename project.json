@@ -32,8 +32,8 @@
   "commands": {
     "$comment": "What each root npm script does and when to run it \u2014 the source of the Commands table in AGENTS.md (npm run agents:gen). A script without an entry fails agents:check, so a new script cannot ship undocumented.",
     "verify": {
-      "does": "Runs every CI check across the repo and workspaces.",
-      "when": "Local sessions before review; CI selects affected checks on each push."
+      "does": "Runs all repository and workspace CI checks.",
+      "when": "Local human checks; CI selects affected checks."
     },
     "verify:root": {
       "does": "Runs the bot package's CI gates.",
@@ -92,8 +92,8 @@
       "when": "Reviewed disposable rehearsal; verify the binding and builds."
     },
     "ci:gate": {
-      "does": "Reads the `needs` context of a CI fan-out and accepts only successful legs or an explicitly planned skip.",
-      "when": "CI only \u2014 the `bot`, `workers` and `image` gate jobs."
+      "does": "Accepts successful CI legs or planned skips.",
+      "when": "CI fan-out gates."
     },
     "ci:plan": {
       "does": "Selects checks and builds from the full diff; uncertainty runs all.",
@@ -124,8 +124,8 @@
       "when": "Local checks and the CI image build."
     },
     "check:site": {
-      "does": "Every page the dashboard links to is in the built site, and its home page reads `displayName`.",
-      "when": "After a docs change; part of `verify`."
+      "does": "Checks dashboard links against the built site.",
+      "when": "Docs changes; part of verify."
     },
     "check:image": {
       "does": "Builds every Worker's image.",
@@ -212,8 +212,8 @@
       "when": "Part of `check:consistency`."
     },
     "docs:changed": {
-      "does": "Reports whether HEAD^ changed a docs site input.",
-      "when": "Local one-commit diagnostics; CI uses `ci:plan`."
+      "does": "Reports changed docs inputs.",
+      "when": "One-commit diagnostics; CI uses ci:plan."
     },
     "deploy:gen": {
       "does": "Renders each Worker's gitignored `wrangler.jsonc` from its template and the profile in force.",
@@ -224,8 +224,8 @@
       "when": "When one looks hand-edited; change the template."
     },
     "deploy:targets": {
-      "does": "Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment.",
-      "when": "CI only \u2014 the `deploy targets` job."
+      "does": "Reports Workers selected by the diff.",
+      "when": "CI summary and release PR comment."
     },
     "docs:dev": {
       "does": "Serves the docs site locally with live reload.",
@@ -258,6 +258,14 @@
     "staging:deploy": {
       "does": "Deploys isolated staging; --recreate plans explicit recreation.",
       "when": "Staging CI and explicit operator setup."
+    },
+    "installation:reset": {
+      "does": "Resets data; keeps settings.",
+      "when": "Preview, then approved apply."
+    },
+    "staging:reset": {
+      "does": "Tests two staging resets.",
+      "when": "Manual staging CI."
     },
     "staging:validate": {
       "does": "Checks PR eligibility before staging.",

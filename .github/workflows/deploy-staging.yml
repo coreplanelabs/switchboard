@@ -24,6 +24,10 @@ on: # zizmor: ignore[dangerous-triggers]
         description: Run bounded live Review acceptance after full-stack deployment
         type: boolean
         default: false
+      reset_e2e:
+        description: Reset isolated staging data twice before product acceptance
+        type: boolean
+        default: false
       retain_maintenance:
         description: Keep selected staging maintenance held until explicit Admin release
         type: boolean
@@ -164,7 +168,7 @@ jobs:
     needs: [authorize, validate]
     if: always() && !cancelled() && needs.authorize.result == 'success' && needs.authorize.outputs.requested == 'true' && (needs.validate.result == 'skipped' || (needs.validate.result == 'success' && needs.validate.outputs.eligible == 'true'))
     runs-on: depot-ubuntu-24.04-4
-    timeout-minutes: 60
+    timeout-minutes: ${{ inputs.reset_e2e && 120 || 60 }}
     environment: staging
     concurrency:
       group: deploy-staging
@@ -192,6 +196,13 @@ jobs:
         working-directory: controller
       # Candidate scripts receive no deploy credentials during installation.
       - run: npm ci
+      - name: require one original full-stack reset rehearsal
+        if: github.event_name == 'workflow_dispatch' && inputs.reset_e2e
+        env:
+          TARGETS: ${{ inputs.targets }}
+          RETAIN: ${{ inputs.retain_maintenance }}
+        run: |
+          [ "$GITHUB_RUN_ATTEMPT" = 1 ] && [ "$TARGETS" = all ] && [ "$RETAIN" != true ] || { echo '::error::Reset rehearsal requires one original full-stack dispatch without retained maintenance'; exit 1; }
       - name: recheck the validated head before giving the candidate credentials
         id: recheck
         if: github.event_name == 'pull_request_target' || inputs.pr != ''
@@ -283,9 +294,39 @@ jobs:
           if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then args+=(--retain-maintenance); fi
           set -o pipefail
           npm run --silent staging:deploy -- "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/staging-deploy.log"
+      - name: prepare the original staging reset secret source
+        if: github.event_name == 'workflow_dispatch' && inputs.reset_e2e && steps.deploy.outcome == 'success'
+        env:
+          RESET_ENVIRONMENT: staging
+          RESET_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+          SWITCHBOARD_STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          SWITCHBOARD_PRODUCTION_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          STAGING_RUNTIME_SECRETS_JSON: ${{ secrets.STAGING_RUNTIME_SECRETS_JSON }}
+          MEMORY_TOKEN: ${{ secrets.STAGING_MEMORY_TOKEN }}
+          SANDBOX_TOKEN: ${{ secrets.STAGING_SANDBOX_TOKEN }}
+          RESIDENT_READ_TOKEN: ${{ secrets.STAGING_RESIDENT_READ_TOKEN }}
+          RESIDENT_DRAIN_TOKEN: ${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}
+        run: npm run --silent staging:reset -- --prepare-secrets
+      - name: rehearse two resets with preserved settings
+        if: github.event_name == 'workflow_dispatch' && inputs.reset_e2e && steps.deploy.outcome == 'success'
+        working-directory: candidate
+        env:
+          RESET_ENVIRONMENT: staging
+          RESET_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+          SWITCHBOARD_STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          SWITCHBOARD_PRODUCTION_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          SMOKE_INGRESS_CONFIG: ${{ vars.STAGING_SMOKE_CONFIG }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_CLOUDFLARE_DEPLOY_TOKEN }}
+          WRANGLER_SEND_METRICS: "false"
+          CI: "1"
+        run: npm run --silent staging:reset -- --directory "$RUNNER_TEMP/reset-rehearsal"
       - name: run live Review acceptance on the deployed stack
         id: e2e
-        if: steps.deploy.outcome == 'success' && (github.event_name == 'pull_request_target' || inputs.pr != '' || inputs.review_e2e)
+        if: steps.deploy.outcome == 'success' && (github.event_name == 'pull_request_target' || inputs.pr != '' || inputs.review_e2e || inputs.reset_e2e)
         env:
           SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
           CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
@@ -333,6 +374,7 @@ jobs:
             ${{ runner.temp }}/staging-setup.json
             ${{ runner.temp }}/staging-fleet.json
             ${{ runner.temp }}/staging-e2e.json
+            ${{ runner.temp }}/reset-rehearsal/staging-reset-e2e.json
           if-no-files-found: ignore
 
   acceptance:

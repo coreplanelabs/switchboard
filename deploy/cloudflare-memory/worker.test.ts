@@ -51,7 +51,7 @@ describe("auth + routing", () => {
     expect(health.data).toEqual({
       ok: true,
       build: { commit: "unknown" },
-      features: ["memory", "schedules", "runs", "config", "delivery", "costs", "plane"],
+      features: ["memory", "schedules", "runs", "config", "delivery", "costs", "plane", "installationReset:v1"],
     });
   });
 

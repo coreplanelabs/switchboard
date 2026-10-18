@@ -122,12 +122,26 @@ export function planStagingRecreation(
 ): StagingRecreationPlan {
   if (!/^[a-f0-9]{32}$/.test(production) || profile.account === production)
     throw new Error("recreation requires a separate staging account");
+  if (WORKER_KINDS.some((kind) => !profile.workers[kind]?.script.includes("staging")))
+    throw new Error("recreation requires four distinct staging Workers");
+  return planInstallationRecreation(profile, profile.account, inventory, source);
+}
+
+/** The account pin is mandatory; the staging wrapper keeps its separate-account guard. */
+export function planInstallationRecreation(
+  profile: DeploymentProfile,
+  account: string,
+  inventory: StagingRecreationInventory,
+  source: { commit: string; configSha256: string },
+): StagingRecreationPlan {
+  if (!/^[a-f0-9]{32}$/.test(account) || profile.account !== account)
+    throw new Error("reset account does not match the selected profile");
   if (profile.residentMaintenance) throw new Error("recreation requires an ordinary profile without maintenance");
   if (!/^[a-f0-9]{40}$/.test(source.commit) || !/^[a-f0-9]{64}$/.test(source.configSha256))
     throw new Error("recreation requires exact source and configuration hashes");
   const names = WORKER_KINDS.map((kind) => profile.workers[kind]?.script);
-  if (names.some((name) => !name?.includes("staging")) || new Set(names).size !== 4)
-    throw new Error("recreation requires four distinct staging Workers");
+  if (names.some((name) => !name || !/^[a-z0-9][a-z0-9-]+$/.test(name)) || new Set(names).size !== 4)
+    throw new Error("reset requires four distinct runtime Workers");
   const allowed = new Set(names as string[]);
   const scripts = nativeInventoryRows(inventory.scripts);
   const applications = nativeInventoryRows(inventory.applications);
@@ -167,6 +181,12 @@ export function planStagingRecreation(
   ];
   const selectedApps = appNames.map((name) => one(applications, "name", name));
   if (
+    applications.some(
+      (row) => names.some((name) => String(row.name).startsWith(`${name}-`)) && !appNames.includes(String(row.name)),
+    )
+  )
+    throw new Error("reset found an unclassified installation application");
+  if (
     selectedApps.some(
       (row) =>
         typeof row.id !== "string" || !/^(?:[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/.test(row.id),
@@ -196,6 +216,8 @@ export function planStagingRecreation(
     `${profile.workers.resident!.script}-refresh`,
   ];
   const selectedWorkflows = workflowNames.map((name) => one(workflows, "name", name));
+  if (workflows.some((row) => allowed.has(String(row.script_name)) && !workflowNames.includes(String(row.name))))
+    throw new Error("reset found an unclassified installation Workflow");
   if (selectedWorkflows.some((row) => !allowed.has(String(row.script_name))))
     throw new Error("staging Workflow owner is unverified");
   const selectedNamespaces = namespaces.filter((row) => allowed.has(String(row.script)));
@@ -232,7 +254,14 @@ export function planStagingRecreation(
       profile,
       source,
       scripts: selectedScripts,
-      applications: selectedApps,
+      applications: selectedApps.map((application) => ({
+        id: application.id,
+        name: application.name,
+        durable_objects: application.durable_objects,
+        configurationSha256: hash(application.configuration ?? null),
+        max_instances: application.max_instances,
+        scheduling_policy: application.scheduling_policy,
+      })),
       namespaces: selectedNamespaces,
       workflows: selectedWorkflows,
       dependencies: inventory.dependencies,

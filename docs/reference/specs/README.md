@@ -6,6 +6,8 @@ The behavioral contract of Switchboard, versioned with the code. Every file in t
 
 ## The rules
 
+The [installation reset contract](installation-reset.md) covers inventory, settings preservation and deliberate application-data removal.
+
 The [maintenance contract](maintenance.md) covers scoped access holds, notices, and explicit activation.
 
 1. **Same-PR updates.** A PR that changes behavior updates the matching feature file in that PR — new criteria for new behavior, edits for changed behavior, deletions for removed behavior. A feature file that describes code that no longer exists is a bug.
