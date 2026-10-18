@@ -1,6 +1,6 @@
 import { buildExpectedSeedManifest } from "./seedManifest.js";
 import { claimTransportDiagnostic, nativeClaimObservationOf } from "./claimObservation.js";
-import { originalStorageFailure } from "../storageFailureDiagnostic.js";
+import { originalStorageFailure, type StorageFailureDiagnostic } from "../storageFailureDiagnostic.js";
 import { STORE_RETRY_BACKOFFS_MS } from "../budgets.js";
 import { PromotionPendingError, PromotionIdentityRefusal } from "./promotion.js";
 import { sourceSeedReferenceMatches, type SourceSeedReference } from "./seedVerification.js";
@@ -381,7 +381,10 @@ export type OpenOutcome =
  *  asked or this run is untracked, reply as before (the run is this process's). */
 export type FinishingGate = "ok" | "fenced" | "unavailable";
 
-export type WriteBoundaryFailure = { diagnosis?: UncertainStoreDiagnosis } & (
+export type WriteBoundaryFailure = {
+  diagnosis?: UncertainStoreDiagnosis;
+  storageDiagnostic?: StorageFailureDiagnostic;
+} & (
   | {
       version: 1;
       runId: string;
@@ -1344,7 +1347,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }> = [];
     get writeBoundaryFailure(): WriteBoundaryFailure | undefined {
       const pending = this.pendingBoundaries[0];
-      return pending && { ...pending.failure };
+      return pending && structuredClone(pending.failure);
     }
     private checkpointMatches(
       receipt: unknown,
@@ -1469,8 +1472,34 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         if (!result.ok && !this.finished) this.detach(`append refused (${result.reason})`, result.reason === "fenced");
       },
       onError: (err, batch) => {
-        if (!this.finished)
-          warn(`[ledger] ${this.threadKey} append not fully acknowledged (${batch.length} events): ${err.message}`);
+        try {
+          warn(
+            JSON.stringify({
+              event: "ledger.append_unconfirmed",
+              runId: this.runId,
+              ownerGen: gen,
+              firstSeq: batch[0]?.seq,
+              lastSeq: batch.at(-1)?.seq,
+              count: batch.length,
+              finished: this.finished,
+              localRetention: "released",
+              outcome: "unconfirmed",
+              failure:
+                err instanceof UncertainStoreError
+                  ? "uncertain"
+                  : err instanceof RouteMissingError
+                    ? "route-missing"
+                    : err instanceof PermanentStoreError
+                      ? "permanent"
+                      : err instanceof TransientStoreError
+                        ? "transient"
+                        : "unclassified",
+              storage: originalStorageFailure(err),
+            }),
+          );
+        } catch {
+          // A failed warning cannot reject the flush or block the next batch.
+        }
       },
       ...(opts.schedule ? { schedule: opts.schedule } : {}),
     });
@@ -1589,16 +1618,94 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     pauseRetained = false;
 
     async pauseForRetry(): Promise<boolean> {
-      if (!this.resumable || !this.tracked() || this.handedOff || this.finished || this.finishLanding) return false;
+      let stage: "guard" | "pending-writes" | "events" | "boundary" | "handoff" | "stop" | "retention" | "complete" =
+        "guard";
+      const diagnose = (
+        outcome: "skipped" | "unconfirmed" | "fenced" | "threw" | "confirmed",
+        error?: unknown,
+      ): void => {
+        try {
+          const boundary = this.writeBoundaryFailure;
+          warn(
+            JSON.stringify({
+              event: "recovery.pause",
+              observation: "before-dispatch-cleanup",
+              runId: this.runId,
+              ownerGen: gen,
+              stage,
+              outcome,
+              handedOff: this.handedOff,
+              tracked: this.tracked(),
+              resumable: this.resumable,
+              heartbeat: this.heartbeat ? "active" : "stopped",
+              recoveryMode: this.pauseStopped
+                ? "stopped"
+                : this.fencedOut
+                  ? "fenced"
+                  : this.finished
+                    ? "finished"
+                    : this.finishLanding
+                      ? "finishing"
+                      : this.handedOff
+                        ? "next-generation"
+                        : this.resumable && this.tracked()
+                          ? "current-generation-held"
+                          : "not-resumable",
+              pauseRetained: this.pauseRetained,
+              pauseStopped: this.pauseStopped,
+              ...(boundary
+                ? {
+                    boundary: {
+                      kind: boundary.kind,
+                      requestDigest: boundary.requestDigest,
+                      expectedDigest: boundary.expectedDigest,
+                      diagnosis: writeBoundaryDiagnosticSummary(boundary),
+                      storage: boundary.storageDiagnostic,
+                    },
+                  }
+                : {}),
+              ...(error === undefined
+                ? {}
+                : {
+                    failure:
+                      error instanceof UncertainStoreError
+                        ? "uncertain"
+                        : error instanceof RouteMissingError
+                          ? "route-missing"
+                          : error instanceof PermanentStoreError
+                            ? "permanent"
+                            : error instanceof TransientStoreError
+                              ? "transient"
+                              : "unclassified",
+                    storage: originalStorageFailure(error),
+                  }),
+            }),
+          );
+        } catch {
+          // A failed diagnostic sink cannot change pause custody or its outcome.
+        }
+      };
+      if (!this.resumable || !this.tracked() || this.handedOff || this.finished || this.finishLanding) {
+        diagnose("skipped");
+        return false;
+      }
       try {
+        stage = "pending-writes";
         await Promise.all([this.stateSending, this.boundarySending]);
+        stage = "events";
         await this.flusher.flush();
-        if (!(await this.reconcilePendingBoundary())) return false;
+        stage = "boundary";
+        if (!(await this.reconcilePendingBoundary())) {
+          diagnose("unconfirmed");
+          return false;
+        }
+        stage = "handoff";
         const { marked } = await ledger.handoff(gen, [this.runId], { pausedForRetry: true });
         if (!marked.includes(this.runId)) {
           // A completed handoff that did not mark this row refused its owner.
           // Storage failure throws instead; only a refusal silences this owner.
           this.detach("pause handoff refused (fenced)", true);
+          diagnose("fenced");
           return false;
         }
         this.markHandedOff();
@@ -1606,20 +1713,24 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         live.delete(this);
         // A hard stop may have landed just before the handoff. Its caller
         // checked before this marker existed; this side closes the same row.
+        stage = "stop";
         try {
           this.pauseStopped = (await sealPausedHardStop(ledger, this.runId, gen, now)) === "sealed";
         } catch (err) {
-          warn(`[ledger] ${this.threadKey} could not check stop for paused run ${this.runId}: ${describe(err)}`);
+          diagnose("threw", err);
         }
+        stage = "retention";
         try {
           const row = (await ledger.listLive()).find((r) => r.runId === this.runId);
           this.pauseRetained = row?.ownerGen === gen && row.phase === "handoff" && row.state.pausedForRetry === true;
         } catch (err) {
-          warn(`[ledger] ${this.threadKey} could not confirm paused run ${this.runId}: ${describe(err)}`);
+          diagnose("threw", err);
         }
+        stage = "complete";
+        diagnose("confirmed");
         return true;
       } catch (err) {
-        warn(`[ledger] ${this.threadKey} could not pause run ${this.runId} for retry: ${describe(err)}`);
+        diagnose("threw", err);
         return this.handedOff;
       }
     }
@@ -1987,6 +2098,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                   requestDigest: err.request.digest,
                   expectedDigest: await sourceHash(expected),
                   ...(err.diagnosis ? { diagnosis: err.diagnosis } : {}),
+                  storageDiagnostic: originalStorageFailure(err),
                 },
                 request: err.request,
                 expected,
@@ -2219,6 +2331,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                 requestDigest: err.request.digest,
                 expectedDigest,
                 ...(err.diagnosis ? { diagnosis: err.diagnosis } : {}),
+                storageDiagnostic: originalStorageFailure(err),
               },
               request: err.request,
               expected,
@@ -2321,6 +2434,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                 requestDigest: err.request.digest,
                 expectedDigest: await sourceHash(expected ?? effective),
                 ...(err.diagnosis ? { diagnosis: err.diagnosis } : {}),
+                storageDiagnostic: originalStorageFailure(err),
               },
               request: err.request,
               expected,
@@ -2390,6 +2504,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                 requestDigest: err.request.digest,
                 expectedDigest,
                 ...(err.diagnosis ? { diagnosis: err.diagnosis } : {}),
+                storageDiagnostic: originalStorageFailure(err),
               },
               request: err.request,
               expected: snapshot,

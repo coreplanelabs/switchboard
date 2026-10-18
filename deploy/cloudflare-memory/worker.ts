@@ -2341,6 +2341,39 @@ class RunDeletedError extends Error {
   }
 }
 
+type CheckpointGateCorrelation = { requestId?: string; requestDigest?: string };
+type CheckpointStage =
+  | "source-read"
+  | "source-snapshot"
+  | "source-install"
+  | "source-batch-read"
+  | "unit-seed-ack"
+  | "source-range-protection"
+  | "alarm-read"
+  | "alarm-write";
+type ObserveCheckpointStage = <T>(
+  stage: CheckpointStage,
+  sourceRunId: string | null,
+  call: () => Promise<T>,
+  sourceCount?: number,
+) => Promise<T>;
+
+/** Exception text and custom names can contain source data. */
+function checkpointErrorName(error: unknown): string {
+  return (
+    (
+      [
+        [SourceSeedPendingError, "SourceSeedPendingError"],
+        [RequiredTranscriptError, "RequiredTranscriptError"],
+        [CanonicalArchiveRefusal, "CanonicalArchiveRefusal"],
+        [SyntaxError, "SyntaxError"],
+        [TypeError, "TypeError"],
+        [Error, "Error"],
+      ] as const
+    ).find(([type]) => error instanceof type)?.[1] ?? "ThrownValue"
+  );
+}
+
 // Bump when terminal candidate projection or decoder semantics change.
 const TERMINAL_PULL_OWNER_INDEX_VERSION = "2";
 // The independent validation footprint detects missing and same-size wrong
@@ -2367,41 +2400,157 @@ const TERMINAL_PULL_OWNER_COLUMNS = `SELECT run_id,
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
   private readonly reviewFeedback: ReviewFeedbackStorage;
+  /** Diagnostic identity only; a reconstruction does not retain it or grant ownership. */
+  private readonly incarnationId = crypto.randomUUID();
   /** Where a turned-final run's point goes (run-metrics.md): the Analytics
    *  Engine dataset when the deploy bound one, the NullSink otherwise —
    *  selected once at construction, the `SHIP_COORDINATOR?` shape. */
   private readonly metrics: RunMetricsSink;
 
-  /** A source refusal must reject its caller after the input gate closes,
-   * rather than reset this shared object and interrupt unrelated runs. */
+  /** Observe admission and release without changing a callback's error behavior. */
+  private async observeInputGate<T>(
+    operation:
+      | "archiveCheckpoint"
+      | "readContextCheckpoint"
+      | "normalizeContextOrigins"
+      | "setState"
+      | "constructor"
+      | "replaceInstance"
+      | "withRangePins"
+      | "abandon"
+      | "delete",
+    runId: string | null,
+    action: (observe: ObserveCheckpointStage) => Promise<T>,
+    correlation?: CheckpointGateCorrelation,
+  ): Promise<T> {
+    let ownerGen: string | null = null;
+    const gateId = crypto.randomUUID(),
+      startedAt = systemClock();
+    let enteredAt: number | undefined;
+    const requestId = storageRequestIdOf(correlation?.requestId);
+    const requestDigest =
+      typeof correlation?.requestDigest === "string" && /^[a-f0-9]{64}$/.test(correlation.requestDigest)
+        ? correlation.requestDigest
+        : undefined;
+    const progress = (
+      phase: "queued" | "entered" | "stage" | "released",
+      details: Record<string, string | number | null> = {},
+    ) => {
+      try {
+        const now = systemClock();
+        console.log(
+          JSON.stringify({
+            event: "storage.gate.progress",
+            gateId,
+            objectId: this.ctx.id.toString(),
+            incarnationId: this.incarnationId,
+            operation,
+            runId,
+            ownerGen,
+            ...(requestId ? { requestId } : {}),
+            ...(requestDigest ? { requestDigest } : {}),
+            phase,
+            elapsedMs: phase === "queued" ? 0 : Math.max(0, now - startedAt),
+            ...(enteredAt !== undefined ? { queueMs: Math.max(0, enteredAt - startedAt) } : {}),
+            ...(phase === "released" && enteredAt !== undefined ? { heldMs: Math.max(0, now - enteredAt) } : {}),
+            ...details,
+            build: BUILD,
+          }),
+        );
+      } catch {
+        // Telemetry cannot change the gate's result or the original error.
+      }
+    };
+    let stageSequence = 0;
+    const observe: ObserveCheckpointStage = async (stage, sourceRunId, call, sourceCount) => {
+      const stageId = ++stageSequence,
+        stageStartedAt = systemClock();
+      const identity = { stage, sourceRunId, stageId, ...(sourceCount !== undefined ? { sourceCount } : {}) };
+      progress("stage", { ...identity, outcome: "started", stageMs: 0 });
+      try {
+        const value = await call();
+        progress("stage", {
+          ...identity,
+          outcome: value && typeof value === "object" && "ok" in value && value.ok === false ? "refused" : "completed",
+          stageMs: Math.max(0, systemClock() - stageStartedAt),
+        });
+        return value;
+      } catch (error) {
+        progress("stage", {
+          ...identity,
+          outcome: "failed",
+          stageMs: Math.max(0, systemClock() - stageStartedAt),
+          errorName: checkpointErrorName(error),
+        });
+        throw error;
+      }
+    };
+    // Emit before the wait so an interrupted call keeps its last observed stage.
+    progress("queued");
+    try {
+      const result = await this.ctx.blockConcurrencyWhile(async () => {
+        enteredAt = systemClock();
+        try {
+          ownerGen = runId ? (this.liveRow(runId)?.ownerGen ?? null) : null;
+        } catch {
+          // An advisory owner lookup cannot fail the caller's operation.
+        }
+        progress("entered");
+        return action(observe);
+      });
+      const refused = result && typeof result === "object" && "ok" in result && result.ok === false;
+      const failed = refused && "error" in result;
+      const value = result && typeof result === "object" && "value" in result ? result.value : result;
+      const held =
+        value instanceof PromotionPendingError ||
+        (value &&
+          typeof value === "object" &&
+          "kind" in value &&
+          value.kind === "held" &&
+          "reason" in value &&
+          (value.reason === "promotion_pending" || value.reason === "promotion_corrupt"));
+      progress(
+        "released",
+        failed
+          ? { outcome: "failed", errorName: checkpointErrorName(result.error) }
+          : {
+              outcome:
+                refused || held || (value && typeof value === "object" && "ok" in value && value.ok === false)
+                  ? "refused"
+                  : "completed",
+            },
+      );
+      return result;
+    } catch (error) {
+      progress("released", { outcome: "failed", errorName: checkpointErrorName(error) });
+      throw error;
+    }
+  }
+
+  /** A source refusal rejects after gate release, without resetting sibling runs. */
   private async withInputGate<T>(
     operation: "archiveCheckpoint" | "readContextCheckpoint" | "normalizeContextOrigins" | "setState",
     runId: string,
-    action: () => Promise<T>,
+    action: (observe: ObserveCheckpointStage) => Promise<T>,
+    correlation?: CheckpointGateCorrelation,
   ): Promise<T> {
     let ownerGen: string | null = null;
-    const result = await this.ctx.blockConcurrencyWhile(async () => {
-      try {
-        ownerGen = this.liveRow(runId)?.ownerGen ?? null;
-        return { ok: true as const, value: await action() };
-      } catch (error) {
-        return { ok: false as const, error };
-      }
-    });
+    const result = await this.observeInputGate(
+      operation,
+      runId,
+      async (observe) => {
+        try {
+          ownerGen = this.liveRow(runId)?.ownerGen ?? null;
+          return { ok: true as const, value: await action(observe) };
+        } catch (error) {
+          return { ok: false as const, error };
+        }
+      },
+      correlation,
+    );
     if (!result.ok) {
       try {
-        // Exception prose can contain source data; emit only fixed class labels.
-        const errorName =
-          (
-            [
-              [SourceSeedPendingError, "SourceSeedPendingError"],
-              [RequiredTranscriptError, "RequiredTranscriptError"],
-              [CanonicalArchiveRefusal, "CanonicalArchiveRefusal"],
-              [SyntaxError, "SyntaxError"],
-              [TypeError, "TypeError"],
-              [Error, "Error"],
-            ] as const
-          ).find(([type]) => result.error instanceof type)?.[1] ?? "ThrownValue";
+        const errorName = checkpointErrorName(result.error);
         console.log(
           JSON.stringify({
             event: "checkpoint.gate_refused",
@@ -2914,7 +3063,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         .map((column) => column.name),
     );
     if (!planeLevelColumns.has("cause")) this.sql.exec(`ALTER TABLE plane_levels ADD COLUMN cause TEXT`);
-    this.ctx.blockConcurrencyWhile(() => this.armCoordinatorReconciliation(systemClock()));
+    this.observeInputGate("constructor", null, (observe) => this.armCoordinatorReconciliation(systemClock(), observe));
   }
 
   // ---- the orchestration plane (record 0064; orchestration-plane.md) ----------
@@ -3914,7 +4063,10 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  hosting deadline) can claim a wake that no longer exists. The due is
    *  capped to the background interval so enabled maintenance never starves
    *  behind a distant hosting deadline. */
-  private async ensurePlaneAlarm(now: number): Promise<void> {
+  private async ensurePlaneAlarm(
+    now: number,
+    observe: ObserveCheckpointStage = async (_stage, _runId, call) => call(),
+  ): Promise<void> {
     const raw = this.planeEarliestDue(now);
     const prior = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'plane_alarm_at'`).toArray()[0];
     const priorAt = prior ? Number(prior.value) : undefined;
@@ -3923,7 +4075,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       return; // nothing waits: the background alarm's own arming stands
     }
     const due = Math.min(raw, now + RUN_SWEEP_INTERVAL_MS);
-    const set = await this.ctx.storage.getAlarm();
+    const set = await observe("alarm-read", null, () => this.ctx.storage.getAlarm());
     const sourceOverdue =
       this.sql.exec(`SELECT key FROM source_events WHERE closed_at IS NULL AND due_at <= ? LIMIT 1`, now).toArray()
         .length > 0;
@@ -3931,7 +4083,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     // this plane armed itself. Due source work keeps its earlier armed wake
     // until it fires; traffic must not restart that recovery delay.
     if (set !== due && (set === null || set > due || (set === priorAt && !sourceOverdue)))
-      await this.ctx.storage.setAlarm(due);
+      await observe("alarm-write", null, () => this.ctx.storage.setAlarm(due));
     if (due !== priorAt)
       this.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_alarm_at', ?)`, String(due));
   }
@@ -4268,13 +4420,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
   }
 
-  private async armCoordinatorReconciliation(now: number): Promise<void> {
+  private async armCoordinatorReconciliation(now: number, observe?: ObserveCheckpointStage): Promise<void> {
     if (!this.sql.exec(`SELECT 1 FROM coordinator_units LIMIT 1`).toArray().length) return;
     this.sql.exec(
       `INSERT OR IGNORE INTO meta (key, value) VALUES ('coordinator_reconcile_due', ?)`,
       String(now + this.planeReaskMs()),
     );
-    await this.ensurePlaneAlarm(now);
+    await this.ensurePlaneAlarm(now, observe);
   }
 
   /** Discovery only: native ended status offers settlement; it never fabricates
@@ -4913,7 +5065,7 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  dropped, in one transaction — an attempt starting over: the leftover of one
    *  whose Workflow instance was never created, once the shim said so. */
   async replaceInstance(instance: CoordinatorInstance): Promise<{ ok: true } | { ok: false; reason: "exists" }> {
-    const result = await this.ctx.blockConcurrencyWhile(async () => {
+    const result = await this.observeInputGate("replaceInstance", null, async () => {
       let out: { ok: true } | { ok: false; reason: "exists" } = { ok: true };
       this.ctx.storage.transactionSync(() => {
         if (
@@ -6373,7 +6525,10 @@ export class RunHistoryDO extends DurableObject<Env> {
     };
   }
 
-  private async checkpointSource(runId: string): Promise<CanonicalCheckpointSource | undefined> {
+  private async checkpointSource(
+    runId: string,
+    observe: ObserveCheckpointStage = async (_stage, _runId, call) => call(),
+  ): Promise<CanonicalCheckpointSource | undefined> {
     const live = this.liveRow(runId);
     const archived = live ? undefined : await this.get(runId);
     const meta = live?.meta ?? archived;
@@ -6383,9 +6538,11 @@ export class RunHistoryDO extends DurableObject<Env> {
     const receipt = isContextCheckpointReceipt(raw) ? raw : undefined;
     let transcriptHash: string | undefined;
     if (receipt) {
-      const data = await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.session.key)).read(
-        receipt.session.seedFrom,
-        receipt.session.through,
+      const data = await observe("source-read", runId, () =>
+        this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.session.key)).read(
+          receipt.session.seedFrom,
+          receipt.session.through,
+        ),
       );
       transcriptHash = await sourceHash(assembleTranscript(data.rows, data.attachments, receipt.session.seedFrom));
     }
@@ -6404,8 +6561,8 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   private async archiveCheckpoint(record: RunRecord): Promise<RunRecord> {
-    return this.withInputGate("archiveCheckpoint", record.id, async () => {
-      await this.recoverPendingCheckpoint(record.id);
+    return this.withInputGate("archiveCheckpoint", record.id, async (observe) => {
+      await this.recoverPendingCheckpoint(record.id, observe);
       const live = this.liveRow(record.id);
       for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
         const canonical = live?.state[field];
@@ -6437,7 +6594,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     });
   }
 
-  private async recoverPendingCheckpoint(runId: string): Promise<void> {
+  private async recoverPendingCheckpoint(runId: string, observe: ObserveCheckpointStage): Promise<void> {
     const row = this.liveRow(runId);
     const receipt = row?.state.pendingContextCheckpoint;
     if (
@@ -6451,7 +6608,9 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (before !== receipt.beforeHash && before !== receipt.normalizedHash) return;
     if ((await sourceHash(row.system)) !== receipt.inputs.systemHash) return;
     const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.session.key));
-    const data = await log.checkpointSnapshot(receipt.session.seedFrom, receipt.session.through);
+    const data = await observe("source-snapshot", runId, () =>
+      log.checkpointSnapshot(receipt.session.seedFrom, receipt.session.through),
+    );
     const source: CanonicalCheckpointSource = {
       runId,
       meta: row.meta,
@@ -6462,7 +6621,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     };
     if (
       !(await validateContextCheckpoint(receipt, source)) ||
-      !(await log.installCheckpoint(runId, row.ownerGen, receipt)).ok
+      !(await observe("source-install", runId, async () => await log.installCheckpoint(runId, row.ownerGen, receipt)))
+        .ok
     )
       return;
     this.ctx.storage.transactionSync(() => {
@@ -6483,119 +6643,149 @@ export class RunHistoryDO extends DurableObject<Env> {
     });
   }
 
-  async readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined> {
-    return this.withInputGate("readContextCheckpoint", runId, async () => {
-      await this.recoverPendingCheckpoint(runId);
-      const source = await this.checkpointSource(runId);
-      return source?.receipt && (await validateContextCheckpoint(source.receipt, source)) ? source : undefined;
-    });
+  async readContextCheckpoint(
+    runId: string,
+    correlation?: CheckpointGateCorrelation,
+  ): Promise<CanonicalCheckpointSource | undefined> {
+    return this.withInputGate(
+      "readContextCheckpoint",
+      runId,
+      async (observe) => {
+        await this.recoverPendingCheckpoint(runId, observe);
+        const source = await this.checkpointSource(runId, observe);
+        return source?.receipt && (await validateContextCheckpoint(source.receipt, source)) ? source : undefined;
+      },
+      correlation,
+    );
   }
 
-  async normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult> {
-    return this.withInputGate("normalizeContextOrigins", request.runId, async () => {
-      await this.recoverPendingCheckpoint(request.runId);
-      const row = this.liveRow(request.runId);
-      const fence = checkFence(row, request.gen);
-      if (!fence.ok) return fence;
-      if (!row) return { ok: false, reason: "unknown-run" };
-      const unavailable = (): ContextCheckpointResult => ({ ok: false, reason: "checkpoint-unavailable" });
-      const committed = await this.checkpointSource(request.runId);
-      if (committed?.receipt && (await validateContextCheckpoint(committed.receipt, committed)))
-        return { ok: true, receipt: committed.receipt };
-      const session = row.meta.session;
-      const lastJson = this.sql
-        .exec<{ json: string }>(
-          `SELECT json FROM run_steps WHERE run_id = ? AND step >= 0 ORDER BY step DESC LIMIT 1`,
-          row.runId,
-        )
-        .toArray()[0]?.json;
-      const last = lastJson ? (parseStoredJson(lastJson) as StepRecord) : undefined;
-      if (
-        !session ||
-        session.key !== request.key ||
-        session.range === "broken" ||
-        !last ||
-        last.step !== 0 ||
-        last.inFlight.length
-      )
-        return unavailable();
-      const through = session.seedFrom + last.turnIndex - 1;
-      const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
-      if (checkpoint && (checkpoint.key !== request.key || checkpoint.through !== through)) return unavailable();
-      const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(request.key));
-      const snapshot = await log.checkpointSnapshot(session.seedFrom, through);
-      if (
-        snapshot.next !== through + 1 ||
-        snapshot.owner?.runId !== row.runId ||
-        snapshot.owner.gen !== request.gen ||
-        !isContextDependencies(snapshot.context) ||
-        !isContextDependencies(row.state.contextDependencies)
-      )
-        return unavailable();
-      const inputs = {
-        transcriptHash: await sourceHash(assembleTranscript(snapshot.rows, snapshot.attachments, session.seedFrom)),
-        systemHash: await sourceHash(row.system),
-        notepadHash: await sourceHash(snapshot.notepad),
-      };
-      let receipt = isContextCheckpointReceipt(row.state.pendingContextCheckpoint)
-        ? row.state.pendingContextCheckpoint
-        : undefined;
-      if (receipt) {
+  async normalizeContextOrigins(
+    request: ContextCheckpointRequest,
+    correlation?: CheckpointGateCorrelation,
+  ): Promise<ContextCheckpointResult> {
+    return this.withInputGate(
+      "normalizeContextOrigins",
+      request.runId,
+      async (observe) => {
+        await this.recoverPendingCheckpoint(request.runId, observe);
+        const row = this.liveRow(request.runId);
+        const fence = checkFence(row, request.gen);
+        if (!fence.ok) return fence;
+        if (!row) return { ok: false, reason: "unknown-run" };
+        const unavailable = (): ContextCheckpointResult => ({ ok: false, reason: "checkpoint-unavailable" });
+        const committed = await this.checkpointSource(request.runId, observe);
+        if (committed?.receipt && (await validateContextCheckpoint(committed.receipt, committed)))
+          return { ok: true, receipt: committed.receipt };
+        const session = row.meta.session;
+        const lastJson = this.sql
+          .exec<{ json: string }>(
+            `SELECT json FROM run_steps WHERE run_id = ? AND step >= 0 ORDER BY step DESC LIMIT 1`,
+            row.runId,
+          )
+          .toArray()[0]?.json;
+        const last = lastJson ? (parseStoredJson(lastJson) as StepRecord) : undefined;
         if (
-          receipt.runId !== row.runId ||
-          receipt.session.key !== request.key ||
-          receipt.session.through !== through ||
-          (await sourceHash(inputs)) !== (await sourceHash(receipt.inputs))
+          !session ||
+          session.key !== request.key ||
+          session.range === "broken" ||
+          !last ||
+          last.step !== 0 ||
+          last.inFlight.length
         )
           return unavailable();
-      } else {
-        if (!contextDependenciesContain(snapshot.context, row.state.contextDependencies)) return unavailable();
-        const sources = (
-          await Promise.all(
-            snapshot.context.origins
-              .filter((origin) => origin.runId !== row.runId)
-              .map((origin) => this.checkpointSource(origin.runId)),
+        const through = session.seedFrom + last.turnIndex - 1;
+        const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
+        if (checkpoint && (checkpoint.key !== request.key || checkpoint.through !== through)) return unavailable();
+        const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(request.key));
+        const snapshot = await observe("source-snapshot", request.runId, () =>
+          log.checkpointSnapshot(session.seedFrom, through),
+        );
+        if (
+          snapshot.next !== through + 1 ||
+          snapshot.owner?.runId !== row.runId ||
+          snapshot.owner.gen !== request.gen ||
+          !isContextDependencies(snapshot.context) ||
+          !isContextDependencies(row.state.contextDependencies)
+        )
+          return unavailable();
+        const inputs = {
+          transcriptHash: await sourceHash(assembleTranscript(snapshot.rows, snapshot.attachments, session.seedFrom)),
+          systemHash: await sourceHash(row.system),
+          notepadHash: await sourceHash(snapshot.notepad),
+        };
+        let receipt = isContextCheckpointReceipt(row.state.pendingContextCheckpoint)
+          ? row.state.pendingContextCheckpoint
+          : undefined;
+        if (receipt) {
+          if (
+            receipt.runId !== row.runId ||
+            receipt.session.key !== request.key ||
+            receipt.session.through !== through ||
+            (await sourceHash(inputs)) !== (await sourceHash(receipt.inputs))
           )
-        ).filter((source): source is CanonicalCheckpointSource => source !== undefined);
-        receipt = await planContextCheckpoint({
-          run: { runId: row.runId, meta: row.meta, context: snapshot.context },
-          ownerGen: request.gen,
-          through,
-          inputs,
-          expected: request.expected,
-          sources,
-        });
-        if (!receipt) return unavailable();
-        const members = checkpointMembersOf(row.runId, receipt.coveredOrigins, sources);
-        const memberHashes = checkpointMemberHashesOf(row.runId, receipt.coveredOrigins, sources);
-        this.ctx.storage.transactionSync(() => {
-          // Preserve predecessor pins until the source object ACKs installation.
-          // A crash before that ACK still resumes from the original closure.
-          for (const [order, member] of members.entries())
-            this.sql.exec(
-              `INSERT INTO context_refs (holder_run_id, source_run_id, session_key, ordinary_member, ordinary_order, ordinary_checkpoint, retention_pin)
+            return unavailable();
+        } else {
+          if (!contextDependenciesContain(snapshot.context, row.state.contextDependencies)) return unavailable();
+          const origins = snapshot.context.origins.filter((origin) => origin.runId !== row.runId);
+          // One batch span keeps the event count independent of the source window.
+          const sources = (
+            await observe(
+              "source-batch-read",
+              row.runId,
+              () => Promise.all(origins.map((origin) => this.checkpointSource(origin.runId))),
+              origins.length,
+            )
+          ).filter((source): source is CanonicalCheckpointSource => source !== undefined);
+          receipt = await planContextCheckpoint({
+            run: { runId: row.runId, meta: row.meta, context: snapshot.context },
+            ownerGen: request.gen,
+            through,
+            inputs,
+            expected: request.expected,
+            sources,
+          });
+          if (!receipt) return unavailable();
+          const members = checkpointMembersOf(row.runId, receipt.coveredOrigins, sources);
+          const memberHashes = checkpointMemberHashesOf(row.runId, receipt.coveredOrigins, sources);
+          this.ctx.storage.transactionSync(() => {
+            // Preserve predecessor pins until the source object ACKs installation.
+            // A crash before that ACK still resumes from the original closure.
+            for (const [order, member] of members.entries())
+              this.sql.exec(
+                `INSERT INTO context_refs (holder_run_id, source_run_id, session_key, ordinary_member, ordinary_order, ordinary_checkpoint, retention_pin)
                VALUES (?, ?, '', 1, ?, ?, 0)
                ON CONFLICT(holder_run_id, source_run_id, session_key) DO UPDATE SET
                  ordinary_member = 1, ordinary_order = excluded.ordinary_order, ordinary_checkpoint = excluded.ordinary_checkpoint`,
+                row.runId,
+                member,
+                order,
+                memberHashes[member],
+              );
+            this.pinReference(row.runId, row.runId, request.key, true);
+            row.state.pendingContextCheckpoint = receipt;
+            this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(row.state), row.runId);
+          });
+        }
+        if (
+          !(
+            await observe(
+              "source-install",
               row.runId,
-              member,
-              order,
-              memberHashes[member],
-            );
-          this.pinReference(row.runId, row.runId, request.key, true);
-          row.state.pendingContextCheckpoint = receipt;
+              async () => await log.installCheckpoint(row.runId, request.gen, receipt!),
+            )
+          ).ok
+        )
+          return unavailable();
+        this.ctx.storage.transactionSync(() => {
+          const { pendingContextCheckpoint: _pending, ...prior } = row.state;
+          row.state = { ...prior, contextDependencies: receipt!.normalized, contextCheckpointReceipt: receipt };
           this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(row.state), row.runId);
+          this.replaceOrdinaryCheckpointPins(row.runId, receipt!);
         });
-      }
-      if (!(await log.installCheckpoint(row.runId, request.gen, receipt)).ok) return unavailable();
-      this.ctx.storage.transactionSync(() => {
-        const { pendingContextCheckpoint: _pending, ...prior } = row.state;
-        row.state = { ...prior, contextDependencies: receipt!.normalized, contextCheckpointReceipt: receipt };
-        this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(row.state), row.runId);
-        this.replaceOrdinaryCheckpointPins(row.runId, receipt!);
-      });
-      return { ok: true, receipt };
-    });
+        return { ok: true, receipt };
+      },
+      correlation,
+    );
   }
 
   /** A source write proves its canonical session through the claimed row. */
@@ -6850,19 +7040,27 @@ export class RunHistoryDO extends DurableObject<Env> {
     });
     if (!holders.some((holder) => handoffRangePins(holder.handoff).size)) return commit();
     const touched = new Set<string>();
-    const outcome = await this.ctx.blockConcurrencyWhile(async () => {
+    const runId = holders.length === 1 && RUN_ID_PATTERN.test(holders[0].id) ? holders[0].id : null;
+    const outcome = await this.observeInputGate("withRangePins", runId, async (observe) => {
       try {
         const { policy } = this.policyState();
-        for (const holder of holders) {
-          if (!this.contextSourcesAvailable(holder.handoff, undefined, policy, systemClock()))
-            throw new Error("unit context source is unavailable");
-          for (const [key, ranges] of handoffRangePins(holder.handoff)) {
-            touched.add(key);
-            const source = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key));
-            if (!(await source.protectRanges(holder.id, ranges)).ok)
-              throw new Error("context source range is unavailable");
-          }
-        }
+        await observe(
+          "source-range-protection",
+          runId,
+          async () => {
+            for (const holder of holders) {
+              if (!this.contextSourcesAvailable(holder.handoff, undefined, policy, systemClock()))
+                throw new Error("unit context source is unavailable");
+              for (const [key, ranges] of handoffRangePins(holder.handoff)) {
+                touched.add(key);
+                const source = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key));
+                if (!(await source.protectRanges(holder.id, ranges)).ok)
+                  throw new Error("context source range is unavailable");
+              }
+            }
+          },
+          holders.reduce((count, holder) => count + handoffRangePins(holder.handoff).size, 0),
+        );
         const value = await commit();
         return { ok: true as const, value };
       } catch (error) {
@@ -8096,7 +8294,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { ok: true, before: canonicalSeedJson(row.state) };
   }
 
-  async setState(runId: string, gen: string, state: RunState, before?: string): Promise<FenceResult | PromotionHold> {
+  async setState(
+    runId: string,
+    gen: string,
+    state: RunState,
+    before?: string,
+    correlation?: CheckpointGateCorrelation,
+  ): Promise<FenceResult | PromotionHold> {
     // A known precondition crosses RPC as data. A remote exception cannot keep
     // the custom class that the HTTP handler would otherwise need to catch.
     const pending = (): PromotionHold => ({ kind: "held", reason: "promotion_pending", runId });
@@ -8113,82 +8317,87 @@ export class RunHistoryDO extends DurableObject<Env> {
     )
       return { ok: false, reason: "fenced" };
     if (this.promotionHeld(runId, gen)) return pending();
-    return this.withInputGate("setState", runId, async (): Promise<FenceResult | PromotionHold> => {
-      const row = this.liveRow(runId);
-      const fence = checkFence(row, gen);
-      if (!fence.ok) return fence;
-      if (!row) return { ok: false, reason: "unknown-run" };
-      if (this.promotionHeld(runId, gen)) return pending();
-      const restored = this.preserveArchivedBaseline(runId, state, { id: runId, ...row.meta });
-      if (!restored) return { ok: false, reason: "fenced" };
-      state = restored;
-      const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
-      const preserved = preserveCheckpointState(row.state, state, mintSeed);
-      if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }))
-        return { ok: false, reason: "fenced" };
-      // A retry may follow a committed write with a lost RPC reply. An exact
-      // current snapshot needs no mutation; a moved prior state is never reset.
-      if (before !== undefined) {
-        const current = canonicalSeedJson(row.state);
-        if (current === canonicalSeedJson(preserved)) return { ok: true };
-        if (current !== before) return { ok: false, reason: "fenced" };
-      }
-      const receipt = preserved.unitSeedReceipt as UnitSeedReceipt | undefined;
-      if (mintSeed && receipt) {
-        const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
-        const lastJson = this.sql
-          .exec<{ json: string }>(
-            `SELECT json FROM run_steps WHERE run_id = ? AND step >= 0 ORDER BY step DESC LIMIT 1`,
-            runId,
-          )
-          .toArray()[0]?.json;
-        const last = lastJson ? (parseStoredJson(lastJson) as StepRecord) : undefined;
-        if (
-          receipt.ownerGen !== gen ||
-          checkpoint?.key !== receipt.seed.key ||
-          checkpoint.through !== receipt.seed.through ||
-          !last ||
-          last.step !== 0 ||
-          last.inFlight.length ||
-          receipt.seed.through !== receipt.seed.from + last.turnIndex - 1
-        )
+    return this.withInputGate(
+      "setState",
+      runId,
+      async (observe): Promise<FenceResult | PromotionHold> => {
+        const row = this.liveRow(runId);
+        const fence = checkFence(row, gen);
+        if (!fence.ok) return fence;
+        if (!row) return { ok: false, reason: "unknown-run" };
+        if (this.promotionHeld(runId, gen)) return pending();
+        const restored = this.preserveArchivedBaseline(runId, state, { id: runId, ...row.meta });
+        if (!restored) return { ok: false, reason: "fenced" };
+        state = restored;
+        const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
+        const preserved = preserveCheckpointState(row.state, state, mintSeed);
+        if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }))
           return { ok: false, reason: "fenced" };
-        const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.seed.key));
-        if (
-          (await sourceHash(row.system)) !== receipt.seed.systemHash ||
-          !(await log.acknowledgeUnitSeed(runId, gen, receipt)).ok
-        )
-          return { ok: false, reason: "fenced" };
-      }
-      let promotionRefused = false;
-      let stateMoved = false;
-      this.ctx.storage.transactionSync(() => {
-        if (this.promotionHeld(runId, gen)) {
-          promotionRefused = true;
-          return;
-        }
+        // A retry may follow a committed write with a lost RPC reply. An exact
+        // current snapshot needs no mutation; a moved prior state is never reset.
         if (before !== undefined) {
-          const current = this.liveRow(runId);
-          if (!checkFence(current, gen).ok || canonicalSeedJson(current?.state) !== canonicalSeedJson(row.state)) {
-            stateMoved = true;
+          const current = canonicalSeedJson(row.state);
+          if (current === canonicalSeedJson(preserved)) return { ok: true };
+          if (current !== before) return { ok: false, reason: "fenced" };
+        }
+        const receipt = preserved.unitSeedReceipt as UnitSeedReceipt | undefined;
+        if (mintSeed && receipt) {
+          const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
+          const lastJson = this.sql
+            .exec<{ json: string }>(
+              `SELECT json FROM run_steps WHERE run_id = ? AND step >= 0 ORDER BY step DESC LIMIT 1`,
+              runId,
+            )
+            .toArray()[0]?.json;
+          const last = lastJson ? (parseStoredJson(lastJson) as StepRecord) : undefined;
+          if (
+            receipt.ownerGen !== gen ||
+            checkpoint?.key !== receipt.seed.key ||
+            checkpoint.through !== receipt.seed.through ||
+            !last ||
+            last.step !== 0 ||
+            last.inFlight.length ||
+            receipt.seed.through !== receipt.seed.from + last.turnIndex - 1
+          )
+            return { ok: false, reason: "fenced" };
+          const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.seed.key));
+          if (
+            (await sourceHash(row.system)) !== receipt.seed.systemHash ||
+            !(await observe("unit-seed-ack", runId, async () => await log.acknowledgeUnitSeed(runId, gen, receipt))).ok
+          )
+            return { ok: false, reason: "fenced" };
+        }
+        let promotionRefused = false;
+        let stateMoved = false;
+        this.ctx.storage.transactionSync(() => {
+          if (this.promotionHeld(runId, gen)) {
+            promotionRefused = true;
             return;
           }
-        }
-        if (isContextDependencies(preserved.contextDependencies))
-          this.pinContext(runId, undefined, preserved.contextDependencies);
-        if (receipt) this.pinReference(runId, runId, receipt.seed.key);
-        this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(preserved), runId);
-        const feedbackReceipt = retainedFeedbackReceipt(row.state.reviewPublication, preserved.reviewPublication, {
-          runId,
-          repo: row.meta.repo,
-          pr: row.meta.pr,
+          if (before !== undefined) {
+            const current = this.liveRow(runId);
+            if (!checkFence(current, gen).ok || canonicalSeedJson(current?.state) !== canonicalSeedJson(row.state)) {
+              stateMoved = true;
+              return;
+            }
+          }
+          if (isContextDependencies(preserved.contextDependencies))
+            this.pinContext(runId, undefined, preserved.contextDependencies);
+          if (receipt) this.pinReference(runId, runId, receipt.seed.key);
+          this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(preserved), runId);
+          const feedbackReceipt = retainedFeedbackReceipt(row.state.reviewPublication, preserved.reviewPublication, {
+            runId,
+            repo: row.meta.repo,
+            pr: row.meta.pr,
+          });
+          if (feedbackReceipt) this.reviewFeedback.retain(feedbackReceipt);
         });
-        if (feedbackReceipt) this.reviewFeedback.retain(feedbackReceipt);
-      });
-      if (promotionRefused) return pending();
-      if (stateMoved) return { ok: false, reason: "fenced" };
-      return { ok: true };
-    });
+        if (promotionRefused) return pending();
+        if (stateMoved) return { ok: false, reason: "fenced" };
+        return { ok: true };
+      },
+      correlation,
+    );
   }
 
   /** Feedback reads and leases are independent of run ownership and publication. */
@@ -8659,7 +8868,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     // A private custody refusal must not break the object's input gate.
     this.prepareInboxSegment(runId);
     let pinKeys: string[] = [];
-    const result = await this.ctx.blockConcurrencyWhile(async () => {
+    const result = await this.observeInputGate("abandon", runId, async () => {
       let out: FenceResult = { ok: true };
       let held: PromotionPendingError | undefined;
       let threadKey: string | undefined;
@@ -10537,7 +10746,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     id: string,
     destructive = false,
   ): Promise<boolean | { ok: false; reason: "publication_pending" | "live" }> {
-    const result = await this.ctx.blockConcurrencyWhile(async () => {
+    const result = await this.observeInputGate("delete", id, async () => {
       let deleted = false;
       let refused = false;
       this.ctx.storage.transactionSync(() => {
@@ -14034,7 +14243,9 @@ async function handleLedger(
           !request.expected.inputs
         )
           return json({ error: "invalid checkpoint request" }, 400);
-        const result = await env.RUNS.get(env.RUNS.idFromName(store.value)).normalizeContextOrigins(request);
+        const result = await env.RUNS.get(env.RUNS.idFromName(store.value)).normalizeContextOrigins(request, {
+          requestId,
+        });
         return json(result, result.ok ? 200 : 409);
       }
       if (pathname === "/runs/session/tail") return json(await stub.nextIndex());
@@ -14546,7 +14757,7 @@ async function handleLedger(
   if (pathname === "/runs/context-checkpoint") {
     const run = parseRunId(b.runId);
     if (!run.ok) return json({ error: run.error }, 400);
-    return json({ source: (await stub.readContextCheckpoint(run.value)) ?? null });
+    return json({ source: (await stub.readContextCheckpoint(run.value, { requestId })) ?? null });
   }
   if (pathname === "/runs/claim") {
     if (b.confirm !== undefined) {
@@ -15228,6 +15439,7 @@ async function handleLedger(
             g.value,
             b.state as RunState,
             before,
+            { requestId, requestDigest: stateWitness?.digest },
           )) as FenceResult | PromotionHold,
       );
     } catch (error) {
@@ -15306,10 +15518,11 @@ async function handleRuns(
   env: Env,
   nativeClient = false,
   reviewStopClient = false,
+  requestId?: string,
 ): Promise<Response> {
   const stub = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
   if (LEDGER_ROUTES.has(pathname))
-    return handleLedger(pathname, body, env, undefined, undefined, undefined, nativeClient, reviewStopClient);
+    return handleLedger(pathname, body, env, undefined, undefined, requestId, nativeClient, reviewStopClient);
   if (pathname.startsWith("/runs/review-feedback/")) {
     if (!body || typeof body !== "object" || Array.isArray(body))
       return json({ error: "invalid review feedback request" }, 400);
@@ -15556,6 +15769,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
             env,
             request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
             request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
+            storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
           ));
     } catch (error) {
       if (error instanceof Error && error.name === "RunDeletedError") throw error;

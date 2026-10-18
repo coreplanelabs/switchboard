@@ -209,6 +209,8 @@ import { markdownOutput } from "../llmOutput/index.js";
 import { branchPushReceiptsOf, callsInFlight, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import { writeBoundaryDiagnosticSummary, type LedgerRun } from "../runLedger/writeThrough.js";
+import { originalStorageFailure } from "../storageFailureDiagnostic.js";
+import { UncertainStoreError, PermanentStoreError, TransientStoreError } from "../storeFailure.js";
 import { assignRunLiveState } from "../runLiveState.js";
 import { causeOfClose } from "../plane/decide.js";
 import { RefusalError, refusalOf } from "../refusal.js";
@@ -339,7 +341,15 @@ export interface RunPaused {
 
 export type RunLoopOutcome = RunOutcome | RunInterrupted | RunPaused;
 
-class ContextCheckpointDeferred extends Error {}
+class ContextCheckpointDeferred extends Error {
+  constructor(
+    message: string,
+    readonly boundary:
+      "tool-recovery" | "review-owner" | "review-submission" | "producer-ending" | "model-context" | "successor-launch",
+  ) {
+    super(message);
+  }
+}
 
 /** What `runLoop` reads off the dispatch. */
 export interface RunLoopContext {
@@ -662,9 +672,69 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // native result checkpoint in this harness; compacted history need not echo.
   const sourceResultCalls = new Set<string>();
   let reviewSubmission: ReviewSubmission | undefined;
+  let recoveryCheckpointFailure: Record<string, unknown> | undefined;
+  const recoveryError = (error: unknown) => ({
+    kind:
+      error instanceof UncertainStoreError
+        ? "uncertain-store"
+        : error instanceof PermanentStoreError
+          ? "permanent-store"
+          : error instanceof TransientStoreError
+            ? "transient-store"
+            : error instanceof ToolRecoveryStoppedError
+              ? "tool-recovery"
+              : error instanceof ContextCheckpointDeferred
+                ? "context-checkpoint"
+                : error instanceof HarnessInterruptedError
+                  ? "harness-interrupted"
+                  : error instanceof RefusalError
+                    ? "refusal"
+                    : error instanceof TypeError
+                      ? "type"
+                      : error instanceof RangeError
+                        ? "range"
+                        : error instanceof SyntaxError
+                          ? "syntax"
+                          : error instanceof Error
+                            ? "error"
+                            : "non-error",
+    storage: originalStorageFailure(error),
+  });
+  const diagnoseRecovery = (
+    event: "recovery.checkpoint.failure" | "recovery.checkpoint.hold",
+    facts: Record<string, unknown>,
+  ): void => {
+    try {
+      console.warn(JSON.stringify({ event, runId: run.id, ownerGen: deps.runLedger.gen, ...facts }));
+    } catch {
+      // Storage and diagnostic sinks cannot grant another model call.
+    }
+  };
   const recovery = new ToolRecovery(restored.toolRecovery, async (state, tool) => {
     if (!ledgerTrackedAtEntry) return true;
     return root.span(`recovery.checkpoint.${tool}`, async () => {
+      const diagnose = (outcome: "threw" | "unconfirmed", error?: unknown) => {
+        const boundary = ledgerRun?.writeBoundaryFailure;
+        recoveryCheckpointFailure = {
+          tool,
+          outcome,
+          tracked: ledgerRun?.tracked() === true,
+          checkpointFailure: ledgerRun?.lastCheckpointFailure ?? "unknown",
+          ...(error === undefined ? {} : { error: recoveryError(error) }),
+          ...(boundary?.runId === run.id && boundary.gen === deps.runLedger.gen
+            ? {
+                boundary: {
+                  kind: boundary.kind,
+                  requestDigest: boundary.requestDigest,
+                  expectedDigest: boundary.expectedDigest,
+                  diagnosis: writeBoundaryDiagnosticSummary(boundary),
+                  storage: boundary.storageDiagnostic,
+                },
+              }
+            : {}),
+        };
+        diagnoseRecovery("recovery.checkpoint.failure", recoveryCheckpointFailure);
+      };
       let confirmed: boolean;
       try {
         confirmed =
@@ -673,14 +743,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             toolRecovery: state,
             ...(tool === "submit_verdict" && reviewSubmission ? { reviewSubmission } : {}),
           }));
-      } catch {
+      } catch (error) {
+        diagnose("threw", error);
         throw classifyError(new Error("Recovery checkpoint unavailable"), { kind: "infra", code: "state_write_threw" });
       }
-      if (!confirmed)
+      if (!confirmed) {
+        diagnose("unconfirmed");
         throw classifyError(new Error("Recovery checkpoint unavailable"), {
           kind: "infra",
           code: ledgerRun?.writeBoundaryFailure?.diagnosis?.kind ?? "ack_unconfirmed",
         });
+      }
       return true;
     });
   });
@@ -1387,6 +1460,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (ledgerTrackedAtEntry && !ledgerRun?.tracked())
       throw new ContextCheckpointDeferred(
         "The original review owner is unavailable; its submission remains unconfirmed.",
+        "review-owner",
       );
     let confirmed = !ledgerRun?.tracked();
     if (ledgerRun?.tracked()) {
@@ -1402,6 +1476,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (!confirmed)
       throw new ContextCheckpointDeferred(
         "The review submission checkpoint could not be confirmed; the review remains incomplete.",
+        "review-submission",
       );
     reviewSubmission = submission;
     verdict = submission.status === "accepted" ? submission.verdict : undefined;
@@ -1645,7 +1720,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       if (harnessSession && lastFacts && ledgerRun?.tracked()) {
         lastFacts = { ...lastFacts, ended: true };
         if (!(await ledgerRun.setStateAndFlush({ harness: lastFacts })))
-          throw new ContextCheckpointDeferred("The producer ending could not be saved.");
+          throw new ContextCheckpointDeferred("The producer ending could not be saved.", "producer-ending");
       }
       harnessEndState = "settled";
     } catch (error) {
@@ -1674,7 +1749,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ledgerRun.tracked() &&
       (ledgerRun.lastCheckpointFailure === "state-unavailable" || ledgerRun.lastCheckpointFailure === "state-unknown")
     )
-      throw new ContextCheckpointDeferred("The completed model context could not be saved.");
+      throw new ContextCheckpointDeferred("The completed model context could not be saved.", "model-context");
     if (!checkpoint)
       throw new Error(`answer context checkpoint was not persisted (${ledgerRun.lastCheckpointFailure ?? "unknown"})`);
     return checkpoint;
@@ -3505,7 +3580,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       if (intent?.phase !== "prepared") {
         const next = nextHarnessLaunch(run.id, launchIntent, recordedFacts, "ended");
         if (!ledgerRun?.tracked() || !(await ledgerRun.setStateAndFlush({ harnessLaunch: next })))
-          throw new ContextCheckpointDeferred("The successor launch could not be saved.");
+          throw new ContextCheckpointDeferred("The successor launch could not be saved.", "successor-launch");
         launchIntent = next;
       }
     }
@@ -4022,7 +4097,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           throw new Error("The original producer ending cannot qualify workspace continuation.");
         const next = nextHarnessLaunch(run.id, launchIntent, lastFacts, "ended");
         if (!(await ledgerRun.setStateAndFlush({ harnessLaunch: next })))
-          throw new ContextCheckpointDeferred("The successor launch could not be saved.");
+          throw new ContextCheckpointDeferred("The successor launch could not be saved.", "successor-launch");
         launchIntent = next;
         const request: ChatMessage = { role: "user", content: [{ type: "text", text: input.text }] };
         await ledgerRun.step({
@@ -5104,9 +5179,31 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       recovery.stopped?.reason === "checkpoint_unavailable"
         ? new ContextCheckpointDeferred(
             "The tool recovery checkpoint could not be confirmed; original work remains held.",
+            "tool-recovery",
           )
         : originalError;
     if (err instanceof ContextCheckpointDeferred) {
+      const boundary = ledgerRun?.writeBoundaryFailure;
+      diagnoseRecovery("recovery.checkpoint.hold", {
+        reason: err.boundary,
+        checkpoint: recoveryCheckpointFailure ?? {
+          outcome: "unconfirmed",
+          checkpointFailure: ledgerRun?.lastCheckpointFailure ?? "unknown",
+          ...(boundary?.runId === run.id && boundary.gen === deps.runLedger.gen
+            ? {
+                boundary: {
+                  kind: boundary.kind,
+                  requestDigest: boundary.requestDigest,
+                  expectedDigest: boundary.expectedDigest,
+                  diagnosis: writeBoundaryDiagnosticSummary(boundary),
+                  storage: boundary.storageDiagnostic,
+                },
+              }
+            : {}),
+        },
+        opening: recoveryError(originalError),
+        endingUnconfirmed: openingEnding !== undefined,
+      });
       events.publish({ type: "run_note", kind: "checkpoint_deferred", summary: err.message, at: clock() });
       await events.drain();
       const handedOff = (await ledgerRun?.pauseForRetry().catch(() => false)) ?? false;
