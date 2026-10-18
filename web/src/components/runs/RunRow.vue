@@ -51,6 +51,8 @@ const props = defineProps<{
   /** The head row this one nests under (live-view item 33): a pipeline's run
    *  indents below its parent's row instead of interleaving with the rest. */
   nestedUnder?: string;
+  /** End the branch rail at the final child's status dot. */
+  lastNested?: boolean;
   /** The rows nested under this head (live-view item 32): a hosted head's pace
    *  cell borrows its newest live child's pace from them. */
   children?: IndexRow[];
@@ -97,13 +99,10 @@ const outcome = computed(() =>
 const stopBadge = computed(() =>
   props.run.stop && !(props.run.finished && props.run.status) ? stopLabel(props.run.stop) : "",
 );
-// The stall signal (live-view item 32): the pace cell — the bound-exceeded
-// mark winning over the rate — and the `stalled` badge; live rows that carry
-// the fact only, so an older writer's row shows no signal, not a false stall.
+// Keep warnings on the row. Event rate is available on the details page.
 const bound = computed(() => rowBound(props.run, props.now));
-// The borrowed pace (item 32): a live hosted head has no pace facts of its
-// own — a coordinator makes no tool calls — so the cell reads its newest live
-// child's pace, or `waiting on the runner` when no child on the page lends one.
+// A hosted head borrows its newest live child's warning. Between children it
+// reads `waiting on the runner`. Healthy event rates stay off the row.
 // The `children` prop arrives only on the head rendering; a nested hosted row
 // (children absent) shows no signal rather than a false `waiting`.
 const inherited = computed(() =>
@@ -111,15 +110,21 @@ const inherited = computed(() =>
     ? inheritedPace({ head: props.run, children: props.children }, props.now)
     : undefined,
 );
-const pace = computed(() => bound.value ?? inherited.value?.text ?? rowPace(props.run, props.now));
+const pace = computed(() => {
+  if (bound.value) return bound.value;
+  const child = inherited.value?.child;
+  if (inherited.value && (!child || rowBound(child, props.now) || rowStalled(child, props.now))) {
+    return inherited.value.text;
+  }
+  return rowStalled(props.run, props.now) ? rowPace(props.run, props.now) : undefined;
+});
 const stalled = computed(() => rowStalled(props.run, props.now));
 
 const pending = ref(false);
 
 /** The row's actions menu, the one control at every width (a pair of Stop and
  *  Kill buttons per row cost 7.6em of every line for two rarely used actions):
- *  the thread link (the desktop source mark is hover-revealed) and, while the
- *  run is stoppable, Stop/Kill — each disabled while its POST is in flight. */
+ *  the thread link and Stop/Kill, each disabled while its POST is in flight. */
 const actionItems = computed(() => [
   ...(threadLink.value ? [{ label: "Open thread", icon: "i-lucide-messages-square", to: threadLink.value }] : []),
   ...(sourceUrl.value
@@ -181,11 +186,13 @@ function onRowClick(ev: MouseEvent): void {
 
 <template>
   <li
-    class="run group relative isolate rounded-md border-b border-muted hover:bg-(--ui-bg-muted) focus-within:bg-(--ui-bg-muted)"
+    class="run group relative isolate border-b hover:bg-(--ui-bg-muted) focus-within:bg-(--ui-bg-muted)"
     :class="[
       run.finished ? 'finished' : 'live',
       leaving ? 'leaving' : '',
-      nestedUnder ? 'nested ml-4 border-l-2 border-accented sm:ml-6' : '',
+      nestedUnder
+        ? ['nested bg-muted/20', lastNested ? 'rounded-b-md border-muted' : 'border-transparent']
+        : [children?.length ? 'rounded-t-md border-transparent' : 'rounded-md border-muted'],
     ]"
     :data-run-id="run.id"
     :data-parent-id="nestedUnder"
@@ -195,121 +202,120 @@ function onRowClick(ev: MouseEvent): void {
     :data-expires-at="expires !== undefined ? String(expires) : undefined"
     @click="onRowClick"
   >
+    <span
+      v-if="children?.length"
+      class="parent-rail pointer-events-none absolute bottom-0 left-[17px] top-7 w-px bg-accented"
+      aria-hidden="true"
+    />
+    <template v-if="nestedUnder">
+      <span
+        v-if="!lastNested"
+        class="child-rail pointer-events-none absolute bottom-0 left-[17px] top-0 w-px bg-accented"
+        aria-hidden="true"
+      />
+      <span
+        class="child-branch pointer-events-none absolute left-[17px] top-0 h-6 w-4 rounded-bl-lg border-b border-l border-accented"
+        aria-hidden="true"
+      />
+    </template>
     <RouterLink
       class="row absolute inset-0 rounded-md focus-visible:outline-2 focus-visible:outline-primary"
       :to="href"
       :aria-label="`open run ${run.label || shortId(run.id)}`"
     ></RouterLink>
-    <!-- ONE responsive body (no per-breakpoint DOM): from sm it is the
-         one-line grid — dot · started · chip · scope · snippet · badges ·
-         source · facts · actions. Below sm the SAME cells wrap into a card via
-         max-sm order/basis overrides: line 1 = dot · chip · scope · stopwatch
-         · the ⋮ actions menu; line 2 = the snippet (clamped); line 3 =
-         started · events · badges. The menu is the same control at every
-         width (it also carries the hover-only thread link for touch). -->
     <div
-      class="body pointer-events-none relative z-[1] flex min-w-0 flex-wrap items-center gap-x-2.5 px-2 max-sm:gap-y-1.5 max-sm:py-3 sm:flex-nowrap sm:py-2"
-      :class="[run.finished ? 'text-muted' : '', leaving ? 'opacity-85' : '']"
+      class="body pointer-events-none relative z-[1] grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-start gap-x-3 px-3 py-3 sm:gap-x-4"
+      :class="[run.finished ? 'text-muted' : '', leaving ? 'opacity-85' : '', nestedUnder ? 'pl-10' : '']"
     >
-      <span class="pointer-events-auto flex items-center max-sm:order-1">
+      <span class="pointer-events-auto mt-1.5 flex items-center">
         <StatusDot :tone="tone" :label="statusWord(run)" :tip="dotTip(run)" :pulse="!run.finished" />
       </span>
-      <UTooltip :text="whenTip(run)" :ui="{ text: 'whitespace-pre-line' }">
-        <span
-          class="when pointer-events-auto shrink-0 font-mono tabular-nums max-sm:order-7 max-sm:pl-5 max-sm:text-xs max-sm:text-dimmed sm:min-w-[8.5em] sm:text-[0.8rem]"
-          :class="run.finished ? 'text-dimmed' : 'text-muted'"
-        >
-          {{ formatRelative(run.startedAt, now) }}
-        </span>
-      </UTooltip>
-      <!-- Who asked (record 0042, runs page): the resolved name, always visible — the
-           source mark's hover kept saying it only to a pointer — led by the surface's
-           name as a small text label (slack · http · mcp · cli: the channel id's own
-           prefix word), so a person's Slack, HTTP and CLI runs read apart without a
-           hover and without a glyph legend (authorization.md item 15: one person,
-           several credentials). A fixed-width column from sm (item 29): every row's
-           agent chip starts at the same x whatever the name's length, a long name
-           truncates and reads in full on hover, and a row that names nobody keeps
-           the empty cell. -->
-      <UTooltip v-if="who" :text="sourceTip(run)">
-        <span
-          class="who pointer-events-auto min-w-0 shrink-0 truncate text-[0.8rem] max-sm:order-7 max-sm:text-xs sm:w-[14em]"
-          :class="run.finished ? 'text-dimmed' : 'text-muted'"
-          :data-user-id="run.userId"
-          :data-surface="src.kind"
-          ><span
-            class="surface mr-1.5 inline-block w-[3.6em] rounded border border-accented text-center font-mono text-[0.62rem] text-dimmed"
-            >{{ src.kind }}</span
-          ><span class="name">{{ who }}</span></span
-        >
-      </UTooltip>
-      <span v-else class="who shrink-0 max-sm:hidden sm:w-[14em]" aria-hidden="true"></span>
-      <span
-        v-if="parts.agent"
-        class="agent shrink-0 rounded border px-1.5 font-mono text-[0.68rem] font-medium uppercase tracking-wider max-sm:order-2"
-        :class="[AGENT_HUE[agentHue(parts.agent)], run.finished ? 'opacity-55' : '']"
-        :data-agent-hue="agentHue(parts.agent)"
-        >{{ parts.agent }}</span
-      >
-      <UTooltip v-if="repo" :text="repo">
-        <a
-          class="repo pointer-events-auto min-w-0 shrink-0 rounded border border-accented bg-accented/50 px-1.5 font-mono text-[0.72rem] font-medium leading-normal text-toned no-underline hover:border-(--ui-text-dimmed) hover:text-highlighted max-sm:order-3"
-          :href="`https://github.com/${repo}`"
-          target="_blank"
-          rel="noopener noreferrer"
-          ><span class="owner font-normal text-dimmed">{{ repo.slice(0, repo.indexOf("/") + 1) }}</span
-          ><span class="name">{{ repo.slice(repo.indexOf("/") + 1) }}</span></a
-        >
-      </UTooltip>
-      <span
-        v-else
-        class="scope min-w-0 shrink-0 truncate font-medium max-sm:order-3"
-        :class="run.finished ? 'text-toned' : 'text-highlighted'"
-        >{{ parts.scope }}</span
-      >
-      <span
-        v-if="parts.snippet !== undefined"
-        class="snippet min-w-0 truncate text-muted max-sm:order-6 max-sm:basis-full max-sm:whitespace-normal max-sm:pl-5 max-sm:text-[0.8rem] max-sm:leading-snug max-sm:line-clamp-2 sm:flex-1"
-        >{{ parts.snippet }}</span
-      >
-      <span
-        v-if="outcome"
-        class="outcome shrink-0 rounded border px-1.5 font-mono text-[0.7rem] max-sm:order-10"
-        :class="
-          tone === 'red'
-            ? 'border-bad/30 text-bad'
-            : tone === 'amber'
-              ? 'border-warn/30 text-warn'
-              : 'border-accented text-muted'
-        "
-        >{{ outcome }}</span
-      >
-      <span
-        v-if="stopBadge"
-        class="stopbadge shrink-0 rounded border px-1.5 font-mono text-[0.7rem] max-sm:order-10"
-        :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-info/30 text-info'"
-        >{{ stopBadge }}</span
-      >
-      <!-- The stall badge (live-view item 32): a live run with no tool call for
-           the whole pace window — the pace cell says for how long. -->
-      <span
-        v-if="stalled"
-        class="stalled shrink-0 rounded border px-1.5 font-mono text-[0.7rem] max-sm:order-10"
-        :class="bound ? 'border-bad/30 text-bad' : 'border-warn/30 text-warn'"
-        >stalled</span
-      >
-      <!-- The source mark is a hover affordance — pointer devices only; the touch menu carries the same link. -->
-      <span class="hidden sm:contents">
-        <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
-      </span>
-      <UTooltip v-if="leaving && expires !== undefined" :text="`removed at ${formatLocalIso(expires)}`">
-        <span class="expires pointer-events-auto shrink-0 font-mono text-xs tabular-nums text-warn max-sm:order-11"
-          >gone {{ formatDateTime(expires, now) }}</span
-        >
-      </UTooltip>
+      <div class="min-w-0">
+        <div class="primary flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span
+            class="snippet min-w-0 text-sm leading-6 text-highlighted [overflow-wrap:anywhere] max-sm:line-clamp-2 sm:truncate"
+            >{{ parts.snippet ?? (repo ? repo.slice(repo.indexOf("/") + 1) : parts.scope) }}</span
+          >
+          <span
+            v-if="outcome"
+            class="outcome shrink-0 rounded border px-1.5 text-[0.7rem]"
+            :class="
+              tone === 'red'
+                ? 'border-bad/30 text-bad'
+                : tone === 'amber'
+                  ? 'border-warn/30 text-warn'
+                  : 'border-accented text-muted'
+            "
+            >{{ outcome }}</span
+          >
+          <span
+            v-if="stopBadge"
+            class="stopbadge shrink-0 rounded border px-1.5 text-[0.7rem]"
+            :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-info/30 text-info'"
+            >{{ stopBadge }}</span
+          >
+          <span
+            v-if="stalled"
+            class="stalled shrink-0 rounded border px-1.5 text-[0.7rem]"
+            :class="bound ? 'border-bad/30 text-bad' : 'border-warn/30 text-warn'"
+            >stalled</span
+          >
+        </div>
+        <div class="metadata mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-5 text-dimmed">
+          <span
+            v-if="parts.agent"
+            class="agent shrink-0 rounded px-1.5 py-0.5 font-mono text-[0.65rem] font-medium leading-none uppercase tracking-wide"
+            :class="AGENT_HUE[agentHue(parts.agent)]"
+            :data-agent-hue="agentHue(parts.agent)"
+            >{{ parts.agent }}</span
+          >
+          <span class="inline-flex min-w-0 max-w-full items-center gap-1.5">
+            <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
+            <UTooltip v-if="who" :text="who">
+              <span class="who pointer-events-auto min-w-0 truncate" :data-user-id="run.userId" :data-surface="src.kind"
+                ><span class="name">{{ who }}</span></span
+              >
+            </UTooltip>
+          </span>
+          <UTooltip v-if="repo" :text="repo">
+            <a
+              class="repo pointer-events-auto inline-flex min-w-0 max-w-full items-center gap-1 text-dimmed no-underline hover:text-highlighted"
+              :href="`https://github.com/${repo}`"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <UIcon name="i-lucide-git-branch" class="size-3 shrink-0" />
+              <span class="truncate"
+                ><span class="owner text-dimmed">{{ repo.slice(0, repo.indexOf("/") + 1) }}</span
+                ><span class="name">{{ repo.slice(repo.indexOf("/") + 1) }}</span></span
+              >
+            </a>
+          </UTooltip>
+          <span v-else class="scope min-w-0 truncate">{{ parts.scope }}</span>
+          <UTooltip :text="whenTip(run)" :ui="{ text: 'whitespace-pre-line' }">
+            <span class="when pointer-events-auto shrink-0 tabular-nums">{{ formatRelative(run.startedAt, now) }}</span>
+          </UTooltip>
+          <UTooltip :text="countTip(run)"
+            ><span class="count shrink-0 tabular-nums">{{ countText(run) }}</span></UTooltip
+          >
+          <UTooltip v-if="pace" :text="inherited && !bound ? inheritedPaceTip(inherited) : paceTip(run, now)">
+            <span
+              class="pace pointer-events-auto min-w-0 [overflow-wrap:anywhere]"
+              :class="bound ? 'text-bad font-medium' : 'text-warn'"
+              :data-inherited="inherited && !bound ? (inherited.child ? 'child' : 'waiting') : undefined"
+              >{{ pace }}</span
+            >
+          </UTooltip>
+          <UTooltip v-if="leaving && expires !== undefined" :text="`removed at ${formatLocalIso(expires)}`">
+            <span class="expires pointer-events-auto shrink-0 tabular-nums text-warn"
+              >gone {{ formatDateTime(expires, now) }}</span
+            >
+          </UTooltip>
+        </div>
+      </div>
       <UTooltip :text="run.finished ? 'start to finish' : 'running for'">
         <span
-          class="elapsed pointer-events-auto ml-auto shrink-0 text-right font-mono text-xs tabular-nums max-sm:order-4 sm:min-w-[4.5em]"
+          class="elapsed pointer-events-auto mt-0.5 shrink-0 text-right font-mono text-xs leading-5 tabular-nums sm:min-w-[5.5em]"
           :class="
             run.finished
               ? [elapsedPaint ? 'heat' : 'text-muted', elapsedHeat.level >= 2 ? 'font-medium' : '']
@@ -320,35 +326,10 @@ function onRowClick(ev: MouseEvent): void {
           >{{ elapsedText(run, now) }}</span
         >
       </UTooltip>
-      <span class="hidden text-xs text-dimmed max-sm:order-8 max-sm:inline" aria-hidden="true">·</span>
-      <UTooltip :text="countTip(run)">
-        <span
-          class="count shrink-0 text-right font-mono text-xs tabular-nums max-sm:order-9 max-sm:text-dimmed sm:min-w-[6em] sm:text-muted"
-        >
-          {{ countText(run) }}
-        </span>
-      </UTooltip>
-      <!-- The pace cell (live-view item 32): events per minute over the last
-           five minutes, `no tool call for N min` once stalled, or the
-           bound-exceeded mark (`bash 2083s, bound 600s`) — live rows that
-           carry the fact only, so a hung bash and a slow suite read apart. -->
-      <!-- The tooltip mirrors the cell's priority: the bound-exceeded mark's
-           sentence wins over the borrowed pace's, exactly as the text does. -->
-      <UTooltip v-if="pace" :text="inherited && !bound ? inheritedPaceTip(inherited) : paceTip(run, now)">
-        <span
-          class="pace pointer-events-auto shrink-0 text-right font-mono text-xs tabular-nums max-sm:order-9"
-          :class="bound ? 'text-bad font-medium' : stalled ? 'text-warn' : 'text-dimmed'"
-          :data-inherited="inherited && !bound ? (inherited.child ? 'child' : 'waiting') : undefined"
-          >{{ pace }}</span
-        >
-      </UTooltip>
-      <!-- The actions cell: one ⋮ menu at every width (Stop/Kill while the run
-           is stoppable, the thread link when there is one), in a fixed-width
-           cell so the facts columns line up on rows with no menu at all. -->
-      <span class="actions flex shrink-0 justify-end max-sm:order-5 sm:w-[2em]">
+      <span class="actions flex w-5 shrink-0 justify-end sm:w-[2em]">
         <UDropdownMenu v-if="actionItems.length > 0" :items="actionItems" :content="{ align: 'end' }">
           <UButton
-            class="pointer-events-auto -my-1.5 -mr-1"
+            class="pointer-events-auto -my-1 -mr-1"
             size="sm"
             color="neutral"
             variant="ghost"

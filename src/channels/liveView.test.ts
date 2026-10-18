@@ -44,7 +44,7 @@ import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { createRunsService } from "../core/runsService.js";
 import type { IndexEvent } from "../core/runRegistry/indexFeed.js";
-import { deletionAwareIndexFeed, visibleIndexFeed } from "./liveView/viewer.js";
+import { deletionAwareIndexFeed, namedIndexFeed, visibleIndexFeed } from "./liveView/viewer.js";
 import type { RunSummary } from "../core/runRegistry/projections.js";
 import { FIXTURE_SCHEDULES } from "./scheduledPanel.test.js";
 import { InMemoryScheduleStore, type ScheduleStore } from "../core/scheduleStore.js";
@@ -167,6 +167,57 @@ it("an incomplete history read does not remove the browser's seeded rows", async
     expect(feed.body()).not.toContain('"type":"snapshot"');
   } finally {
     feed.fireClose();
+  }
+});
+
+it("label lookup preserves feed order and stops delivery after disconnect", async () => {
+  const reg = fixedRegistry();
+  let resolveName!: (name: string) => void;
+  const name = new Promise<string>((resolve) => {
+    resolveName = resolve;
+  });
+  const events: IndexEvent[] = [];
+  const unsubscribe = namedIndexFeed(
+    (listener) => reg.subscribeIndex(listener),
+    async () => name,
+  )((event) => events.push(event));
+  const first = reg.create("visible run", { userId: "slack:UALICE", channelId: "slack:C1", threadKey: "slack:C1:1" });
+  reg.discard(first.id);
+  resolveName("Alice Chen");
+  await vi.waitFor(() => expect(events.map((event) => event.type)).toEqual(["upsert", "removed"]));
+  expect(events[0]).toMatchObject({ run: { userId: "slack:UALICE", userName: "Alice Chen" } });
+  reg.create("closed run", { userId: "slack:UALICE", channelId: "slack:C1", threadKey: "slack:C1:2" });
+  unsubscribe();
+  await Promise.resolve();
+  expect(events.map((event) => event.type)).toEqual(["upsert", "removed"]);
+});
+
+it("a stalled label lookup releases initial feed replay and removals within one deadline", async () => {
+  vi.useFakeTimers();
+  try {
+    const reg = fixedRegistry();
+    const meta = (userId: string) => ({ userId, channelId: "slack:C1", threadKey: "slack:C1:1", userName: "original" });
+    const first = reg.create("first run", meta("slack:UFIRST"));
+    const second = reg.create("second run", meta("slack:USECOND"));
+    const seen: IndexEvent[] = [];
+    const unsubscribe = namedIndexFeed(
+      (listener) => reg.subscribeIndex(listener),
+      async () => new Promise<string>(() => {}),
+    )((event) => seen.push(event));
+    try {
+      reg.discard(first.id);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(seen.map((event) => (event.type === "upsert" ? event.run.id : `removed:${event.id}`))).toEqual([
+        second.id,
+        first.id,
+        `removed:${first.id}`,
+      ]);
+      expect(seen[1]).toMatchObject({ run: { userName: "original" } });
+    } finally {
+      unsubscribe();
+    }
+  } finally {
+    vi.useRealTimers();
   }
 });
 
@@ -1219,6 +1270,48 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(seed.rows).toHaveLength(1);
     expect(seed.rows[0]).toMatchObject({ id, token, label: "coding · owner/repo", finished: false });
     expect(t.body()).toContain("<title>(1) Live runs</title>"); // item 21: the tab carries the live count
+  });
+
+  it("uses current requester labels on the index seed and feed while retaining caller ids", async () => {
+    const reg = fixedRegistry();
+    const { id } = reg.create("review · acme/web", {
+      userId: "access:account-1",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:account-1",
+      userName: "ingress",
+    });
+    const handler = liveOnlyHandler(reg, { requesterName: async () => "Alice Chen" });
+    const page = fakeReqRes("GET", "/runs");
+    handler(page.req, page.res);
+    await page.finished;
+    expect(indexSeedOf(page.body()).rows[0]).toMatchObject({ id, userId: "access:account-1", userName: "Alice Chen" });
+    const feed = fakeReqRes("GET", "/runs?stream=1");
+    handler(feed.req, feed.res);
+    await vi.waitFor(() => expect(feed.body()).toContain('"userName":"Alice Chen"'));
+    expect(feed.body()).toContain('"userId":"access:account-1"');
+    expect(reg.listActive()[0]).toMatchObject({ userId: "access:account-1", userName: "ingress" });
+    feed.fireClose();
+  });
+
+  it.each(["/runs", "/runs?all=1"])("a slow requester label cannot block %s", async (url) => {
+    vi.useFakeTimers();
+    try {
+      const reg = fixedRegistry();
+      const { id, token } = reg.create("review · acme/web", {
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1",
+        userName: "alice",
+      });
+      const handler = liveOnlyHandler(reg, { requesterName: async () => new Promise<string>(() => {}) });
+      const page = fakeReqRes("GET", url);
+      handler(page.req, page.res);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(page.status).toBe(200);
+      expect(indexSeedOf(page.body()).rows[0]).toMatchObject({ id, token, userName: "alice" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // Feature: docs/reference/specs/live-view.md item 32 — the index

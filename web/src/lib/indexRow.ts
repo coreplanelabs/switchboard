@@ -262,10 +262,15 @@ export function surfaceOf(run: IndexRow): { kind: string; identity: string } {
   const id = run.channelId ?? "";
   const colon = id.indexOf(":");
   const kind = colon === -1 ? "unknown" : id.slice(0, colon);
-  if (run.userName) return { kind, identity: run.userName };
+  const label = run.userName?.trim();
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (label && !uuid.test(label)) return { kind, identity: label };
   const uid = run.userId ?? "";
   const ucolon = uid.indexOf(":");
-  return { kind, identity: ucolon === -1 ? uid : uid.slice(ucolon + 1) };
+  const username = ucolon === -1 ? uid : uid.slice(ucolon + 1);
+  const opaque = uuid.test(username) || /^slack:[UW][A-Z0-9]+$/.test(uid) || /^(access|person):/.test(uid);
+  const machine = /^(?:http|mcp):/.test(uid);
+  return { kind, identity: !username ? "" : opaque ? "Unknown user" : machine ? "Service" : username };
 }
 
 /** The thread a run belongs to, as a page on this dashboard: the Threads page takes a
@@ -279,9 +284,7 @@ export function threadHref(threadKey: string): string {
  *  keeps when the URL names neither; a URL that names one wins. */
 export const RUNS_PREF = { mine: "sb.runs.mine", all: "sb.runs.all" } as const;
 
-/** The surface's name in words, for tooltips and menu labels. The row itself
- *  labels a surface with the channel id's own prefix word (`slack`, `http`,
- *  `mcp`, `cli`) — a text label, never a glyph a reader would need a legend for. */
+/** Accessible surface names for source icons, tooltips and menu labels. */
 export const SURFACE_NAME: Record<string, string> = {
   slack: "Slack",
   http: "HTTP ingress",
@@ -317,9 +320,7 @@ export function sourceTip(run: IndexRow): string {
   return `via ${SURFACE_NAME[s.kind] ?? s.kind}${s.identity ? ` · ${s.identity}` : ""}`;
 }
 
-/** The requester cell: who asked for the run — the resolved name (or the id
- *  suffix), always visible, so a page of rows says whose runs they are without
- *  a hover. Its tooltip is the source mark's sentence. */
+/** The requester label stays visible; the source icon carries the source tooltip. */
 export function whoText(run: IndexRow): string {
   return surfaceOf(run).identity;
 }
