@@ -328,6 +328,13 @@ export function buildReviewsReport(rows: ReviewsRows, range: ReviewsRange): Revi
   const askedForResident =
     RESIDENT_REQUESTED_WORKSPACES.reduce((s, w) => s + (workspaces[w] ?? 0), 0) + standInBackends;
   const counted = runs - (outcomes.cancellation ?? 0) - (outcomes["not recorded"] ?? 0);
+  // Rows written before the setup result existed carry no workspace, so they
+  // cannot have been lost at setup: they stay out of that total.
+  const withWorkspace = runs - (workspaces["not recorded"] ?? 0);
+  // A review row is built from the stored run whatever wrote it, so a range
+  // with rows that carry no outcome cannot tie its review rows to its run rows:
+  // the verdict share is not stated (0 over none) rather than guessed.
+  const verdictTotal = (outcomes["not recorded"] ?? 0) > 0 ? 0 : runs;
   const sampled = maxSampleInterval > 1;
 
   return {
@@ -385,8 +392,8 @@ export function buildReviewsReport(rows: ReviewsRows, range: ReviewsRange): Revi
       tiles: {
         runSuccessRate: tile(outcomes.success ?? 0, counted),
         warmStartShare: tile(warm, askedForResident),
-        lostAtSetup: tile(workspaces.none ?? 0, runs),
-        reviewsWithVerdict: tile(reviewRows, runs),
+        lostAtSetup: tile(workspaces.none ?? 0, withWorkspace),
+        reviewsWithVerdict: verdictTotal > 0 ? tile(reviewRows, verdictTotal) : tile(0, 0),
       },
       unclassified: errorTypes.unclassified ?? 0,
       outcomeNotRecorded: outcomes["not recorded"] ?? 0,

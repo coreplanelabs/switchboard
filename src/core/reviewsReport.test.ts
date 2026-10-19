@@ -359,8 +359,53 @@ describe("buildReviewsReport", () => {
     expect(t.runSuccessRate).toEqual({ good: 6, total: 8, ratio: 0.75 });
     // Warm over the rows that asked for a resident and got a workspace.
     expect(t.warmStartShare).toEqual({ good: 4, total: 7, ratio: 4 / 7 });
-    expect(t.lostAtSetup).toEqual({ good: 2, total: 10, ratio: 0.2 });
-    expect(t.reviewsWithVerdict).toEqual({ good: 5, total: 10, ratio: 0.5 });
+    // The row written before the setup result existed has no workspace: out of the loss total.
+    expect(t.lostAtSetup).toEqual({ good: 2, total: 9, ratio: 2 / 9 });
+    // A range with a row that carries no outcome cannot tie review rows to runs: no share is stated.
+    expect(t.reviewsWithVerdict).toEqual({ good: 0, total: 0, ratio: 0 });
+  });
+
+  it("states reviews with a verdict over every run when each run row carries an outcome, and never above 100%", () => {
+    const recorded = { ...rows, runs: rows.runs.filter((r) => r.outcome !== "") };
+    expect(buildReviewsReport(recorded, RANGE).system.tiles.reviewsWithVerdict).toEqual({
+      good: 5,
+      total: 9,
+      ratio: 5 / 9,
+    });
+    // An older writer's run row (no outcome) beside a newer one, both with review rows: no share, not 2 / 1.
+    const mixed = buildReviewsReport(
+      {
+        ...EMPTY,
+        runs: [
+          { day: sqlDay(1), outcome: "", surface: "", requester: "slack:UA", runs: 1, wallMs: 1, maxInterval: 1 },
+          {
+            day: sqlDay(1),
+            outcome: "success",
+            surface: "slack",
+            requester: "slack:UA",
+            runs: 1,
+            wallMs: 1,
+            maxInterval: 1,
+          },
+        ],
+        reviews: [
+          {
+            repository: "o/r",
+            pr: "1",
+            verdict: "approved",
+            reviews: 2,
+            findings: 0,
+            blocking: 0,
+            major: 0,
+            minor: 0,
+            nit: 0,
+            maxInterval: 1,
+          },
+        ],
+      },
+      RANGE,
+    );
+    expect(mixed.system.tiles.reviewsWithVerdict).toEqual({ good: 0, total: 0, ratio: 0 });
   });
 
   it("counts a local or E2B run that stood in for a resident in the warm-start total, never a cold one", () => {
