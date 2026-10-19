@@ -62,7 +62,7 @@ watch(isDark, followAppearance);
 const stories = [
   {
     shot: picture("runs-index"),
-    crop: "5 / 2",
+    crop: "16 / 10",
     lead: "Every run, accounted for.",
     rest: "Live and finished, with the agent, the duration and a stop button.",
     link: "/how-to/watch-a-run",
@@ -71,7 +71,7 @@ const stories = [
   },
   {
     shot: picture("residents"),
-    crop: "5 / 1",
+    crop: "16 / 10",
     lead: "Repos kept warm.",
     rest: "Onboard a repository once; every thread works in a checkout that is already there.",
     link: "/how-to/onboard-a-repo",
@@ -80,7 +80,7 @@ const stories = [
   },
   {
     shot: picture("costs"),
-    crop: "2 / 1",
+    crop: "16 / 10",
     lead: "Spend you can see.",
     rest: "Per agent, per model, per day — on the dashboard, not the invoice.",
     link: "/how-to/check-spend",
@@ -158,21 +158,46 @@ async function copy() {
         <!-- The one picture above the fold: one eager image (see `heroSrc`). Until
              the script has run, the source picks the file for the OS scheme; once
              `heroSrc` is set, the image follows the site's appearance instead. -->
-        <figure class="frame hero-frame">
-          <div class="bar" aria-hidden="true">
-            <span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/runs/…</span>
-          </div>
-          <picture>
-            <source v-if="heroSrc === null" media="(prefers-color-scheme: dark)" :srcset="shotSrc(hero.name, 'dark')" />
+        <div class="device-stack hero-stack">
+          <figure class="frame hero-frame">
+            <div class="bar" aria-hidden="true">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span
+              ><span class="url">/runs/…</span>
+            </div>
+            <picture>
+              <source
+                v-if="heroSrc === null"
+                media="(prefers-color-scheme: dark)"
+                :srcset="shotSrc(hero.name, 'dark')"
+              />
+              <img
+                :src="heroSrc ?? shotSrc(hero.name, 'light')"
+                :alt="hero.alt"
+                :width="PICTURE.width"
+                :height="PICTURE.height"
+                fetchpriority="high"
+              />
+            </picture>
+          </figure>
+          <figure class="frame phone-frame">
             <img
-              :src="heroSrc ?? shotSrc(hero.name, 'light')"
-              :alt="hero.alt"
-              :width="PICTURE.width"
-              :height="PICTURE.height"
-              fetchpriority="high"
+              class="light"
+              :src="shotSrc(hero.name + '-phone', 'light')"
+              :alt="hero.alt + ' Mobile view.'"
+              width="780"
+              height="1688"
+              loading="lazy"
             />
-          </picture>
-        </figure>
+            <img
+              class="dark"
+              :src="shotSrc(hero.name + '-phone', 'dark')"
+              :alt="hero.alt + ' Mobile view.'"
+              width="780"
+              height="1688"
+              loading="lazy"
+            />
+          </figure>
+        </div>
         <p class="caption">The run page: the model turns, the tool calls, the reply — every step timed.</p>
       </div>
     </section>
@@ -185,27 +210,47 @@ async function copy() {
           </p>
           <a class="more" :href="story.link">{{ story.cta }} →</a>
         </div>
-        <figure class="frame picture" :style="{ '--crop': story.crop }">
-          <div class="bar" aria-hidden="true">
-            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-          </div>
-          <img
-            class="light"
-            :src="shotSrc(story.shot.name, 'light')"
-            :alt="story.shot.alt"
-            :width="PICTURE.width"
-            :height="PICTURE.height"
-            loading="lazy"
-          />
-          <img
-            class="dark"
-            :src="shotSrc(story.shot.name, 'dark')"
-            :alt="story.shot.alt"
-            :width="PICTURE.width"
-            :height="PICTURE.height"
-            loading="lazy"
-          />
-        </figure>
+        <div class="device-stack picture">
+          <figure class="frame desktop-frame" :style="{ '--crop': story.crop }">
+            <div class="bar" aria-hidden="true">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            </div>
+            <img
+              class="light"
+              :src="shotSrc(story.shot.name, 'light')"
+              :alt="story.shot.alt"
+              :width="PICTURE.width"
+              :height="PICTURE.height"
+              loading="lazy"
+            />
+            <img
+              class="dark"
+              :src="shotSrc(story.shot.name, 'dark')"
+              :alt="story.shot.alt"
+              :width="PICTURE.width"
+              :height="PICTURE.height"
+              loading="lazy"
+            />
+          </figure>
+          <figure class="frame phone-frame">
+            <img
+              class="light"
+              :src="shotSrc(story.shot.name + '-phone', 'light')"
+              :alt="story.shot.alt + ' Mobile view.'"
+              width="780"
+              height="1688"
+              loading="lazy"
+            />
+            <img
+              class="dark"
+              :src="shotSrc(story.shot.name + '-phone', 'dark')"
+              :alt="story.shot.alt + ' Mobile view.'"
+              width="780"
+              height="1688"
+              loading="lazy"
+            />
+          </figure>
+        </div>
       </div>
     </section>
 
@@ -515,12 +560,12 @@ async function copy() {
   opacity: 1;
 }
 
-.hero-frame {
+.hero-stack {
   margin-top: 64px;
 }
 
 @media (min-width: 960px) {
-  .hero-frame {
+  .hero-stack {
     margin-top: 88px;
   }
 }
@@ -571,7 +616,7 @@ async function copy() {
 /* Beside a statement the picture is cropped from the top to the ratio its
  * story sets (`--crop`), and the frame stays sized from it before the image
  * arrives. */
-.picture img {
+.desktop-frame img {
   aspect-ratio: var(--crop);
   object-fit: cover;
   object-position: top;
@@ -586,6 +631,35 @@ async function copy() {
 
 :global(.dark .landing .frame img.dark) {
   display: block;
+}
+
+.device-stack {
+  position: relative;
+  min-width: 0;
+  padding: 0 8% 9%;
+}
+.device-stack .frame {
+  opacity: 1;
+}
+.device-stack .phone-frame {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 25%;
+  border: 4px solid var(--vp-c-bg-soft);
+  border-radius: 18px;
+  box-shadow: 0 12px 36px rgb(0 0 0 / 16%);
+}
+@media (max-width: 639px) {
+  .device-stack {
+    padding-right: 12%;
+    padding-bottom: 20%;
+  }
+  .device-stack .phone-frame {
+    width: 30%;
+    border-width: 3px;
+    border-radius: 12px;
+  }
 }
 
 .caption {

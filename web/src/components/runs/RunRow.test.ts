@@ -35,6 +35,35 @@ afterEach(() => {
 });
 
 describe("RunRow", () => {
+  it("keeps the date with the requester and the timer, events and warnings in the right facts column", () => {
+    const w = mountRow(
+      row({
+        userName: "Alice",
+        eventsLast5m: 0,
+        lastToolCallAt: 1_000_000 - 600_000,
+        inFlight: { tool: "bash", since: 1_000_000 - 600_000, boundMs: 600_000 },
+      }),
+    );
+    expect(w.get(".identity-date .who .name").text()).toBe("Alice");
+    expect(w.get(".identity-date .when").text()).toBe("4 minutes ago");
+    expect(w.get(".facts .elapsed").text()).toBe("4m 12s");
+    expect(w.get(".facts .count").text()).toBe("4 events");
+    expect(w.get(".facts .pace").text()).toBe("bash 852s, bound 600s");
+    expect(w.get(".facts .stalled").text()).toBe("stalled");
+  });
+  it("opens the run from description, requester, date, event count and outcome", async () => {
+    const navigate = vi.spyOn(browser, "navigate").mockImplementation(() => {});
+    const w = mountRow(finished("failed", { userName: "Alice" }));
+    for (const selector of [".snippet", ".who", ".when", ".count", ".outcome"]) await w.get(selector).trigger("click");
+    expect(navigate.mock.calls.map(([href]) => href)).toEqual([
+      "/runs/run-1",
+      "/runs/run-1",
+      "/runs/run-1",
+      "/runs/run-1",
+      "/runs/run-1",
+    ]);
+  });
+
   it("restores a shortened historical label from the retained request on focus", async () => {
     fetchMock.mockResolvedValueOnce(
       Response.json({

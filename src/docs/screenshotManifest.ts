@@ -197,6 +197,10 @@ export const SURFACES = [
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
     page: "web/green/pages/Runs.vue",
     what: "the runs index, live and finished rows",
+    captures: [
+      { name: "desktop", suffix: "", viewport: { width: 1440, height: 900, deviceScaleFactor: 2 } },
+      { name: "phone", suffix: "-phone", viewport: { width: 390, height: 844, deviceScaleFactor: 2 } },
+    ],
   },
   {
     name: "runs-index-viewing-as",
@@ -211,6 +215,10 @@ export const SURFACES = [
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
     page: "web/green/pages/RunRoute.vue",
     what: "a finished coding run's page and timeline",
+    captures: [
+      { name: "desktop", suffix: "", viewport: { width: 1440, height: 900, deviceScaleFactor: 2 } },
+      { name: "phone", suffix: "-phone", viewport: { width: 390, height: 844, deviceScaleFactor: 2 } },
+    ],
   },
   {
     name: "residents",
@@ -218,6 +226,10 @@ export const SURFACES = [
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
     page: "web/green/pages/Runtime.vue",
     what: "the residents index, one resident folded open",
+    captures: [
+      { name: "desktop", suffix: "", viewport: { width: 1440, height: 900, deviceScaleFactor: 2 } },
+      { name: "phone", suffix: "-phone", viewport: { width: 390, height: 844, deviceScaleFactor: 2 } },
+    ],
   },
   {
     name: "costs",
@@ -225,6 +237,10 @@ export const SURFACES = [
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
     page: "web/green/pages/Costs.vue",
     what: "the spend page",
+    captures: [
+      { name: "desktop", suffix: "", viewport: { width: 1440, height: 900, deviceScaleFactor: 2 } },
+      { name: "phone", suffix: "-phone", viewport: { width: 390, height: 844, deviceScaleFactor: 2 } },
+    ],
   },
   {
     name: "plane",

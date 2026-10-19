@@ -221,7 +221,7 @@ function onRowClick(ev: MouseEvent): void {
 
 <template>
   <li
-    class="run group relative isolate border-b hover:bg-(--ui-bg-muted) focus-within:bg-(--ui-bg-muted)"
+    class="run group relative isolate cursor-pointer border-b hover:bg-(--ui-bg-muted) focus-within:bg-(--ui-bg-muted)"
     :class="[
       run.finished ? 'finished' : 'live',
       leaving ? 'leaving' : '',
@@ -259,114 +259,116 @@ function onRowClick(ev: MouseEvent): void {
       :aria-label="`open run ${run.label || shortId(run.id)}`"
     ></RouterLink>
     <div
-      class="body pointer-events-none relative z-[1] grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-start gap-x-3 px-3 py-3 sm:gap-x-4"
+      class="body pointer-events-none relative z-[1] grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-2 px-2 py-3 sm:gap-x-4 sm:px-3"
       :class="[run.finished ? 'text-muted' : '', leaving ? 'opacity-85' : '', nestedUnder ? 'pl-10' : '']"
     >
       <span class="pointer-events-auto mt-1.5 flex items-center">
         <StatusDot :tone="tone" :label="statusWord(run)" :tip="dotTip(run)" :pulse="!run.finished" />
       </span>
-      <div class="min-w-0">
-        <div class="primary grid min-w-0 grid-cols-1 items-center gap-x-4 gap-y-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-          <div class="flex min-w-0 items-center gap-2">
-            <ScrollingText
-              class="snippet min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm leading-6 text-highlighted pointer-events-auto"
-              :text="parts.snippet ?? (repo ? repo.slice(repo.indexOf('/') + 1) : parts.scope)"
-              :title="originalPrompt ?? parts.snippet"
-              tabindex="0"
-              @pointerenter="loadRetainedPrompt"
-              @focus="loadRetainedPrompt"
-              @keydown.enter="browser.navigate(href)"
-            />
+      <div class="row-main grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-2 sm:gap-x-4">
+        <div class="primary min-w-0">
+          <ScrollingText
+            class="snippet pointer-events-auto min-w-0 cursor-pointer overflow-x-auto whitespace-nowrap text-sm leading-6 text-highlighted"
+            :text="parts.snippet ?? (repo ? repo.slice(repo.indexOf('/') + 1) : parts.scope)"
+            :title="originalPrompt ?? parts.snippet"
+            tabindex="0"
+            @pointerenter="loadRetainedPrompt"
+            @focus="loadRetainedPrompt"
+            @keydown.enter="browser.navigate(href)"
+          />
+          <div class="identity-date mt-2 flex min-w-0 items-center gap-2">
+            <UTooltip :text="who">
+              <span
+                class="who pointer-events-auto inline-flex min-w-0 items-center gap-2 text-sm text-highlighted"
+                :data-user-id="run.userId"
+                :data-surface="src.kind"
+              >
+                <RequesterAvatar :name="who" :url="run.userProfile?.avatarUrl" />
+                <span class="min-w-0 truncate"
+                  ><span class="name">{{ who }}</span></span
+                >
+              </span>
+            </UTooltip>
+            <UTooltip :text="whenTip(run)" :ui="{ text: 'whitespace-pre-line' }">
+              <span class="when pointer-events-auto shrink-0 text-xs tabular-nums text-dimmed">{{
+                formatRelative(run.startedAt, now)
+              }}</span>
+            </UTooltip>
+          </div>
+          <div class="metadata mt-2 min-w-0 text-xs leading-5 text-dimmed">
+            <div class="context flex min-w-0 items-center gap-2 overflow-x-auto whitespace-nowrap">
+              <span
+                v-if="parts.agent"
+                class="agent shrink-0 rounded px-1.5 py-0.5 font-mono text-[0.65rem] font-medium leading-none uppercase tracking-wide"
+                :class="AGENT_HUE[agentHue(parts.agent)]"
+                :data-agent-hue="agentHue(parts.agent)"
+                >{{ parts.agent }}</span
+              >
+              <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
+              <RunPullRequestLink :run="run" />
+            </div>
+            <UTooltip v-if="leaving && expires !== undefined" :text="'removed at ' + formatLocalIso(expires)">
+              <span class="expires pointer-events-auto mt-1 inline-block font-mono text-xs tabular-nums text-warn"
+                >gone {{ formatDateTime(expires, now) }}</span
+              >
+            </UTooltip>
+          </div>
+        </div>
+        <div class="facts flex w-20 min-w-0 flex-col items-end gap-1 text-right sm:w-40">
+          <UTooltip :text="run.finished ? 'start to finish' : 'running for'">
+            <span
+              class="elapsed pointer-events-auto shrink-0 font-mono text-sm leading-6 tabular-nums"
+              :class="
+                run.finished
+                  ? [elapsedPaint ? 'heat' : 'text-muted', elapsedHeat.level >= 2 ? 'font-medium' : '']
+                  : 'text-ok'
+              "
+              :style="run.finished ? elapsedPaint : undefined"
+              :data-heat="run.finished ? elapsedHeat.level : undefined"
+              >{{ elapsedText(run, now) }}</span
+            >
+          </UTooltip>
+          <UTooltip v-if="pace" :text="inherited && !bound ? inheritedPaceTip(inherited) : paceTip(run, now)">
+            <span
+              class="pace pointer-events-auto min-w-0 text-xs leading-5 [overflow-wrap:anywhere]"
+              :class="bound ? 'text-bad font-medium' : 'text-warn'"
+              :data-inherited="inherited && !bound ? (inherited.child ? 'child' : 'waiting') : undefined"
+              >{{ pace }}</span
+            >
+          </UTooltip>
+          <UTooltip :text="countTip(run)"
+            ><span class="count pointer-events-auto text-xs leading-5 tabular-nums text-dimmed">{{
+              countText(run)
+            }}</span></UTooltip
+          >
+          <div v-if="outcome || stopBadge || stalled" class="outcomes mt-auto flex flex-col items-end gap-1 pt-1">
             <span
               v-if="outcome"
-              class="outcome shrink-0 rounded border px-1.5 text-[0.7rem]"
+              class="outcome rounded border px-2 py-0.5 text-xs font-medium"
               :class="
                 tone === 'red'
-                  ? 'border-bad/30 text-bad'
+                  ? 'border-bad/30 bg-bad/5 text-bad'
                   : tone === 'amber'
-                    ? 'border-warn/30 text-warn'
+                    ? 'border-warn/30 bg-warn/5 text-warn'
                     : 'border-accented text-muted'
               "
               >{{ outcome }}</span
             >
             <span
               v-if="stopBadge"
-              class="stopbadge shrink-0 rounded border px-1.5 text-[0.7rem]"
+              class="stopbadge rounded border px-2 py-0.5 text-xs font-medium"
               :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-info/30 text-info'"
               >{{ stopBadge }}</span
             >
             <span
               v-if="stalled"
-              class="stalled shrink-0 rounded border px-1.5 text-[0.7rem]"
-              :class="bound ? 'border-bad/30 text-bad' : 'border-warn/30 text-warn'"
+              class="stalled rounded border px-2 py-0.5 text-xs font-medium"
+              :class="bound ? 'border-bad/30 bg-bad/5 text-bad' : 'border-warn/30 bg-warn/5 text-warn'"
               >stalled</span
             >
           </div>
-          <UTooltip v-if="who" :text="who">
-            <span
-              class="who pointer-events-auto inline-flex min-w-0 items-center gap-2 text-sm text-highlighted sm:max-w-48"
-              :data-user-id="run.userId"
-              :data-surface="src.kind"
-            >
-              <RequesterAvatar :name="who" :url="run.userProfile?.avatarUrl" />
-              <span class="min-w-0 truncate"
-                ><span class="name">{{ who }}</span></span
-              >
-            </span>
-          </UTooltip>
-        </div>
-        <div
-          class="metadata mt-2 grid min-w-0 grid-cols-1 items-center gap-x-4 gap-y-2 text-xs leading-5 text-dimmed sm:grid-cols-[minmax(0,1fr)_auto]"
-        >
-          <div class="context flex min-w-0 items-center gap-3">
-            <span
-              v-if="parts.agent"
-              class="agent shrink-0 rounded px-1.5 py-0.5 font-mono text-[0.65rem] font-medium leading-none uppercase tracking-wide"
-              :class="AGENT_HUE[agentHue(parts.agent)]"
-              :data-agent-hue="agentHue(parts.agent)"
-              >{{ parts.agent }}</span
-            >
-            <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
-            <RunPullRequestLink :run="run" />
-          </div>
-          <div class="facts flex min-w-0 items-center gap-3">
-            <UTooltip :text="whenTip(run)" :ui="{ text: 'whitespace-pre-line' }">
-              <span class="when pointer-events-auto shrink-0 tabular-nums">{{
-                formatRelative(run.startedAt, now)
-              }}</span>
-            </UTooltip>
-            <UTooltip :text="countTip(run)"
-              ><span class="count shrink-0 tabular-nums">{{ countText(run) }}</span></UTooltip
-            >
-          </div>
-          <UTooltip v-if="pace" :text="inherited && !bound ? inheritedPaceTip(inherited) : paceTip(run, now)">
-            <span
-              class="pace pointer-events-auto min-w-0 [overflow-wrap:anywhere]"
-              :class="bound ? 'text-bad font-medium' : 'text-warn'"
-              :data-inherited="inherited && !bound ? (inherited.child ? 'child' : 'waiting') : undefined"
-              >{{ pace }}</span
-            >
-          </UTooltip>
-          <UTooltip v-if="leaving && expires !== undefined" :text="`removed at ${formatLocalIso(expires)}`">
-            <span class="expires pointer-events-auto shrink-0 tabular-nums text-warn"
-              >gone {{ formatDateTime(expires, now) }}</span
-            >
-          </UTooltip>
         </div>
       </div>
-      <UTooltip :text="run.finished ? 'start to finish' : 'running for'">
-        <span
-          class="elapsed pointer-events-auto mt-0.5 shrink-0 text-right font-mono text-xs leading-5 tabular-nums sm:min-w-[5.5em]"
-          :class="
-            run.finished
-              ? [elapsedPaint ? 'heat' : 'text-muted', elapsedHeat.level >= 2 ? 'font-medium' : '']
-              : 'text-ok'
-          "
-          :style="run.finished ? elapsedPaint : undefined"
-          :data-heat="run.finished ? elapsedHeat.level : undefined"
-          >{{ elapsedText(run, now) }}</span
-        >
-      </UTooltip>
       <span class="actions flex w-5 shrink-0 justify-end sm:w-[2em]">
         <UDropdownMenu v-if="actionItems.length > 0" :items="actionItems" :content="{ align: 'end' }">
           <UButton

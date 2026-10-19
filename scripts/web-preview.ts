@@ -1045,11 +1045,38 @@ const VERDICT_STREAM = normalizeSpans([
 const LAST_CALL_INDEX = HIST_EVENTS.map((e) => e.type).lastIndexOf("tool_call");
 const LIVE_TIMING = { tick: 500, delay: 1500, hold: 30_000 };
 const LIVE_RETRY = "retry: 3000\n\n";
-const liveFrame = (event: (typeof HIST_EVENTS)[number], at: number) =>
+type PreviewEvent = (typeof HIST_EVENTS)[number] | RunEvent;
+const liveFrame = (event: PreviewEvent, at: number) =>
   `id: ${event.seq}\ndata: ${JSON.stringify({ ...event, at })}\n\n`;
 
+const GENERAL_LIVE_EVENTS: RunEvent[] = [
+  {
+    type: "input",
+    messageId: "general-preview",
+    text: "What changed in the last deployment?",
+    at: NOW,
+    seq: 1,
+    source: { channel: "dev", user: "alice", url: "https://example.slack.com/archives/C1/p1" },
+  },
+  {
+    type: "run_meta",
+    agent: "general",
+    model: "anthropic/claude-fable-5",
+    effort: "high",
+    harness: "pi",
+    at: NOW,
+    seq: 2,
+  },
+  { type: "assistant", text: "I am comparing the latest deployment with the previous revision.", at: NOW, seq: 3 },
+  { type: "answer", text: "The deployment comparison is ready.", at: NOW, seq: 4 },
+];
+
 /** The live stream: replays the history script slowly, then keeps the run open. */
-function serveLiveStream(res: import("node:http").ServerResponse, snapshot: boolean): void {
+function serveLiveStream(
+  res: import("node:http").ServerResponse,
+  snapshot: boolean,
+  events: readonly PreviewEvent[] = HIST_EVENTS,
+): void {
   // The capture cache reads the finite script and its pacing, while browsers
   // keep receiving the historical timed stream. Both use the same inputs.
   if (snapshot) {
@@ -1058,7 +1085,8 @@ function serveLiveStream(res: import("node:http").ServerResponse, snapshot: bool
       JSON.stringify({
         script:
           LIVE_RETRY +
-          HIST_EVENTS.slice(0, -1)
+          events
+            .slice(0, -1)
             .map((event) => liveFrame(event, event.at ?? NOW))
             .join(""),
         timing: LIVE_TIMING,
@@ -1074,12 +1102,12 @@ function serveLiveStream(res: import("node:http").ServerResponse, snapshot: bool
   let i = 0;
   let nextAt = systemClock();
   const timer = setInterval(() => {
-    if (i >= HIST_EVENTS.length - 1) {
+    if (i >= events.length - 1) {
       res.write(": hb\n\n"); // the answer is held back so the run stays visibly live
       return;
     }
     if (systemClock() < nextAt) return;
-    res.write(liveFrame(HIST_EVENTS[i], systemClock()));
+    res.write(liveFrame(events[i], systemClock()));
     i++;
     // The last command stays out for half a minute so a ticking running card
     // can be seen; then the model "thinks" forever (the pending-turn row).
@@ -2684,6 +2712,20 @@ function page(
         startedAt: 1_700_000_000_000,
       },
     };
+  if (pathname === "/runs/live-2")
+    return {
+      title: "Live run",
+      seed: {
+        page: "run",
+        mode: "live",
+        id: "live-2",
+        runTitle: "What changed in the last deployment?",
+        eventsUrl: "/runs/live-2/events?t=tok-live-2",
+        stopUrl: "/runs/live-2/stop?t=tok-live-2",
+        serverNow: NOW,
+        startedAt: NOW - 65_000,
+      },
+    };
   if (pathname === "/runs/hist-1")
     return {
       title: "Run",
@@ -2977,6 +3019,7 @@ createServer((req, res) => {
     return;
   }
   if (url.pathname === "/runs/live-1/events") return serveLiveStream(res, snapshot);
+  if (url.pathname === "/runs/live-2/events") return serveLiveStream(res, snapshot, GENERAL_LIVE_EVENTS);
   if (
     req.method === "GET" &&
     url.searchParams.get("id") === "review-1" &&

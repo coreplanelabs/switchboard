@@ -164,9 +164,13 @@ describe("hashInputs", () => {
 });
 
 describe("expectedFiles", () => {
-  it("is one PNG per surface per theme, named <surface>-<theme>.png", () => {
+  it("is one PNG per capture per theme, including the landing page phone views", () => {
     const files = expectedFiles();
-    expect(files).toHaveLength(74);
+    expect(files).toHaveLength(82);
+    expect(files).toContain("run-page-phone-light.png");
+    expect(files).toContain("runs-index-phone-dark.png");
+    expect(files).toContain("residents-phone-light.png");
+    expect(files).toContain("costs-phone-dark.png");
     expect(files).toContain("metrics-phone-light.png");
     expect(files).toContain("metrics-health-phone-dark.png");
     expect(files).toContain("metrics-week-phone-dark.png");
