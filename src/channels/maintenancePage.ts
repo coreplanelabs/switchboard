@@ -1,6 +1,59 @@
 import { FAVICON_DEFAULT } from "./favicon.js";
 import { escapeHtml } from "./liveView/html.js";
 
+const PAGE_PATHS = new Set([
+  "/",
+  "/index.html",
+  "/home",
+  "/home/history",
+  "/home/threads",
+  "/threads",
+  "/plane",
+  "/runs",
+  "/runs/scheduled",
+  "/residents",
+  "/costs",
+  "/delivery",
+  "/metrics",
+  "/metrics/health",
+  "/metrics/week",
+  "/settings",
+  "/settings/identities",
+  "/settings/mcps",
+  "/settings/channels",
+  "/settings/installation",
+  "/settings/runtime",
+  "/docs",
+]);
+const PAGE_ROUTES = [
+  [/^\/pipelines\/[A-Za-z0-9_-]{1,100}$/, "/pipelines/:id"],
+  [/^\/threads\/[^/]+$/, "/threads/:id"],
+  [/^\/runs\/unit\/[^/]+$/, "/runs/unit/:key"],
+  [/^\/runs\/[^/]+$/, "/runs/:id"],
+  [/^\/costs\/[a-z0-9][a-z0-9-]{0,39}$/, "/costs/:group"],
+  [/^\/delivery\/[\w.-]{1,100}\/[\w.-]{1,100}$/, "/delivery/:owner/:name"],
+  [/^\/residents\/[^/]+\/[^/]+$/, "/residents/:owner/:name"],
+  [/^\/settings\/runtime\/[^/]+\/[^/]+$/, "/settings/runtime/:owner/:name"],
+  [/^\/settings\/channels\/[^/]+$/, "/settings/channels/:channel"],
+] as const;
+
+/** Only document routes can acquire an outage page or its deadline. The returned path is safe for logs. */
+export function maintenancePageRoute(request: Request): string | undefined {
+  const accept = request.headers.get("accept");
+  if (
+    !["GET", "HEAD"].includes(request.method) ||
+    !accept?.includes("text/html") ||
+    accept.includes("application/json")
+  )
+    return;
+  const url = new URL(request.url);
+  if (url.searchParams.get("stream") === "1") return;
+  const path = url.pathname.replace(/\/$/, "") || "/";
+  if (path.endsWith(".json")) return;
+  if (PAGE_PATHS.has(path)) return path;
+  return PAGE_ROUTES.find(([pattern]) => pattern.test(path))?.[1];
+}
+
 export function maintenancePageResponse(
   request: Request,
   unavailable: string,

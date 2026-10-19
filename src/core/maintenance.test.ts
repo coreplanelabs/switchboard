@@ -4,12 +4,78 @@ import {
   WorkerMaintenanceStore,
   MaintenanceService,
   maintenanceRefusal,
+  maintenanceGate,
   maintenanceResponse,
   type MaintenanceNotice,
   type MaintenanceStore,
 } from "./maintenance.js";
 
 const id = "12345678-1234-4234-8234-123456789abc";
+describe("maintenance outage page", () => {
+  it.each([
+    "/costs/api.json",
+    "/costs/api/users.json",
+    "/metrics/week.json",
+    "/delivery/acme/api.json",
+    "/runs/example/artifacts/out.png",
+    "/runs?stream=1",
+    "/costs.json",
+    "/home/events",
+  ])("keeps the structured refusal for a failed state read on %s", async (path) => {
+    const store: MaintenanceStore = {
+      read: async () => {
+        throw new Error("storage unavailable");
+      },
+      write: async () => {
+        throw new Error("not used");
+      },
+    };
+    const response = (await maintenanceGate(
+      new Request(`https://example.com${path}`, { headers: { accept: "text/html" } }),
+      store,
+    ))!;
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "maintenance_unavailable",
+      message: "Maintenance status is unavailable. No new work can start.",
+    });
+  });
+  it("serves the self-contained page when maintenance state cannot be read, while API clients keep JSON", async () => {
+    const store: MaintenanceStore = {
+      read: async () => {
+        throw new Error("private storage failure");
+      },
+      write: async () => {
+        throw new Error("not used");
+      },
+    };
+    const response = (await maintenanceGate(
+      new Request("https://example.com/", {
+        headers: { accept: "text/html" },
+      }),
+      store,
+    ))!;
+    expect(response.status).toBe(503);
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = await response.text();
+    expect(body).toContain("Down for maintenance");
+    expect(body).toContain("<style>");
+    expect(body).toContain("data:image/svg+xml");
+    expect(body).not.toContain("private storage failure");
+    const json = (await maintenanceGate(
+      new Request("https://example.com/", {
+        headers: { accept: "application/json" },
+      }),
+      store,
+    ))!;
+    expect(await json.json()).toEqual({
+      error: "maintenance_unavailable",
+      message: "Maintenance status is unavailable. No new work can start.",
+    });
+  });
+});
+
 function fixture(store: MaintenanceStore = new InMemoryMaintenanceStore()) {
   const messages: MaintenanceNotice[] = [];
   const service = new MaintenanceService({

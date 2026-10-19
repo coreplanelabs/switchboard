@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { maintenancePageResponse } from "../channels/maintenancePage.js";
+import { maintenancePageResponse, maintenancePageRoute } from "../channels/maintenancePage.js";
 import { systemClock } from "./trace/clock.js";
 import { SECOND_MS } from "./budgets.js";
 import { stateWorkerOf, type SecretReader, type StateWorkerBlocks } from "./stateWorkerRef.js";
@@ -173,6 +173,12 @@ export async function maintenanceGate(request: Request, store?: MaintenanceStore
   try {
     return maintenanceResponse(request, await store.read());
   } catch {
+    if (maintenancePageRoute(request))
+      return maintenancePageResponse(
+        request,
+        "Switchboard web pages are temporarily unavailable.",
+        MAINTENANCE_UNAVAILABLE,
+      );
     return Response.json(
       { error: "maintenance_unavailable", message: MAINTENANCE_UNAVAILABLE },
       { status: 503, headers: { "cache-control": "no-store" } },

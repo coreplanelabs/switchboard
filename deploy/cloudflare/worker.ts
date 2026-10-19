@@ -1,5 +1,6 @@
 import { depotCiAuthorization, handleDepotCi } from "./depotCi.ts";
 import { maintenanceGate, WorkerMaintenanceStore } from "../../src/core/maintenance.ts";
+import { withDashboardFallback } from "./dashboardFallback.ts";
 import { DEPOT_CI_AUTHORIZATION_PATH, DEPOT_CI_PATH } from "../../src/core/depotCi.ts";
 import { githubDoorEdgeRoute } from "../../src/channels/githubDoorPaths.ts";
 // Cloudflare Containers shim: runs the unchanged Switchboard image as a single
@@ -537,7 +538,10 @@ export default {
     // root; a refusal's line is dropped by the sink's filter.
     const inbound = stripTraceContext(request);
     const route = shimRoute(pathname);
-    if (route === undefined) return withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(inbound));
+    if (route === undefined)
+      return withDashboardFallback(inbound, async () =>
+        withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(inbound)),
+      );
     const root = tracer.start("bot-shim.fetch", { sinks: traceSinks, attrs: { route } });
     try {
       const forwarded = withTraceContext(inbound, root);
@@ -581,7 +585,9 @@ export default {
                         fetch: (input, init) => fetch(input, init),
                         lengthPipe: (size) => new FixedLengthStream(size),
                       })
-                    : withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded));
+                    : await withDashboardFallback(forwarded, async () =>
+                        withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded)),
+                      );
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {

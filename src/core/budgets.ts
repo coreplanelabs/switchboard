@@ -23,6 +23,8 @@ export const WORKSPACE_PREDECESSORS_MAX = 20;
 export const WORKSPACE_RECONCILE_BINDINGS_MAX = 20;
 
 export const SECOND_MS = 1_000;
+/** Browser pages show the edge maintenance page while a cold bot continues to start. */
+export const DASHBOARD_FALLBACK_TIMEOUT_MS = 5 * SECOND_MS;
 /** Local Kill waits for the original run's terminal write, never a replacement. */
 export const RUN_KILL_SETTLE_MS = 10 * SECOND_MS;
 
