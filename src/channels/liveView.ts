@@ -1167,6 +1167,8 @@ export function createLiveViewHandler(
             threadKey: view.threadKey,
             ...(view.title !== undefined ? { runTitle: view.title } : {}),
             ...(view.recoveryHold !== undefined ? { recoveryHold: view.recoveryHold } : {}),
+            ...(view.recoveryPending ? { recoveryPending: true as const } : {}),
+            ...(view.producerUnconfirmed ? { producerUnconfirmed: true as const } : {}),
             serverNow: now(),
             startedAt: view.startedAt,
             ...(view.receivedAt !== undefined ? { receivedAt: view.receivedAt } : {}),

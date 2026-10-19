@@ -12,6 +12,7 @@ import {
   sourceTip,
   statusDot,
   statusLabel,
+  statusPulse,
   statusWord,
   stopHref,
   stopLabel,
@@ -55,6 +56,33 @@ describe("status vocabulary", () => {
     const held = row({ recoveryHold: "private_context", recoveryPending: true });
     expect([statusWord(held), statusDot(held)]).toEqual(["held", "amber"]);
     expect([statusWord(row()), statusDot(row())]).toEqual(["live", "green"]);
+  });
+  it("does not present a recovery hold or unconfirmed producer as active execution", () => {
+    const recovering = row({ recoveryPending: true, activity: "paused for storage recovery" });
+    expect([statusWord(recovering), statusDot(recovering), dotTip(recovering), statusPulse(recovering)]).toEqual([
+      "recovery not confirmed",
+      "amber",
+      "recovery not confirmed · last: paused for storage recovery",
+      false,
+    ]);
+    const unconfirmed = row({ producerUnconfirmed: true, activity: "working" });
+    expect([statusWord(unconfirmed), statusDot(unconfirmed), dotTip(unconfirmed), statusPulse(unconfirmed)]).toEqual([
+      "execution not confirmed",
+      "amber",
+      "execution not confirmed · last: working",
+      false,
+    ]);
+    const expired = row({ liveState: { state: "working", since: 1_000_000, bound: 1_000_100 } });
+    expect([statusWord(expired, 1_000_100), statusDot(expired, 1_000_100), statusPulse(expired, 1_000_100)]).toEqual([
+      "live state expired",
+      "amber",
+      false,
+    ]);
+    expect([statusWord(expired, 1_000_099), statusDot(expired, 1_000_099), statusPulse(expired, 1_000_099)]).toEqual([
+      "live",
+      "green",
+      true,
+    ]);
   });
   it("shows display words, not the enum: succeeded / failed / killed / stopped early", () => {
     expect(statusLabel("completed")).toBe("succeeded");

@@ -193,7 +193,7 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
       cut: [],
       rankedNote: RANKED_NOTE,
       cutNote: CUT_NOTE,
-      note: "Timing is unavailable while this run is held. Runtime ending is unconfirmed.",
+      note: "Timing is unavailable while execution is unconfirmed. Runtime ending is unconfirmed.",
       debug,
     };
   if (input.untimed) {

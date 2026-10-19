@@ -33,9 +33,17 @@ export function stopLabel(stop: { state: string; mode: string }): string {
   return stop.state === "stopped" ? "stopped by user" : "stopping";
 }
 
-export function statusWord(run: IndexRow): string {
-  if (!run.finished && run.recoveryHold === "private_context") return "held";
-  if (!run.finished) return "live";
+export function statusWord(run: IndexRow, now?: number): string {
+  if (!run.finished) {
+    if (run.recoveryHold === "private_context") return "held";
+    if (run.recoveryPending) return "recovery not confirmed";
+    if (run.pausedForRetry) return "paused";
+    if (run.producerUnconfirmed) return "execution not confirmed";
+    if (run.liveState?.state === "ended") return "shutdown not confirmed";
+    if (now !== undefined && run.liveState?.bound !== undefined && run.liveState.bound <= now)
+      return "live state expired";
+    return "live";
+  }
   // A provisional record: the tombstone-first start marker still in its window.
   // Never `interrupted` — that is a real terminal state for a confirmed dead run.
   if (run.provisional) return PROVISIONAL_LABEL;
@@ -52,9 +60,8 @@ export function delivering(run: IndexRow): boolean {
   return run.finished && !run.persisted && run.sealedAt === undefined;
 }
 
-export function statusDot(run: IndexRow): DotTone {
-  if (!run.finished && run.recoveryHold === "private_context") return "amber";
-  if (!run.finished) return "green";
+export function statusDot(run: IndexRow, now?: number): DotTone {
+  if (!run.finished) return statusWord(run, now) === "live" ? "green" : "amber";
   if (delivering(run)) return "amber";
   // A provisional record: the tombstone-first marker still in its window — amber,
   // not red, because the run may still be live in a registry the store-only reader
@@ -66,6 +73,11 @@ export function statusDot(run: IndexRow): DotTone {
   if (run.status === "failed" || run.status === "interrupted") return "red";
   if (run.status === "stopped_soft" || run.status === "stopped_hard") return "grey";
   return "grey";
+}
+
+/** Only a confirmed live presentation breathes. A held row stays visible without claiming work continues. */
+export function statusPulse(run: IndexRow, now?: number): boolean {
+  return !run.finished && statusWord(run, now) === "live";
 }
 
 /** The chip hue for an agent name: one of the four built-in agents gets its
@@ -298,9 +310,18 @@ export const SURFACE_NAME: Record<string, string> = {
 /** The dot's tooltip: a live run's latest activity (or "starting…"); a
  *  finished run's outcome, duration, and — when it did not complete — what it
  *  was last doing. */
-export function dotTip(run: IndexRow): string {
-  if (!run.finished) return run.activity ? `now: ${run.activity}` : "starting…";
-  let t = statusWord(run);
+export function dotTip(run: IndexRow, now?: number): string {
+  if (!run.finished) {
+    const status = statusWord(run, now);
+    return status === "live"
+      ? run.activity
+        ? `now: ${run.activity}`
+        : "starting…"
+      : run.activity
+        ? `${status} · last: ${run.activity}`
+        : status;
+  }
+  let t = statusWord(run, now);
   const ms = runDurationMs(run);
   if (ms !== undefined) t += ` in ${formatDuration(ms, "clock")}${basisNote(run)}`;
   if (delivering(run)) t += " · delivering the reply";

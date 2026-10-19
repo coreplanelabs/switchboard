@@ -155,6 +155,8 @@ export interface RunView {
   liveStateSeq?: number;
   /** A deferred checkpoint still holds this producer until a recorded resume. */
   recoveryPending?: true;
+  /** The ledger cannot confirm that its claimed producer is still executing. This is not an ending receipt. */
+  producerUnconfirmed?: true;
   /** The original producer is retained without replay of unverified private context. */
   recoveryHold?: "private_context";
   /** A saved execution pause overrides an older working-state deadline. */
@@ -643,7 +645,7 @@ export interface RunsServiceDeps {
 /** A live row of the run ledger as a view (run-history item 41): the row's meta
  *  and start, the events the ledger holds for it, the generation driving it.
  *  Never a token — the page token is the other generation's. */
-function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
+function ledgerView(row: LiveRunRow, events: readonly RunEvent[], producerUnconfirmed = false): RunView {
   const m = row.meta;
   // A failed pause can retain a live owner after the producer stopped. Its
   // checkpoint event survives even when the handoff state write did not.
@@ -682,6 +684,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     startedAt: row.startedAt,
     finished: false,
     ...(recoveryPending ? { recoveryPending: true as const } : {}),
+    ...(producerUnconfirmed ? { producerUnconfirmed: true as const } : {}),
     ...(contextHeld ? { recoveryHold: "private_context" as const } : {}),
     ...(row.state.pausedForRetry === true ? { pausedForRetry: true as const } : {}),
     ...(!contextHeld && row.liveState !== undefined ? { liveState: row.liveState } : {}),
@@ -913,6 +916,14 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   const clock = deps.clock ?? systemClock;
   const warn = deps.warn ?? ((m: string) => console.warn(m));
   const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+  const ledgerProjection = (row: LiveRunRow, events: readonly RunEvent[]): RunView =>
+    ledgerView(
+      row,
+      events,
+      row.phase === "handoff" ||
+        row.leaseUntil <= clock() ||
+        (deps.generation !== undefined && row.ownerGen === deps.generation && !registry.getById(row.runId)),
+    );
 
   const inspectCheck = async (read: CheckSourceRead, settle: boolean): Promise<CheckInspection> => {
     if (read.kind !== "source") return { kind: "unavailable", reason: "source" };
@@ -963,7 +974,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         } catch (err) {
           warn(`[runs] run ledger events read failed for ${row.runId}: ${describe(err)}`);
         }
-        return ledgerView(row, events);
+        return ledgerProjection(row, events);
       }),
     );
     return { runs };
@@ -1351,7 +1362,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           // Read the ledger before persisted history: a child that finishes in
           // between still appears live, never vanishes in the read handoff.
           // No TTL, no limit, and no registry-id suppression of contradictory tags.
-          live = (await ledger.listLive()).map((row) => ledgerView(row, []));
+          live = (await ledger.listLive()).map((row) => ledgerProjection(row, []));
         } catch {
           return { runs: [], ledgerUnavailable: true };
         }
@@ -1624,7 +1635,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // Live on the ledger, not here (item 41): the row and the events it holds.
       const far = await ledgerRow(id);
       if (far) {
-        const view: RunRecordView = ledgerView(far.row, far.events);
+        const view: RunRecordView = ledgerProjection(far.row, far.events);
         if (!ordinaryRun(view, opts.privateWorkerAccess)) return notFound;
         if (opts.include === "messages") view.events = far.events;
         return { ok: true, value: await diagnostic(view) };

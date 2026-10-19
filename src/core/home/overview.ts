@@ -47,6 +47,7 @@ export function homeOverview(
     if (
       run.stop ||
       run.recoveryPending ||
+      run.producerUnconfirmed ||
       run.pausedForRetry ||
       !state ||
       !RUN_LIVE_STATE_NAMES.includes(state.state) ||
@@ -148,15 +149,17 @@ export function homeOverview(
                     ? "Recovery not confirmed"
                     : item.run.pausedForRetry
                       ? "Run paused"
-                      : !item.run.liveState
-                        ? "State not recorded"
-                        : item.run.liveState.bound !== undefined && item.run.liveState.bound <= now
-                          ? "Live state expired"
-                          : item.run.liveState.state === "ended"
-                            ? "Shutdown not confirmed"
-                            : runGroup(item.run) === "investigation"
-                              ? "State cannot be confirmed"
-                              : item.run.liveState.state.replaceAll("_", " "),
+                      : item.run.producerUnconfirmed
+                        ? "Execution not confirmed"
+                        : !item.run.liveState
+                          ? "State not recorded"
+                          : item.run.liveState.bound !== undefined && item.run.liveState.bound <= now
+                            ? "Live state expired"
+                            : item.run.liveState.state === "ended"
+                              ? "Shutdown not confirmed"
+                              : runGroup(item.run) === "investigation"
+                                ? "State cannot be confirmed"
+                                : item.run.liveState.state.replaceAll("_", " "),
                 activity: item.run.activity,
               },
             ]

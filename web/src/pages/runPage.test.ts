@@ -364,6 +364,64 @@ describe("RunPage — the timeline (item 25)", () => {
 });
 
 describe("RunPage — recovery notices", () => {
+  it("stops claiming model work after a failed run loses its finish record", async () => {
+    const { wrapper: w, es } = mountLive();
+    await flushPromises();
+    es().emitOpen();
+    es().emitMessage(input, "1");
+    es().emitMessage(call("c1", "github_pull_get", 2000, "github_pull_get"), "2");
+    es().emitMessage(result("c1", { tool: "github_pull_get", at: 3000 }), "3");
+    await flushPromises();
+    expect(w.find("#thinking").exists()).toBe(true);
+
+    es().emitMessage({
+      type: "run_note",
+      kind: "storage_failure",
+      summary: "Storage request failed: /runs/live-state (transport): TimeoutError",
+      at: 4000,
+    });
+    es().emitMessage({
+      type: "run_note",
+      kind: "run_failed",
+      summary: "The model call ended without a classified result; operation=/runs/live-state failure=transport",
+      at: 5000,
+    });
+    await flushPromises();
+    expect(w.find("#state").text()).toBe("execution not confirmed");
+    expect(w.find("#statedot").classes()).not.toContain("motion-safe:animate-pulse");
+    expect(w.find("#thinking").exists()).toBe(false);
+    es().emitMessage({ type: "run_note", kind: "resumed", summary: "the original run resumed", at: 6000 });
+    await flushPromises();
+    expect(w.find("#state").text()).toBe("running · 3s");
+    expect(w.find("#thinking").exists()).toBe(true);
+  });
+
+  it("does not grow the timing summary while a failed run has no confirmed ending", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      const { wrapper: w, es } = mountLive();
+      await flushPromises();
+      es().emitOpen();
+      es().emitMessage(input, "1");
+      es().emitMessage(call("c1", "github_pull_get", 2000, "github_pull_get"), "2");
+      es().emitMessage(result("c1", { tool: "github_pull_get", at: 3000 }), "3");
+      es().emitMessage({ type: "run_note", kind: "run_failed", summary: "storage write timed out", at: 4000 }, "4");
+      await flushPromises();
+      const held = w.find("#timeline").text();
+      expect(held).toContain("Runtime ending is unconfirmed.");
+      expect(held).not.toContain("Switchboard overhead");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(w.find("#timeline").text()).toBe(held);
+      es().emitMessage({ type: "run_note", kind: "resumed", summary: "the original run resumed", at: 5000 }, "5");
+      await flushPromises();
+      expect(w.find("#timeline").text()).toContain("1m 03s");
+      expect(w.find("#timeline").text()).not.toContain("Runtime ending is unconfirmed.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("applies repeated canonical hold snapshots to an open model span without inventing an ending", async () => {
     vi.useFakeTimers();
     try {
@@ -417,6 +475,39 @@ describe("RunPage — recovery notices", () => {
     expect(w.find("#state").text()).toBe("held · private context could not be verified");
     expect(w.find("#thinking").exists()).toBe(false);
     expect(w.find("#statedot").classes()).toContain("text-warn");
+  });
+
+  it.each(["seed", "stream"])("shows an unconfirmed producer without a running pulse from the %s", async (source) => {
+    const { created, factory } = fakeEventSourceFactory();
+    const w = mountApp(RunPage, {
+      seed: { ...liveSeed, ...(source === "seed" ? { producerUnconfirmed: true as const } : {}) },
+      eventSource: factory,
+    });
+    await flushPromises();
+    created[0].emitOpen();
+    if (source === "stream")
+      created[0].emitNamed("recovery", JSON.stringify({ hold: null, pending: false, producerUnconfirmed: true }));
+    await flushPromises();
+    expect(w.find("#state").text()).toBe("execution not confirmed");
+    expect(w.find("#statedot").classes()).toContain("text-warn");
+    expect(w.find("#statedot").classes()).not.toContain("motion-safe:animate-pulse");
+    created[0].emitNamed("recovery", JSON.stringify({ hold: null, pending: false, producerUnconfirmed: false }));
+    await flushPromises();
+    expect(w.find("#state").text()).toContain("running");
+  });
+
+  it("uses the finish frame after an unconfirmed producer warning", async () => {
+    const { created, factory } = fakeEventSourceFactory();
+    const w = mountApp(RunPage, { seed: { ...liveSeed, producerUnconfirmed: true }, eventSource: factory });
+    await flushPromises();
+    created[0].emitOpen();
+    expect(w.find("#state").text()).toBe("execution not confirmed");
+    created[0].emitNamed("recovery", '{"hold":null,"producerUnconfirmed":"false"}');
+    await flushPromises();
+    expect(w.find("#state").text()).toBe("execution not confirmed");
+    created[0].emitNamed("finished", JSON.stringify({ finishedAt: liveSeed.startedAt + 63_000 }));
+    await flushPromises();
+    expect(w.find("#state").text()).toContain("delivering");
   });
 
   it.each(["history", "live"])("uses info for routine recovery and warning for failures in %s mode", async (mode) => {

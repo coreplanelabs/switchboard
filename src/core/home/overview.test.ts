@@ -69,6 +69,7 @@ describe("Home work overview", () => {
       { ...run, id: "additional" },
       { ...run, id: "provider", liveState: { state: "waiting_provider" as const, since: 1, bound: 1000 } },
       { ...run, id: "expired", liveState: { state: "working" as const, since: 1, bound: 2 } },
+      { ...run, id: "producer-unconfirmed", producerUnconfirmed: true as const },
       { ...run, id: "stopping", stop: { mode: "soft" as const, state: "stopping" as const } },
     ];
     expect(homeOverview(source, runs, { view: "moving", page: 1 }, 10).overview.runs.map((row) => row.id)).toEqual([
@@ -79,8 +80,12 @@ describe("Home work overview", () => {
       "provider",
     ]);
     const held = homeOverview(source, runs, { view: "investigation", page: 1 }, 10);
-    expect(held.overview.runs.map((row) => row.id)).toEqual(["expired", "stopping"]);
-    expect(held.overview.counts).toMatchObject({ moving: 2, waiting: 1, investigation: 2 });
+    expect(held.overview.runs.map((row) => [row.id, row.stateLabel])).toEqual([
+      ["expired", "Live state expired"],
+      ["producer-unconfirmed", "Execution not confirmed"],
+      ["stopping", "Shutdown not confirmed"],
+    ]);
+    expect(held.overview.counts).toMatchObject({ moving: 2, waiting: 1, investigation: 3 });
   });
   it("keeps old unfinished work reachable and separates recorded waits from unknown and failed work", () => {
     const unknown = row("unknown");

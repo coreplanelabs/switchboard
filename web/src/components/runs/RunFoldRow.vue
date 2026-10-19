@@ -14,6 +14,7 @@ import {
   shortId,
   statusDot,
   statusLabel,
+  statusPulse,
   statusWord,
   whenTip,
 } from "../../lib/indexRow";
@@ -48,7 +49,7 @@ watch(
 );
 
 const parts = computed(() => splitRunLabel(props.run.label || shortId(props.run.id)));
-const tone = computed(() => statusDot(props.run));
+const tone = computed(() => statusDot(props.run, props.now));
 const href = computed(() => runHref(props.run));
 const foldable = computed(() => props.run.finished);
 const outcome = computed(() =>
@@ -87,7 +88,7 @@ function onToggle(ev: Event): void {
           aria-hidden="true"
           >❯</span
         >
-        <StatusDot :tone="tone" :label="statusWord(run)" :tip="dotTip(run)" />
+        <StatusDot :tone="tone" :label="statusWord(run, now)" :tip="dotTip(run, now)" />
         <span
           v-if="label"
           class="round shrink-0 rounded border border-accented px-1.5 font-mono text-[0.7rem] font-medium tabular-nums text-toned"
@@ -136,7 +137,7 @@ function onToggle(ev: Event): void {
     <!-- In progress: the row is drawn where the run will end up, its clock moving; it opens the live page. -->
     <div v-else class="row flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 px-2 py-2 hover:bg-(--ui-bg-muted)">
       <span class="chev select-none text-xs text-transparent" aria-hidden="true">❯</span>
-      <StatusDot :tone="tone" :label="statusWord(run)" :tip="dotTip(run)" pulse />
+      <StatusDot :tone="tone" :label="statusWord(run, now)" :tip="dotTip(run, now)" :pulse="statusPulse(run, now)" />
       <span
         v-if="label"
         class="round shrink-0 rounded border border-accented px-1.5 font-mono text-[0.7rem] font-medium tabular-nums text-toned"

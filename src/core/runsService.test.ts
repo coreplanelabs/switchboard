@@ -1559,11 +1559,18 @@ describe("RunsService.listRuns — read merge", () => {
 // — or reclaimed here and not yet launched — lists, reads, pages, diagnoses and
 // stops through the same service as a run in this process's registry.
 describe("RunsService with the run ledger — one registry across generations (run-history item 41)", () => {
-  function ledgerSetup() {
+  function ledgerSetup(generation?: string) {
     const base = setup();
     const ledger = new InMemoryRunLedger(() => NOW);
     const warnings: string[] = [];
-    const svc = createRunsService({ registry: base.reg, store: base.store, ledger, warn: (m) => warnings.push(m) });
+    const svc = createRunsService({
+      registry: base.reg,
+      store: base.store,
+      ledger,
+      clock: () => NOW,
+      ...(generation ? { generation } : {}),
+      warn: (m) => warnings.push(m),
+    });
     return { ...base, svc, ledger, warnings };
   }
   async function farRun(
@@ -1598,6 +1605,30 @@ describe("RunsService with the run ledger — one registry across generations (r
       { type: "tool_call", tool: "bash", summary: "$ make", at: NOW - 4_000, seq: 2 },
     ]);
   }
+
+  it("marks a same-generation ledger run without a local producer as unconfirmed", async () => {
+    const { svc, ledger } = ledgerSetup("g-OTHER");
+    await farRun(ledger);
+    expect(await svc.getRun("far-1")).toMatchObject({
+      ok: true,
+      value: { id: "far-1", finished: false, producerUnconfirmed: true },
+    });
+    expect((await svc.listRuns({ visibleTo: ALL, status: "active" })).runs[0]).toMatchObject({
+      id: "far-1",
+      finished: false,
+      producerUnconfirmed: true,
+    });
+  });
+
+  it("marks an expired foreign lease as unconfirmed without assigning a terminal result", async () => {
+    const { svc, ledger } = ledgerSetup("g-CURRENT");
+    await farRun(ledger);
+    ledger.live.get("far-1")!.leaseUntil = NOW;
+    expect(await svc.getRun("far-1")).toMatchObject({
+      ok: true,
+      value: { id: "far-1", finished: false, producerUnconfirmed: true },
+    });
+  });
 
   it("keeps a saved execution pause in Home investigation before its working bound expires", async () => {
     const { svc, ledger } = ledgerSetup();
