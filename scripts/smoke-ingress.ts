@@ -6,8 +6,10 @@ import {
   parseSmokeConfig,
   PRODUCT_ACCEPTANCE_GAP,
   runAgentSmoke,
+  smokeProgress,
   SmokeReaderError,
 } from "../src/deploy/agentSmoke.js";
+import { systemClock } from "../src/core/trace/clock.js";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -128,13 +130,25 @@ try {
   } else {
     if (!process.env.SMOKE_INGRESS_THREAD)
       throw new Error("SMOKE_INGRESS_THREAD is not set; use a fresh disposable thread prefix");
+    const startedAt = systemClock();
+    let lastProgress: string | undefined;
     const receipt = await runAgentSmoke({
       config,
       requireSlackConnection: process.env.SMOKE_REQUIRE_SLACK_CONNECTION === "true",
       transport,
       expectedCommit: process.env.SMOKE_EXPECTED_COMMIT || undefined,
       thread: process.env.SMOKE_INGRESS_THREAD,
-      onReceipt: save,
+      onReceipt: async (receipt) => {
+        await save(receipt);
+        const progress = smokeProgress(receipt);
+        const signature = JSON.stringify(progress);
+        if (progress && signature !== lastProgress) {
+          lastProgress = signature;
+          process.stdout.write(
+            `${JSON.stringify({ ...progress, elapsedMs: Math.max(0, systemClock() - startedAt) })}\n`,
+          );
+        }
+      },
     });
     if (receipt.capabilityOutcome === "passed" && slackConfig) {
       const saveSlack = async (slackCommand: SlackSmokeReceipt) =>

@@ -289,6 +289,7 @@ globalThis.fetch = async (url, init) => {
         if (mode === "challenge") {
           expect(saved.readerCheck.observationError).toEqual({
             code: "mcp_auth_required",
+            operation: "runs_list",
             http: { status: 302, authChallenge: true },
           });
           expect(result.stderr).toBe("Smoke reader not verified (mcp_auth_required, HTTP 302). No agent started.\n");
