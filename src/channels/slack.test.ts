@@ -594,6 +594,29 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
     expect(items.map((i) => i.at)).toEqual([1_000, 2_000]);
   });
 
+  it("keeps human approvals and own answers while omitting marked status cards", async () => {
+    const client = guardOutbound({ conversations: { replies: vi.fn() } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0]);
+    const thread = [
+      { user: "UA", text: "✅ approved", ts: "1.0" },
+      { user: "UBOT", bot_id: "B1", text: "✅ finished the task", ts: "2.0" },
+      {
+        user: "UBOT",
+        bot_id: "B1",
+        text: "working",
+        ts: "2.5",
+        blocks: [{ type: "context", block_id: "switchboard-status:v1:live:00000000-0000-4000-8000-000000000000" }],
+      },
+      { user: "UA", text: "hi", ts: "3.0" },
+    ];
+    const items = await new SlackIO(client, { ...ev, thread }).history();
+    expect(items.map((item) => [item.role, item.text])).toEqual([
+      ["user", "✅ approved"],
+      ["assistant", "✅ finished the task"],
+    ]);
+  });
+
   it("a message whose ts does not parse carries no time; the item is kept", async () => {
     const client = guardOutbound({ conversations: { replies: vi.fn() } } as unknown as ConstructorParameters<
       typeof SlackIO
@@ -762,6 +785,23 @@ describe("SlackIO.status — verbosity and shimmer lifecycle", () => {
   };
 
   afterEach(() => vi.useRealTimers());
+  it("marks the native status lifecycle without using its display text", async () => {
+    const f = fixture();
+    const handle = await new SlackIO(f.main, ev, { statusClient: f.statusClient, statusBudget: budget() }).status(
+      { title: "arbitrary start text" },
+      { verbosity: "quiet" },
+    );
+    handle.update({ title: "✅ still running" });
+    await handle.done({ title: "◐ ended" });
+    const ids = [f.postMessage.mock.calls[0][0], ...f.update.mock.calls.map(([payload]) => payload)].map(
+      (payload) => (payload.blocks as { block_id?: string }[])[0].block_id,
+    );
+    expect(ids[0]).toMatch(/^switchboard-status:v1:live:/);
+    expect(ids[1]).toMatch(/^switchboard-status:v1:live:/);
+    expect(ids[2]).toMatch(/^switchboard-status:v1:closed:/);
+    expect(new Set(ids).size).toBe(3);
+  });
+
   it("terminal acknowledgement distinguishes delivered, failed, deferred and clipped outcomes", async () => {
     vi.useFakeTimers();
     const f = fixture();

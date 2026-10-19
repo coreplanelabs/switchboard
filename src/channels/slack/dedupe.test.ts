@@ -53,9 +53,9 @@ describe("dedupeDelivery (redelivery guard)", () => {
     const state = memState(); // fresh process: nothing handled here
     const client = repliesClient([
       { ts: TS, user: "UA" }, // the mention
-      { ts: "1788121677.778409", bot_id: "B1" }, // ⏱ late-pickup note
-      { ts: "1788121678.289369", bot_id: "B1" }, // status card
-      { ts: "1788121716.609039", bot_id: "B1" }, // the answer
+      { ts: "1788121677.778409", bot_id: "B1", user: BOT }, // ⏱ late-pickup note
+      { ts: "1788121678.289369", bot_id: "B1", user: BOT }, // status card
+      { ts: "1788121716.609039", bot_id: "B1", user: BOT }, // the answer
     ]);
     const drop = await dedupeDelivery(client, ev, REDELIVERY_MS, state);
     expect(drop).toMatch(
@@ -66,10 +66,23 @@ describe("dedupeDelivery (redelivery guard)", () => {
     expect(state.was("C1234567890", TS)).toBe(true);
   });
 
+  it("keeps a stale request when only another app replied", async () => {
+    const client = repliesClient([
+      { ts: TS, user: "UA" },
+      { ts: "1788121678.289369", user: "UOTHER", bot_id: "BOTHER" },
+    ]);
+    expect(await dedupeDelivery(client, ev, REDELIVERY_MS, memState())).toBeNull();
+    const own = repliesClient([
+      { ts: TS, user: "UA" },
+      { ts: "1788121678.289369", user: BOT, bot_id: "B1" },
+    ]);
+    expect(await dedupeDelivery(own, ev, REDELIVERY_MS, memState())).toMatch(/^already answered in its thread/);
+  });
+
   it("stale but UNANSWERED (the 👀-then-killed shape) → runs; bot messages before it don't count", async () => {
     const state = memState();
     const client = repliesClient([
-      { ts: "1788121000.000000", bot_id: "B1" }, // bot spoke earlier in the thread
+      { ts: "1788121000.000000", bot_id: "B1", user: BOT }, // bot spoke earlier in the thread
       { ts: TS, user: "UA" },
     ]);
     await expect(dedupeDelivery(client, ev, REDELIVERY_MS, state)).resolves.toBeNull();

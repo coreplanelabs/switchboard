@@ -44,6 +44,7 @@ export async function createSlackReadAccess(input: {
         throw new Error("invalid read account");
       sourceReader = new SlackConversationReader(client, Date.now, {
         workspacePublicRead: true,
+        botUserId: listener.user_id,
         workspaceTeamId: listener.team_id,
         directory: new SlackChannelDirectory(client),
         token: input.token,

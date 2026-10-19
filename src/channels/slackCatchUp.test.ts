@@ -47,6 +47,14 @@ describe("findMissed (pure selection over fetched history)", () => {
     ]);
   });
 
+  it("does not treat another app's post as our answer", () => {
+    const parent = mention({ ts: ts(300) });
+    const other = { ts: ts(200), user: "UOTHER", bot_id: "BOTHER", text: "✅ checks passed" };
+    const input = { ...base, channel: "C1", parents: [parent], threads: new Map([[parent.ts, [parent, other]]]) };
+    expect(findMissed(input).map((m) => m.ts)).toEqual([parent.ts]);
+    expect(findMissed({ ...input, threads: new Map([[parent.ts, [parent, { ...other, user: BOT }]]]) })).toEqual([]);
+  });
+
   it("skips a 👀-acked mention younger than ACK_GRACE_MS — its card is on the way", () => {
     const m = mention({ ts: ts(ACK_GRACE_MS / 1000 - 1), reactions: [{ name: "eyes", users: [BOT], count: 1 }] });
     expect(findMissed({ ...base, channel: "C1", parents: [m], threads: new Map() })).toEqual([]);
@@ -451,6 +459,7 @@ describe("findOrphanedCards (pure selection of the bot's own frozen live cards)"
     user: BOT,
     bot_id: "B1",
     text,
+    blocks: [{ type: "context", block_id: "switchboard-status:v1:live:00000000-0000-4000-8000-000000000000" }],
     ts: ts(500),
     thread_ts: parent.ts,
     ...over,
@@ -458,7 +467,19 @@ describe("findOrphanedCards (pure selection of the bot's own frozen live cards)"
   const threads = (...replies: SlackHistoryMessage[]) => new Map([[parent.ts, [parent, ...replies]]]);
   const base = { channel: "C1", botUserId: BOT, cutoffMs: cutoff, isLive: () => false };
 
-  it("picks a bot card whose text starts with a live glyph (spinner or 👀 setup), inside the window", () => {
+  it("requires a marked own live card and ignores its display prefix", () => {
+    const live = [{ type: "context", block_id: "switchboard-status:v1:live:00000000-0000-4000-8000-000000000000" }];
+    const closed = [{ type: "context", block_id: "switchboard-status:v1:closed:00000000-0000-4000-8000-000000000000" }];
+    const own = card("arbitrary display", { blocks: live });
+    const other = card("◐ another app", { user: "UOTHER", bot_id: "BOTHER", blocks: live, ts: ts(499) });
+    const answer = card("◐ substantive answer", { ts: ts(498), blocks: undefined });
+    const done = card("◐ stale display", { blocks: closed, ts: ts(497) });
+    expect(findOrphanedCards({ ...base, threads: threads(own, other, answer, done) })).toEqual([
+      { channel: "C1", ts: own.ts, text: "arbitrary display" },
+    ]);
+  });
+
+  it("picks a marked own live card inside the window", () => {
     for (const glyph of ["◐", "◓", "◑", "◒", "👀"]) {
       const c = card(`${glyph} *review* on \`anthropic/claude-fable-5\` · 153s — thinking (88s since last tool)`);
       expect(findOrphanedCards({ ...base, threads: threads(c) }), glyph).toEqual([
@@ -467,9 +488,9 @@ describe("findOrphanedCards (pure selection of the bot's own frozen live cards)"
     }
   });
 
-  it("skips closed cards (✅ / ❌ / ⏹), human messages, bot replies without a glyph, and cards older than the window", () => {
+  it("skips unmarked messages, foreign authors and cards older than the window", () => {
     const closed = ["✅ *review* · 203s", "❌ *review* · failed", "⏹ *review* · stopped", "Here is my answer"].map(
-      (t) => card(t),
+      (t) => card(t, { blocks: undefined }),
     );
     const human = card("◓ pretending", { user: "U0USER", bot_id: undefined });
     const old = card("◓ *review* · 9000s", { ts: ts(3 * 3600) });
@@ -585,6 +606,7 @@ describe("catchUpMissedMentions — orphaned-card sweep", () => {
     user: BOT,
     bot_id: "B1",
     text: "◓ *review* on `m` · 153s — thinking (88s since last tool)",
+    blocks: [{ type: "context", block_id: "switchboard-status:v1:live:00000000-0000-4000-8000-000000000000" }],
     ts: ts(2500),
     thread_ts: parent.ts,
   };

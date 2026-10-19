@@ -1,4 +1,4 @@
-import { STATUS_PREFIXES } from "../../core/dispatch/reply.js";
+import { ownStatusCard } from "./messageIdentity.js";
 import type { SlackFile } from "./attachments.js";
 
 // The pure half of reading a Slack thread: fetched `conversations.replies` messages in,
@@ -10,6 +10,7 @@ import type { SlackFile } from "./attachments.js";
 /** One message as `conversations.replies` returns it — the fields the mapping reads. */
 export interface SlackThreadMessage {
   edited?: { ts?: string; user?: string };
+  blocks?: { type?: string; block_id?: string }[];
   bot_id?: string;
   user?: string;
   text?: string;
@@ -38,6 +39,8 @@ export interface ThreadTurnsOptions {
   skipTs?: string;
   /** The bot's user id: its mention is stripped from every kept text. */
   botUserId?: string;
+  /** Listener ownership for linked reads that preserve mentions as source text. */
+  statusBotUserId?: string;
 }
 
 /** Slack app attribution is transport chrome. A mention or a matching Markdown
@@ -91,7 +94,7 @@ export function stripBotNameAddress(text: string): string {
 
 /**
  * Map fetched thread messages to turns. Drops the triggering message (by `skipTs`), the
- * bot's own status cards (`STATUS_PREFIXES`), and any message left with neither
+ * bot's marked status cards, and any message left with neither
  * text nor a user's files; strips the bot mention and the app footer; stamps
  * `at` from `ts`.
  */
@@ -101,7 +104,7 @@ export function threadTurns(messages: readonly SlackThreadMessage[], opts: Threa
     if (opts.skipTs !== undefined && mm.ts === opts.skipTs) continue;
     const raw = mm.text ?? "";
     const text = stripAppFooter(opts.botUserId ? stripBotNameAddress(raw.replaceAll(`<@${opts.botUserId}>`, "")) : raw);
-    if (STATUS_PREFIXES.some((p) => text.startsWith(p))) continue;
+    if (ownStatusCard(mm, opts.statusBotUserId ?? opts.botUserId)) continue;
     const files = mm.bot_id ? undefined : mm.files;
     if (!text && !files?.length) continue;
     const at = mm.ts !== undefined && Number.isFinite(Number(mm.ts)) ? Math.round(Number(mm.ts) * 1000) : undefined;

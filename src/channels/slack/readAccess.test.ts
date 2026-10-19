@@ -101,6 +101,38 @@ describe("workspace Slack read access", () => {
     expect(f.sourceCalls.mock.calls).toHaveLength(1);
   });
 
+  it("uses the listener identity to filter cards read by the separate account", async () => {
+    const f = fixture();
+    const blocks = [{ type: "context", block_id: "switchboard-status:v1:live:00000000-0000-4000-8000-000000000000" }];
+    const messages = [
+      { ts: "1790000000.000001", user: "UALICE", text: "✅ approved" },
+      { ts: "1790000001.000001", user: "UBOT", bot_id: "BBOT", text: "arbitrary card text", blocks },
+      { ts: "1790000002.000001", user: "UBOT", bot_id: "BBOT", text: "✅ the answer" },
+      { ts: "1790000003.000001", user: "UOTHER", bot_id: "BOTHER", text: "◐ another app", blocks },
+    ];
+    f.sourceCalls.mockResolvedValue({ messages });
+    const reads = await createSlackReadAccess({
+      listener: f.listener,
+      directory: new SlackChannelDirectory(f.listener),
+      token: new Secret("read-token", "SLACK_READ_TOKEN"),
+      sourceClient: f.source,
+    });
+    const result = await reads
+      .context(f.actor, f.msg)
+      .readSource({ kind: "link", url: "https://team.example/archives/C_PUBLIC/p1790000000000001" });
+    expect(result).toMatchObject({
+      kind: "read",
+      receipt: {
+        messages: [{ id: "1790000000.000001" }, { id: "1790000002.000001" }, { id: "1790000003.000001" }],
+        coverage: { kind: "complete", truncated: false },
+      },
+    });
+    expect(result.content).toContain("✅ approved");
+    expect(result.content).toContain("✅ the answer");
+    expect(result.content).toContain("◐ another app");
+    expect(result.content).not.toContain("arbitrary card text");
+  });
+
   it("requires the requester's own private membership even when the read account has access", async () => {
     const f = fixture();
     const reads = await createSlackReadAccess({

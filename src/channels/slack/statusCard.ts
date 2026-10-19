@@ -5,6 +5,7 @@ import { answerOutcomeDetail, type AnswerOutcome } from "../../core/answerOutcom
 
 import type { StatusUpdate } from "../../core/types.js";
 import { escapeMrkdwn } from "../slackEscape.js";
+import { statusBlockId } from "./messageIdentity.js";
 
 // The card body is bounded so the blocks payload stays far under Slack's
 // per-message limits whatever the tools emit.
@@ -100,7 +101,7 @@ export async function closeReclaimedCards(
       detail,
     };
     try {
-      await client.chat.update({ channel: c.card.channel, ts: c.card.ts, ...render(frame) });
+      await client.chat.update({ channel: c.card.channel, ts: c.card.ts, ...render(frame, "closed") });
       closed++;
     } catch (err) {
       warn(
@@ -132,9 +133,11 @@ export function isLiveCard(channel: string, ts: string): boolean {
  *  `frame.title` still lands in a `mrkdwn` context field and is escaped;
  *  escapeMrkdwn only neutralizes `&`/`<`/`>`, so the title's intentional
  *  `*bold*`/`` `code` `` markup renders as before. Exported for tests. */
-export function render(frame: StatusUpdate): { text: string; blocks: object[] } {
+export function render(frame: StatusUpdate, state: "live" | "closed" = "live"): { text: string; blocks: object[] } {
   const title = escapeMrkdwn(frame.title);
-  const blocks: object[] = [{ type: "context", elements: [{ type: "mrkdwn", text: title }] }];
+  const blocks: object[] = [
+    { type: "context", block_id: statusBlockId(state), elements: [{ type: "mrkdwn", text: title }] },
+  ];
   const elements: object[] = [];
   // Each text piece after the first opens on its own line.
   const line = (text: string) => elements.push({ type: "text", text: elements.length > 0 ? `\n${text}` : text });

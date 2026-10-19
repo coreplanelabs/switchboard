@@ -342,7 +342,7 @@ export function createSlackApp(
           // the run ledger says another live generation holds — are not.
           isLive: isLiveCard,
           onOrphanedCard: async (card, frame) => {
-            await app.client.chat.update({ channel: card.channel, ts: card.ts, ...render(frame) });
+            await app.client.chat.update({ channel: card.channel, ts: card.ts, ...render(frame, "closed") });
           },
           // The runner awaits only the hand-off — the receipt read and the
           // verdict — never the run: a run takes minutes and live events run
@@ -1800,7 +1800,8 @@ export class SlackIO implements ChannelIO {
       await setShimmer("");
     }
     budget.open(card);
-    const edit = (frame: StatusUpdate) => statusClient.chat.update({ channel: this.ev.channel, ts, ...render(frame) });
+    const edit = (frame: StatusUpdate, state: "live" | "closed" = "live") =>
+      statusClient.chat.update({ channel: this.ev.channel, ts, ...render(frame, state) });
     // Progress frames the budget refused: the card was stale until the next
     // heartbeat that got a token. Counted for the close's log line.
     let dropped = 0;
@@ -1810,7 +1811,7 @@ export class SlackIO implements ChannelIO {
     // card to the orphan sweep).
     const sendTerminal = async (frame: StatusUpdate, attempt: number): Promise<boolean> => {
       try {
-        await edit(frame);
+        await edit(frame, "closed");
         return true;
       } catch (err) {
         const retryAfter = retryAfterSeconds(err);

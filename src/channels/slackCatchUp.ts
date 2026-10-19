@@ -9,6 +9,7 @@ import { recordCatchUpOutcome, type CatchUpOutcome } from "./slackCatchUpStatus.
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
 import type { SlackFile } from "./slack/attachments.js";
 import type { SlackThreadMessage } from "./slack/threadTurns.js";
+import { isOwnSlackMessage, ownStatusCard } from "./slack/messageIdentity.js";
 
 // Reconnect catch-up (docs/decisions/0012-reconnect-catch-up-as-recovery.md).
 // Socket Mode does not queue events while the app is disconnected, so every
@@ -146,7 +147,8 @@ export function isAckedByBot(m: SlackHistoryMessage, botUserId: string): boolean
   return (m.reactions ?? []).some((r) => r.name === ACK_EMOJI && (r.users ?? []).includes(botUserId));
 }
 
-const isFromBot = (m: SlackHistoryMessage, botUserId: string): boolean => Boolean(m.bot_id) || m.user === botUserId;
+const isAppMessage = (m: SlackHistoryMessage, botUserId: string): boolean =>
+  Boolean(m.bot_id) || isOwnSlackMessage(m, botUserId);
 
 /** Has the bot posted in this thread after `m` — a status card or a reply?
  *  Exported for the adapter's redelivery guard, which asks the same
@@ -156,7 +158,7 @@ export function botRepliedAfter(
   m: Pick<SlackHistoryMessage, "ts">,
   botUserId: string,
 ): boolean {
-  return thread.some((r) => isFromBot(r, botUserId) && tsNum(r.ts) > tsNum(m.ts));
+  return thread.some((r) => isOwnSlackMessage(r, botUserId) && tsNum(r.ts) > tsNum(m.ts));
 }
 
 export interface FindMissedInput {
@@ -192,7 +194,7 @@ export function findMissed(input: FindMissedInput): MissedMessage[] {
   const eligible = (m: SlackHistoryMessage): m is SlackHistoryMessage & { ts: string } =>
     typeof m.ts === "string" &&
     tsMs(m.ts) >= cutoffMs &&
-    !isFromBot(m, botUserId) &&
+    !isAppMessage(m, botUserId) &&
     (!m.subtype || m.subtype === "file_share") &&
     !alreadyHandled(channel, m.ts);
   const handled = (m: SlackHistoryMessage & { ts: string }, thread: SlackHistoryMessage[]) =>
@@ -238,18 +240,17 @@ export interface FindOrphanedInput {
   isLive: (channel: string, ts: string) => boolean;
 }
 
-/** Pure selection: the bot's own cards still wearing a live glyph, inside the
- *  window, whose run is live nowhere this process knows of. Bot-authored only — a human can type a
- *  spinner too. */
+/** Pure selection: only the listener app's marked live cards inside the
+ *  window, whose run is live nowhere this process knows of. Display text and
+ *  unmarked legacy messages cannot identify a status card. */
 export function findOrphanedCards(input: FindOrphanedInput): OrphanedCard[] {
   const { channel, botUserId, cutoffMs, isLive } = input;
   const out: OrphanedCard[] = [];
   for (const thread of input.threads.values()) {
     for (const m of thread) {
       if (typeof m.ts !== "string" || tsMs(m.ts) < cutoffMs) continue;
-      if (!isFromBot(m, botUserId)) continue;
+      if (ownStatusCard(m, botUserId) !== "live") continue;
       const text = m.text ?? "";
-      if (!LIVE_CARD_PREFIXES.some((p) => text.startsWith(p))) continue;
       if (isLive(channel, m.ts)) continue;
       out.push({ channel, ts: m.ts, text });
     }
