@@ -5585,6 +5585,103 @@ describe("browser installation", () => {
       ]);
     else await expect(history).rejects.toThrow("original machine input");
   });
+  it("checks an active native HTTP Review without requiring recovery custody", async () => {
+    const url = "https://github.com/sample/api/pull/42";
+    const head = "a".repeat(40);
+    const s = await fixture(
+      false,
+      false,
+      {
+        name: "fixture",
+        complete: async () => ({
+          content: [
+            {
+              type: "tool_use",
+              id: "route-review",
+              name: "bind_preset",
+              input: {
+                preset: "review",
+                model: "anthropic/general-model",
+                repo: "sample/api",
+                prTarget: { number: 42, source: "request", quote: url },
+                reason: "Review the requested change",
+                settingsEvidence: operatorSettingsEvidence(),
+              },
+            },
+          ],
+          stopReason: "tool_use",
+        }),
+      },
+      false,
+      false,
+      false,
+      10,
+      false,
+      undefined,
+      undefined,
+      (core) => {
+        core.fetchPrHead = async () => head;
+        core.resolveRepoContext = () => ({
+          repo: "sample/api",
+          ref: "patch-1",
+          baseRef: "main",
+          pr: 42,
+          headSha: head,
+        });
+        core.fetchPrFacts = async () => ({
+          state: "open",
+          headRef: "patch-1",
+          baseRef: "main",
+          headSha: head,
+          headBranchExists: true,
+          sameRepoHead: true,
+          verifiedHead: { repo: "sample/api", ref: "patch-1", sha: head },
+        });
+      },
+    );
+    s.core.config.config.routing!.operator = "on";
+    const accepted = await handleIngressRequest(
+      {
+        method: "POST",
+        headers: { authorization: "Bearer native-token" },
+        body: JSON.stringify({
+          text: `agent:review Review ${url} at head ${head}. Publish the review.`,
+          channel: "ops",
+          thread: "service-review-proof",
+          async: true,
+          idempotencyKey: "service-review-proof",
+        }),
+      },
+      s.core,
+      { auth: { tokens: s.tokens }, admit: (msg, _io, evidence) => s.installation.admitNative(msg, evidence) },
+    );
+    expect(accepted.status).toBe(202);
+    const receipt = (accepted.body as { admission: { status: string; runId: string } }).admission;
+    expect(receipt.status).toBe("accepted");
+    const binding = await s.installation.originalBinding(receipt.runId);
+    if (!binding) throw new Error("No original service binding");
+    expect(binding).toMatchObject({ originalStatus: "dispatching", actor: { id: "http:bot", kind: "service" } });
+    expect(await binding.io.authoritativePrivateHistory!(binding.msg)).toEqual([]);
+    expect(await binding.io.rehostOrganizationInput!(binding.msg)).toBeUndefined();
+    // This proof stops after routing; it does not claim a published review.
+    const executor = vi
+      .spyOn(executorFactory, "makeExecutor")
+      .mockRejectedValue(new Error("Controlled executor boundary stop"));
+    try {
+      await s.execute();
+    } finally {
+      executor.mockRestore();
+    }
+    expect(await s.runStore.get(receipt.runId)).toMatchObject({
+      id: receipt.runId,
+      operator: {
+        outcome: "binds",
+        binds: [expect.objectContaining({ preset: "review", repo: "sample/api" })],
+        attempts: [{ outcome: "accepted" }],
+      },
+    });
+  });
+
   it("routes the exported smoke answer through native HTTP to its original General owner", async () => {
     const modelRequests: import("../core/provider.js").CompletionRequest[] = [];
     const s = await fixture(false, false, {

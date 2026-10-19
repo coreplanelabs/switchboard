@@ -1772,12 +1772,19 @@ export async function dispatch(
                 opts.authoritativeHistory &&
                 pointer &&
                 !pointer.nativeMediaDigest &&
-                !pointer.savedNativeMediaSource &&
-                !(await io.rehostOrganizationInput?.(msg))
-              )
-                throw new RefusalError(
-                  refusalOf("setup_failed", "The current conversation could not be verified. No new task started."),
-                );
+                !pointer.savedNativeMediaSource
+              ) {
+                const restored = await io.rehostOrganizationInput?.(msg);
+                if (!restored) {
+                  if (chatActorOf(deps.config, msg).kind !== "service" || !io.authoritativePrivateHistory)
+                    throw new RefusalError(
+                      refusalOf("setup_failed", "The current conversation could not be verified. No new task started."),
+                    );
+                  // The captured service sink rechecks its active original input.
+                  // Rehosting remains limited to uncertain custody.
+                  await io.authoritativePrivateHistory(msg);
+                }
+              }
               if (!pointer?.nativeMediaDigest && !pointer?.savedNativeMediaSource) return;
               const media = pointer.savedNativeMediaSource
                 ? await io.readSavedNativeMedia?.(pointer.savedNativeMediaSource, msg)
