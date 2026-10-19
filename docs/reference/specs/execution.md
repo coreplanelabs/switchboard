@@ -280,3 +280,9 @@ Controller-owned workspace commands retain their stage, exit status, truncation 
 | Sandbox configuration renders the state endpoint for cancellation checks independently of optional resident cache bindings; a cold profile has no resident bucket. | `[unit]` `src/deploy/wranglerTemplate.test.ts::sandbox runtime cancellation configuration::renders the state endpoint independently of optional resident cache bindings` |
 | Fresh and seeded sandbox images provide `rg` and `fd` on PATH. The image build proves `fd` can find a source file; runs need no search-binary download | `[agent]` Run `npm run check:image -w deploy/cloudflare-sandbox`; the build must pass its PATH probes and `fd --glob` fixture search. This proves the candidate image; deploy and a natural fallback run remain separate live proof. |
 | Failed workspace movement identifies its command stage, exit status, truncation and redacted failure output. | `[unit]` `src/execution/workspaceAdvance.test.ts::executor workspace advance::identifies the failed command stage, exit status and redacted output` |
+
+## Cloudflare failure boundary
+
+| Criterion | Proof |
+| --- | --- |
+| A Cloudflare internal-error reference is an infrastructure failure on all Resident execution routes. The displayed error names Cloudflare’s infrastructure boundary and keeps the reference. Sandbox error replies use the same wording. An application error that quotes the platform message keeps its original attribution. | `[unit]` `deploy/cloudflare-resident/threadErr.test.ts::names a Cloudflare internal failure and keeps its reference on every execution route`; `src/execution/sandboxErrors.test.ts::thrownText::names Cloudflare's boundary for a platform reference without relabeling application errors` |

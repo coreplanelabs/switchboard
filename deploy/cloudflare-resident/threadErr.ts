@@ -17,6 +17,7 @@ import type { ResidentStep } from "../../src/execution/residentStepTrace.js";
 import type { RefusalCause } from "../../src/core/refusal.js";
 import type { ResidentRefusalCode } from "../../src/core/runSetup.js";
 import { MEMORY_PRESSURE_REASON } from "../../src/execution/sandboxErrors.js";
+import { CLOUDFLARE_INTERNAL_ERROR, cloudflareErrorMessage } from "../../src/core/cloudflareErrors.js";
 
 // The cause-chain walker has one home, beside the wording lists; the Worker
 // takes it from here with the rest of the thread data plane's shapes.
@@ -241,10 +242,10 @@ export function controlResetErr(err: ControlResetError): ThreadErr {
 export const TRANSIENT_PLATFORM_WORDING =
   /exceeded its memory limit and was reset|storage operation exceeded timeout which caused object to be reset|durable object is overloaded/i;
 
-/** The platform's bare `internal error`, the whole message — read on the
+/** The platform's `internal error`, with an optional support reference — read on the
  *  top-level throw only (see above): one link down it is a Worker's own failed
  *  subrequest, wrapped by the route that made it. */
-export const PLATFORM_INTERNAL_ERROR_WORDING = /^internal error\.?$/i;
+export const PLATFORM_INTERNAL_ERROR_WORDING = CLOUDFLARE_INTERNAL_ERROR;
 
 /** What only the Worker knows about a throw, handed in so the rules below stay
  *  pure: the pinned SDK's predicates (`isDurableObjectCodeUpdateReset` as
@@ -340,7 +341,7 @@ export function threadErrBuilders(p: ThrowPredicates): ThreadErrBuilders {
     return false;
   };
   const catchAllErr = (err: unknown, prefix?: string, known?: KnownVerdicts): ThreadErr => {
-    const words = messageOf(err);
+    const words = cloudflareErrorMessage(messageOf(err));
     return {
       error: prefix ? `${prefix}: ${words}` : words,
       status: 500,

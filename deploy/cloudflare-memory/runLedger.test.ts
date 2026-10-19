@@ -15083,20 +15083,25 @@ describe("state-write holds across Durable Object RPC", () => {
       },
     });
   };
-  function routedEnv(stub: ReturnType<typeof env.RUNS.get>, override: (name: PropertyKey) => unknown) {
-    const wrapped = new Proxy(stub, {
-      get(target, name) {
-        const replacement = override(name);
-        if (replacement !== undefined) return replacement;
-        const value = Reflect.get(target, name, target);
-        // RpcCallable does not have Function.bind: accessing it invokes a remote
-        // method named bind. Reflect.apply preserves the actual stub invocation.
-        return typeof value === "function" ? (...args: unknown[]) => Reflect.apply(value, target, args) : value;
-      },
-    });
+  function routedEnv(
+    stub: ReturnType<typeof env.RUNS.get>,
+    override: (name: PropertyKey, stubIndex: number) => unknown,
+  ) {
+    let stubIndex = 0;
+    const wrap = (index: number) =>
+      new Proxy(stub, {
+        get(target, name) {
+          const replacement = override(name, index);
+          if (replacement !== undefined) return replacement;
+          const value = Reflect.get(target, name, target);
+          // RpcCallable does not have Function.bind: accessing it invokes a remote
+          // method named bind. Reflect.apply preserves the actual stub invocation.
+          return typeof value === "function" ? (...args: unknown[]) => Reflect.apply(value, target, args) : value;
+        },
+      });
     const namespace = new Proxy(env.RUNS, {
       get(target, name) {
-        if (name === "get") return () => wrapped;
+        if (name === "get") return () => wrap(++stubIndex);
         const value = Reflect.get(target, name, target);
         return typeof value === "function" ? (...args: unknown[]) => Reflect.apply(value, target, args) : value;
       },
@@ -15334,6 +15339,149 @@ describe("state-write holds across Durable Object RPC", () => {
     },
   );
 
+  it.each(["append", "heartbeat", "step"] as const)(
+    "recovers Cloudflare RPC failure before and after %s commits without replaying the HTTP request",
+    async (operation) => {
+      for (const when of ["before", "after"] as const) {
+        const key = `runs:cloudflare-retry:${operation}:${when}`;
+        const stub = env.RUNS.get(env.RUNS.idFromName(key));
+        expect((await stub.claim(claim(), 1)).ok).toBe(true);
+        const method = operation === "append" ? "appendEvents" : operation === "step" ? "recordStep" : "heartbeat";
+        let attempts = 0,
+          brokenStub: number | undefined;
+        const routed = routedEnv(stub, (name, stubIndex) =>
+          name === method
+            ? async (...args: unknown[]) => {
+                if (stubIndex === brokenStub) throw new Error("broken stub reused");
+                attempts++;
+                if (attempts === 1) {
+                  brokenStub = stubIndex;
+                  if (when === "after") await Reflect.apply(stub[method], stub, args);
+                  throw new Error("internal error; reference = 0123456789abcdefghijklmn");
+                }
+                return Reflect.apply(stub[method], stub, args);
+              }
+            : undefined,
+        );
+        const body = JSON.stringify({
+          storeKey: key,
+          runId: id,
+          gen,
+          ...(operation === "append"
+            ? { events: [{ seq: 1, type: "assistant", text: "one recorded result" }] }
+            : operation === "step"
+              ? {
+                  record: {
+                    step: 1,
+                    seq: 1,
+                    turnIndex: 1,
+                    inFlight: [],
+                    inboxConsumedSeq: 0,
+                    remainingMs: 1000,
+                    turn: 1,
+                    iteration: 1,
+                  },
+                }
+              : { leaseMs: 30000 }),
+        });
+        const response = await memoryWorker.fetch(
+          new Request(`https://memory.test/runs/${operation}`, {
+            method: "POST",
+            body,
+            headers: { ...AUTH, "content-length": String(new TextEncoder().encode(body).length) },
+          }),
+          routed,
+        );
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ ok: true });
+        expect(attempts).toBe(2);
+        const saved = await runInDurableObject(stub, (_instance, ctx) => ({
+          events: ctx.storage.sql.exec<{ json: string }>("SELECT json FROM run_events WHERE run_id=?", id).toArray(),
+          steps: ctx.storage.sql.exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=?", id).toArray(),
+          lease: ctx.storage.sql
+            .exec<{ lease_until: number }>("SELECT lease_until FROM live_runs WHERE run_id=?", id)
+            .one().lease_until,
+        }));
+        if (operation === "append")
+          expect(saved.events.map((row) => JSON.parse(row.json))).toEqual([
+            { seq: 1, type: "assistant", text: "one recorded result" },
+          ]);
+        else if (operation === "step")
+          expect(saved.steps.map((row) => JSON.parse(row.json))).toEqual([
+            {
+              step: 1,
+              seq: 1,
+              turnIndex: 1,
+              inFlight: [],
+              inboxConsumedSeq: 0,
+              remainingMs: 1000,
+              turn: 1,
+              iteration: 1,
+            },
+          ]);
+        else expect(saved.lease).toBeGreaterThan(30001);
+      }
+    },
+  );
+  it.each(["exhausted", "overloaded", "permanent", "application"] as const)(
+    "bounds Cloudflare RPC retries for %s failures and keeps the request failed",
+    async (mode) => {
+      const key = `runs:cloudflare-retry-limit:${mode}`;
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      let attempts = 0;
+      const routed = routedEnv(stub, (name) =>
+        name === "appendEvents"
+          ? async () => {
+              attempts++;
+              throw Object.assign(
+                new Error(
+                  mode === "application"
+                    ? "invalid stored event"
+                    : "internal error; reference = 0123456789abcdefghijklmn",
+                ),
+                {
+                  ...(mode === "overloaded"
+                    ? { overloaded: true, retryable: true }
+                    : mode === "permanent"
+                      ? { retryable: false }
+                      : {}),
+                },
+              );
+            }
+          : undefined,
+      );
+      const body = JSON.stringify({
+        storeKey: key,
+        runId: id,
+        gen,
+        events: [{ seq: 1, type: "assistant", text: "PRIVATE_EVENT" }],
+      });
+      const response = await memoryWorker.fetch(
+        new Request("https://memory.test/runs/append", {
+          method: "POST",
+          body,
+          headers: { ...AUTH, "content-length": String(new TextEncoder().encode(body).length) },
+        }),
+        routed,
+      );
+      expect(response.status).toBe(500);
+      expect(attempts).toBe(mode === "exhausted" ? 3 : 1);
+      expect(
+        await runInDurableObject(
+          stub,
+          (_instance, ctx) =>
+            ctx.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM run_events WHERE run_id=?", id).one().n,
+        ),
+      ).toBe(0);
+      const failure = JSON.parse(response.headers.get(STORAGE_FAILURE_DIAGNOSTIC_HEADER)!);
+      expect(failure.failure.exception.message).toBe(
+        mode === "application"
+          ? "invalid stored event"
+          : "Failed inside Cloudflare's infrastructure boundary: internal error; reference = 0123456789abcdefghijklmn",
+      );
+    },
+  );
   it.each(["before", "after"] as const)(
     "recovers a retryable RPC failure %s commit on the original run",
     async (when) => {
@@ -15352,7 +15500,7 @@ describe("state-write holds across Durable Object RPC", () => {
               calls++;
               if (calls === 1) {
                 if (when === "after") expect(await Reflect.apply(stub.setState, stub, args)).toEqual({ ok: true });
-                throw Object.assign(new Error("Durable Object reset"), { retryable: true, remote: true });
+                throw new Error("internal error; reference = 0123456789abcdefghijklmn");
               }
               return Reflect.apply(stub.setState, stub, args);
             }
@@ -15371,7 +15519,7 @@ describe("state-write holds across Durable Object RPC", () => {
       ).toBe(1);
     },
   );
-  it.each(["state", "heartbeat", "append"] as const)(
+  it.each(["state", "heartbeat", "append", "step"] as const)(
     "exposes the pending %s RPC and its completion under the original request digest",
     async (operation) => {
       const key = "runs:rpc-progress:" + operation;
@@ -15381,8 +15529,22 @@ describe("state-write holds across Durable Object RPC", () => {
       let release!: () => void;
       const pending = new Promise<void>((resolve) => (entered = resolve));
       const gate = new Promise<void>((resolve) => (release = resolve));
-      const method = operation === "state" ? "setState" : operation === "append" ? "appendEvents" : "heartbeat";
-      const stage = operation === "state" ? "state-rpc" : operation === "append" ? "append-rpc" : "heartbeat-rpc";
+      const method =
+        operation === "state"
+          ? "setState"
+          : operation === "append"
+            ? "appendEvents"
+            : operation === "step"
+              ? "recordStep"
+              : "heartbeat";
+      const stage =
+        operation === "state"
+          ? "state-rpc"
+          : operation === "append"
+            ? "append-rpc"
+            : operation === "step"
+              ? "step-rpc"
+              : "heartbeat-rpc";
       const routed = routedEnv(stub, (name) =>
         name === method
           ? async (...args: unknown[]) => {
@@ -15400,7 +15562,20 @@ describe("state-write holds across Durable Object RPC", () => {
           ? { state }
           : operation === "heartbeat"
             ? { leaseMs: 30000 }
-            : { events: [{ seq: 1, type: "assistant", text: "PRIVATE_REQUEST" }] }),
+            : operation === "step"
+              ? {
+                  record: {
+                    step: 1,
+                    seq: 1,
+                    turnIndex: 1,
+                    inFlight: [],
+                    inboxConsumedSeq: 0,
+                    remainingMs: 1000,
+                    turn: 1,
+                    iteration: 1,
+                  },
+                }
+              : { events: [{ seq: 1, type: "assistant", text: "PRIVATE_REQUEST" }] }),
       });
       const path = "/runs/" + operation;
       const requestId = "11111111-1111-4111-a111-111111111111";
@@ -15561,7 +15736,8 @@ describe("state-write holds across Durable Object RPC", () => {
         attempts: mode === "exhausted" ? 3 : 1,
         exception: {
           name: "Error",
-          message: "Durable Object reset because its code was updated. token=«redacted»",
+          message:
+            "Failed inside Cloudflare's infrastructure boundary: Durable Object reset because its code was updated. token=«redacted»",
           retryable: mode !== "ordinary",
           overloaded: mode === "overloaded",
           remote: true,

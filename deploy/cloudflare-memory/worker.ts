@@ -486,6 +486,9 @@ import {
   RANGE_PIN_RPC_SLOW_MS,
   STORE_RETRY_BACKOFFS_MS,
 } from "../../src/core/budgets.ts";
+import { isRetryableCloudflareError } from "../../src/core/cloudflareErrors.ts";
+import { RUN_STORE_TIMEOUT_MS } from "../../src/core/runStoreConstants.ts";
+import { captureException } from "../../src/core/exceptionDiagnostic.ts";
 import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause } from "../../src/core/provider.ts";
 import { holdBackgroundTask } from "./backgroundTasks.ts";
 import {
@@ -14878,11 +14881,14 @@ async function handleLedger(
       : undefined;
   let rpcWitness = stateWitness;
   const observeRpc = async <T>(
-    stage: "promotion-preflight" | "state-read" | "state-rpc" | "heartbeat-rpc" | "append-rpc",
+    stage: "promotion-preflight" | "state-read" | "state-rpc" | "heartbeat-rpc" | "append-rpc" | "step-rpc",
     attempt: number,
     call: () => Promise<T>,
   ): Promise<T> => {
-    if (originalBody === undefined || !["/runs/state", "/runs/heartbeat", "/runs/append"].includes(pathname))
+    if (
+      originalBody === undefined ||
+      !["/runs/state", "/runs/heartbeat", "/runs/append", "/runs/step"].includes(pathname)
+    )
       return call();
     try {
       rpcWitness ??= await storeRequestWitness(pathname, originalBody, b, requestId);
@@ -14927,6 +14933,46 @@ async function handleLedger(
       throw error;
     }
   };
+  // These methods repeat the original fenced upsert or lease extension. Never
+  // use this loop for arbitrary mutations or for replaying an HTTP request.
+  const replayableRpc = async <T>(
+    stage: "heartbeat-rpc" | "append-rpc" | "step-rpc",
+    call: (fresh: ReturnType<typeof env.RUNS.get>) => Promise<T>,
+  ): Promise<T> => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await observeRpc(stage, attempt, () => call(env.RUNS.get(env.RUNS.idFromName(key.value))));
+      } catch (error) {
+        const delayMs = STORE_RETRY_BACKOFFS_MS[attempt - 1];
+        const retry =
+          delayMs !== undefined &&
+          isRetryableCloudflareError(error) &&
+          systemClock() - now + delayMs < RUN_STORE_TIMEOUT_MS;
+        try {
+          console.log(
+            JSON.stringify({
+              event: "storage.rpc.failure",
+              operation: pathname,
+              stage,
+              attempt,
+              retry,
+              ...(retry ? { delayMs } : {}),
+              requestId,
+              requestDigest: rpcWitness?.digest,
+              runId: b.runId,
+              ownerGen: b.gen,
+              exception: captureException(error),
+              build: BUILD,
+            }),
+          );
+        } catch (telemetryError) {
+          logStorageTelemetryFailure(pathname, "operator-log", telemetryError, undefined, rpcWitness?.digest);
+        }
+        if (!retry) throw error;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  };
   const stateRpc = async <T>(
     stage: "promotion-preflight" | "state-read" | "state-rpc",
     call: () => Promise<T>,
@@ -14951,10 +14997,8 @@ async function handleLedger(
       } catch (error) {
         if (!stateWitness) throw error;
         const failure = stateWriteException(stage, error, attempt);
-        const exception = "exception" in failure ? failure.exception : undefined;
         const retry =
-          exception?.retryable === true &&
-          exception.overloaded !== true &&
+          isRetryableCloudflareError(error) &&
           "errorKind" in failure &&
           failure.errorKind === "error" &&
           attempt <= STORE_RETRY_BACKOFFS_MS.length;
@@ -15658,8 +15702,8 @@ async function handleLedger(
       typeof (b.facts as Record<string, unknown>).startedAt === "number"
         ? (b.facts as unknown as HeartbeatFacts)
         : undefined;
-    const r = (await observeRpc("heartbeat-rpc", 1, () =>
-      stub.heartbeat(runId.value, g.value, lease.value, now, facts),
+    const r = (await replayableRpc("heartbeat-rpc", (fresh) =>
+      fresh.heartbeat(runId.value, g.value, lease.value, now, facts),
     )) as unknown as HeartbeatAnswer;
     return r.ok ? json(r) : json(r, 409);
   }
@@ -15703,7 +15747,9 @@ async function handleLedger(
         return reject("append_event_too_large", `event ${ev.seq} exceeds ${maxBytes} bytes`);
       events.push({ seq: ev.seq, json: text });
     }
-    const r = await observeRpc<FenceResult>("append-rpc", 1, () => stub.appendEvents(runId.value, g.value, events));
+    const r = await replayableRpc<FenceResult>("append-rpc", (fresh) =>
+      fresh.appendEvents(runId.value, g.value, events),
+    );
     console.log(`[runs/append] ${key.value} ${runId.value} <- ${events.length} event(s), ok=${r.ok}`);
     return fenced(r);
   }
@@ -15717,7 +15763,9 @@ async function handleLedger(
   if (pathname === "/runs/step") {
     const record = parseStep(b.record);
     if (!record.ok) return json({ error: record.error }, 400);
-    return fenced(await stub.recordStep(runId.value, g.value, record.value));
+    return fenced(
+      await replayableRpc<FenceResult>("step-rpc", (fresh) => fresh.recordStep(runId.value, g.value, record.value)),
+    );
   }
   if (pathname === "/runs/state") {
     if (typeof b.state !== "object" || b.state === null) return json({ error: "state must be an object" }, 400);
@@ -16071,7 +16119,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
     try {
       return await (PLANE_ROUTES.has(url.pathname)
         ? handlePlane(url.pathname, body, env)
-        : needsSeed || ["/runs/state", "/runs/append", "/runs/heartbeat"].includes(url.pathname)
+        : needsSeed || ["/runs/state", "/runs/append", "/runs/heartbeat", "/runs/step"].includes(url.pathname)
           ? handleLedger(
               url.pathname,
               body,
