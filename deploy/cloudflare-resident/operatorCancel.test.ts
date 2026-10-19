@@ -408,6 +408,52 @@ describe("operator deploy admission abandonment", () => {
     expect(JSON.stringify(h.rows.get(tombstone))).not.toContain("admin-secret");
   });
 
+  it.each([
+    ["missing resource", { resource: null }],
+    ["missing Worker version", { workerVersion: null }],
+    ["missing build", { build: null }],
+    ["short legacy build", { build: "a".repeat(7) }],
+  ])("archives exact %s provenance without inventing an original source", async (_name, source) => {
+    const h = fixture(),
+      original = { ...h.original, ...source };
+    h.rows.set(key, original);
+    const request = operatorAbandonmentSchema.parse(await h.request());
+    expect(request.source).toEqual({
+      build: original.build,
+      workerVersion: original.workerVersion,
+      resource: original.resource,
+    });
+    const response = await h.call("POST", "/abandon-deploy-admission", request);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ requestEnd: "unobserved", nativeOutcome: "unverified" });
+    expect(h.rows.get(tombstone)).toMatchObject({ originalRecord: original });
+    expect(h.rows.has(key)).toBe(false);
+    expect(h.rows.get("deploy:admission:neighbor")).toEqual(h.neighbor);
+  });
+
+  it.each([
+    ["missing source key", { resource: undefined }],
+    ["malformed resource", { resource: "elsewhere" }],
+    ["malformed build", { build: "not-a-build" }],
+    ["malformed Worker version", { workerVersion: "not-a-version" }],
+  ])("refuses %s without removing the legacy permit", async (_name, source) => {
+    const h = fixture();
+    h.rows.set(key, { ...h.original, ...source });
+    const before = structuredClone([...h.rows]);
+    expect((await h.call("GET", `/deploy-admission-abandonment?id=${id}`)).status).toBe(409);
+    expect([...h.rows]).toEqual(before);
+  });
+
+  it("refuses an invented source for a legacy permit", async () => {
+    const h = fixture();
+    h.rows.set(key, { ...h.original, resource: null });
+    const request = operatorAbandonmentSchema.parse(await h.request());
+    request.source.resource = "repo:other/app";
+    const before = structuredClone([...h.rows]);
+    expect((await h.call("POST", "/abandon-deploy-admission", request)).status).toBe(409);
+    expect([...h.rows]).toEqual(before);
+  });
+
   it("keeps quote and exact receipt reads free of mutations", async () => {
     const h = fixture(),
       before = structuredClone([...h.rows]);
