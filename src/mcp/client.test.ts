@@ -26,6 +26,112 @@ function client(
 }
 
 describe("StreamableHttpMcpClient", () => {
+  const responseClient = (response: (id: number) => unknown, transport = "json") =>
+    new StreamableHttpMcpClient({
+      url: "https://mcp.example.com/mcp",
+      fetch: async (_url, init) => {
+        const { id } = JSON.parse(String(init?.body));
+        const value = response(id);
+        return transport === "sse"
+          ? new Response(`data: ${JSON.stringify(value)}\n\n`, { headers: { "content-type": "text/event-stream" } })
+          : Response.json(transport === "batch" ? [value] : value);
+      },
+    });
+
+  it.each([
+    ["wrong id", (id: number) => ({ jsonrpc: "2.0", id: id + 1, result: { content: [] } })],
+    ["missing id", () => ({ jsonrpc: "2.0", result: { content: [] } })],
+    ["wrong version", (id: number) => ({ jsonrpc: "1.0", id, result: { content: [] } })],
+    ["missing outcome", (id: number) => ({ jsonrpc: "2.0", id })],
+    [
+      "conflicting outcomes",
+      (id: number) => ({ jsonrpc: "2.0", id, result: { content: [] }, error: { code: -1, message: "failed" } }),
+    ],
+    ["malformed error", (id: number) => ({ jsonrpc: "2.0", id, error: { code: "-1", message: "failed" } })],
+  ] as const)("refuses a JSON response with %s", async (_name, response) => {
+    await expect(responseClient(response).callTool("read", {}, { sourceSession: "original" })).rejects.toMatchObject({
+      code: "protocol",
+    });
+  });
+
+  it.each(["sse", "batch"])("validates the selected %s response envelope", async (transport) => {
+    await expect(
+      responseClient((id) => ({ id, result: { content: [] } }), transport).callTool(
+        "read",
+        {},
+        { sourceSession: "original" },
+      ),
+    ).rejects.toMatchObject({ code: "protocol" });
+    expect(
+      await responseClient(
+        (id) => ({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "exact answer" }] } }),
+        transport,
+      ).callTool("read", {}, { sourceSession: "original" }),
+    ).toEqual({ content: [{ type: "text", text: "exact answer" }] });
+  });
+
+  it.each([
+    ["absent content", {}],
+    ["non-object result", null],
+    ["non-array content", { content: "answer" }],
+    ["invalid content part", { content: [null] }],
+    ["missing text", { content: [{ type: "text" }] }],
+    ["non-boolean error flag", { content: [], isError: "true" }],
+    ["non-object structured content", { content: [], structuredContent: [] }],
+  ] as const)("refuses a tool result with %s instead of returning empty success", async (_name, result) => {
+    await expect(
+      responseClient((id) => ({ jsonrpc: "2.0", id, result })).callTool("read", {}, { sourceSession: "original" }),
+    ).rejects.toMatchObject({ code: "protocol" });
+  });
+
+  it("retains valid empty, error and opaque tool results", async () => {
+    expect(
+      await responseClient((id) => ({ jsonrpc: "2.0", id, result: { content: [] } })).callTool(
+        "read",
+        {},
+        { sourceSession: "original" },
+      ),
+    ).toEqual({ content: [] });
+    const result = {
+      content: [
+        { type: "text", text: "cannot read" },
+        { type: "future-part", payload: { id: "native-7" } },
+      ],
+      isError: true,
+      structuredContent: { operation: "native-7", status: "held" },
+    };
+    expect(
+      await responseClient((id) => ({ jsonrpc: "2.0", id, result })).callTool(
+        "read",
+        {},
+        { sourceSession: "original" },
+      ),
+    ).toEqual(result);
+  });
+
+  it.each(["sse", "batch"])("refuses ambiguous duplicate %s responses without replay", async (transport) => {
+    let calls = 0;
+    const c = new StreamableHttpMcpClient({
+      url: "https://mcp.example.com/mcp",
+      fetch: async (_url, init) => {
+        calls++;
+        const { id } = JSON.parse(String(init?.body));
+        const replies = ["first", "second"].map((text) => ({
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text }] },
+        }));
+        return transport === "sse"
+          ? new Response(replies.map((reply) => `data: ${JSON.stringify(reply)}\n\n`).join(""), {
+              headers: { "content-type": "text/event-stream" },
+            })
+          : Response.json(replies);
+      },
+    });
+    await expect(c.callTool("read", {}, { sourceSession: "original" })).rejects.toMatchObject({ code: "protocol" });
+    expect(calls).toBe(1);
+  });
+
   it("preserves the versioned source descriptor as data during discovery", async () => {
     const server = fakeMcpServerFetch({ tools: [readTool] });
     expect((await client(server).listTools())[0]).toMatchObject({ _meta: readTool._meta });
