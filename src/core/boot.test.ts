@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "./chatMessage.js";
 import { closeReclaimed, closureNote, reclaimRuns, startReclaimSweep, threadsElsewhereOf } from "./boot.js";
-import type { RunStatus } from "./runRecord.js";
+import type { RunRecord, RunStatus } from "./runRecord.js";
+import { analyzeRunFriction } from "./runFriction.js";
+import { checkStateFixture } from "./testing/checkState.js";
 import { shipInterruptedNote } from "./shipPipeline.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import type { RunLedger } from "./runLedger/ledger.js";
@@ -68,6 +70,7 @@ function harness(
   wrap?: (inner: InMemoryRunLedger) => RunLedger,
   over: {
     storedStatus?: (runId: string) => Promise<RunStatus | undefined>;
+    storedRecord?: (runId: string) => Promise<RunRecord | null | undefined>;
     hostedInstanceLive?: (instanceId: string) => Promise<boolean | undefined>;
     gen?: string;
   } = {},
@@ -83,6 +86,7 @@ function harness(
       ledger,
       gen: over.gen ?? "g2",
       ...(over.storedStatus ? { storedStatus: over.storedStatus } : {}),
+      ...(over.storedRecord ? { storedRecord: over.storedRecord } : {}),
       ...(over.hostedInstanceLive ? { hostedInstanceLive: over.hostedInstanceLive } : {}),
       now: () => clock,
       log: (l) => logs.push(l),
@@ -109,6 +113,141 @@ const hostedClaim = (runId: string, thread: string, gen = "g1"): ClaimRequest =>
 });
 
 describe("reclaimRuns", () => {
+  it.each(["completed", "failed"] as const)(
+    "settles a leaked lease with saved checks without closing an already %s run again",
+    async (status) => {
+      const { ledger, run } = harness(undefined, { storedRecord: async (id) => ledger.finished.get(id) });
+      const request = claim("r1", "slack:C1:1.0", "g1", {
+        phase: "attaching",
+        meta: { ...claim("r1", "slack:C1:1.0").meta, request: { text: "review this" } },
+      });
+      await ledger.claim(request); // The claim committed; its caller lost the reply.
+      const checks = await checkStateFixture(
+        { runId: "r1", requester: "slack:UALICE", threadKey: request.threadKey, repo: "acme/api" },
+        { output: "original verification output" },
+      );
+      expect(await ledger.setState("r1", "g1", { checkExecutions: checks })).toEqual({ ok: true });
+      await ledger.requestStop("r1", "hard");
+      const original: RunRecord = {
+        id: "r1",
+        channelVisibility: "private",
+        ...(status === "failed"
+          ? { setup: { version: 1 as const, requested: "resident" as const, reason: "resident_claim_error" as const } }
+          : {}),
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        threadKey: "slack:C1:1.0",
+        startedAt: 1_000,
+        finishedAt: 2_000,
+        status,
+        eventCount: 0,
+        storedEventCount: 0,
+        truncated: false,
+        events: [],
+        diagnosis: analyzeRunFriction([]),
+      };
+      ledger.finished.set("r1", structuredClone(original)); // The failed setup close used the plain store.
+
+      const outcome = await run();
+
+      expect(ledger.finished.get("r1")).toEqual(original);
+      expect(await ledger.listLive()).toEqual([]);
+      expect(await ledger.readCheckSource({ runId: "r1", callId: "call-1", phase: "command" })).toMatchObject({
+        kind: "source",
+        source: { state: "terminal", result: { stdout: "original verification output", exitCode: 0 } },
+      });
+      expect(outcome).toMatchObject({ closed: [], resumable: [], failed: [], liveListingComplete: true });
+      expect(ledger.planeEndings.get("r1")).toBeUndefined();
+      expect(await ledger.claim(claim("r2", "slack:C1:1.0", "g2"))).toMatchObject({ ok: true });
+    },
+  );
+
+  it.each(["unavailable", "different start", "different requester", "abandon fenced"] as const)(
+    "holds a leaked lease when its terminal result cannot be settled: %s",
+    async (fault) => {
+      const { ledger, run } = harness(
+        (inner) =>
+          fault === "abandon fenced"
+            ? overriding(inner, {
+                abandon: async () => ({ ok: false, reason: "fenced" }),
+              })
+            : inner,
+        {
+          storedRecord: async () => {
+            if (fault === "unavailable") throw new TransientStoreError("store unavailable");
+            return {
+              id: "r1",
+              channelVisibility: "private",
+              channelId: "slack:C1",
+              userId: fault === "different requester" ? "slack:UOTHER" : "slack:UALICE",
+              threadKey: "slack:C1:1.0",
+              startedAt: fault === "different start" ? 500 : 1_000,
+              finishedAt: 2_000,
+              status: "failed",
+              eventCount: 0,
+              storedEventCount: 0,
+              truncated: false,
+              events: [],
+              diagnosis: analyzeRunFriction([]),
+            };
+          },
+        },
+      );
+      await ledger.claim(claim("r1", "slack:C1:1.0"));
+      const outcome = await run();
+      expect(outcome.closed).toEqual([]);
+      expect(outcome.resumable).toEqual([]);
+      expect(outcome.failed).toEqual([
+        {
+          runId: "r1",
+          error:
+            fault === "unavailable"
+              ? "store unavailable"
+              : fault === "abandon fenced"
+                ? "terminal lease settlement refused (fenced)"
+                : "the stored terminal result does not match the reclaimed run",
+        },
+      ]);
+      expect(await ledger.listLive()).toMatchObject([{ runId: "r1", ownerGen: "g2" }]);
+      expect(ledger.finished.has("r1")).toBe(false);
+      expect(ledger.planeEndings.get("r1")).toBeUndefined();
+    },
+  );
+
+  it.each(["missing", "provisional", "restarting", "interrupted"] as const)(
+    "keeps normal attaching recovery when the stored result is %s",
+    async (kind) => {
+      const { ledger, run } = harness(undefined, {
+        storedRecord: async () =>
+          kind === "missing"
+            ? null
+            : {
+                id: "r1",
+                channelVisibility: "private",
+                channelId: "slack:C1",
+                userId: "slack:UALICE",
+                threadKey: "slack:C1:1.0",
+                startedAt: 1_000,
+                finishedAt: 2_000,
+                status: kind === "interrupted" ? "interrupted" : "failed",
+                ...(kind === "provisional" ? { provisional: true } : {}),
+                ...(kind === "restarting" ? { restarting: true } : {}),
+                eventCount: 0,
+                storedEventCount: 0,
+                truncated: false,
+                events: [],
+                diagnosis: analyzeRunFriction([]),
+              },
+      });
+      const req = claim("r1", "slack:C1:1.0");
+      await ledger.claim({ ...req, phase: "attaching", meta: { ...req.meta, request: { text: "review this" } } });
+      const outcome = await run();
+      expect(outcome).toMatchObject({ closed: [], failed: [], resumable: [{ kind: "restart", row: { runId: "r1" } }] });
+      expect(await ledger.listLive()).toMatchObject([{ runId: "r1", ownerGen: "g2" }]);
+      expect(ledger.finished.has("r1")).toBe(false);
+    },
+  );
+
   it.each(["foreign owner", "unknown version", "null history"] as const)(
     "keeps invalid-present orchestrator history on its live row: %s",
     async (fault) => {

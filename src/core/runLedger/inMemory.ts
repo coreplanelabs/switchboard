@@ -234,6 +234,7 @@ import type { UnitSeedReceipt } from "../coordinator/unitSeedReceipt.js";
 import {
   assignLedgerLiveState,
   checkFence,
+  matchesStoredTerminal,
   decideClaim,
   decideClaimWrite,
   decideIntakeInsert,
@@ -2983,11 +2984,27 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true };
   }
 
-  async abandon(runId: string, gen: string): Promise<FenceResult> {
+  async abandon(runId: string, gen: string, opts?: { settleTerminal: true }): Promise<FenceResult> {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
     if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
-    if (hasRecordedCheckEvidence(this.live.get(runId)?.state.checkExecutions)) return { ok: false, reason: "fenced" };
+    const current = this.live.get(runId)!;
+    let checkEvidence: RunState | undefined;
+    if (opts?.settleTerminal) {
+      const stored = this.finished.get(runId);
+      if (!matchesStoredTerminal(current, stored)) return { ok: false, reason: "fenced" };
+      const snapshot = captureCheckArchive(current, true);
+      const prior = this.finishedWorkEvidence.get(runId);
+      const archive = checkArchiveOf(prior?.checkArchive);
+      if (
+        (prior?.checkArchive !== undefined && !archive) ||
+        (archive?.sealed && snapshot !== undefined && JSON.stringify(archive) !== JSON.stringify(snapshot))
+      )
+        return { ok: false, reason: "fenced" };
+      checkEvidence = { ...prior, ...(snapshot === undefined ? {} : { checkArchive: snapshot }) };
+      if (utf8ByteLength(JSON.stringify({ ...stored, ...checkEvidence })) > MAX_RECORD_BYTES)
+        throw new Error("check evidence exceeds record byte limit");
+    } else if (hasRecordedCheckEvidence(current.state.checkExecutions)) return { ok: false, reason: "fenced" };
     const retainedSteps = this.prepareInboxSegment(runId);
     this.steps.set(runId, retainedSteps);
     const allocation = workspaceDurabilityArchiveOf(this.allocationArchive(runId));
@@ -3000,6 +3017,7 @@ export class InMemoryRunLedger implements RunLedger {
           pendingEffects: true,
         }),
       });
+    if (checkEvidence !== undefined) this.finishedWorkEvidence.set(runId, checkEvidence);
     this.live.delete(runId);
     // Abandoning execution does not dispose of unread or opaque source bytes.
     this.jobs.delete(runId);

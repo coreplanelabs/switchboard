@@ -508,6 +508,17 @@ describe("WorkerRunLedger", () => {
       sources,
     });
   });
+  it("requests terminal lease settlement explicitly and preserves a fence refusal", async () => {
+    const accepted = stubWorker();
+    expect(await accepted.ledger.abandon("r1", "g1", { settleTerminal: true })).toEqual({ ok: true });
+    expect(accepted.calls[0]).toMatchObject({
+      path: "/runs/abandon",
+      body: { storeKey: "runs:default", runId: "r1", gen: "g1", settleTerminal: true },
+    });
+    const refused = stubWorker(() => ({ status: 409, data: { ok: false, reason: "fenced" } }));
+    expect(await refused.ledger.abandon("r1", "g1", { settleTerminal: true })).toEqual({ ok: false, reason: "fenced" });
+  });
+
   it("requests a resident fence for the ledger owner and reports stale claims", async () => {
     const w = stubWorker((path) =>
       path === "/runs/resident-claim"

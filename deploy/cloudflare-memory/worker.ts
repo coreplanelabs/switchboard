@@ -459,6 +459,7 @@ import {
 import {
   assignLedgerLiveState,
   checkFence,
+  matchesStoredTerminal,
   decideClaim,
   decideClaimWrite,
   decideIntakeInsert,
@@ -8993,10 +8994,11 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { ...out, event: event.kind };
   }
 
-  /** The live rows go with no record (item 42): a reserved run that never
-   *  started. Fenced. */
-  async abandon(runId: string, gen: string): Promise<FenceResult> {
-    if (hasRecordedCheckEvidence(this.liveRow(runId)?.state.checkExecutions)) return { ok: false, reason: "fenced" };
+  /** Remove an unstarted reservation, or settle its verified final result
+   *  while preserving checks. Neither path writes another close. Fenced. */
+  async abandon(runId: string, gen: string, opts?: { settleTerminal: true }): Promise<FenceResult> {
+    if (!opts?.settleTerminal && hasRecordedCheckEvidence(this.liveRow(runId)?.state.checkExecutions))
+      return { ok: false, reason: "fenced" };
     if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
       await this.requirePromotionRelease(runId, gen);
     const admitted = checkFence(this.liveRow(runId), gen);
@@ -9017,7 +9019,37 @@ export class RunHistoryDO extends DurableObject<Env> {
         const row = this.liveRow(runId);
         out = checkFence(row, gen);
         if (!out.ok) return;
-        if (hasRecordedCheckEvidence(row?.state.checkExecutions)) {
+        if (opts?.settleTerminal) {
+          const stored = this.sql
+            .exec<{ summary_json: string; work_evidence_json: string | null; bytes: number }>(
+              "SELECT summary_json,work_evidence_json,bytes FROM runs WHERE run_id = ?",
+              runId,
+            )
+            .toArray()[0];
+          const record = stored && parseStoredJson(stored.summary_json);
+          if (!row || !stored || !matchesStoredTerminal(row, record)) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          const snapshot = captureCheckArchive(row, true);
+          const evidence =
+            stored.work_evidence_json === null ? { version: 1 } : parseStoredJson(stored.work_evidence_json);
+          if (!parseWorkEvidence(evidence, record)) throw new Error("work evidence is unreadable");
+          const prior = checkArchiveOf(evidence.checkArchive);
+          if (
+            (evidence.checkArchive !== undefined && !prior) ||
+            (prior?.sealed && snapshot !== undefined && JSON.stringify(prior) !== JSON.stringify(snapshot))
+          ) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          if (snapshot !== undefined) {
+            const json = JSON.stringify({ ...evidence, checkArchive: snapshot });
+            const bytes = stored.bytes - utf8ByteLength(stored.work_evidence_json ?? "") + utf8ByteLength(json);
+            if (bytes > MAX_RECORD_BYTES) throw new Error("check evidence exceeds record byte limit");
+            this.sql.exec("UPDATE runs SET work_evidence_json = ?, bytes = ? WHERE run_id = ?", json, bytes, runId);
+          }
+        } else if (hasRecordedCheckEvidence(row?.state.checkExecutions)) {
           out = { ok: false, reason: "fenced" };
           return;
         }
@@ -16013,7 +16045,9 @@ async function handleLedger(
   }
   if (pathname === "/runs/finishing") return fenced(await stub.finishing(runId.value, g.value));
   if (pathname === "/runs/abandon") {
-    const r = await stub.abandon(runId.value, g.value);
+    if (b.settleTerminal !== undefined && b.settleTerminal !== true)
+      return json({ error: "settleTerminal must be true" }, 400);
+    const r = await stub.abandon(runId.value, g.value, b.settleTerminal ? { settleTerminal: true } : undefined);
     console.log(`[runs/abandon] ${key.value} ${runId.value} ok=${r.ok}${r.ok ? "" : ` ${r.reason}`}`);
     return fenced(r);
   }

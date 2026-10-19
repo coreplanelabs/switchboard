@@ -19,7 +19,7 @@ import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import type { RunRecord, RunStatus } from "./runRecord.js";
 import { RouteMissingError } from "./runStoreWorker.js";
 import type { RunLedger } from "./runLedger/ledger.js";
-import { transcriptCompleteness } from "./runLedger/decisions.js";
+import { matchesStoredTerminal, transcriptCompleteness } from "./runLedger/decisions.js";
 import { transcriptSource } from "./runLedger/resume.js";
 import type { AssembledTranscript } from "./runLedger/transcript.js";
 import {
@@ -204,6 +204,9 @@ export interface ReclaimOptions {
    *  over a stale plain-store projection, because abandoning its parent would
    *  orphan the unit. */
   storedStatus?: (runId: string) => Promise<RunStatus | undefined>;
+  /** The full result binds settlement of an ordinary stale lease to the same
+   *  execution. A read failure holds the row instead of risking a second close. */
+  storedRecord?: (runId: string) => Promise<RunRecord | null | undefined>;
   /** Whether the Workflow instance still runs. `undefined` means the platform
    *  could not answer; a live child row remains sufficient on its own. */
   hostedInstanceLive?: (instanceId: string) => Promise<boolean | undefined>;
@@ -287,6 +290,25 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
   for (const run of classificationOrder) {
     const { row } = run;
     try {
+      if (!row.meta.hosted && hostingOf(row.state) === undefined && opts.storedRecord) {
+        const stored = await opts.storedRecord(row.runId);
+        if (
+          stored &&
+          !stored.provisional &&
+          !stored.restarting &&
+          (stored.status === "completed" || stored.status === "failed")
+        ) {
+          if (!matchesStoredTerminal(row, stored))
+            throw new Error("the stored terminal result does not match the reclaimed run");
+          // The original close reached the plain store while its lease stayed
+          // live. Terminal settlement archives checks under the generation
+          // fence; another finish would fabricate a new result and plane ending.
+          const settled = await ledger.abandon(row.runId, gen, { settleTerminal: true });
+          if (!settled.ok) throw new Error(`terminal lease settlement refused (${settled.reason})`);
+          log(`[reclaim] ${row.runId} ${row.threadKey} settled (the store already holds its ${stored.status} result)`);
+          continue;
+        }
+      }
       let status: RunStatus;
       let why: string;
       let terminalEvents: AppendableEvent[] | undefined;
