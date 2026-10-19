@@ -84,6 +84,34 @@ it("names a Cloudflare internal failure and keeps its reference on every executi
   ).toEqual({ error: "GitHub request failed", status: 500, transient: false, cause: "system" });
 });
 
+it("recognizes a referenced Durable Object storage reset without retrying a wrapped application failure", () => {
+  const message =
+    "Internal error in Durable Object storage caused object to be reset; reference = 0123456789abcdefghijklmn";
+  for (const route of ROUTES) {
+    expect(threadRejectionErr(new Error(message), route)).toEqual({
+      error:
+        "Failed inside Cloudflare's infrastructure boundary: Internal error in Durable Object storage caused object to be reset; reference = 0123456789abcdefghijklmn",
+      status: 500,
+      transient: true,
+      cause: "system",
+    });
+  }
+  expect(catchAllErr(new Error("GitHub request failed", { cause: new Error(message) }))).toEqual({
+    error: "GitHub request failed",
+    status: 500,
+    transient: false,
+    cause: "system",
+  });
+  expect(
+    catchAllErr(new Error("Internal error in Durable Object storage caused object to be reset; reference = malformed")),
+  ).toEqual({
+    error: "Internal error in Durable Object storage caused object to be reset; reference = malformed",
+    status: 500,
+    transient: false,
+    cause: "system",
+  });
+});
+
 // The sentences, each from its emitting source: the SDK's dist (its patterns
 // and `Network connection lost.`), the resident's wording lists
 // (src/execution/residentRefresh.ts), the resident's own renamed word
