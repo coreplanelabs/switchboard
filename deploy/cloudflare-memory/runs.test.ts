@@ -2532,6 +2532,57 @@ describe("run metrics — the point, the guard and the emission rule", () => {
       expect(written).toHaveLength(1);
     });
 
+    it("a later stop never replaces a failed run's terminal close, and writes no point", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const failedAt = Date.now() - 60_000;
+      const failed = record("r9", failedAt, {
+        status: "failed",
+        setup: { version: 1, requested: "resident", reason: "lost_other" },
+      });
+      await putDirectWithPoint(key, failed, pointOf(failed));
+      expect(written).toHaveLength(1);
+      for (const status of ["stopped_hard", "stopped_soft"] as const) {
+        const stop = record("r9", Date.now() - 1_000, { status });
+        expect(await putDirectWithPoint(key, stop, pointOf(stop))).toMatchObject({
+          stored: true,
+          rewritten: false,
+          emits: false,
+        });
+      }
+      const got = (await post("/runs/get", { storeKey: key, id: "r9" })).data.record as RunRecord;
+      expect(got).toMatchObject({
+        status: "failed",
+        finishedAt: failedAt,
+        setup: { version: 1, requested: "resident", reason: "lost_other" },
+      });
+      expect(written).toHaveLength(1);
+      // A rewrite that keeps the terminal status (an identical retry, the
+      // review artifact) still lands.
+      const kept = record("r9", failedAt, {
+        status: "failed",
+        setup: { version: 1, requested: "resident", reason: "lost_other" },
+        title: "rewritten",
+      });
+      await putDirectWithPoint(key, kept, pointOf(kept));
+      expect(((await post("/runs/get", { storeKey: key, id: "r9" })).data.record as RunRecord).title).toBe("rewritten");
+      expect(written).toHaveLength(1);
+    });
+
+    it("a stop still replaces an interrupted close, as when a same-id restart's successor is stopped", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const interrupted = record("r10", Date.now() - 60_000, { status: "interrupted" });
+      await putDirectWithPoint(key, interrupted, pointOf(interrupted));
+      const stoppedAt = Date.now() - 1_000;
+      const stop = record("r10", stoppedAt, { status: "stopped_hard" });
+      expect(await putDirectWithPoint(key, stop, pointOf(stop))).toMatchObject({ stored: true, rewritten: true });
+      const got = (await post("/runs/get", { storeKey: key, id: "r10" })).data.record as RunRecord;
+      expect(got).toMatchObject({ status: "stopped_hard", finishedAt: stoppedAt });
+      // The run is counted once, at its first terminal close.
+      expect(written).toHaveLength(1);
+    });
+
     it("the sweep closes an unclaimed restart past its deadline as interrupted with restart_unclaimed, writing the run's one point", async () => {
       const key = storeKey();
       const written = await metricsDouble(key);
