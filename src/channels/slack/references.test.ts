@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SlackThreadMessage } from "./threadTurns.js";
 import { resetSlackNameCaches } from "./lookups.js";
 import { SlackConversationReader, CLASSIFY_CACHE_MS, type ReferenceClient } from "./references.js";
 
@@ -23,7 +24,7 @@ type Info = {
 
 function fakeClient(input: {
   channels?: Record<string, Info>;
-  replies?: Record<string, { user?: string; bot_id?: string; text?: string; ts?: string }[]>;
+  replies?: Record<string, SlackThreadMessage[]>;
   users?: Record<string, { name?: string; real_name?: string; is_restricted?: boolean; is_ultra_restricted?: boolean }>;
   teamUrl?: string;
   infoDelayMs?: number;
@@ -33,7 +34,7 @@ function fakeClient(input: {
     auth: {
       test: async () => {
         calls.auth++;
-        return { url: input.teamUrl ?? "https://team.example/" };
+        return { url: input.teamUrl ?? "https://team.example/", user_id: "UBOT", bot_id: "B1" };
       },
     },
     conversations: {
@@ -93,6 +94,36 @@ describe("SlackConversationReader.parseConversationUrl — this workspace's gram
     expect(r.parseConversationUrl("https://team.example/files/U_ALICE/F1/x.png")).toBeUndefined();
     expect(r.parseConversationUrl("https://team.example/archives/C_PUB/pabc")).toBeUndefined();
     expect(r.parseConversationUrl("https://github.com/acme/api/pull/1")).toBeUndefined();
+  });
+
+  it.each([
+    ["revoked token", new Error("Slack API failed: token_revoked"), "Slack API failed: token_revoked"],
+    ["network failure", new Error("network unavailable"), "network unavailable"],
+    ["private diagnostic", new Error("\u001b[31mxoxb-12345678-abcdef12345678"), "«redacted-slack-token»"],
+    ["oversized diagnostic", new Error("z".repeat(1_000)), "z".repeat(200) + "…"],
+  ])("reports a safe identity failure and keeps the reader unavailable: %s", async (_label, error, message) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { client } = fakeClient({});
+      client.auth.test = async () => {
+        throw error;
+      };
+      const reader = new SlackConversationReader(client);
+      await reader.ready();
+      expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        { event: "slack.reference.identity.unavailable", error: message },
+      ]);
+      expect(reader.botUserId).toBeUndefined();
+      expect(reader.parseConversationUrl("https://team.example/archives/C_PUB/p1789439332061189")).toBeUndefined();
+      const available = new SlackConversationReader(fakeClient({}).client);
+      await available.ready();
+      expect(available.parseConversationUrl("https://team.example/archives/C_PUB/p1789439332061189")).toMatchObject({
+        channelId: "slack:C_PUB",
+        messageId: "1789439332.061189",
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("before the team URL is known, nothing parses — a guess about the host is never made", () => {
@@ -219,7 +250,13 @@ describe("SlackConversationReader.readConversation — text only, newest kept", 
       replies: {
         "C_PUB:1.0": [
           { user: "U_ALICE", text: "first <https://a.example|label>", ts: "1.0" },
-          { bot_id: "B1", text: "⏳ working on it", ts: "2.0" },
+          {
+            user: "UBOT",
+            bot_id: "B1",
+            text: "⏳ working on it",
+            ts: "2.0",
+            blocks: [{ type: "context", block_id: "switchboard-status:v1:live:00000000-0000-4000-8000-000000000000" }],
+          },
           { bot_id: "B1", text: "the answer", ts: "3.0" },
           { user: "U_BOB", text: "thanks", ts: "4.0" },
         ],
@@ -239,6 +276,28 @@ describe("SlackConversationReader.readConversation — text only, newest kept", 
       ["bob", "thanks", 4000],
     ]);
     expect(calls.replies).toBe(1);
+  });
+
+  it("preserves status-like messages and exact native identities in complete references", async () => {
+    const { client } = fakeClient({
+      channels: { C_PUB: PUBLIC },
+      replies: {
+        "C_PUB:1.0": [
+          { user: "UA", text: "@switchboard ✅ approved", ts: "1.0" },
+          { user: "UBOT", bot_id: "B1", text: "✅ the requested answer", ts: "2.0" },
+        ],
+      },
+    });
+    const r = new SlackConversationReader(client);
+    const out = await r.readConversation(
+      { channelId: "slack:C_PUB", threadKey: "slack:C_PUB:1.0", url: "https://x" },
+      caps,
+    );
+    expect(out.messages.map((m) => [m.ts, m.text])).toEqual([
+      ["1.0", "@switchboard ✅ approved"],
+      ["2.0", "✅ the requested answer"],
+    ]);
+    expect(out.coverage).toEqual({ kind: "complete", truncated: false });
   });
 
   it("asks for up to 1000 replies in one call and keeps the parent plus the newest maxMessages - 1", async () => {
@@ -283,7 +342,13 @@ describe("SlackConversationReader.readConversation — text only, newest kept", 
   it("a bare permalink to a message the mapping dropped, or to a ts the thread does not carry, quotes nothing — never the whole thread", async () => {
     const thread = [
       { user: "U_ALICE", text: "parent", ts: "1.0" },
-      { bot_id: "B1", text: "⏳ working", ts: "2.0" },
+      {
+        user: "UBOT",
+        bot_id: "B1",
+        text: "⏳ working",
+        ts: "2.0",
+        blocks: [{ type: "context", block_id: "switchboard-status:v1:live:00000000-0000-4000-8000-000000000000" }],
+      },
       { user: "U_ALICE", text: "later", ts: "3.0" },
     ];
     const { client } = fakeClient({

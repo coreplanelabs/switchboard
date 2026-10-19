@@ -3,6 +3,7 @@ import { NO_GRANTS } from "./authz/types.js";
 import { describe, expect, it } from "vitest";
 import { parseDirectives, reviewHeadOf } from "../directives.js";
 import type { AgentDef } from "../agents/registry.js";
+import { statusBlockId } from "../channels/slack/messageIdentity.js";
 import { adoptLiveCard, isLiveCard, liveCardKey, liveCards } from "../channels/slack/statusCard.js";
 import { findOrphanedCards, type SlackHistoryMessage } from "../channels/slackCatchUp.js";
 import type { ChatMessage } from "./chatMessage.js";
@@ -905,17 +906,22 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
       expect(outcome.launched).toEqual(["r-ship"]);
       const card: SlackHistoryMessage = {
         type: "message",
-        user: "BBOT",
+        user: "UBOT",
         bot_id: "B1",
+        blocks: [{ type: "context", block_id: statusBlockId("live") }],
         text: "◐ *ship* · plan fix · 120s",
         ts: cardTs,
         thread_ts: "90.000000",
       };
       // A control card no process owns, in the same thread: still swept.
-      const orphan: SlackHistoryMessage = { ...card, ts: "100.000200" };
+      const orphan: SlackHistoryMessage = {
+        ...card,
+        ts: "100.000200",
+        blocks: [{ type: "context", block_id: statusBlockId("live") }],
+      };
       const out = findOrphanedCards({
         channel: "C9",
-        botUserId: "BBOT",
+        botUserId: "UBOT",
         cutoffMs: 0,
         threads: new Map([["90.000000", [card, orphan]]]),
         isLive: isLiveCard,

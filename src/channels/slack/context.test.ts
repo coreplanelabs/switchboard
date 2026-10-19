@@ -177,6 +177,24 @@ function setup(
 }
 
 describe("Slack context adapter", () => {
+  it("retains status-like source messages in complete receipts", async () => {
+    const h = setup({
+      replies: {
+        [`C_PUBLIC:${THREAD}`]: [
+          { ts: THREAD, user: "UALICE", text: "✅ approved" },
+          { ts: REPLY, user: "UOTHER", bot_id: "BOTHER", text: "⏳ waiting for the owner" },
+        ],
+      },
+    });
+    const result = await h.capability.readSource({ kind: "link", url: url("C_PUBLIC") });
+    expect(result).toMatchObject({
+      kind: "read",
+      receipt: { messages: [{ id: THREAD }, { id: REPLY }], coverage: { kind: "complete", truncated: false } },
+    });
+    expect(result.content).toContain("✅ approved");
+    expect(result.content).toContain("⏳ waiting for the owner");
+  });
+
   it("reads a public source without adding the bot to its channel", async () => {
     const h = setup({
       origin: "C_PUBLIC",

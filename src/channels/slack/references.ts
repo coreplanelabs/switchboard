@@ -1,3 +1,4 @@
+import { redactAndCap } from "../../core/redact.js";
 import type { ChannelDirectory } from "../../core/authz/types.js";
 import type { Secret } from "../../secrets.js";
 import { sourceHash } from "../../core/references/receipts.js";
@@ -9,7 +10,7 @@ import type {
   ReferencedConversation,
   ReferencedMessage,
 } from "../../core/references/types.js";
-import { resolveTeamUrl, resolveUserName } from "./lookups.js";
+import { resolveUserName } from "./lookups.js";
 import { threadTurns, type SlackThreadMessage } from "./threadTurns.js";
 
 // The Slack conversation reader (record 0037, the adapter contract): what the
@@ -125,6 +126,9 @@ export class SlackConversationReader implements ConversationReader {
   get workspacePublicRead(): boolean {
     return this.options.workspacePublicRead === true;
   }
+  get botUserId(): string | undefined {
+    return this.listenerBotUserId;
+  }
   get directory() {
     return this.options.directory;
   }
@@ -143,6 +147,7 @@ export class SlackConversationReader implements ConversationReader {
     );
   }
   private host: string | undefined;
+  private listenerBotUserId: string | undefined;
   private readonly readyP: Promise<void>;
   private readonly cache = new Map<string, { at: number; answer: ConversationClassification }>();
 
@@ -151,19 +156,30 @@ export class SlackConversationReader implements ConversationReader {
     private readonly now: () => number = Date.now,
     private readonly options: {
       workspacePublicRead?: boolean;
+      /** The listener app, including when this reader uses a separate read account. */
+      botUserId?: string;
       workspaceTeamId?: string;
       directory?: Pick<ChannelDirectory, "isMember">;
       crossChannel?: SlackConversationReader;
       token?: Secret;
     } = {},
   ) {
-    // The host is this workspace's `auth.test` URL, read once per process
-    // (`resolveTeamUrl`'s memo). Until it is known nothing parses: a guess
-    // about which host is ours would be exactly the cross-workspace confusion
-    // the grammar exists to refuse.
-    this.readyP = resolveTeamUrl(client).then((url) => {
-      if (url) this.host = new URL(url).host;
-    });
+    // Native authentication supplies the host and app identity together. A read
+    // account keeps the listener app's identity, never its own human identity.
+    this.readyP = client.auth
+      .test()
+      .then((identity) => {
+        if (identity.url) this.host = new URL(identity.url).host;
+        this.listenerBotUserId = options.botUserId ?? (identity.bot_id ? identity.user_id : undefined);
+      })
+      .catch((error) => {
+        console.warn(
+          JSON.stringify({
+            event: "slack.reference.identity.unavailable",
+            error: redactAndCap(error instanceof Error ? error.message : String(error)),
+          }),
+        );
+      });
   }
 
   /** Resolves once the workspace host is known (or known to be unreadable). */
@@ -238,6 +254,7 @@ export class SlackConversationReader implements ConversationReader {
     ref: ConversationRef,
     caps: { maxMessages: number; maxBytes: number },
   ): Promise<ReferencedConversation> {
+    await this.ready();
     const channel = ref.channelId.slice(SLACK.length + 1);
     const threadTs = ref.threadKey.slice(ref.channelId.length + 1);
     const [messagesInThread, cls] = await Promise.all([
@@ -247,7 +264,7 @@ export class SlackConversationReader implements ConversationReader {
     // The same mapping the current thread is read with: status cards dropped,
     // an empty message dropped, the author ids kept. No skip ts — a linked
     // thread has no triggering message — and no bot mention to strip.
-    let turns = threadTurns(messagesInThread, {});
+    let turns = threadTurns(messagesInThread, { statusBotUserId: this.botUserId });
     // A bare permalink to a thread's own parent reads the thread; to a reply
     // or a lone message, exactly that message by its `ts` — and a permalink to
     // a message the mapping dropped (a status card) quotes nothing, never the

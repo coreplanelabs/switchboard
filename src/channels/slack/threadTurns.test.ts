@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { STATUS_PREFIXES } from "../../core/dispatch/reply.js";
 import { threadTurns } from "./threadTurns.js";
 
 // The pure half of `SlackIO.history()`: one Slack thread page in, the kept
@@ -54,10 +53,38 @@ describe("threadTurns — the thread-page-to-turns mapping", () => {
     expect("at" in turn).toBe(false);
   });
 
-  it("drops the bot's own status cards by their prefixes", () => {
-    const thread = STATUS_PREFIXES.map((p, i) => ({ bot_id: "B1", text: `${p} working`, ts: `${i + 1}.0` }));
-    thread.push({ bot_id: "B1", text: "a real answer", ts: "99.0" });
-    expect(threadTurns(thread, {}).map((t) => t.text)).toEqual(["a real answer"]);
+  it("removes only marked own status cards and keeps text that looks like status", () => {
+    const blocks = [{ type: "context", block_id: "switchboard-status:v1:live:00000000-0000-4000-8000-000000000000" }];
+    const thread = [
+      { user: "UA", text: "✅ approved", ts: "1.0", blocks },
+      { user: "UOTHER", bot_id: "BOTHER", text: "✅ checks passed", ts: "2.0", blocks },
+      { user: "UBOT", bot_id: "B1", text: "✅ the requested answer", ts: "3.0" },
+      { user: "UBOT", bot_id: "B1", text: "◐ legacy card", ts: "4.0" },
+      { user: "UBOT", bot_id: "B1", text: "arbitrary display text", ts: "5.0", blocks },
+      {
+        user: "UBOT",
+        bot_id: "B1",
+        text: "✅ unsupported card",
+        ts: "6.0",
+        blocks: [{ type: "context", block_id: "switchboard-status:v2:live:00000000-0000-4000-8000-000000000000" }],
+      },
+    ];
+    expect(threadTurns(thread, { botUserId: "UBOT" }).map((t) => [t.ts, t.text])).toEqual([
+      ["1.0", "✅ approved"],
+      ["2.0", "✅ checks passed"],
+      ["3.0", "✅ the requested answer"],
+      ["4.0", "◐ legacy card"],
+      ["6.0", "✅ unsupported card"],
+    ]);
+    expect(threadTurns(thread, {}).map((t) => t.ts)).toEqual(["1.0", "2.0", "3.0", "4.0", "5.0", "6.0"]);
+  });
+
+  it("keeps source addressing text when only status ownership is supplied", () => {
+    expect(
+      threadTurns([{ user: "UA", text: "@switchboard <@UBOT> explain this", ts: "1.0" }], {
+        statusBotUserId: "UBOT",
+      }).map((turn) => turn.text),
+    ).toEqual(["@switchboard <@UBOT> explain this"]);
   });
 
   it("keeps a user's files and drops a bot's; a message with neither text nor files is dropped", () => {

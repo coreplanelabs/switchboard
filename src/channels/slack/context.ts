@@ -245,7 +245,7 @@ export function createSlackContextCapability(input: {
     nearby = false,
   ): Promise<SlackSourceRead> {
     const teamUrl = await resolveTeamUrl(client);
-    const all = threadTurns(raw, {});
+    const all = threadTurns(raw, { statusBotUserId: reader.forReference(msg.channelId, ref).botUserId });
     let selected = all.slice(-SLACK_CONTEXT_MAX_MESSAGES);
     const line = (t: ThreadTurn) =>
       clipped(
