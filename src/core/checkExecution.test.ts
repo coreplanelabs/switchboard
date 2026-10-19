@@ -5,7 +5,7 @@ import type { RunRecord } from "./runRecord.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import { storeRequestWitness } from "./storeResponse.js";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -16,7 +16,8 @@ import { BASH_TIMEOUT_MS, RUN_DEADLINE_RESERVE_MS } from "../execution/bashTimeo
 import { ResidentExecutor } from "../execution/resident.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { runCheckTool } from "../tools/check.js";
-import { ExecInfraError } from "../execution/executor.js";
+import { ExecInfraError, LocalExecutor } from "../execution/executor.js";
+import { redactSecrets } from "./redact.js";
 
 const ok = { stdout: "", stderr: "", exitCode: 0, truncated: false };
 const metadata = { ...ok, stdout: `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n` };
@@ -1124,6 +1125,58 @@ describe("recorded coding checks", () => {
       expect(restored.execResult).not.toHaveBeenCalled();
     },
   );
+
+  it.each(["raw", "redacted"])("executes in the trusted checkout with %s metadata output", async (mode) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "swb-check-path-")));
+    const workspace = join(root, "source-task-archive-snapshot");
+    mkdirSync(workspace);
+    const env = { PATH: "/usr/bin:/bin:/usr/local/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: workspace, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    try {
+      git("init", "-b", "work");
+      git("config", "user.name", "Test");
+      git("config", "user.email", "test@example.invalid");
+      writeFileSync(join(workspace, "result.txt"), `checked\nsk-${"x".repeat(32)}\n`);
+      git("add", ".");
+      git("commit", "-m", "fixture");
+      const s = setup();
+      const executor = new LocalExecutor(root, async () => env);
+      s.binding.workspace = () => workspace;
+      s.binding.executor = () => ({
+        inspectCheckResult: async () => undefined,
+        async execResult(command, options) {
+          const result = await executor.execResult(command, options);
+          return { ...result, stdout: mode === "redacted" ? redactSecrets(result.stdout) : result.stdout };
+        },
+      });
+      const capability = s.capability();
+      const check = { ...input, command: "cat result.txt", purpose: "verification" as const };
+      const output = await runCheckTool.run(check, {
+        checkExecution: capability,
+        callId: "trusted-path",
+      } as Parameters<typeof runCheckTool.run>[1]);
+      expect(output).toContain("Command completed with exit 0.");
+      expect(output).toContain('"stdout":"checked\\n«redacted-api-key»\\n"');
+      expect(output).toContain(`${root}/source-ta«redacted-api-key»`);
+      expect(output).not.toContain("source-task-archive-snapshot");
+      expect(output).not.toContain("x".repeat(32));
+      expect(s.saved.at(-1)?.receipts[0]).toMatchObject({
+        workspace: { cwd: workspace, head: git("rev-parse", "HEAD") },
+        outcome: { kind: "completed", stdout: "checked\n«redacted-api-key»\n", exitCode: 0 },
+      });
+      writeFileSync(join(workspace, "result.txt"), "changed\n");
+      const restored = setup(s.saved.at(-1));
+      expect(await restored.capability().run(check, "trusted-path")).toMatchObject({
+        kind: "recorded",
+        replayed: true,
+        receipt: { outcome: { kind: "completed", stdout: "checked\n«redacted-api-key»\n", exitCode: 0 } },
+      });
+      expect(restored.execResult).not.toHaveBeenCalled();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it.each(["ordinary", "quote-heavy"])("executes %s checks in their recorded checkout", async (kind) => {
     const workspace = realpathSync(

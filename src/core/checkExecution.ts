@@ -388,7 +388,9 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
       command: redactAndCap(input.command, COMMAND_CAP).slice(0, COMMAND_CAP),
       purpose: input.purpose,
       owner: { ...owner },
-      workspace: { cwd: fields[0]!, head: fields[1]!, fingerprint: fields[2]! },
+      // Executor output may already be redacted. Only the trusted binding
+      // supplies the execution path; displayed metadata cannot redirect it.
+      workspace: { cwd: workspace, head: fields[1]!, fingerprint: fields[2]! },
       timeoutMs,
       startedAt: binding.clock(),
       outcome: { kind: "pending" },
@@ -396,7 +398,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
         ? {
             checkOperation: {
               key: operationKey(callId, inputHash),
-              commandHash: hash(checkCommand(fields[0]!, input.command)),
+              commandHash: hash(checkCommand(workspace, input.command)),
             },
           }
         : {}),
