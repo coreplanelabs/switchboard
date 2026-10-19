@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { renderMaintenancePage } from "../channels/maintenancePage.js";
+import { maintenancePageResponse } from "../channels/maintenancePage.js";
 import { systemClock } from "./trace/clock.js";
 import { SECOND_MS } from "./budgets.js";
 import { stateWorkerOf, type SecretReader, type StateWorkerBlocks } from "./stateWorkerRef.js";
@@ -190,20 +190,12 @@ export function maintenanceResponse(request: Request, state: MaintenanceSnapshot
   if (!["GET", "HEAD"].includes(request.method) || request.headers.get("accept")?.includes("application/json"))
     return Response.json({ error: "maintenance", message, episodeId: state.episode?.id }, { status: 503, headers });
   const thread = state.episode?.thread;
-  const body = renderMaintenancePage(
+  return maintenancePageResponse(
+    request,
     `You cannot ${state.episode!.scopes.map((s) => actions[s]).join("; ")}.`,
     state.episode!.reason,
     thread?.url,
   );
-  return new Response(request.method === "HEAD" ? null : body, {
-    status: 503,
-    headers: {
-      ...headers,
-      "content-type": "text/html; charset=utf-8",
-      "content-security-policy":
-        "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
-    },
-  });
 }
 
 export interface MaintenanceNotice {

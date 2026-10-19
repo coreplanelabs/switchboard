@@ -1,6 +1,23 @@
 import { FAVICON_DEFAULT } from "./favicon.js";
 import { escapeHtml } from "./liveView/html.js";
 
+export function maintenancePageResponse(
+  request: Request,
+  unavailable: string,
+  reason: string,
+  threadUrl?: string,
+): Response {
+  return new Response(request.method === "HEAD" ? null : renderMaintenancePage(unavailable, reason, threadUrl), {
+    status: 503,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy":
+        "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+    },
+  });
+}
+
 /** Match the native approval page without depending on a running asset server. */
 export function renderMaintenancePage(unavailable: string, reason: string, threadUrl?: string): string {
   return `<!doctype html>
