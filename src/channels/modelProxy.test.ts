@@ -1415,7 +1415,7 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
       tools: 0,
       toolChoice: "none",
       stopReason: "tool_use",
-      inputTokens: 900,
+      inputTokens: 100,
       outputTokens: 30,
       cacheReadTokens: 800,
       priceSource: "none", // no wire cost, no operator entry, no card, no list family
@@ -1707,7 +1707,7 @@ describe("the meter row — biller, vendor, usd, priceSource (model-proxy item 6
     const token = h.bearers.mint(h.localGrant("run-1", { card: cardOf() }));
     const turn = await send(h, token);
     expect(turn.attrs.priceSource).toBe("operator");
-    expect(turn.attrs.usd).toBe((1000 * 1 + 500 * 2 + 100 * 3) / 1_000_000);
+    expect(turn.attrs.usd).toBe(0.0022);
   });
 
   it("a registry card with a tier above 272,000 input tokens prices the whole request at the tier (pi's rule)", async () => {
@@ -1738,6 +1738,37 @@ describe("the meter row — biller, vendor, usd, priceSource (model-proxy item 6
   });
 });
 
+describe("the meter — inconsistent wire cache counts", () => {
+  it.each(["buffered", "streamed"])("records overreported cache on a %s Responses turn", async (mode) => {
+    const answer = responsesAnswer({
+      output: [],
+      usage: { input_tokens: 10, output_tokens: 2, input_tokens_details: { cached_tokens: 20 } },
+    });
+    const h = harness({
+      answer: () =>
+        mode === "buffered"
+          ? new Response(JSON.stringify(answer), { headers: { "content-type": "application/json" } })
+          : streamingResponse(
+              [sse("response.completed", { type: "response.completed", response: answer })],
+              h.clock,
+              1,
+            ),
+    });
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    const response = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
+      h.deps,
+    );
+    await drain(response.body);
+    expect(h.ends.find((span) => span.name === "model.turn")?.attrs).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 2,
+      cacheReadTokens: 20,
+      cacheOverReported: true,
+    });
+  });
+});
+
 describe("the meter — the Responses route (model-proxy item 6)", () => {
   it("a coding preset on pi on the route offers tools with reasoning.effort and gets a tool call back from the fake: the stream forwarded chunk for chunk, the span ended tool_use with the usage shape's four counts and the ttft", async () => {
     const h = harness({ answer: () => streamingResponse(responsesStreamChunks(), h.clock, 40) });
@@ -1761,7 +1792,7 @@ describe("the meter — the Responses route (model-proxy item 6)", () => {
       toolNames: "bash,read",
       toolChoice: "auto",
       stopReason: "tool_use",
-      inputTokens: 900,
+      inputTokens: 80,
       outputTokens: 33,
       cacheReadTokens: 700,
       cacheWriteTokens: 120,
@@ -1792,7 +1823,7 @@ describe("the meter — the Responses route (model-proxy item 6)", () => {
     const turns = h.ends.filter((s) => s.name === "model.turn");
     expect(turns.map((t) => t.attrs.stopReason)).toEqual(["end_turn", "max_tokens", "other"]);
     expect(turns[0].attrs).toMatchObject({
-      inputTokens: 900,
+      inputTokens: 80,
       outputTokens: 33,
       cacheReadTokens: 700,
       cacheWriteTokens: 120,

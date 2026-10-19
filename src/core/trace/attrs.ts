@@ -104,6 +104,8 @@ export interface AttrDomain {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** The inclusive wire input was smaller than its reported cache buckets. */
+  cacheOverReported: boolean;
   /** The meter row (model-proxy.md item 6): who bills the turn (the
    *  block), the vendor the card names, the turn's dollars with the layer
    *  that priced them, and on a BYOK turn the aggregator's fee (inside `usd`). */
@@ -311,6 +313,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   outputTokens: "number",
   cacheReadTokens: "number",
   cacheWriteTokens: "number",
+  cacheOverReported: "boolean",
   biller: "string",
   vendor: "string",
   usd: "number",

@@ -21,8 +21,9 @@ export function usageFromAnthropic(u: unknown): TokenUsage | undefined {
   return usage;
 }
 
-/** OpenAI-style `usage` → TokenUsage. `prompt_tokens_details.cached_tokens` is
- *  the cache-read count where the server reports one. */
+/** OpenAI-style `usage` → disjoint TokenUsage buckets. Prompt tokens include
+ *  cache reads and writes; charging them again as ordinary input inflates both
+ *  the price and the input size used to select a price tier. */
 export function usageFromOpenAI(u: unknown): TokenUsage | undefined {
   if (typeof u !== "object" || u === null) return undefined;
   const o = u as Record<string, unknown>;
@@ -30,9 +31,13 @@ export function usageFromOpenAI(u: unknown): TokenUsage | undefined {
   const usage: TokenUsage = { inputTokens: o.prompt_tokens, outputTokens: o.completion_tokens };
   const details = o.prompt_tokens_details;
   if (typeof details === "object" && details !== null) {
-    const cached = (details as Record<string, unknown>).cached_tokens;
-    if (typeof cached === "number") usage.cacheReadTokens = cached;
+    const { cached_tokens, cache_write_tokens } = details as Record<string, unknown>;
+    if (typeof cached_tokens === "number") usage.cacheReadTokens = cached_tokens;
+    if (typeof cache_write_tokens === "number") usage.cacheWriteTokens = cache_write_tokens;
   }
+  const uncachedInput = usage.inputTokens - (usage.cacheReadTokens ?? 0) - (usage.cacheWriteTokens ?? 0);
+  if (uncachedInput < 0) usage.cacheOverReported = true;
+  usage.inputTokens = Math.max(0, uncachedInput);
   return usage;
 }
 
@@ -70,8 +75,9 @@ export function reportedCostOf(u: unknown): ReportedCost | undefined {
 
 /** The Responses API's `usage` → TokenUsage. `input_tokens_details.cached_tokens`
  *  is the cache-read count and `input_tokens_details.cache_write_tokens` the
- *  cache-write count where a server reports one (OpenAI itself never does; a
- *  gateway on the wire may). `output_tokens_details.reasoning_tokens` rides
+ *  cache-write count where a server reports one. Both are included in
+ *  `input_tokens`, so remove them from the ordinary-input bucket.
+ *  `output_tokens_details.reasoning_tokens` rides
  *  inside `output_tokens` — the shape is read, never a fifth counter. */
 export function usageFromResponses(u: unknown): TokenUsage | undefined {
   if (typeof u !== "object" || u === null) return undefined;
@@ -84,5 +90,8 @@ export function usageFromResponses(u: unknown): TokenUsage | undefined {
     if (typeof cached_tokens === "number") usage.cacheReadTokens = cached_tokens;
     if (typeof cache_write_tokens === "number") usage.cacheWriteTokens = cache_write_tokens;
   }
+  const uncachedInput = usage.inputTokens - (usage.cacheReadTokens ?? 0) - (usage.cacheWriteTokens ?? 0);
+  if (uncachedInput < 0) usage.cacheOverReported = true;
+  usage.inputTokens = Math.max(0, uncachedInput);
   return usage;
 }

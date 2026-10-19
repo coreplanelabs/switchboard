@@ -508,7 +508,7 @@ export class SseMeter {
   }
 
   result(): TurnMeter {
-    const { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } = this.usage;
+    const { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, cacheOverReported } = this.usage;
     const usage: TokenUsage | undefined =
       inputTokens !== undefined && outputTokens !== undefined
         ? {
@@ -516,6 +516,7 @@ export class SseMeter {
             outputTokens,
             ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
             ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+            ...(cacheOverReported ? { cacheOverReported } : {}),
           }
         : undefined;
     return {
@@ -765,6 +766,7 @@ export function turnAttrs(
           outputTokens: u.outputTokens,
           ...(u.cacheReadTokens !== undefined ? { cacheReadTokens: u.cacheReadTokens } : {}),
           ...(u.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
+          ...(u.cacheOverReported ? { cacheOverReported: true } : {}),
         }
       : {}),
     ...(price

@@ -82,13 +82,16 @@ export interface CompletionObserver {
   onBlockEnd?(kind: string, index: number): void;
 }
 
-/** Token accounting for ONE model call, normalized across providers. Cache
- *  counters are present only when the provider reports them. */
+/** Token accounting for ONE model call, normalized to disjoint buckets.
+ *  inputTokens excludes cache reads and writes. Cache counters are present
+ *  only when the provider reports them. */
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  /** The wire reported more cache input than its inclusive input total. */
+  cacheOverReported?: boolean;
 }
 
 export interface CompletionResult {
