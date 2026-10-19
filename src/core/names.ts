@@ -40,3 +40,9 @@ export async function namesOf(
   });
   return out;
 }
+
+/** Display data from a verified account. It grants no authority. */
+export interface PersonProfile {
+  name: string;
+  avatarUrl?: string;
+}

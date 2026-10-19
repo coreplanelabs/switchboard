@@ -90,7 +90,12 @@ import { buildConfirmationStore } from "./core/confirmations.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
 import { createViewAsHandler, peopleSource, viewAsFromCookie } from "./channels/viewAs.js";
 import { RUN_LIST_MAX_LIMIT } from "./core/runRecord.js";
-import { resolvePersonByEmail, resolveUserEmail, resolveUserName } from "./channels/slack/lookups.js";
+import {
+  resolvePersonByEmail,
+  resolveUserEmail,
+  resolveUserName,
+  resolveUserProfile,
+} from "./channels/slack/lookups.js";
 import { slackNames } from "./channels/slackNames.js";
 import { namesOf, NO_NAMES, type NameDirectory } from "./core/names.js";
 import { mdToMrkdwn } from "./channels/mrkdwn.js";
@@ -1356,6 +1361,8 @@ export async function runBot(): Promise<void> {
     },
     people: () => nativePeople(),
     requesterLabel: (id) => names.person(id),
+    requesterProfile: (id) =>
+      id.startsWith("slack:") ? resolveUserProfile(app.client, id.slice(6)) : Promise.resolve(undefined),
     channelsOf,
     now: systemClock,
     owner: generation,
@@ -1804,6 +1811,7 @@ export async function runBot(): Promise<void> {
     const greenDocument = makePageSender(greenAssets.entry, capabilities, {
       csp: GREEN_PAGE_CSP,
       organization: config.config.organization,
+      viewerProfile: (actor) => browserWiring?.viewerProfile(actor),
     });
     nativePage = greenDocument;
     void browserWiring!.emoji.refresh(app.client).catch(() => {});
@@ -2020,6 +2028,7 @@ export async function runBot(): Promise<void> {
       },
       index: defaultRunRegistry,
       requesterName: (id) => browserWiring?.requesterName(id) ?? names.person(id),
+      requesterProfile: (id) => browserWiring?.requesterProfile(id) ?? Promise.resolve(undefined),
       // The view-as picker's people (record 0053): the cache `viewAsPeople` keeps.
       people: () => viewAsPeople.current(),
       retention:

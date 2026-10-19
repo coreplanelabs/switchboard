@@ -1,3 +1,4 @@
+import type { PersonProfile } from "../core/names.js";
 import { WORK_VIEW_ENRICHMENT_TIMEOUT_MS } from "../core/budgets.js";
 import type { ExternalIdentity } from "../core/identity/contract.js";
 import type { OrganizationStore } from "../core/organization/contract.js";
@@ -12,6 +13,7 @@ interface RequesterNames {
   mcpIssuer?: string;
   slackTeam: string;
   name(id: string): Promise<string | undefined>;
+  profile?(id: string): Promise<PersonProfile | undefined>;
   tokens: IngressTokenMap;
   personByEmail?: PersonLookup;
 }
@@ -23,16 +25,21 @@ function warnRequesterLabel(id: string, reason: "failed" | "timeout" | "unavaila
 }
 
 /** Display-only account grouping. Original ids still control access and attribution. */
-export async function requesterName(id: string, options: RequesterNames): Promise<string | undefined> {
+export async function requesterProfile(id: string, options: RequesterNames): Promise<PersonProfile | undefined> {
+  const profileOf = async (userId: string): Promise<PersonProfile | undefined> => {
+    if (options.profile) return options.profile(userId);
+    const name = await options.name(userId);
+    return name ? { name } : undefined;
+  };
   try {
-    if (id.startsWith("slack:")) return await options.name(id);
+    if (id.startsWith("slack:")) return await profileOf(id);
     if (/^(http|mcp):/.test(id)) {
       const subject = id.slice(id.indexOf(":") + 1);
       const matches = Object.values(options.tokens).filter((token) => token.subject === subject);
       const emails = new Set(matches.map((token) => token.email));
       if (emails.size !== 1 || emails.has(undefined)) return;
       const person = await options.personByEmail?.(matches[0]!.email!);
-      return person?.name ?? (person ? await options.name(person.id) : undefined);
+      return person ? ((await profileOf(person.id)) ?? (person.name ? { name: person.name } : undefined)) : undefined;
     }
     if (!id.startsWith("access:") || !options.store) return;
     // SSO over MCP and the browser have distinct issuers. Only active links
@@ -56,28 +63,32 @@ export async function requesterName(id: string, options: RequesterNames): Promis
       if (peers.status === "unavailable") warnRequesterLabel(id, "unavailable");
       return;
     }
-    const names = new Set<string>();
+    const profiles = new Map<string, PersonProfile>();
     for (const peer of peers.identities) {
       if (peer.issuer !== "https://slack.com" || peer.tenant !== options.slackTeam) continue;
       const current = await options.store.directory.resolve(peer);
       if (current.status === "unavailable") warnRequesterLabel(id, "unavailable");
       if (current.status !== "bound" || current.binding.personId !== personId) continue;
-      const name = await options.name(`slack:${peer.subject}`);
-      if (name?.trim()) names.add(name.trim());
+      const profile = await profileOf(`slack:${peer.subject}`);
+      if (profile?.name.trim()) profiles.set(profile.name.trim(), profile);
     }
     // Conflicting profiles must not select an arbitrary person's name.
-    return names.size === 1 ? [...names][0] : undefined;
+    return profiles.size === 1 ? [...profiles.values()][0] : undefined;
   } catch {
     warnRequesterLabel(id, "failed");
     return undefined;
   }
 }
 
+export async function requesterName(id: string, options: RequesterNames): Promise<string | undefined> {
+  return (await requesterProfile(id, options))?.name;
+}
+
 /** Optional labels have one deadline, including directory and provider reads. */
-export async function readRequesterName(
-  lookup: ((id: string) => Promise<string | undefined>) | undefined,
+async function readRequester<T>(
+  lookup: ((id: string) => Promise<T | undefined>) | undefined,
   id: string,
-): Promise<string | undefined> {
+): Promise<T | undefined> {
   if (!lookup) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -96,4 +107,19 @@ export async function readRequesterName(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+export function readRequesterName(
+  lookup: ((id: string) => Promise<string | undefined>) | undefined,
+  id: string,
+): Promise<string | undefined> {
+  return readRequester(lookup, id);
+}
+
+export async function readRequesterProfile(
+  lookup: ((id: string) => Promise<string | PersonProfile | undefined>) | undefined,
+  id: string,
+): Promise<PersonProfile | undefined> {
+  const profile = await readRequester(lookup, id);
+  return typeof profile === "string" ? { name: profile } : profile;
 }

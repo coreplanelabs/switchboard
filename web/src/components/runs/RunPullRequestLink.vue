@@ -115,7 +115,7 @@ onBeforeUnmount(dispose);
 <template>
   <UTooltip v-if="href" :text="`View ${run.repo}#${number} diff. Ctrl/Cmd-click or middle-click opens GitHub.`">
     <a
-      class="run-pr pointer-events-auto inline-flex size-6 shrink-0 items-center justify-center rounded text-sm text-dimmed hover:text-highlighted focus-visible:outline-2 focus-visible:outline-primary"
+      class="run-pr pointer-events-auto inline-flex min-w-0 items-center gap-1.5 rounded text-xs text-dimmed hover:text-highlighted focus-visible:outline-2 focus-visible:outline-primary"
       :href="href"
       target="_blank"
       rel="noopener noreferrer"
@@ -123,7 +123,8 @@ onBeforeUnmount(dispose);
       aria-haspopup="dialog"
       @click="show"
     >
-      <GithubMark />
+      <GithubMark class="shrink-0" />
+      <span class="truncate">{{ run.repo }} #{{ number }}</span>
     </a>
   </UTooltip>
   <PrReviewSlideover

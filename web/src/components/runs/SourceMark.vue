@@ -14,7 +14,7 @@ const icons: Record<string, string> = {
   <UTooltip :text="tip">
     <component
       :is="url ? 'a' : 'span'"
-      class="source pointer-events-auto inline-flex size-4 shrink-0 items-center justify-center rounded text-dimmed focus-visible:outline-2 focus-visible:outline-primary"
+      class="source pointer-events-auto inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded text-dimmed focus-visible:outline-2 focus-visible:outline-primary"
       :class="url ? 'linked hover:text-primary' : ''"
       :data-kind="kind"
       :aria-label="url ? `open the ${SURFACE_NAME[kind] ?? kind} thread (new tab)` : (SURFACE_NAME[kind] ?? kind)"
@@ -23,8 +23,9 @@ const icons: Record<string, string> = {
       :target="url ? '_blank' : undefined"
       :rel="url ? 'noopener noreferrer' : undefined"
     >
-      <SlackMark v-if="kind === 'slack'" />
-      <UIcon v-else :name="icons[kind] ?? 'i-lucide-circle-help'" class="size-3.5" />
+      <SlackMark v-if="kind === 'slack'" aria-hidden="true" />
+      <UIcon v-else :name="icons[kind] ?? 'i-lucide-circle-help'" class="size-3.5" aria-hidden="true" />
+      <span>{{ SURFACE_NAME[kind] ?? "Unknown" }}</span>
     </component>
   </UTooltip>
 </template>

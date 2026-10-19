@@ -264,15 +264,14 @@ export function surfaceOf(run: IndexRow): { kind: string; identity: string } {
   const id = run.channelId ?? "";
   const colon = id.indexOf(":");
   const kind = colon === -1 ? "unknown" : id.slice(0, colon);
-  const label = run.userName?.trim();
+  const label = run.userProfile?.name.trim() || run.userName?.trim();
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (label && !uuid.test(label)) return { kind, identity: label };
   const uid = run.userId ?? "";
   const ucolon = uid.indexOf(":");
   const username = ucolon === -1 ? uid : uid.slice(ucolon + 1);
   const opaque = uuid.test(username) || /^slack:[UW][A-Z0-9]+$/.test(uid) || /^(access|person):/.test(uid);
-  const machine = /^(?:http|mcp):/.test(uid);
-  return { kind, identity: !username ? "" : opaque ? "Unknown user" : machine ? "Service" : username };
+  return { kind, identity: !username ? "" : opaque ? "Unknown user" : username };
 }
 
 /** The thread a run belongs to, as a page on this dashboard: the Threads page takes a
@@ -289,10 +288,11 @@ export const RUNS_PREF = { mine: "sb.runs.mine", all: "sb.runs.all" } as const;
 /** Accessible surface names for source icons, tooltips and menu labels. */
 export const SURFACE_NAME: Record<string, string> = {
   slack: "Slack",
-  http: "HTTP ingress",
+  http: "API (HTTP)",
   mcp: "MCP",
   cli: "CLI",
   web: "Web",
+  unknown: "Unknown",
 };
 
 /** The dot's tooltip: a live run's latest activity (or "starting…"); a

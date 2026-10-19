@@ -1302,15 +1302,23 @@ describe("createLiveViewHandler (node:http)", () => {
       threadKey: "mcp:default:account-1",
       userName: "ingress",
     });
-    const handler = liveOnlyHandler(reg, { requesterName: async () => "Alice Chen" });
+    const profile = { name: "Alice Chen", avatarUrl: "https://avatars.slack-edge.com/alice.jpg" };
+    const handler = liveOnlyHandler(reg, { requesterProfile: async () => profile });
     const page = fakeReqRes("GET", "/runs");
     handler(page.req, page.res);
     await page.finished;
-    expect(indexSeedOf(page.body()).rows[0]).toMatchObject({ id, userId: "access:account-1", userName: "Alice Chen" });
+    expect(page.headers["content-security-policy"]).toContain("img-src 'self' data: https://avatars.slack-edge.com;");
+    expect(indexSeedOf(page.body()).rows[0]).toMatchObject({
+      id,
+      userId: "access:account-1",
+      userName: "Alice Chen",
+      userProfile: profile,
+    });
     const feed = fakeReqRes("GET", "/runs?stream=1");
     handler(feed.req, feed.res);
     await vi.waitFor(() => expect(feed.body()).toContain('"userName":"Alice Chen"'));
     expect(feed.body()).toContain('"userId":"access:account-1"');
+    expect(feed.body()).toContain('"avatarUrl":"https://avatars.slack-edge.com/alice.jpg"');
     expect(reg.listActive()[0]).toMatchObject({ userId: "access:account-1", userName: "ingress" });
     feed.fireClose();
   });

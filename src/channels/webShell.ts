@@ -1,3 +1,4 @@
+import type { PersonProfile } from "../core/names.js";
 import { PROJECT_DOCS_URL } from "../core/docsLink.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { escapeHtml } from "./liveView/html.js";
@@ -26,7 +27,7 @@ import type { Actor } from "../core/authz/types.js";
  *  only (a run's video or audio file plays from the artifact route,
  *  live-view.md item 26), and no framing. */
 export const PAGE_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://avatars.slack-edge.com; media-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /** Account verification permits only protected local forms and the pinned Slack provider. */
 export const GREEN_PAGE_CSP = PAGE_CSP.replace("form-action 'none'", "form-action 'self' https://slack.com");
@@ -125,14 +126,20 @@ export type PageSender = (
 export function makePageSender(
   assets: ShellAssets,
   capabilities: Capabilities,
-  options: { csp?: string; organization?: string } = {},
+  options: { csp?: string; organization?: string; viewerProfile?(actor: Actor): PersonProfile | undefined } = {},
 ): PageSender {
   return (req, res, status, viewer, title, seed) => {
-    const { pageAccess: _suppliedAccess, ...data } = seed as PageSeed & { pageAccess?: unknown };
+    const {
+      pageAccess: _suppliedAccess,
+      signedInUser: _suppliedViewer,
+      ...data
+    } = seed as PageSeed & { pageAccess?: unknown; signedInUser?: unknown };
+    const profile = viewer ? options.viewerProfile?.(viewer) : undefined;
     const island: WebSeed = {
       ...data,
       title,
       capabilities,
+      ...(profile && viewer ? { signedInUser: { id: viewer.id, ...profile } } : {}),
       ...(typeof viewer?.id === "string" && viewer.id
         ? { pageAccess: { actor: viewer.id, ...(options.organization ? { organization: options.organization } : {}) } }
         : {}),

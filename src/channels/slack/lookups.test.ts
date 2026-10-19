@@ -5,6 +5,7 @@ import {
   resolveChannelName,
   resolvePersonByEmail,
   resolveUserName,
+  resolveUserProfile,
   slackPermalink,
 } from "./lookups.js";
 
@@ -182,5 +183,42 @@ describe("resolvePersonByEmail (the dashboard link, record 0042)", () => {
     const c2 = client(async () => person());
     expect(await resolvePersonByEmail(c2 as never, "not-an-email")).toBeUndefined();
     expect(c2.users.lookupByEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe("requester profiles", () => {
+  afterEach(() => resetSlackNameCaches());
+  it("reads the current display name and safe photo from the same Slack user", async () => {
+    const client = {
+      users: {
+        info: async () => ({
+          user: {
+            name: "alice",
+            profile: { display_name: "Alice Chen", image_48: "https://avatars.slack-edge.com/test.jpg" },
+          },
+        }),
+      },
+      conversations: { info: async () => ({}) },
+    };
+    expect(await resolveUserProfile(client, "UALICE")).toEqual({
+      name: "Alice Chen",
+      avatarUrl: "https://avatars.slack-edge.com/test.jpg",
+    });
+    expect(await resolveUserName(client, "UALICE")).toBe("Alice Chen");
+  });
+  it("keeps the name when a photo URL is unsafe or absent", async () => {
+    for (const image_48 of [
+      "javascript:bad",
+      "https://attacker.test/photo",
+      "https://avatars.slack-edge.com.attacker.test/photo",
+      undefined,
+    ]) {
+      resetSlackNameCaches();
+      const client = {
+        users: { info: async () => ({ user: { name: "alice", profile: { display_name: "Alice Chen", image_48 } } }) },
+        conversations: { info: async () => ({}) },
+      };
+      expect(await resolveUserProfile(client, "UALICE")).toEqual({ name: "Alice Chen" });
+    }
   });
 });

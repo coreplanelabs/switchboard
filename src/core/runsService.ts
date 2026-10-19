@@ -1,3 +1,4 @@
+import type { PersonProfile } from "./names.js";
 import type { CancellationRefusal, CancellationObservation } from "./runLedger/cancellation.js";
 import { cancellationMatches, cancellationOf, cancellationRefusalOf } from "./runLedger/cancellation.js";
 import type { ClaimObservationPage } from "./runLedger/claimObservation.js";
@@ -184,6 +185,8 @@ export interface RunView {
   sourceUrl?: string;
   /** Who started it, resolved (`RunMeta.userName` / `RunRecord.userName`). */
   userName?: string;
+  /** Current display-only profile, added after row visibility checks. */
+  userProfile?: PersonProfile;
   /** The bound credential behind the person (`RunMeta.authenticatedAs` / `RunRecord.authenticatedAs`), when there was one. */
   authenticatedAs?: string;
   /** The authenticated app that relayed this request for the credited person. */

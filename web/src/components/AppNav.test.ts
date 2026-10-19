@@ -19,6 +19,26 @@ afterEach(() => {
 });
 
 describe("Global shell navigation", () => {
+  it("keeps the signed-in profile photo in the user menu while viewing another person", async () => {
+    const wrapper = mountApp(Shell, {
+      seed: {
+        ...island(),
+        signedInUser: { id: "access:alice", name: "Alice Chen", avatarUrl: "https://avatars.slack-edge.com/alice.jpg" },
+        viewingAs: { id: "slack:UIVY", name: "ivy" },
+        asUser: { id: "slack:UIVY", name: "ivy" },
+      },
+    });
+    const menu = wrapper.get('button[aria-label="User menu"]');
+    expect(menu.get(".green-user-name").text()).toBe("Alice Chen");
+    expect(menu.get(".green-user-read-target").text()).toBe("Viewing ivy");
+    expect(menu.get("img").attributes("src")).toBe("https://avatars.slack-edge.com/alice.jpg");
+    await menu.get("img").trigger("error");
+    expect(menu.get('[aria-hidden="true"]').text()).toBe("AC");
+    expect(menu.get(".green-user-name").text()).toBe("Alice Chen");
+    await menu.trigger("click");
+    expect(wrapper.text()).toContain("This person's view is read-only.");
+  });
+
   it("renders capability-backed work links and constant run, settings, and documentation paths without tokens", () => {
     const wrapper = mountApp(Shell, { seed: island(), slots: { default: () => h("p", { id: "body" }, "hello") } });
     expect(wrapper.find("#body").text()).toBe("hello");
@@ -160,7 +180,8 @@ describe("Global shell navigation", () => {
     });
     await wrapper.find('button[aria-label="User menu"]').trigger("click");
     expect(wrapper.text()).toContain("This person's view is read-only");
-    expect(wrapper.find('button[aria-label="User menu"]').text()).toContain("ivy");
+    expect(wrapper.find('button[aria-label="User menu"] .green-user-name').text()).toBe("Your account");
+    expect(wrapper.find('button[aria-label="User menu"] .green-user-read-target').text()).toBe("Viewing ivy");
     await wrapper.find('select[aria-label="View as person"]').setValue("mine");
     await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
     expect(fetch).toHaveBeenCalledWith("/runs/data-view", {

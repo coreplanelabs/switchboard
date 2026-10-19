@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { useRoute } from "vue-router";
+import { RUN_PROMPT_MAX } from "@core/core/runDisplay.js";
+import { fetchSeed } from "../../lib/seed";
 import StatusDot from "../StatusDot.vue";
+import RequesterAvatar from "./RequesterAvatar.vue";
 import SourceMark from "./SourceMark.vue";
 import RunPullRequestLink from "./RunPullRequestLink.vue";
 import ScrollingText from "../ScrollingText.vue";
@@ -60,19 +64,44 @@ const props = defineProps<{
   children?: IndexRow[];
 }>();
 
+const route = useRoute();
+const retainedPrompt = ref<{ key: string; text: string }>();
+let requestedPrompt: string | undefined;
+const promptKey = computed(() => props.run.id + ":" + route.fullPath);
+const originalPrompt = computed(
+  () => props.run.prompt ?? (retainedPrompt.value?.key === promptKey.value ? retainedPrompt.value.text : undefined),
+);
 const parts = computed(() => {
   const label = splitRunLabel(props.run.label || shortId(props.run.id));
   return {
     ...label,
     agent: label.agent ?? props.run.agent,
-    snippet: props.run.title ?? props.run.prompt ?? label.snippet ?? props.run.activity,
+    snippet: props.run.title ?? originalPrompt.value ?? label.snippet ?? props.run.activity,
   };
 });
+/** Older summaries can omit the full input while the authorized history still retains it. */
+async function loadRetainedPrompt(): Promise<void> {
+  const shortened = parts.value.snippet?.endsWith("…") || props.run.label?.endsWith("…");
+  if (!props.run.finished || props.run.title || originalPrompt.value || !shortened) return;
+  const key = promptKey.value;
+  if (requestedPrompt === key) return;
+  requestedPrompt = key;
+  const address = new URL(runHref(props.run), window.location.origin);
+  for (const [name, value] of Object.entries(route.query)) {
+    if (name === "t" || value == null) continue;
+    for (const part of Array.isArray(value) ? value : [value])
+      if (part !== null) address.searchParams.append(name, part);
+  }
+  const seed = await fetchSeed(address.pathname + address.search);
+  if (key !== promptKey.value || seed?.page !== "run" || seed.id !== props.run.id || seed.mode !== "history") return;
+  const input = seed.events.find((event) => event.type === "input");
+  if (input?.type === "input") retainedPrompt.value = { key, text: input.text.slice(0, RUN_PROMPT_MAX) };
+}
 const repo = computed(() => repoOf(props.run, parts.value.scope));
 const tone = computed(() => statusDot(props.run));
 const href = computed(() => runHref(props.run));
 const src = computed(() => surfaceOf(props.run));
-const who = computed(() => whoText(props.run));
+const who = computed(() => whoText(props.run) || "Unknown user");
 const sourceUrl = computed(() => safeSourceUrl(props.run));
 /** The run's thread as a page here (web-chat.md item 4), beside the source's own link. */
 const threadLink = computed(() => (props.run.threadKey ? threadHref(props.run.threadKey) : null));
@@ -237,77 +266,79 @@ function onRowClick(ev: MouseEvent): void {
         <StatusDot :tone="tone" :label="statusWord(run)" :tip="dotTip(run)" :pulse="!run.finished" />
       </span>
       <div class="min-w-0">
-        <div class="primary flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <ScrollingText
-            class="snippet min-w-0 max-w-full overflow-x-auto whitespace-nowrap text-sm leading-6 text-highlighted pointer-events-auto"
-            :text="parts.snippet ?? (repo ? repo.slice(repo.indexOf('/') + 1) : parts.scope)"
-            :title="run.prompt ?? parts.snippet"
-            tabindex="0"
-            @keydown.enter="browser.navigate(href)"
-          />
-          <span
-            v-if="outcome"
-            class="outcome shrink-0 rounded border px-1.5 text-[0.7rem]"
-            :class="
-              tone === 'red'
-                ? 'border-bad/30 text-bad'
-                : tone === 'amber'
-                  ? 'border-warn/30 text-warn'
-                  : 'border-accented text-muted'
-            "
-            >{{ outcome }}</span
-          >
-          <span
-            v-if="stopBadge"
-            class="stopbadge shrink-0 rounded border px-1.5 text-[0.7rem]"
-            :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-info/30 text-info'"
-            >{{ stopBadge }}</span
-          >
-          <span
-            v-if="stalled"
-            class="stalled shrink-0 rounded border px-1.5 text-[0.7rem]"
-            :class="bound ? 'border-bad/30 text-bad' : 'border-warn/30 text-warn'"
-            >stalled</span
-          >
-        </div>
-        <div class="metadata mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-5 text-dimmed">
-          <span
-            v-if="parts.agent"
-            class="agent shrink-0 rounded px-1.5 py-0.5 font-mono text-[0.65rem] font-medium leading-none uppercase tracking-wide"
-            :class="AGENT_HUE[agentHue(parts.agent)]"
-            :data-agent-hue="agentHue(parts.agent)"
-            >{{ parts.agent }}</span
-          >
-          <span class="inline-flex min-w-0 max-w-full items-center gap-1.5">
-            <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
-            <RunPullRequestLink :run="run" />
-            <UTooltip v-if="who" :text="who">
-              <span class="who pointer-events-auto min-w-0 truncate" :data-user-id="run.userId" :data-surface="src.kind"
+        <div class="primary grid min-w-0 grid-cols-1 items-center gap-x-4 gap-y-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <div class="flex min-w-0 items-center gap-2">
+            <ScrollingText
+              class="snippet min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm leading-6 text-highlighted pointer-events-auto"
+              :text="parts.snippet ?? (repo ? repo.slice(repo.indexOf('/') + 1) : parts.scope)"
+              :title="originalPrompt ?? parts.snippet"
+              tabindex="0"
+              @pointerenter="loadRetainedPrompt"
+              @focus="loadRetainedPrompt"
+              @keydown.enter="browser.navigate(href)"
+            />
+            <span
+              v-if="outcome"
+              class="outcome shrink-0 rounded border px-1.5 text-[0.7rem]"
+              :class="
+                tone === 'red'
+                  ? 'border-bad/30 text-bad'
+                  : tone === 'amber'
+                    ? 'border-warn/30 text-warn'
+                    : 'border-accented text-muted'
+              "
+              >{{ outcome }}</span
+            >
+            <span
+              v-if="stopBadge"
+              class="stopbadge shrink-0 rounded border px-1.5 text-[0.7rem]"
+              :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-info/30 text-info'"
+              >{{ stopBadge }}</span
+            >
+            <span
+              v-if="stalled"
+              class="stalled shrink-0 rounded border px-1.5 text-[0.7rem]"
+              :class="bound ? 'border-bad/30 text-bad' : 'border-warn/30 text-warn'"
+              >stalled</span
+            >
+          </div>
+          <UTooltip v-if="who" :text="who">
+            <span
+              class="who pointer-events-auto inline-flex min-w-0 items-center gap-2 text-sm text-highlighted sm:max-w-48"
+              :data-user-id="run.userId"
+              :data-surface="src.kind"
+            >
+              <RequesterAvatar :name="who" :url="run.userProfile?.avatarUrl" />
+              <span class="min-w-0 truncate"
                 ><span class="name">{{ who }}</span></span
               >
-            </UTooltip>
-          </span>
-          <UTooltip v-if="repo" :text="repo">
-            <a
-              class="repo pointer-events-auto inline-flex min-w-0 max-w-full items-center gap-1 text-dimmed no-underline hover:text-highlighted"
-              :href="`https://github.com/${repo}`"
-              target="_blank"
-              rel="noopener noreferrer"
+            </span>
+          </UTooltip>
+        </div>
+        <div
+          class="metadata mt-2 grid min-w-0 grid-cols-1 items-center gap-x-4 gap-y-2 text-xs leading-5 text-dimmed sm:grid-cols-[minmax(0,1fr)_auto]"
+        >
+          <div class="context flex min-w-0 items-center gap-3">
+            <span
+              v-if="parts.agent"
+              class="agent shrink-0 rounded px-1.5 py-0.5 font-mono text-[0.65rem] font-medium leading-none uppercase tracking-wide"
+              :class="AGENT_HUE[agentHue(parts.agent)]"
+              :data-agent-hue="agentHue(parts.agent)"
+              >{{ parts.agent }}</span
             >
-              <UIcon name="i-lucide-git-branch" class="size-3 shrink-0" />
-              <span class="truncate"
-                ><span class="owner text-dimmed">{{ repo.slice(0, repo.indexOf("/") + 1) }}</span
-                ><span class="name">{{ repo.slice(repo.indexOf("/") + 1) }}</span></span
-              >
-            </a>
-          </UTooltip>
-          <span v-else class="scope min-w-0 truncate">{{ parts.scope }}</span>
-          <UTooltip :text="whenTip(run)" :ui="{ text: 'whitespace-pre-line' }">
-            <span class="when pointer-events-auto shrink-0 tabular-nums">{{ formatRelative(run.startedAt, now) }}</span>
-          </UTooltip>
-          <UTooltip :text="countTip(run)"
-            ><span class="count shrink-0 tabular-nums">{{ countText(run) }}</span></UTooltip
-          >
+            <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
+            <RunPullRequestLink :run="run" />
+          </div>
+          <div class="facts flex min-w-0 items-center gap-3">
+            <UTooltip :text="whenTip(run)" :ui="{ text: 'whitespace-pre-line' }">
+              <span class="when pointer-events-auto shrink-0 tabular-nums">{{
+                formatRelative(run.startedAt, now)
+              }}</span>
+            </UTooltip>
+            <UTooltip :text="countTip(run)"
+              ><span class="count shrink-0 tabular-nums">{{ countText(run) }}</span></UTooltip
+            >
+          </div>
           <UTooltip v-if="pace" :text="inherited && !bound ? inheritedPaceTip(inherited) : paceTip(run, now)">
             <span
               class="pace pointer-events-auto min-w-0 [overflow-wrap:anywhere]"

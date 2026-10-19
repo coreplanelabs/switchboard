@@ -603,6 +603,8 @@ export type WebSeed = PageSeed & {
    *  what the app sets on an in-app navigation. */
   title: string;
   capabilities: Capabilities;
+  /** Current signed-in account profile, independent of the selected read target. */
+  signedInUser?: ViewablePerson & { avatarUrl?: string };
   /** Server-stamped actual viewer, independent of the selected read target. */
   pageAccess?: { actor: string; organization?: string };
   /** The person this session is viewing the page as (record 0053), stamped by the shell renderer
