@@ -90,19 +90,26 @@ export class StreamableHttpMcpClient implements McpClient {
   async callTool(name: string, args: Record<string, unknown>, opts?: McpCallOptions): Promise<McpCallResult> {
     // An original session may outlive this client process. Address it explicitly;
     // do not mutate the discovery client's session shared with other runs.
-    const result = (await (opts?.sourceSession
+    const result = await (opts?.sourceSession
       ? this.rpc("tools/call", { name, arguments: args }, opts.signal, { sourceSession: opts.sourceSession })
-      : this.request("tools/call", { name, arguments: args }, opts?.signal))) as {
-      content?: unknown;
-      isError?: unknown;
-      structuredContent?: unknown;
-    };
-    const content = Array.isArray(result?.content)
-      ? result.content.filter(
-          (p): p is McpCallResult["content"][number] =>
-            typeof p === "object" && p !== null && typeof (p as { type?: unknown }).type === "string",
-        )
-      : [];
+      : this.request("tools/call", { name, arguments: args }, opts?.signal));
+    // Missing or malformed protocol data is not an empty successful tool call.
+    // Keep unknown non-text parts opaque, but validate the fields we consume.
+    if (
+      !record(result) ||
+      !Array.isArray(result.content) ||
+      !result.content.every(
+        (part) =>
+          record(part) &&
+          typeof part.type === "string" &&
+          part.type.length > 0 &&
+          (part.type !== "text" || typeof part.text === "string"),
+      ) ||
+      (Object.hasOwn(result, "isError") && typeof result.isError !== "boolean") ||
+      (Object.hasOwn(result, "structuredContent") && !record(result.structuredContent))
+    )
+      throw new McpError("protocol", "tools/call returned an invalid result");
+    const content = result.content as McpCallResult["content"];
     return {
       content,
       ...(result?.isError === true ? { isError: true } : {}),
@@ -228,22 +235,41 @@ export class StreamableHttpMcpClient implements McpClient {
     }
     const type = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
     if (type === "text/event-stream") {
-      for (const data of sseDataFrames(text)) {
-        const parsed = tryParse(data);
-        if (parsed && (parsed as JsonRpcResponse).id === id) return parsed as JsonRpcResponse;
-      }
-      throw new McpError("protocol", "SSE response carried no frame for the request");
+      const matches = sseDataFrames(text)
+        .map(tryParse)
+        .filter((value) => record(value) && value.id === id);
+      if (matches.length !== 1) throw new McpError("protocol", "SSE response did not carry one frame for the request");
+      return responseOf(matches[0], id);
     }
     const parsed = tryParse(text);
     if (!parsed || typeof parsed !== "object") throw new McpError("protocol", "response was not JSON-RPC");
     // Some servers answer a batch array; take our id.
     if (Array.isArray(parsed)) {
-      const hit = parsed.find((m) => (m as JsonRpcResponse)?.id === id) as JsonRpcResponse | undefined;
-      if (!hit) throw new McpError("protocol", "batch response carried no frame for the request");
-      return hit;
+      const matches = parsed.filter((value) => record(value) && value.id === id);
+      if (matches.length !== 1)
+        throw new McpError("protocol", "batch response did not carry one frame for the request");
+      return responseOf(matches[0], id);
     }
-    return parsed as JsonRpcResponse;
+    return responseOf(parsed, id);
   }
+}
+
+const record = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** Validate correlation and the response envelope before extracting any result.
+ * Notifications and display defaults cannot stand in for the requested reply. */
+function responseOf(value: unknown, id: number): JsonRpcResponse {
+  if (
+    !record(value) ||
+    value.jsonrpc !== "2.0" ||
+    value.id !== id ||
+    Object.hasOwn(value, "result") === Object.hasOwn(value, "error") ||
+    (Object.hasOwn(value, "error") &&
+      (!record(value.error) || !Number.isInteger(value.error.code) || typeof value.error.message !== "string"))
+  )
+    throw new McpError("protocol", "response was not a matching JSON-RPC response");
+  return value as JsonRpcResponse;
 }
 
 class HttpStatusError extends McpError {
