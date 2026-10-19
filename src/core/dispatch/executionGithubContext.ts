@@ -97,6 +97,9 @@ export async function currentGithubReadCapability(
   input: Record<string, unknown>,
   github: GithubCapability,
   agentName: string,
+  // Owned by one context validation. Never retain read results across a model
+  // or publication boundary; those boundaries must observe revoked access.
+  readResults?: Map<string, Promise<unknown>>,
 ): Promise<{ ok: true } | { ok: false; githubAccess: GithubAccessDiagnostic }> {
   const tool = GITHUB_READ_TOOLS.find((tool) => tool.name === receipt.tool);
   const sourceCallHash = await sourceHash(receipt.callId);
@@ -181,7 +184,21 @@ export async function currentGithubReadCapability(
           ? (property as GithubAccessDiagnostic["operation"])
           : "none";
         try {
-          return await value.apply(target, args);
+          if (
+            !readResults ||
+            typeof property !== "string" ||
+            !(GITHUB_ACCESS_OPERATIONS as readonly string[]).includes(property)
+          )
+            return await value.apply(target, args);
+          const key = JSON.stringify([property, args]);
+          let pending = readResults.get(key);
+          if (!pending) {
+            pending = Promise.resolve().then(() => value.apply(target, args));
+            readResults.set(key, pending);
+          }
+          // A tool may transform its response. Each receipt gets independent
+          // bytes even when two history pages use the same underlying read.
+          return structuredClone(await pending);
         } catch (error) {
           firstFailure ??= failedRead(error, readOperation);
           throw error;

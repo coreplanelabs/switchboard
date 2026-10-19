@@ -12,6 +12,111 @@ import { githubFileTool } from "../../tools/github.js";
 import { sourceHash } from "../references/receipts.js";
 
 describe("current native execution read authority", () => {
+  it("validates paged history with one history read and refuses revoked access in the next validation", async () => {
+    let historyReads = 0;
+    let revoked = false;
+    const api = new RestGithubApi({
+      token: async () => "fixture token",
+      fetch: async (url) => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/installation/repositories")
+          return Response.json({ repositories: [{ full_name: "acme/private", private: true }] });
+        if (path === "/repos/acme/private/pulls/7")
+          return Response.json({
+            number: 7,
+            state: "open",
+            head: { repo: { full_name: "acme/private" }, ref: "change", sha: "a".repeat(40) },
+            base: { repo: { full_name: "acme/private" }, ref: "main" },
+          });
+        if (path === "/repos/acme/private/pulls/7/reviews") {
+          if (revoked || ++historyReads > 1) return Response.json({}, { status: revoked ? 403 : 429 });
+          return Response.json([
+            {
+              id: 1,
+              state: "COMMENTED",
+              body: "history ".repeat(20_000),
+              user: { login: "reviewer", type: "Bot" },
+              commit_id: "a".repeat(40),
+              submitted_at: "2026-01-01T00:00:00Z",
+            },
+          ]);
+        }
+        if (path === "/repos/acme/private/issues/7/comments" || path === "/repos/acme/private/pulls/7/comments")
+          return Response.json([]);
+        return Response.json({}, { status: 404 });
+      },
+    });
+    const receipt = {
+      version: 2 as const,
+      runId: "run",
+      callId: "history",
+      tool: "github_pull_get",
+      repos: ["acme/private"],
+      resultHash: "a".repeat(64),
+      inputHash: "b".repeat(64),
+      admissionHash: "c".repeat(64),
+    };
+    const readResults = new Map<string, Promise<unknown>>();
+    for (const historyPage of [1, 2])
+      expect(
+        await currentGithubReadCapability(
+          receipt,
+          { repo: "acme/private", number: 7, includeReviewHistory: true, historyPage },
+          { api, canWrite: () => false },
+          "review",
+          readResults,
+        ),
+      ).toEqual({ ok: true });
+    revoked = true;
+    expect(
+      await currentGithubReadCapability(
+        receipt,
+        { repo: "acme/private", number: 7, includeReviewHistory: true, historyPage: 1 },
+        { api, canWrite: () => false },
+        "review",
+        new Map(),
+      ),
+    ).toMatchObject({
+      ok: false,
+      githubAccess: { operation: "getPullRequestFeedback", route: "pull_reviews", httpStatus: 403 },
+    });
+  });
+  it("checks each public result and keeps different read arguments separate within a validation", async () => {
+    const api = new InMemoryGithubApi({ "upstream/provider": { private: false, files: { "x.ts": "public code" } } });
+    api.listRepos = async () => [];
+    const receipt = {
+      version: 2 as const,
+      runId: "run",
+      callId: "call",
+      tool: "github_file",
+      repos: ["upstream/provider"],
+      resultHash: await sourceHash("https://github.com/upstream/provider/blob/main/x.ts (11 bytes):\n\npublic code"),
+      inputHash: "b".repeat(64),
+      admissionHash: "c".repeat(64),
+    };
+    const readResults = new Map<string, Promise<unknown>>();
+    const input = { repo: "upstream/provider", path: "x.ts" };
+    const github = { api, canWrite: () => false };
+    expect(await currentGithubReadCapability(receipt, input, github, "review", readResults)).toEqual({ ok: true });
+    expect(
+      await currentGithubReadCapability(
+        { ...receipt, resultHash: "f".repeat(64) },
+        input,
+        github,
+        "review",
+        readResults,
+      ),
+    ).toMatchObject({
+      ok: false,
+      githubAccess: { reason: "public-result-changed" },
+    });
+    expect(
+      await currentGithubReadCapability(receipt, { ...input, path: "private.ts" }, github, "review", readResults),
+    ).toMatchObject({
+      ok: false,
+      githubAccess: { operation: "readFile", stage: "tool-read" },
+    });
+  });
   it("denies retained private bytes when a now-public source returns different content", async () => {
     const api = new InMemoryGithubApi({ "upstream/provider": { private: false, files: { "x.ts": "public code" } } });
     api.listRepos = async () => [];
