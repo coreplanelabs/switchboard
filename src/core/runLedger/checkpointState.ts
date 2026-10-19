@@ -2,6 +2,7 @@ import { harnessLaunchIntentOf, originalSessionPolicyOf, sameOriginalSessionPoli
 import type { RunState } from "./types.js";
 import { isRunWorkEvidence } from "../runRecord.js";
 import { isBranchIdentityBaseline } from "../branchIdentityBaseline.js";
+import { sourceTaskSnapshotOf } from "../references/sourceTaskSnapshot.js";
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -108,6 +109,21 @@ export function preserveCheckpointState(
   const next = preserveHarnessPolicy(prior, incoming);
   if (!next) return undefined;
   if (prior.killRequested === true) next.killRequested = true;
+  if (prior.sourceTask !== undefined) {
+    const originalTask = sourceTaskSnapshotOf(prior.sourceTask);
+    const replacementTask = sourceTaskSnapshotOf(incoming.sourceTask);
+    if (
+      !originalTask ||
+      (incoming.sourceTask !== undefined &&
+        (!replacementTask || JSON.stringify(replacementTask) !== JSON.stringify(originalTask)))
+    )
+      return undefined;
+    next.sourceTask = originalTask;
+  } else if (incoming.sourceTask !== undefined) {
+    const task = sourceTaskSnapshotOf(incoming.sourceTask);
+    if (!task) return undefined;
+    next.sourceTask = task;
+  }
   const baseline = prior.branchIdentityBaseline;
   const replacement = incoming.branchIdentityBaseline;
   if (baseline !== undefined) {
@@ -141,6 +157,7 @@ export function preserveCheckpointState(
       workReads: next.workReads,
       unitSeedReceipt: next.unitSeedReceipt,
       branchIdentityBaseline: next.branchIdentityBaseline,
+      sourceTask: next.sourceTask,
     })
   )
     return undefined;

@@ -53,6 +53,7 @@ import { randomUUID } from "node:crypto";
 import { systemClock } from "../trace/clock.js";
 import { sealPausedHardStop } from "./pausedStop.js";
 import type { SourceReadState } from "../../mcp/sourceReadState.js";
+import { sourceTaskSnapshotOf } from "../references/sourceTaskSnapshot.js";
 import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { ToolDef } from "../provider.js";
@@ -1844,6 +1845,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           );
         }
       }
+      const sourceTask = sourceTaskSnapshotOf(this.state.sourceTask);
+      if (this.state.sourceTask !== undefined && !sourceTask)
+        throw new Error("The retained source task could not be verified.");
       const record = {
         ...plain,
         ...(session ? { session } : {}),
@@ -1855,6 +1859,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
               ) as RunRecord["contextCheckpointReceipt"],
             }
           : {}),
+        ...(sourceTask ? { sourceTask } : {}),
         ...(this.state.sourceReads !== undefined
           ? { sourceReads: structuredClone(this.state.sourceReads) as SourceReadState }
           : {}),

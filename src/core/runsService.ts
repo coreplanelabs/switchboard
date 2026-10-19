@@ -758,6 +758,7 @@ function persistedView(
       | "sourceReads"
       | "readingDiffAbridge"
       | "githubSource"
+      | "sourceTask"
       | "orchestratorDecisions"
       | "branchIdentityBaseline"
       | "workReads"
@@ -777,6 +778,7 @@ function persistedView(
     readingDiffAbridge: _readingDiffAbridge,
     sourceReads: _sourceReads,
     githubSource: _githubSource,
+    sourceTask: _sourceTask,
     orchestratorDecisions: _orchestratorDecisions,
     branchIdentityBaseline: _branchIdentityBaseline,
     workReads: _workReads,

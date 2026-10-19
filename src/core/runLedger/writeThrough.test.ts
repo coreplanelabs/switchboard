@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { captureSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
 import type { CoordinatorReconcileEffect, CoordinatorReconcileReceipt } from "../coordinator/workflowReconciliation.js";
 import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
@@ -1455,6 +1456,37 @@ describe("open — claim and seed", () => {
     await second.close();
   });
 
+  it("archives only an acknowledged original task through the tracked sink", async () => {
+    const { ledger, wt } = harness();
+    const req = openReq();
+    req.meta = {
+      ...req.meta,
+      agent: "orchestrator",
+      repo: "fixture/api",
+      ref: "accepted-branch",
+      baseRef: "main",
+      headSha: "a".repeat(40),
+      pr: 7,
+    };
+    const run = (await openRun(wt, req))!;
+    const snapshot = captureSourceTaskSnapshot(ledger.live.get("r1")!);
+    expect(snapshot).toMatchObject({
+      owner: { runId: "r1" },
+      task: { ref: "accepted-branch", headSha: "a".repeat(40) },
+    });
+    expect(await run.setStateAndFlush({ sourceTask: snapshot })).toBe(true);
+    await run.sink.put({
+      ...record("r1"),
+      agent: "orchestrator",
+      repo: "fixture/api",
+      targetPr: 7,
+      headSha: "b".repeat(40),
+    });
+    expect(ledger.finished.get("r1")).toMatchObject({
+      headSha: "b".repeat(40),
+      sourceTask: { task: { ref: "accepted-branch", headSha: "a".repeat(40) } },
+    });
+  });
   it("archives original source state and dependencies before deleting the live row", async () => {
     const { ledger, wt } = harness();
     const req = openReq();

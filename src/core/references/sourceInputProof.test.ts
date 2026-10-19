@@ -4,8 +4,9 @@ import { sourceHash } from "./receipts.js";
 import type { SourceInputReference } from "./sourceInputReference.js";
 import { sourceEvidenceMessageFromRecord } from "../runLedger/sourceEvidence.js";
 import { sourceSnapshot } from "../runLedger/sourceEvents.js";
+import { captureSourceTaskSnapshot } from "./sourceTaskSnapshot.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
-import { LEASE_MS, type LiveRunRow } from "../runLedger/types.js";
+import { LEASE_MS, type LiveRunRow, type LiveRunMeta } from "../runLedger/types.js";
 import { InMemoryRunStore } from "../runStore.js";
 import type { RunRecord } from "../runRecord.js";
 import { analyzeRunFriction } from "../runFriction.js";
@@ -23,7 +24,7 @@ const task = {
   githubSource: null,
   recordTaskKey: null,
 };
-async function fixture(fold = false) {
+async function fixture(fold = false, taskFields: Partial<LiveRunMeta> = {}) {
   const ledger = new InMemoryRunLedger(() => 123);
   const store = new InMemoryRunStore({ now: () => 200 });
   const saved = await ledger.receiveSourceEvent({
@@ -79,12 +80,24 @@ async function fixture(fold = false) {
       threadKey: owner.threadKey,
       repo: task.repo,
       pr: task.pr,
+      ...taskFields,
     },
   });
   await ledger.setState(owner.runId, "g1", { orchestratorDecisions: [decision] });
   const root = (await ledger.listLive())[0]!;
-  const read = () => readSourceInputProof(reference, { ledger });
-  return { ledger, store, reference, message, record, root, decision, read };
+  const read = () => readSourceInputProof(reference, { ledger, runStore: store });
+  const archive = async () => {
+    const snapshot = captureSourceTaskSnapshot(root);
+    expect(snapshot).toMatchObject({ version: 1, owner: { runId: "root" } });
+    expect(await ledger.setState("root", "g1", { ...root.state, sourceTask: snapshot })).toEqual({ ok: true });
+    expect(await ledger.finish("root", "g1", { ...archived(root), headSha: "b".repeat(40) })).toMatchObject({
+      ok: true,
+      stored: true,
+    });
+    await store.put(ledger.finished.get("root")!);
+    expect(await store.get("root")).toMatchObject({ sourceTask: { version: 1 } });
+  };
+  return { ledger, store, reference, message, record, root, decision, read, archive };
 }
 function archived(root: LiveRunRow): RunRecord {
   return {
@@ -111,6 +124,30 @@ function archived(root: LiveRunRow): RunRecord {
 }
 
 describe("canonical source input proof", () => {
+  it.each([false, true])(
+    "reads notice/fold=%s from an archive only with acknowledged original task data",
+    async (fold) => {
+      const f = await fixture(fold, {
+        ref: "accepted-branch",
+        baseRef: "main",
+        headSha: "a".repeat(40),
+        operationTarget: { repo: "fixture/api", ref: "accepted-branch" },
+      });
+      await f.archive();
+      expect(await f.read()).toEqual({
+        kind: "consistent",
+        message: f.message,
+        task: {
+          ...task,
+          ref: "accepted-branch",
+          baseRef: "main",
+          headSha: "a".repeat(40),
+          operationTarget: { repo: "fixture/api", ref: "accepted-branch" },
+        },
+      });
+      expect((await f.store.get("root"))?.headSha).toBe("b".repeat(40));
+    },
+  );
   it.each([false, true])("reconstructs notice/fold=%s from the stored event and original root", async (fold) => {
     const f = await fixture(fold);
     expect(await f.read()).toEqual({ kind: "consistent", message: f.message, task });
@@ -160,7 +197,7 @@ describe("canonical source input proof", () => {
   });
   it("does not replace malformed live proof with an older valid archive", async () => {
     const f = await fixture();
-    await f.store.put(archived(f.root));
+    await f.archive();
     const invalid = structuredClone(f.root);
     invalid.meta.agent = "review";
     vi.spyOn(f.ledger, "listLive").mockResolvedValue([invalid]);
@@ -183,7 +220,7 @@ describe("canonical source input proof", () => {
   });
   it("holds ambiguous or unsafe live identities instead of using an archive", async () => {
     const f = await fixture();
-    await f.store.put(archived(f.root));
+    await f.archive();
     const live = vi.spyOn(f.ledger, "listLive").mockResolvedValue([f.root, f.root]);
     expect(await f.read()).toEqual({ kind: "held", reason: "root-unproved" });
     let reads = 0;

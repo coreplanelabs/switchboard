@@ -1,3 +1,4 @@
+import { sameSourceTaskSnapshot } from "../../src/core/references/sourceTaskSnapshot.js";
 import type { StorageOperation } from "../../src/core/storageRequestContext.js";
 import {
   validUnitGroupIds,
@@ -6669,10 +6670,15 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.withInputGate("archiveCheckpoint", record.id, async (observe) => {
       await this.recoverPendingCheckpoint(record.id, observe);
       const live = this.liveRow(record.id);
-      for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
+      for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline", "sourceTask"] as const) {
         const canonical = live?.state[field];
         if (canonical === undefined) continue;
-        if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
+        if (
+          record[field] !== undefined &&
+          (field === "sourceTask"
+            ? !sameSourceTaskSnapshot(record[field], canonical)
+            : JSON.stringify(record[field]) !== JSON.stringify(canonical))
+        )
           throw new CanonicalArchiveRefusal("work evidence is not canonical");
         record = { ...record, [field]: structuredClone(canonical) };
       }
@@ -7605,6 +7611,11 @@ export class RunHistoryDO extends DurableObject<Env> {
     );
     if (!restoredChecks) return undefined;
     if (restoredChecks.checks !== undefined) incoming = { ...incoming, checkExecutions: restoredChecks.checks };
+    if (evidence?.sourceTask !== undefined) {
+      const retainedTask = preserveCheckpointState({ sourceTask: evidence.sourceTask }, incoming);
+      if (!retainedTask || !workEvidenceBelongsToRun(retainedTask, owner)) return undefined;
+      incoming = retainedTask;
+    }
     const baseline =
       evidence && Object.hasOwn(evidence, "branchIdentityBaseline")
         ? evidence.branchIdentityBaseline
@@ -8051,7 +8062,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         const state =
           restored && preserveCheckpointState(existing?.runId === req.runId ? existing.state : {}, restored);
         if (!state) throw new Error("checkpoint state is immutable");
-        if (!workEvidenceBelongsToRun(state, { id: req.runId, ...req.meta }))
+        if (!workEvidenceBelongsToRun(state, { id: req.runId, ...req.meta }, req.meta))
           throw new Error("work evidence does not match its canonical run");
         req = { ...req, state };
         out = decideClaim(
@@ -8316,7 +8327,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       if (
         !preserveCheckpointState(row.state, assignment.statePatch ?? {}) ||
-        !workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta })
+        !workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta }, row.meta)
       ) {
         out = { ok: false, reason: "fenced" };
         return;
@@ -8434,7 +8445,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         state = restored;
         const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
         const preserved = preserveCheckpointState(row.state, state, mintSeed);
-        if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }))
+        if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }, row.meta))
           return { ok: false, reason: "fenced" };
         // A retry may follow a committed write with a lost RPC reply. An exact
         // current snapshot needs no mutation; a moved prior state is never reset.
@@ -8893,6 +8904,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         return;
       }
       if (row) this.checkWorkspaceFinishCapacity(row, record);
+      if (record.sourceTask !== undefined && !sameSourceTaskSnapshot(record.sourceTask, row?.state.sourceTask)) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
       if (
         allocation?.allocation &&
         row &&
@@ -10537,6 +10552,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         stored,
       );
       if (!canonicalWork) throw new Error("original branch identity baseline is immutable");
+      if (stored.sourceTask !== undefined && !sameSourceTaskSnapshot(stored.sourceTask, canonicalWork.sourceTask))
+        throw new Error("source task evidence is not canonical");
       // Terminal outcome and cost do not depend on a process-local publication
       // acknowledgment. Only saved producer state can authorize branch release.
       const canonicalDoor = liveWork
@@ -10578,7 +10595,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(stored.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
       )
         throw new Error("unit seed receipt is not canonical");
-      for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
+      for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline", "sourceTask"] as const) {
         if (stored[field] === undefined && canonicalWork[field] !== undefined)
           Object.assign(stored, { [field]: structuredClone(canonicalWork[field]) });
       }
@@ -10587,6 +10604,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           workReads: stored.workReads,
           unitSeedReceipt: stored.unitSeedReceipt,
           branchIdentityBaseline: stored.branchIdentityBaseline,
+          sourceTask: stored.sourceTask,
         })
       )
         throw new Error("work evidence is not canonical");
@@ -10598,6 +10616,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         workReads,
         unitSeedReceipt,
         branchIdentityBaseline,
+        sourceTask,
         contextCheckpointReceipt,
         directAudience,
         ...summary
@@ -10610,6 +10629,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         workReads === undefined &&
         unitSeedReceipt === undefined &&
         branchIdentityBaseline === undefined &&
+        sourceTask === undefined &&
         !(branchPublication === undefined && canonicalWork.branchPublication !== undefined) &&
         Object.keys(unreadablePush).length === 0 &&
         Object.keys(unreadableReview).length === 0 &&
@@ -10625,6 +10645,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               workReads,
               unitSeedReceipt,
               branchIdentityBaseline,
+              sourceTask,
               ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
                 ? { branchPublication: canonicalWork.branchPublication }
                 : {}),
@@ -10646,6 +10667,8 @@ export class RunHistoryDO extends DurableObject<Env> {
                   : {}),
               }),
             );
+      if (sourceTask !== undefined && bytes > MAX_RECORD_BYTES)
+        throw new Error("source task evidence exceeds record byte limit");
       if (checkArchive !== undefined && bytes > MAX_RECORD_BYTES)
         throw new Error("check evidence exceeds record byte limit");
       const existing = this.sql
@@ -11281,6 +11304,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     let workReads: unknown;
     let unitSeedReceipt: unknown;
     let branchIdentityBaseline: unknown;
+    let sourceTask: unknown;
     let contextCheckpointReceipt: unknown;
     let directAudience: unknown;
     try {
@@ -11307,6 +11331,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         workReads = (evidence as { workReads?: unknown }).workReads;
         unitSeedReceipt = (evidence as { unitSeedReceipt?: unknown }).unitSeedReceipt;
         branchIdentityBaseline = evidence.branchIdentityBaseline;
+        sourceTask = evidence.sourceTask;
       }
 
       contextCheckpointReceipt =
@@ -11328,6 +11353,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       ...(workReads === undefined ? {} : { workReads }),
       ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
       ...(branchIdentityBaseline === undefined ? {} : { branchIdentityBaseline }),
+      ...(sourceTask === undefined ? {} : { sourceTask }),
       ...(contextCheckpointReceipt === undefined ? {} : { contextCheckpointReceipt }),
       ...(directAudience === undefined ? {} : { directAudience }),
     };
@@ -11770,6 +11796,7 @@ function parseWorkEvidence(value: unknown, owner: RunWorkOwner): Record<string, 
         field !== "workReads" &&
         field !== "unitSeedReceipt" &&
         field !== "branchIdentityBaseline" &&
+        field !== "sourceTask" &&
         field !== "branchPublication" &&
         field !== "reviewPublication" &&
         field !== "branchPushReceipts" &&

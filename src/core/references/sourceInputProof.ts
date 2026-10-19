@@ -1,4 +1,6 @@
 import type { RunLedger } from "../runLedger/ledger.js";
+import type { RunStore } from "../runStore.js";
+import { sourceTaskSnapshotOf } from "./sourceTaskSnapshot.js";
 import { sourceSnapshot } from "../runLedger/sourceEvents.js";
 import { sourceEvidenceMessageFromRecord, type CommonSourceEvidenceMessage } from "../runLedger/sourceEvidence.js";
 import { orchestratorDecisionsOf, sourceRunTask } from "../dispatch/orchestratorDecisions.js";
@@ -31,8 +33,9 @@ const body = (value: unknown) => (object(value) ? json({ event: value.event, rec
 
 function rootProof(value: unknown, reference: SourceInputReference) {
   if (!object(value)) return;
-  const meta = value.meta;
-  const runId = value.runId;
+  const live = Object.hasOwn(value, "meta");
+  const meta = live ? value.meta : value;
+  const runId = live ? value.runId : value.id;
   if (
     !object(meta) ||
     runId !== reference.root.runId ||
@@ -52,7 +55,13 @@ function rootProof(value: unknown, reference: SourceInputReference) {
     parentInstanceId: meta.parentInstanceId,
   });
   if (!owner) return;
-  const decisions = object(value.state) ? value.state.orchestratorDecisions : undefined;
+  const savedTask = live ? undefined : sourceTaskSnapshotOf(value.sourceTask);
+  if (!live && (!savedTask || json(savedTask.owner) !== json(owner))) return;
+  const decisions = live
+    ? object(value.state)
+      ? value.state.orchestratorDecisions
+      : undefined
+    : value.orchestratorDecisions;
   const routing = reference.routing;
   const selected =
     routing.kind === "fold"
@@ -60,15 +69,15 @@ function rootProof(value: unknown, reference: SourceInputReference) {
       : undefined;
   return {
     owner,
-    task: sourceRunTask(meta),
+    task: savedTask?.task ?? sourceRunTask(meta),
     decision: selected?.version === 2 ? selected : null,
   };
 }
 
 /** Compare a saved reference with canonical data through the existing stores.
- * Only live roots retain this complete task projection. Archives stay held
- * until an exact source-task snapshot is retained; finished workspace output
- * cannot stand in for an original task. Source events
+ * Archives require an exact retained task snapshot; finished workspace output
+ * cannot stand in for an original task. Malformed live proof never falls back
+ * to an archive. Source events
  * are immutable; job progress is not part of their identity. Recheck their
  * body and the root's selected task/decision after asynchronous hashing.
  * This does not check accessHash, current permission, destination audience,
@@ -77,6 +86,7 @@ export async function readSourceInputProof(
   value: unknown,
   deps: {
     ledger: Pick<RunLedger, "readSourceEvent" | "listLive">;
+    runStore?: Pick<RunStore, "get">;
   },
 ): Promise<SourceInputProof> {
   const reference = sourceInputReferenceOf(value);
@@ -84,6 +94,7 @@ export async function readSourceInputProof(
   try {
     const readSource = deps.ledger.readSourceEvent?.bind(deps.ledger);
     const readLive = deps.ledger.listLive.bind(deps.ledger);
+    const readArchive = deps.runStore?.get.bind(deps.runStore);
     if (!readSource) return held("source-unproved");
     const readRoot = async () => {
       const rows = await readLive();
@@ -96,8 +107,9 @@ export async function readSourceInputProof(
         if (!id || !Object.hasOwn(id, "value") || typeof id.value !== "string") return;
         if (id.value === reference.root.runId) matching.push(row);
       }
-      if (matching.length !== 1) return;
-      return rootProof(sourceSnapshot(matching[0]), reference);
+      if (matching.length > 1) return;
+      const selected = matching.length === 1 ? matching[0] : await readArchive?.(reference.root.runId);
+      return selected ? rootProof(sourceSnapshot(selected), reference) : undefined;
     };
     const stored = await readSource(reference.receipt.key);
     if (!stored) return held("source-unproved");
