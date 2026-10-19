@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryArtifactStore, R2ArtifactStore } from "../artifacts/store.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
 import { MAX_READ_BYTES } from "../execution/binaryRead.js";
-import type { Executor } from "../execution/executor.js";
+import type { ExecResult, Executor } from "../execution/executor.js";
 import { Secret } from "../secrets.js";
 import { attachFileTool, MAX_ARTIFACT_BYTES, parsePutReport, type UploadTicketCapability } from "./attach.js";
 import { TOOLSETS } from "./toolsets.js";
@@ -12,6 +12,8 @@ import { ConsoleIO } from "../cli.js";
 import { HttpIO } from "../channels/http.js";
 import { McpIO } from "../channels/mcp.js";
 import type { ChannelIO } from "../core/types.js";
+import { ToolRecovery } from "../core/harness/toolRecovery.js";
+import { runRelayedTool, type LiveHarness } from "../core/harness/pi/relay.js";
 
 // Feature: docs/reference/specs/agent-coding.md item 10 — a run's screenshot
 // reaches the person: `attach_file` reads the workspace file as bytes off the
@@ -43,6 +45,26 @@ function attaching(fail?: Error) {
   return { posted, attach };
 }
 
+function relaying(ctx: ToolContext) {
+  const recovery = new ToolRecovery();
+  const live: LiveHarness = {
+    runId: "r1",
+    tools: [attachFileTool],
+    toolContext: { ...ctx, recovery },
+    rules: { identity: "write", checkout: "/work" },
+    toolsBlocked: () => undefined,
+    emit: (event) => ctx.publish?.(event),
+    toolSpan: () => undefined,
+    gateSaw: () => {},
+  };
+  return {
+    recovery,
+    context: live.toolContext,
+    call: (id: string, path = "shots/page.png", input: Record<string, unknown> = {}) =>
+      runRelayedTool(live, { toolCallId: id, tool: "attach_file", input: { ...input, path } }),
+  };
+}
+
 describe("attach_file toolset wiring", () => {
   it("is in the coding (full) toolset only — a read-only or workspace-less agent never posts files", () => {
     const names = (key: string) => (TOOLSETS[key] ?? []).map((t) => t.name);
@@ -57,6 +79,56 @@ describe("attach_file toolset wiring", () => {
 });
 
 describe("attach_file", () => {
+  it("holds an inline upload whose callback throws after a remote effect", async () => {
+    const posted: string[] = [];
+    const f = relaying({
+      executor: executor({ "shots/page.png": png }),
+      attach: async (file) => {
+        posted.push(file.name);
+        throw new Error("API rejected after upload");
+      },
+    });
+    const result = await f.call("original-inline");
+    expect(f.recovery.snapshot().stopped).toEqual({ tool: "attach_file", attempts: 1, reason: "outcome_unknown" });
+    expect(() => f.recovery.throwIfStopped()).toThrow("Further model calls were blocked");
+    expect(result).toEqual({
+      isError: true,
+      content: [
+        { type: "text", text: "error: the upload of page.png has an unknown outcome: API rejected after upload" },
+      ],
+    });
+    expect(await f.call("replacement-inline")).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "Error: The attach_file outcome is unknown. Further model calls were blocked; the original operation remains held.",
+        },
+      ],
+    });
+    expect(posted).toEqual(["page.png"]);
+  });
+
+  it("allows correction after a missing upload capability before invocation", async () => {
+    const f = relaying({ executor: executor({ "shots/page.png": png }) });
+    expect(await f.call("no-capability")).toEqual({
+      isError: false,
+      content: [
+        {
+          type: "text",
+          text: "attach_file is not available here: this conversation's channel takes no file uploads — link to the file instead",
+        },
+      ],
+    });
+    const { posted, attach } = attaching();
+    f.context.attach = attach;
+    expect(await f.call("with-capability")).toEqual({
+      isError: false,
+      content: [{ type: "text", text: "attached page.png (7 bytes) to the conversation" }],
+    });
+    expect(posted).toEqual([{ name: "page.png", bytes: png, lead: "page.png" }]);
+    expect(f.recovery.stopped).toBeUndefined();
+  });
   it("posts the file's bytes under its own name with the comment as the lead", async () => {
     const { posted, attach } = attaching();
     const out = await attachFileTool.run(
@@ -112,10 +184,10 @@ describe("attach_file", () => {
     expect(posted).toEqual([]);
   });
 
-  it("a refused upload (a missing scope, an API error) is reported with the platform's message, never swallowed", async () => {
+  it("an upload callback error carries the platform's message and states that the outcome is unknown", async () => {
     const { attach } = attaching(new Error("An API error occurred: missing_scope"));
     const out = await attachFileTool.run({ path: "a.png" }, { executor: executor({ "a.png": png }), attach });
-    expect(out).toBe("error: the channel refused the upload of a.png: An API error occurred: missing_scope");
+    expect(out).toBe("error: the upload of a.png has an unknown outcome: An API error occurred: missing_scope");
   });
 });
 
@@ -133,7 +205,13 @@ describe("attach_file through the artifact store", () => {
    *  PUT lands the bytes in the in-memory store (as R2 would), the rest is scripted. */
   function storeExecutor(
     store: InMemoryArtifactStore,
-    over: { stat?: string; put?: string; post?: string; sizeInStore?: number } = {},
+    over: {
+      stat?: string;
+      put?: string;
+      post?: string;
+      sizeInStore?: number;
+      outcomes?: Partial<Record<"stat" | "put" | "post", Partial<ExecResult> | Error>>;
+    } = {},
   ) {
     const commands: Array<{ command: string; timeoutMs?: number }> = [];
     const log: string[] = [];
@@ -157,7 +235,18 @@ describe("attach_file through the artifact store", () => {
       }
       return `exit 127: unexpected command ${command}`;
     };
-    return { commands, log, executor: { exec, readFile: async () => "", writeFile: async () => "" } as Executor };
+    const execResult: NonNullable<Executor["execResult"]> = async (command, opts) => {
+      const stdout = await exec(command, opts);
+      const stage = command.startsWith("stat ") ? "stat" : command.startsWith("curl -fsS -T ") ? "put" : "post";
+      const outcome = over.outcomes?.[stage];
+      if (outcome instanceof Error) throw outcome;
+      return { stdout, stderr: "", exitCode: 0, truncated: false, ...outcome };
+    };
+    return {
+      commands,
+      log,
+      executor: { exec, execResult, readFile: async () => "", writeFile: async () => "" } as Executor,
+    };
   }
 
   function ticketing(log: string[], over: { mint?: Error; complete?: Error } = {}) {
@@ -191,6 +280,7 @@ describe("attach_file through the artifact store", () => {
     const tickets = ticketing(log);
     const replies: string[] = [];
     const events: RunEvent[] = [];
+    const failures: Array<{ code: string; recovery: string }> = [];
     let seq = 0;
     const ctx: ToolContext = {
       executor,
@@ -207,10 +297,184 @@ describe("attach_file through the artifact store", () => {
         log.push(e.type);
         events.push(e);
       },
+      reportToolFailure: (failure) => failures.push(failure),
       ...(over.remainingMs !== undefined ? { remainingMs: () => over.remainingMs! } : {}),
     };
-    return { store, commands, log, executor, tickets, replies, events, ctx };
+    return { store, commands, log, executor, tickets, replies, events, failures, ctx };
   }
+
+  it.each((["put", "post"] as const).flatMap((stage) => [28, 52, 56].map((exitCode) => [stage, exitCode] as const)))(
+    "holds a remote %s outcome after process exit %s and blocks another attachment",
+    async (stage, exitCode) => {
+      const h = harness({ outcomes: { [stage]: { exitCode, stdout: "200 0", stderr: "HTTP 403; zero bytes sent" } } });
+      const f = relaying(h.ctx);
+      const result = await f.call("original-upload");
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: expect.stringContaining("upload outcome is unknown") }],
+      });
+      expect(f.recovery.snapshot().stopped).toEqual({ tool: "attach_file", attempts: 1, reason: "outcome_unknown" });
+      expect(() => f.recovery.throwIfStopped()).toThrow("Further model calls were blocked");
+      expect(await f.call("replacement-upload")).toEqual({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Error: The attach_file outcome is unknown. Further model calls were blocked; the original operation remains held.",
+          },
+        ],
+      });
+      expect(h.log).toEqual(stage === "put" ? ["stat", "put"] : ["stat", "put", "artifact", "ticket", "post"]);
+      expect(await h.store.head("runs/r1/out/1-page.png")).toEqual({ size: SIZE, contentType: "image/png" });
+      expect(h.tickets.minted).toEqual(stage === "put" ? [] : [{ name: "page.png", size: SIZE }]);
+      expect(h.tickets.completed).toEqual([]);
+      expect(h.events).toEqual(
+        stage === "put"
+          ? []
+          : [
+              {
+                type: "artifact",
+                direction: "out",
+                key: "runs/r1/out/1-page.png",
+                name: "page.png",
+                size: SIZE,
+                contentType: "image/png",
+                callId: "original-upload",
+              },
+            ],
+      );
+    },
+  );
+
+  it.each(["stat", "precondition"] as const)(
+    "allows correction after a known %s failure before uploading",
+    async (stage) => {
+      const outcomes = { stat: { exitCode: stage === "stat" ? 28 : 0 } };
+      const h = harness({ outcomes });
+      const f = relaying(h.ctx);
+      const first = await f.call("before-upload", stage === "precondition" ? "" : "shots/page.png");
+      expect(first).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: expect.stringContaining(stage === "stat" ? "command exited with code 28" : "path is required"),
+          },
+        ],
+      });
+      expect(f.recovery.stopped).toBeUndefined();
+      outcomes.stat.exitCode = 0;
+      expect(await f.call("corrected-upload")).toEqual({
+        isError: false,
+        content: [{ type: "text", text: "attached page.png (3145728 bytes) to the conversation and the run page" }],
+      });
+      expect(h.tickets.completed).toEqual(["page.png"]);
+      expect(h.tickets.minted).toEqual([{ name: "page.png", size: SIZE }]);
+    },
+  );
+
+  it("holds a completion callback failure after a remote effect and preserves its verified artifact", async () => {
+    const h = harness();
+    const mint = h.ctx.uploadTicket!;
+    let remoteCompletions = 0;
+    h.ctx.uploadTicket = async (file) => {
+      const ticket = await mint(file);
+      return {
+        ...ticket,
+        complete: async (lead) => {
+          await ticket.complete(lead);
+          remoteCompletions++;
+          throw new Error("API rejected after sharing");
+        },
+      };
+    };
+    const f = relaying(h.ctx);
+    const result = await f.call("original-completion");
+    expect(f.recovery.snapshot().stopped).toEqual({ tool: "attach_file", attempts: 1, reason: "outcome_unknown" });
+    expect(() => f.recovery.throwIfStopped()).toThrow("Further model calls were blocked");
+    expect(result).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "error: completion of the upload of page.png has an unknown outcome: API rejected after sharing; the file is kept on the run page",
+        },
+      ],
+    });
+    expect(await f.call("replacement-completion")).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "Error: The attach_file outcome is unknown. Further model calls were blocked; the original operation remains held.",
+        },
+      ],
+    });
+    expect(remoteCompletions).toBe(1);
+    expect(h.tickets.minted).toEqual([{ name: "page.png", size: SIZE }]);
+    expect(h.tickets.completed).toEqual(["page.png"]);
+    expect(h.events).toEqual([
+      {
+        type: "artifact",
+        direction: "out",
+        key: "runs/r1/out/1-page.png",
+        name: "page.png",
+        size: SIZE,
+        contentType: "image/png",
+        callId: "original-completion",
+      },
+    ]);
+    expect(await h.store.head("runs/r1/out/1-page.png")).toEqual({ size: SIZE, contentType: "image/png" });
+    expect(h.log).toEqual(["stat", "put", "artifact", "ticket", "post", "complete"]);
+  });
+
+  it("holds a ticketless reply failure after a remote effect and preserves its verified artifact", async () => {
+    const replies: string[] = [];
+    const h = harness({
+      reply: async (text) => {
+        replies.push(text);
+        throw new Error("reply response lost");
+      },
+    });
+    delete h.ctx.uploadTicket;
+    const f = relaying(h.ctx);
+    const result = await f.call("original-reply");
+    expect(f.recovery.snapshot().stopped).toEqual({ tool: "attach_file", attempts: 1, reason: "outcome_unknown" });
+    expect(() => f.recovery.throwIfStopped()).toThrow("Further model calls were blocked");
+    expect(result).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "error: the file-link reply for page.png has an unknown outcome: reply response lost; the file is kept on the run page",
+        },
+      ],
+    });
+    expect(await f.call("replacement-reply")).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "Error: The attach_file outcome is unknown. Further model calls were blocked; the original operation remains held.",
+        },
+      ],
+    });
+    expect(replies).toEqual(["page.png\n📎 page.png (3145728 bytes) is on the run page as runs/r1/out/1-page.png"]);
+    expect(h.events).toEqual([
+      {
+        type: "artifact",
+        direction: "out",
+        key: "runs/r1/out/1-page.png",
+        name: "page.png",
+        size: SIZE,
+        contentType: "image/png",
+        callId: "original-reply",
+      },
+    ]);
+    expect(await h.store.head("runs/r1/out/1-page.png")).toEqual({ size: SIZE, contentType: "image/png" });
+    expect(h.log).toEqual(["stat", "put", "artifact"]);
+    expect(h.tickets.minted).toEqual([]);
+  });
 
   it("happy path: stat → presigned PUT → HEAD → artifact event → ticket → POST → complete, each command under the 20-minute cap, and the result names the size", async () => {
     const h = harness();
@@ -258,6 +522,162 @@ describe("attach_file through the artifact store", () => {
     expect(h.tickets.completed).toEqual(["page.png", "page.png"]); // the lead defaults to the name
   });
 
+  it("successful upload output cannot invent a command failure", async () => {
+    const h = harness({ post: "exit 22: example output", outcomes: { put: { stdout: "exit 22: example output" } } });
+    expect(await attachFileTool.run({ path: "shots/page.png" }, h.ctx)).toBe(
+      "attached page.png (3145728 bytes) to the conversation and the run page",
+    );
+    expect(h.tickets.completed).toEqual(["page.png"]);
+  });
+
+  it.each([
+    ...(["stat", "put", "post"] as const).flatMap((stage) =>
+      (["lost_reply", "unverifiable_result", "truncated_output"] as const).map((reason) => [stage, reason] as const),
+    ),
+    ...(["put", "post"] as const).map((stage) => [stage, "upload_outcome_unknown"] as const),
+  ])("records one bounded %s refusal for %s without private data", async (stage, reason) => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const outcome =
+        reason === "lost_reply"
+          ? new Error("Bearer abcdefghijklmnopqrstuvwxyz /private/path")
+          : reason === "upload_outcome_unknown"
+            ? {
+                exitCode: 56,
+                stdout: "HTTP 403; zero bytes sent",
+                stderr: "Bearer abcdefghijklmnopqrstuvwxyz /private/path",
+              }
+            : reason === "unverifiable_result"
+              ? { exitCode: Number.NaN, stderr: "private output" }
+              : { truncated: true, stderr: "private output" };
+      const h = harness({ outcomes: { [stage]: outcome } });
+      h.ctx.callId = "private/path?token=not-logged";
+      const result = await attachFileTool.run({ path: "shots/page.png" }, h.ctx);
+      expect(result).toContain(
+        reason === "lost_reply"
+          ? "command outcome is unknown"
+          : reason === "upload_outcome_unknown"
+            ? "upload outcome is unknown"
+            : reason === "unverifiable_result"
+              ? "command result could not be verified"
+              : "command output was truncated",
+      );
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        {
+          event: "attachment_command_refused",
+          tool: "attach_file",
+          stage,
+          reason,
+          callIdHash: "6754846e778738038b288a07da905b54aa7723595c7ec80992df4336de75577e",
+          ...(reason === "upload_outcome_unknown" ? { exitCode: 56 } : {}),
+        },
+      ]);
+      expect(JSON.stringify(log.mock.calls)).not.toMatch(
+        /private|Bearer|abcdefghijklmnopqrstuvwxyz|page\.png|not-logged/,
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("successful commands and failed stat emit no uncertain-refusal signal", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await attachFileTool.run({ path: "shots/page.png" }, harness().ctx)).toBe(
+        "attached page.png (3145728 bytes) to the conversation and the run page",
+      );
+      expect(
+        await attachFileTool.run({ path: "shots/page.png" }, harness({ outcomes: { stat: { exitCode: 7 } } }).ctx),
+      ).toContain("command exited with code 7");
+      expect(log.mock.calls).toEqual([]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it.each(["stat", "put", "post"] as const)(
+    "uses the %s exit code even when output looks successful",
+    async (stage) => {
+      const h = harness({ outcomes: { [stage]: { exitCode: 7 } } });
+      expect(await attachFileTool.run({ path: "shots/page.png" }, h.ctx)).toContain("command exited with code 7");
+      expect(h.log).toEqual(
+        stage === "stat" ? ["stat"] : stage === "put" ? ["stat", "put"] : ["stat", "put", "artifact", "ticket", "post"],
+      );
+      expect(h.tickets.completed).toEqual([]);
+    },
+  );
+
+  it.each(["stat", "put", "post"] as const)("refuses incomplete %s output without retrying", async (stage) => {
+    const h = harness({ outcomes: { [stage]: { truncated: true } } });
+    const result = await attachFileTool.run({ path: "shots/page.png" }, h.ctx);
+    expect(result).toContain("command output was truncated");
+    expect(h.log).toEqual(
+      stage === "stat" ? ["stat"] : stage === "put" ? ["stat", "put"] : ["stat", "put", "artifact", "ticket", "post"],
+    );
+    expect(h.tickets.completed).toEqual([]);
+    expect(h.failures).toEqual(stage === "stat" ? [] : [{ code: "outcome_unknown", recovery: "stop" }]);
+    if (stage === "post") {
+      expect(result).toContain("the file is kept on the run page");
+      expect(h.events).toEqual([
+        {
+          type: "artifact",
+          direction: "out",
+          key: "runs/r1/out/1-page.png",
+          name: "page.png",
+          size: SIZE,
+          contentType: "image/png",
+          callId: "toolu_attach_1",
+        },
+      ]);
+    }
+  });
+
+  it.each(["put", "post"] as const)(
+    "holds an uncertain %s upload after one send and redacts its error",
+    async (stage) => {
+      const h = harness({ outcomes: { [stage]: new Error("lost response: Bearer abcdefghijklmnopqrstuvwxyz") } });
+      const result = await attachFileTool.run({ path: "shots/page.png" }, h.ctx);
+      expect(result).toContain("command outcome is unknown: lost response: Bearer «redacted»");
+      expect(result).not.toContain("abcdefghijklmnopqrstuvwxyz");
+      expect(h.log).toEqual(stage === "put" ? ["stat", "put"] : ["stat", "put", "artifact", "ticket", "post"]);
+      expect(await h.store.head("runs/r1/out/1-page.png")).toEqual({ size: SIZE, contentType: "image/png" });
+      expect(h.tickets.completed).toEqual([]);
+      expect(h.failures).toEqual([{ code: "outcome_unknown", recovery: "stop" }]);
+      if (stage === "post") expect(result).toContain("the file is kept on the run page");
+    },
+  );
+
+  it("refuses a missing structured executor before measuring or minting", async () => {
+    const h = harness();
+    delete h.executor.execResult;
+    expect(await attachFileTool.run({ path: "shots/page.png" }, h.ctx)).toBe(
+      "error: attach_file requires structured command outcomes",
+    );
+    expect(h.log).toEqual([]);
+  });
+
+  it.each(["put", "post"] as const)("holds an invalid %s upload result after one send", async (stage) => {
+    const h = harness({ outcomes: { [stage]: { exitCode: Number.NaN } } });
+    expect(await attachFileTool.run({ path: "shots/page.png" }, h.ctx)).toContain(
+      "command result could not be verified",
+    );
+    expect(h.failures).toEqual([{ code: "outcome_unknown", recovery: "stop" }]);
+    expect(h.log).toEqual(stage === "put" ? ["stat", "put"] : ["stat", "put", "artifact", "ticket", "post"]);
+    expect(h.tickets.completed).toEqual([]);
+  });
+
+  it.each([undefined, { stdout: "3145728", stderr: "", truncated: false }])(
+    "refuses malformed structured results before using their output: %j",
+    async (result) => {
+      const h = harness();
+      h.executor.execResult = async () => result as ExecResult;
+      expect(await attachFileTool.run({ path: "shots/page.png" }, h.ctx)).toBe(
+        "error: could not read shots/page.png: command result could not be verified",
+      );
+      expect(h.log).toEqual([]);
+    },
+  );
+
   it("a HEAD that answers a different size stops the chain: no ticket, no complete, no event; both sizes and curl's own report named", async () => {
     const h = harness({ sizeInStore: 1024 });
     const out = await attachFileTool.run({ path: "shots/page.png" }, h.ctx);
@@ -277,31 +697,34 @@ describe("attach_file through the artifact store", () => {
     );
     expect(parsePutReport("")).toBeNull();
     expect(parsePutReport("\n200 119")).toEqual({ httpCode: 200, sentBytes: 119 });
-    expect(parsePutReport("some body\n200 0\n")).toEqual({ httpCode: 200, sentBytes: 0 });
+    expect(parsePutReport("some body\n200 0\n")).toBeNull();
   });
 
   it("a failed PUT carries curl's words; nothing is verified, recorded or minted", async () => {
-    const h = harness({ put: "exit 22:\ncurl: (22) The requested URL returned error: 403" });
+    const h = harness({ put: "curl: (22) The requested URL returned error: 403", outcomes: { put: { exitCode: 22 } } });
     const out = await attachFileTool.run({ path: "shots/page.png" }, h.ctx);
     expect(out).toBe(
-      "error: the upload of page.png to the artifact store failed: exit 22:\ncurl: (22) The requested URL returned error: 403",
+      "error: the upload of page.png to the artifact store failed: command exited with code 22: curl: (22) The requested URL returned error: 403; upload outcome is unknown",
     );
     expect(h.log).toEqual(["stat", "put"]);
     expect(h.events).toEqual([]);
   });
 
   it("a failed POST to the channel keeps the store copy and its event: no complete, curl's words and where the file is", async () => {
-    const h = harness({ post: "exit 56:\ncurl: (56) Recv failure: Connection reset by peer" });
+    const h = harness({
+      post: "curl: (56) Recv failure: Connection reset by peer",
+      outcomes: { post: { exitCode: 56 } },
+    });
     const out = await attachFileTool.run({ path: "shots/page.png" }, h.ctx);
     expect(out).toBe(
-      "error: the upload of page.png to the channel failed: exit 56:\ncurl: (56) Recv failure: Connection reset by peer; the file is kept on the run page",
+      "error: the upload of page.png to the channel failed: command exited with code 56: curl: (56) Recv failure: Connection reset by peer; upload outcome is unknown; the file is kept on the run page",
     );
     expect(h.log).toEqual(["stat", "put", "artifact", "ticket", "post"]);
     expect(h.tickets.completed).toEqual([]);
     expect(h.events).toHaveLength(1);
   });
 
-  it("a `complete` the channel refuses carries the platform's words; the event stands", async () => {
+  it("a completion callback error has an unknown outcome and carries the platform's words; the event stands", async () => {
     const store = new InMemoryArtifactStore({ bucket: "test" });
     const { log, executor } = storeExecutor(store);
     const tickets = ticketing(log, { complete: new Error("An API error occurred: file_not_found") });
@@ -315,7 +738,7 @@ describe("attach_file through the artifact store", () => {
     };
     const out = await attachFileTool.run({ path: "shots/page.png" }, ctx);
     expect(out).toBe(
-      "error: the channel refused to complete the upload of page.png: An API error occurred: file_not_found; the file is kept on the run page",
+      "error: completion of the upload of page.png has an unknown outcome: An API error occurred: file_not_found; the file is kept on the run page",
     );
     expect(events).toHaveLength(1);
   });
@@ -333,9 +756,12 @@ describe("attach_file through the artifact store", () => {
     expect(await attachFileTool.run({ path: "shots/page.png" }, ctx)).toBe(
       "error: the channel refused an upload ticket for page.png: An API error occurred: missing_scope; the file is kept on the run page",
     );
-    const missing = harness({ stat: "exit 1:\nstat: cannot statx 'shots/page.png': No such file or directory" });
+    const missing = harness({
+      stat: "stat: cannot statx 'shots/page.png': No such file or directory",
+      outcomes: { stat: { exitCode: 1 } },
+    });
     expect(await attachFileTool.run({ path: "shots/page.png" }, missing.ctx)).toBe(
-      "error: could not read shots/page.png: exit 1:\nstat: cannot statx 'shots/page.png': No such file or directory",
+      "error: could not read shots/page.png: command exited with code 1: stat: cannot statx 'shots/page.png': No such file or directory",
     );
     const empty = harness({ stat: "0\n" });
     expect(await attachFileTool.run({ path: "shots/page.png" }, empty.ctx)).toBe(
@@ -455,13 +881,13 @@ describe("attach_file through the artifact store", () => {
       clock: () => Date.UTC(2026, 8, 14),
     });
     const commands: string[] = [];
-    const exec: Executor["exec"] = async (command) => {
+    const execResult: NonNullable<Executor["execResult"]> = async (command) => {
       commands.push(command);
-      return command.startsWith("stat ") ? `${SIZE}\n` : "";
+      return { stdout: command.startsWith("stat ") ? `${SIZE}\n` : "", stderr: "", exitCode: 0, truncated: false };
     };
     const { uploadTicket } = ticketing([]);
     const ctx: ToolContext = {
-      executor: { exec, readFile: async () => "", writeFile: async () => "" },
+      executor: { exec: async () => "", execResult, readFile: async () => "", writeFile: async () => "" },
       callId: "toolu_attach_1",
       artifacts: { store, runId: "r1", nextSeq: () => 1, reply: async () => {} },
       uploadTicket,
@@ -501,13 +927,15 @@ describe("attach_file PR publication", () => {
       executor: {
         readFile: async () => "",
         writeFile: async () => "",
-        exec: async (command) => {
-          if (command.startsWith("stat ")) return String(bytes.length);
+        exec: async () => "",
+        execResult: async (command) => {
+          if (command.startsWith("stat "))
+            return { stdout: String(bytes.length), stderr: "", exitCode: 0, truncated: false };
           if (command.startsWith("curl -fsS -T ")) {
             const url = new URL(/'([^']+)'$/.exec(command)![1]);
             store.put(decodeURIComponent(url.pathname.slice(1)), bytes, "image/png");
           }
-          return "";
+          return { stdout: "", stderr: "", exitCode: 0, truncated: false };
         },
       },
       artifacts: {
@@ -527,6 +955,55 @@ describe("attach_file PR publication", () => {
     };
     return { ctx, store, order };
   }
+
+  it("holds a public copy failure after a remote effect and retains confirmed channel delivery", async () => {
+    const h = harness();
+    const publish = h.store.publishPrImage.bind(h.store);
+    let publicCopies = 0;
+    h.store.publishPrImage = async (key) => {
+      await publish(key);
+      publicCopies++;
+      throw new Error("copy response lost");
+    };
+    const events: RunEvent[] = [];
+    h.ctx.publish = (event) => void events.push(event);
+    const f = relaying(h.ctx);
+    const result = await f.call("original-publication", "page.png", { publishForPr: true });
+    expect(f.recovery.snapshot().stopped).toEqual({ tool: "attach_file", attempts: 1, reason: "outcome_unknown" });
+    expect(() => f.recovery.throwIfStopped()).toThrow("Further model calls were blocked");
+    expect(result).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: `error: attached page.png (${bytes.length} bytes) to the conversation and the run page; PR publication has an unknown outcome: copy response lost — no public PR image URL was returned`,
+        },
+      ],
+    });
+    expect(await f.call("replacement-publication", "page.png", { publishForPr: true })).toEqual({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "Error: The attach_file outcome is unknown. Further model calls were blocked; the original operation remains held.",
+        },
+      ],
+    });
+    expect(publicCopies).toBe(1);
+    expect(h.order).toEqual(["attached", "publish:runs/own-run/out/1-page.png"]);
+    expect(events).toEqual([
+      {
+        type: "artifact",
+        direction: "out",
+        key: "runs/own-run/out/1-page.png",
+        name: "page.png",
+        size: bytes.length,
+        contentType: "image/png",
+        callId: "original-publication",
+      },
+    ]);
+    expect(await h.store.head("runs/own-run/out/1-page.png")).toEqual({ size: bytes.length, contentType: "image/png" });
+  });
 
   it("explicit publication delivers to the thread first and returns an embeddable URL for only this call's outbound key", async () => {
     const h = harness();
@@ -550,7 +1027,7 @@ describe("attach_file PR publication", () => {
 
   it("refuses unauthorized, unbound, storeless, non-PNG and malformed publication requests without publishing", async () => {
     const h = harness(false);
-    h.ctx.executor.exec = async () => {
+    h.ctx.executor.execResult = async () => {
       throw new Error("unauthorized file read");
     };
     expect(await attachFileTool.run({ path: "page.png", publishForPr: true }, h.ctx)).toMatch(/error:.*permission/);
@@ -572,7 +1049,7 @@ describe("attach_file PR publication", () => {
 
   it("refuses an over-cap publication before uploading, and an attachment failure publishes nothing", async () => {
     const large = harness();
-    large.ctx.executor.exec = async () => "10485761";
+    large.ctx.executor.execResult = async () => ({ stdout: "10485761", stderr: "", exitCode: 0, truncated: false });
     expect(await attachFileTool.run({ path: "page.png", publishForPr: true }, large.ctx)).toMatch(/error:.*10485760/);
     expect(large.order).toEqual([]);
     const h = harness();
@@ -583,7 +1060,7 @@ describe("attach_file PR publication", () => {
       },
     });
     expect(await attachFileTool.run({ path: "page.png", publishForPr: true }, h.ctx)).toMatch(
-      /error: the channel refused/,
+      /error: completion of the upload of page.png has an unknown outcome/,
     );
     expect(h.order).toEqual([]);
   });
@@ -594,7 +1071,7 @@ describe("attach_file PR publication", () => {
       throw new Error("service unavailable");
     };
     const result = await attachFileTool.run({ path: "page.png", publishForPr: true }, h.ctx);
-    expect(result).toMatch(/error: attached page.png.*PR publication failed: service unavailable/);
+    expect(result).toMatch(/error: attached page.png.*PR publication has an unknown outcome: service unavailable/);
     expect(result).not.toContain("https:");
     expect(h.order).toEqual(["attached"]);
   });
