@@ -672,7 +672,7 @@ export class PiBridge {
       ...(exit.exitCode !== undefined ? { exitCode: exit.exitCode } : {}),
       ...prepareToolResult(text),
       ...(open?.span ? { spanId: open.span.id } : {}),
-      ...(cut ? { cut: true as const } : {}),
+      ...(cut || exit.unconfirmed || this.deps.recovery?.isOutcomeUnknown(callId) ? { cut: true as const } : {}),
     });
     open?.span?.end(ok ? "ok" : "error", {
       callId,

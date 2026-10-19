@@ -1183,6 +1183,13 @@ export class ResidentExecutor implements Executor {
       while (this.attachmentPending) await this.attachmentPending;
       if (this.attachmentFailure) throw this.attachmentFailure;
     }
+    // Preparation may outlive a stop. Refuse before the send boundary so
+    // cancellation cannot become an unknown command outcome without a send.
+    if (signal?.aborted) {
+      const failure = new ExecInfraError(`resident ${route}: stopped before request`, "aborted");
+      Object.defineProperty(failure, "cause", { value: signal.reason });
+      throw classifyError(failure, { kind: "transport" });
+    }
     let res: Response;
     try {
       // One `http.client` span under the caller's (docs/reference/specs/tracing.md item 21);
@@ -1229,7 +1236,10 @@ export class ResidentExecutor implements Executor {
       // exit): the runner counts these toward fail-fast. One decision for the
       // reason; the tracker's kind derives from it.
       const reason = infraReasonOfRequestFailure(err, signal);
-      throw classifyError(new ExecInfraError(requestFailedMessage("resident", route, err), reason), {
+      const failure = new ExecInfraError(requestFailedMessage("resident", route, err), reason);
+      if (route === "/exec") failure.commandOutcome = "unknown";
+      Object.defineProperty(failure, "cause", { value: err });
+      throw classifyError(failure, {
         kind: reason === "deadline-passed" ? "timeout" : "transport",
       });
     }
@@ -1680,7 +1690,8 @@ export class ResidentExecutor implements Executor {
    *  recycled since the last attach) is, on /exec, the typed
    *  `ExecSandboxRestartedError` at once — the word the pi harness keys on
    *  (harness-pi item 16) — before any recovery, so nothing the recovery
-   *  meets can hide it; the command may have started and is never re-issued.
+   *  meets can hide it. Runtime replacement may have started the command;
+   *  missing-worktree preflight proves no start. Neither is re-issued here.
    *  On the idempotent routes (/read, /write) a `runtime-replaced` re-attaches
    *  once — proving the new isolate serves this thread — and re-issues the op;
    *  two such answers with no success between them are infra (a flapping
@@ -1715,8 +1726,13 @@ export class ResidentExecutor implements Executor {
       );
     // The container under the thread is gone: on /exec the typed restart, now.
     const goneUnderThread = (data: Record<string, unknown>): void => {
-      if (route === "/exec" && saysContainerGone(data))
-        throw new ExecSandboxRestartedError(containerGoneMessage(String(data.error)), 0);
+      if (route === "/exec" && saysContainerGone(data)) {
+        const failure = new ExecSandboxRestartedError(containerGoneMessage(String(data.error)), 0);
+        // The exact worktree-missing/needs:attach reply comes from preflight,
+        // before the command starts. Runtime replacement can occur mid-command.
+        if (data.reason === "runtime-replaced") failure.commandOutcome = "unknown";
+        throw failure;
+      }
     };
     // The resident's own DO reset under the command while the container kept
     // running (a Worker deploy, item 43): on /exec the typed control reset at
@@ -1733,7 +1749,9 @@ export class ResidentExecutor implements Executor {
     // of the checks that follow.
     const controlResetUnderThread = (data: Record<string, unknown>): void => {
       if (!CONTROL_RESET_REISSUE_ROUTES.has(route) && saysControlReset(data))
-        throw new ExecControlResetError(String(data.error).trim());
+        throw Object.assign(new ExecControlResetError(String(data.error).trim()), {
+          commandOutcome: "unknown" as const,
+        });
     };
     // One wake budget per operation, bounding the PROBING (never an attach
     // request, which runs under the attach's own timeout): the wait for a
@@ -2260,10 +2278,25 @@ export class ResidentExecutor implements Executor {
       const failure = observationFailure
         ? new ExecInfraError(message, reason, "resident")
         : new ExecInfraError(message, reason);
+      // The memory gate returns this typed refusal before thread preflight
+      // or command dispatch. Display text alone cannot prove that phase.
+      const memoryRefused =
+        (status === 200 || status === 503) &&
+        data.reason === MEMORY_PRESSURE_REASON &&
+        data.status === 503 &&
+        data.cause === "system" &&
+        data.stdout === "" &&
+        data.exitCode === 127 &&
+        (data.truncated === undefined || data.truncated === false);
+      // Plain HTTP client refusals also precede dispatch. Other streamed or
+      // server failures have no terminal process receipt.
+      if ((status < 400 || status >= 500) && !memoryRefused) failure.commandOutcome = "unknown";
       throw classifyError(failure, { kind: "infra" });
     }
     if (status !== 200) {
-      throw classifyError(new ExecInfraError(`resident /exec HTTP ${status}`, residentAnswerReason(status, data)), {
+      const failure = new ExecInfraError(`resident /exec HTTP ${status}`, residentAnswerReason(status, data));
+      if (status < 400 || status >= 500) failure.commandOutcome = "unknown";
+      throw classifyError(failure, {
         kind: "http",
         code: String(status),
       });
@@ -2272,9 +2305,13 @@ export class ResidentExecutor implements Executor {
       typeof data.stdout !== "string" ||
       typeof data.stderr !== "string" ||
       !Number.isInteger(data.exitCode) ||
+      (data.exitCode as number) < 0 ||
+      (data.exitCode as number) > 255 ||
       typeof data.truncated !== "boolean"
     )
-      throw new ExecInfraError("resident /exec: invalid command result", "worker-unavailable");
+      throw Object.assign(new ExecInfraError("resident /exec: invalid command result", "worker-unavailable"), {
+        commandOutcome: "unknown" as const,
+      });
     return {
       stdout: data.stdout,
       stderr: data.stderr,

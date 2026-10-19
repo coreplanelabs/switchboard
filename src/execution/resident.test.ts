@@ -79,6 +79,220 @@ function stubFetch(...responses: Array<{ status?: number; body?: unknown; raw?: 
 const route = (c: { url: string }) => new URL(c.url).pathname;
 const sentBody = (c: { init: RequestInit }) => JSON.parse(String(c.init.body)) as Record<string, unknown>;
 
+describe("Resident command outcome custody", () => {
+  it.each(["exec", "execResult"] as const)(
+    "keeps a typed memory refusal known unstarted without replay (%s)",
+    async (method) => {
+      const { calls } = stubFetch({
+        body: {
+          error: "capacity refusal",
+          reason: "memory-pressure",
+          status: 503,
+          cause: "system",
+          state: "warm",
+          stateReason: "",
+          stdout: "",
+          stderr: "capacity refusal",
+          exitCode: 127,
+        },
+      });
+      const error = await new ResidentExecutor(OPTS)[method]("operation").catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(ExecInfraError);
+      expect((error as ExecInfraError).commandOutcome).toBeUndefined();
+      expect(calls.map(route)).toEqual(["/exec"]);
+    },
+  );
+  it.each([
+    {
+      error: "memory-pressure: display only",
+      status: 503,
+      cause: "system",
+      stdout: "",
+      stderr: "refusal",
+      exitCode: 127,
+    },
+    {
+      error: "capacity refusal",
+      reason: "memory-pressure",
+      status: 500,
+      cause: "system",
+      stdout: "",
+      stderr: "refusal",
+      exitCode: 127,
+    },
+    {
+      error: "capacity refusal",
+      reason: "memory-pressure",
+      cause: "system",
+      stdout: "",
+      stderr: "refusal",
+      exitCode: 127,
+    },
+    {
+      error: "capacity refusal",
+      reason: "memory-pressure",
+      status: 503,
+      cause: "system",
+      stdout: "command output",
+      stderr: "refusal",
+      exitCode: 127,
+    },
+    {
+      error: "capacity refusal",
+      reason: "memory-pressure",
+      status: 503,
+      cause: "system",
+      stdout: "",
+      stderr: "refusal",
+      exitCode: 0,
+    },
+  ])("keeps unproved memory-looking failures unknown: %j", async (body) => {
+    const { calls } = stubFetch({ body });
+    const error = await new ResidentExecutor(OPTS).execResult("operation").catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ commandOutcome: "unknown" });
+    expect(calls.map(route)).toEqual(["/exec"]);
+  });
+  it.each(["exec", "execResult"] as const)(
+    "keeps a proven missing-checkout refusal known unstarted (%s)",
+    async (method) => {
+      const { calls } = stubFetch({
+        body: { needs: "attach", status: 409, error: "worktree-missing: checkout absent before dispatch" },
+      });
+      const error = await new ResidentExecutor(OPTS)[method]("operation").catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(ExecSandboxRestartedError);
+      expect((error as ExecSandboxRestartedError).commandOutcome).toBeUndefined();
+      expect(calls.map(route)).toEqual(["/exec"]);
+    },
+  );
+  it.each(["exec", "execResult"] as const)("keeps a possible mid-command replacement unknown (%s)", async (method) => {
+    const { calls } = stubFetch({
+      body: { reason: "runtime-replaced", status: 409, error: "runtime replaced during command" },
+    });
+    const error = await new ResidentExecutor(OPTS)[method]("operation").catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(ExecSandboxRestartedError);
+    expect((error as ExecSandboxRestartedError).commandOutcome).toBe("unknown");
+    expect(calls.map(route)).toEqual(["/exec"]);
+  });
+  it.each([
+    ["before-start", "exec"],
+    ["before-start", "execResult"],
+    ["environment", "exec"],
+    ["environment", "execResult"],
+    ["attachment", "exec"],
+    ["attachment", "execResult"],
+  ] as const)("keeps %s cancellation known unstarted (%s)", async (phase, method) => {
+    const control = new AbortController();
+    const reason = new Error("owner stopped before send");
+    const calls: string[] = [];
+    let ready!: () => void;
+    let release!: () => void;
+    const preparing = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const prepared = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal("fetch", async (url: unknown, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      calls.push(path);
+      if (path === "/attach") {
+        ready();
+        await prepared;
+        return Response.json(ATTACH_OK);
+      }
+      init?.signal?.throwIfAborted();
+      return Response.json({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
+    });
+    const ex = new ResidentExecutor({
+      ...OPTS,
+      ...(phase === "environment"
+        ? {
+            resolveEnvs: async () => {
+              ready();
+              await prepared;
+              return {};
+            },
+          }
+        : {}),
+    });
+    const attachment = phase === "attachment" ? ex.attach() : undefined;
+    if (attachment) await preparing;
+    if (phase === "before-start") control.abort(reason);
+    const request = ex[method]("command", { signal: control.signal }).catch((failure: unknown) => failure);
+    if (phase === "environment") await preparing;
+    if (phase !== "before-start") control.abort(reason);
+    release();
+    await attachment;
+    const failure = await request;
+    expect(failure).toMatchObject({ reason: "aborted", cause: reason });
+    expect((failure as ExecInfraError).commandOutcome).toBeUndefined();
+    expect(calls).toEqual(phase === "attachment" ? ["/attach"] : []);
+    expect(await ex[method]("known command")).toEqual(
+      method === "exec" ? "ok" : { stdout: "ok", stderr: "", exitCode: 0, truncated: false },
+    );
+    expect(calls.at(-1)).toBe("/exec");
+  });
+  it.each(["exec", "execResult"] as const)("keeps cancellation after send unknown (%s)", async (method) => {
+    const control = new AbortController();
+    const reason = new Error("response lost after send");
+    const effects: string[] = [];
+    vi.stubGlobal("fetch", async () => {
+      effects.push("send");
+      control.abort(reason);
+      throw reason;
+    });
+    const failure = await new ResidentExecutor(OPTS)
+      [method]("write files", { signal: control.signal })
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({ reason: "aborted", commandOutcome: "unknown", cause: reason });
+    expect(effects).toEqual(["send"]);
+  });
+  it.each(["exec", "execResult"] as const)(
+    "keeps a possibly sent command unknown with its cause (%s)",
+    async (method) => {
+      const cause = new Error("response lost after execution");
+      const effects: string[] = [];
+      vi.stubGlobal("fetch", async () => {
+        effects.push("send");
+        throw cause;
+      });
+      const error = await new ResidentExecutor(OPTS)[method]("write files").catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ commandOutcome: "unknown", reason: "transport-lost", cause });
+      expect(effects).toEqual(["send"]);
+    },
+  );
+  it.each([
+    { body: { stdout: "exit 0", stderr: "", truncated: false } },
+    { body: { stdout: "exit 0", stderr: "", exitCode: -1, truncated: false } },
+    { body: { stdout: "exit 0", stderr: "", exitCode: 256, truncated: false } },
+    { body: { error: "command transport failed", exitCode: 127 } },
+    { status: 502, body: { error: "upstream lost" } },
+    { status: 409, body: { error: "control reset", reason: "control-reset" } },
+  ])("retains an unconfirmed result without replay: %j", async (reply) => {
+    const { calls } = stubFetch(reply);
+    const error = await new ResidentExecutor(OPTS).execResult("write files").catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ commandOutcome: "unknown" });
+    expect(calls.map(route)).toEqual(["/exec"]);
+  });
+  it("does not turn a known validation refusal or noncommand read failure into a command hold", async () => {
+    stubFetch({ status: 400, body: { error: "invalid command" } });
+    const refused = await new ResidentExecutor(OPTS).execResult("bad input").catch((failure: unknown) => failure);
+    expect(refused).toMatchObject({ message: "resident /exec: invalid command" });
+    expect((refused as ExecInfraError).commandOutcome).toBeUndefined();
+    stubFetch({ reject: "read transport lost" });
+    const read = await new ResidentExecutor(OPTS).readFile("a").catch((failure: unknown) => failure);
+    expect(read).toMatchObject({ reason: "transport-lost" });
+    expect((read as ExecInfraError).commandOutcome).toBeUndefined();
+    stubFetch({ body: { stdout: "exit 1: display", stderr: "", exitCode: 0, truncated: false } });
+    expect(await new ResidentExecutor(OPTS).execResult("true")).toEqual({
+      stdout: "exit 1: display",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    });
+  });
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -805,9 +1019,6 @@ describe("ResidentExecutor.readFile / writeFile", () => {
     // outside the set is the typed unknown outcome at once (`controlResetUnderThread`);
     // the re-issue block below it never states the fact again.
     expect(src).toMatch(/const CONTROL_RESET_REISSUE_ROUTES = new Set\(\["\/read", "\/write"\]\);/);
-    expect(src).toMatch(
-      /if \(!CONTROL_RESET_REISSUE_ROUTES\.has\(route\) && saysControlReset\(data\)\)\s*throw new ExecControlResetError/,
-    );
     expect(src).not.toMatch(/if \(!CONTROL_RESET_REISSUE_ROUTES\.has\(route\)\) throw/);
     expect(src).not.toMatch(/route === "\/exec" && saysControlReset\(data\)/);
     // The invariant is stated where the set is: /write is a full-content put.

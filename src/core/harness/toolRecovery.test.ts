@@ -1,6 +1,6 @@
 import { createCheckExecution } from "../checkExecution.js";
 import { humanReview } from "../testing/humanReview.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { validateToolArguments, type Tool } from "@earendil-works/pi-ai";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { runToolCall } from "@earendil-works/pi-agent-core";
@@ -9,6 +9,8 @@ import { authorizeToolCall, runRelayedTool, type LiveHarness } from "./pi/relay.
 import { RunBearerStore } from "../modelProxy/runBearers.js";
 import { createTracer } from "../trace/tracer.js";
 import { submitVerdictTool } from "../../tools/submit.js";
+import { diffDigestTool } from "../../tools/diffDigest.js";
+import { ResidentExecutor } from "../../execution/resident.js";
 import { runCheckTool } from "../../tools/check.js";
 import type { RunnableTool } from "../../tools/runnableTool.js";
 import { UncertainStoreError } from "../storeFailure.js";
@@ -20,6 +22,7 @@ import { InMemoryGithubApi, RestGithubApi } from "../../execution/githubApi.js";
 import { githubReadWithContext } from "../dispatch/githubReadContext.js";
 import { StreamableHttpMcpClient } from "../../mcp/client.js";
 import { bridgeMcpTools, newRunBudget } from "../../mcp/bridge.js";
+import { ExecCapacityError, ExecInfraError } from "../../execution/executor.js";
 
 function fixture(tools: RunnableTool[] = [submitVerdictTool], previous?: unknown) {
   const saved: unknown[] = [];
@@ -67,6 +70,86 @@ const badVerdict = {
 };
 
 describe("run-owned tool recovery", () => {
+  it.each([false, true])(
+    "keeps typed Resident memory refusal distinct from uncertain transport through the relay (typed: %s)",
+    async (typed) => {
+      const calls: string[] = [];
+      vi.stubGlobal("fetch", async (url: unknown) => {
+        calls.push(new URL(String(url)).pathname);
+        return Response.json({
+          error: "memory-pressure: refused",
+          ...(typed ? { reason: "memory-pressure" } : {}),
+          status: 503,
+          cause: "system",
+          state: "warm",
+          stateReason: "",
+          stdout: "",
+          stderr: "memory-pressure: refused",
+          exitCode: 127,
+        });
+      });
+      try {
+        const f = fixture([diffDigestTool]);
+        f.harness.toolContext.executor = new ResidentExecutor({
+          baseUrl: "https://resident.example",
+          token: "test",
+          resource: "repo:acme/api",
+          threadKey: "thread",
+        });
+        expect((await f.call("original", "diff_digest", {})).isError).toBe(true);
+        expect(f.recovery.hasUnconfirmedEffects).toBe(!typed);
+        expect(f.bearers.consumeTurn("r")).toEqual(
+          typed
+            ? { ok: true, turn: 1 }
+            : {
+                ok: false,
+                reason: "tool_recovery",
+                stop: { tool: "diff_digest", attempts: 1, reason: "outcome_unknown" },
+              },
+        );
+        expect(calls).toEqual(["/exec"]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+  it.each([false, true])(
+    "keeps Resident diff_digest phase facts through the relay (possibly executed: %s)",
+    async (unknown) => {
+      const calls: string[] = [];
+      vi.stubGlobal("fetch", async (url: unknown) => {
+        calls.push(new URL(String(url)).pathname);
+        return Response.json(
+          unknown
+            ? { reason: "runtime-replaced", status: 409, error: "runtime replaced during command" }
+            : { needs: "attach", status: 409, error: "worktree-missing: checkout absent before dispatch" },
+        );
+      });
+      try {
+        const f = fixture([diffDigestTool]);
+        f.harness.toolContext.executor = new ResidentExecutor({
+          baseUrl: "https://resident.example",
+          token: "test",
+          resource: "repo:acme/api",
+          threadKey: "thread",
+        });
+        expect((await f.call("original", "diff_digest", {})).isError).toBe(true);
+        expect(f.recovery.hasUnconfirmedEffects).toBe(unknown);
+        expect(f.bearers.consumeTurn("r")).toEqual(
+          unknown
+            ? {
+                ok: false,
+                reason: "tool_recovery",
+                stop: { tool: "diff_digest", attempts: 1, reason: "outcome_unknown" },
+              }
+            : { ok: true, turn: 1 },
+        );
+        expect(calls).toEqual(["/exec"]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
   it.each([
     "wrong id",
     "wrong version",
@@ -524,6 +607,165 @@ describe("run-owned tool recovery", () => {
     },
   );
 
+  it("holds an unknown command before another model or effect admission regardless of tool hints", async () => {
+    let effects = 0;
+    const cause = new Error("connection lost");
+    const failure = Object.assign(new ExecInfraError("exit 0: display only", "transport-lost"), {
+      commandOutcome: "unknown" as const,
+      cause,
+    });
+    const tool: RunnableTool = {
+      name: "external_operation",
+      description: "",
+      inputSchema: {},
+      sideEffectFree: true,
+      run: async () => {
+        effects++;
+        throw failure;
+      },
+    };
+    const f = fixture([tool]);
+    expect(await f.call("original", tool.name, {})).toEqual({
+      content: [{ type: "text", text: "Error: exit 0: display only" }],
+      isError: true,
+    });
+    expect(f.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: tool.name, attempts: 1, reason: "outcome_unknown" },
+    });
+    expect(authorizeToolCall(f.harness, { toolCallId: "next", tool: tool.name, input: {} })).toMatchObject({
+      allow: false,
+    });
+    await f.call("next", tool.name, {});
+    expect({
+      effects,
+      originalHeld: f.recovery.isOutcomeHeld("original"),
+      unrelatedHeld: f.recovery.isOutcomeHeld("other"),
+    }).toEqual({ effects: 1, originalHeld: true, unrelatedHeld: false });
+    expect(failure.cause).toBe(cause);
+  });
+
+  it("keeps ordinary reads and known pre-dispatch refusals correctable", async () => {
+    for (const error of [
+      new Error("file missing"),
+      new ExecCapacityError("not started"),
+      new ExecInfraError("noncommand read failed", "transport-lost"),
+    ]) {
+      const f = fixture([
+        {
+          name: "read",
+          description: "",
+          inputSchema: {},
+          run: async () => {
+            throw error;
+          },
+        },
+      ]);
+      expect((await f.call("read", "read", {})).isError).toBe(true);
+      expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+      expect(f.recovery.hasUnconfirmedEffects).toBe(false);
+    }
+  });
+
+  it("retains late unknown call identities before dedup and terminal guards", async () => {
+    const f = fixture();
+    await f.recovery.record("first", "read", {}, { text: "missing" });
+    await f.recovery.record("second", "read", {}, { text: "missing" });
+    const unknown = { text: "lost", detail: { code: "outcome_unknown" as const, recovery: "stop" as const } };
+    await Promise.all([
+      f.recovery.record("first", "write", {}, unknown),
+      f.recovery.record("concurrent", "write", {}, unknown),
+    ]);
+    await f.recovery.record("first", "write", {});
+    expect(f.recovery.stopped).toEqual({ tool: "write", attempts: 1, reason: "outcome_unknown" });
+    expect([
+      f.recovery.isOutcomeHeld("first"),
+      f.recovery.isOutcomeHeld("concurrent"),
+      f.recovery.isOutcomeHeld("other"),
+    ]).toEqual([true, true, false]);
+    const restored = fixture(undefined, f.saved.at(-1));
+    expect(restored.bearers.consumeTurn("r")).toMatchObject({ ok: false, reason: "tool_recovery" });
+    expect([restored.recovery.hasUnconfirmedEffects, restored.recovery.isOutcomeHeld("not-in-mirror")]).toEqual([
+      true,
+      true,
+    ]);
+    expect(Object.keys(restored.recovery.snapshot()).sort()).toEqual(["failures", "settled", "stopped", "version"]);
+  });
+
+  it.each([false, true])(
+    "keeps concurrent admitted effects held after a late result (unknown: %s)",
+    async (lateUnknown) => {
+      let finish!: () => void;
+      const late = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const admissions: string[] = [];
+      const tool: RunnableTool = {
+        name: "operation",
+        description: "",
+        inputSchema: {},
+        run: async (input) => {
+          admissions.push(String(input.order));
+          if (input.order === "late") {
+            await late;
+            if (!lateUnknown) return "known completion";
+          }
+          throw Object.assign(new ExecInfraError("response lost", "transport-lost"), { commandOutcome: "unknown" });
+        },
+      };
+      const f = fixture([tool]);
+      const original = f.call("first", tool.name, { order: "first" });
+      const concurrent = f.call("late", tool.name, { order: "late" });
+      expect((await original).isError).toBe(true);
+      finish();
+      expect((await concurrent).isError).toBe(lateUnknown);
+      await f.call("replacement", tool.name, { order: "replacement" });
+      expect(admissions).toEqual(["first", "late"]);
+      expect([f.recovery.isOutcomeHeld("first"), f.recovery.isOutcomeHeld("late")]).toEqual([true, lateUnknown]);
+      expect(f.bearers.consumeTurn("r")).toEqual({
+        ok: false,
+        reason: "tool_recovery",
+        stop: { tool: tool.name, attempts: 1, reason: "outcome_unknown" },
+      });
+    },
+  );
+
+  it("uses a broad hold at the identity limit and preserves checkpoint failure after a late unknown", async () => {
+    const unknown = { text: "lost", detail: { code: "outcome_unknown" as const, recovery: "stop" as const } };
+    const recovery = new ToolRecovery();
+    for (let i = 0; i <= 256; i++) await recovery.record("call" + i, "write", {}, unknown);
+    expect([recovery.hasUnconfirmedEffects, recovery.isOutcomeHeld("unlisted")]).toEqual([true, true]);
+    const full = new ToolRecovery();
+    for (let i = 0; i < 256; i++) await full.record("read" + i, "find", { path: i }, { text: "missing" });
+    await full.record("late-unknown", "write", {}, unknown);
+    expect(new ToolRecovery(full.snapshot()).hasUnconfirmedEffects).toBe(true);
+    const failed = new ToolRecovery(undefined, async () => false);
+    await failed.record("one", "write", {}, unknown);
+    await failed.record("two", "write", {}, unknown);
+    expect(failed.stopped).toEqual({ tool: "write", attempts: 1, reason: "checkpoint_unavailable" });
+    expect([failed.isOutcomeHeld("one"), failed.isOutcomeHeld("two"), failed.isOutcomeHeld("other")]).toEqual([
+      true,
+      true,
+      true,
+    ]);
+  });
+
+  it("retains unsupported checkpoint custody through two JSON restarts", () => {
+    const first = new ToolRecovery({ version: "unsupported" });
+    const second = new ToolRecovery(JSON.parse(JSON.stringify(first.snapshot())));
+    const third = fixture(undefined, JSON.parse(JSON.stringify(second.snapshot())));
+    expect([first.hasUnconfirmedEffects, second.hasUnconfirmedEffects, third.recovery.hasUnconfirmedEffects]).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(third.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "tool", attempts: 1, reason: "checkpoint_unavailable" },
+    });
+  });
   it.each(["source checkpoint", "current access"] as const)(
     "reports a refused GitHub %s as failure while keeping successful source text readable",
     async (failure) => {
@@ -1007,24 +1249,85 @@ describe("run-owned tool recovery", () => {
     expect(fixture(undefined, historical).bearers.consumeTurn("r")).toEqual({
       ok: false,
       reason: "tool_recovery",
-      stop: { tool: "tool", attempts: 1, reason: "unavailable" },
+      stop: { tool: "tool", attempts: 1, reason: "checkpoint_unavailable" },
     });
   });
 
   it("fails closed on refused checkpoints and malformed retained state", async () => {
+    expect([
+      new ToolRecovery().hasUnconfirmedEffects,
+      new ToolRecovery({ version: 1, failures: [] }).hasUnconfirmedEffects,
+    ]).toEqual([false, true]);
     const recovery = new ToolRecovery(undefined, async () => false);
     await recovery.record("one", "submit_verdict", {}, { text: "error: rejected" });
     expect(() => recovery.throwIfStopped()).toThrow("The submit_verdict recovery checkpoint could not be confirmed.");
     expect(() => new ToolRecovery({ version: 1, failures: [] }).throwIfStopped()).toThrow(
-      "The tool operation could not continue safely.",
+      "The tool recovery checkpoint could not be confirmed.",
     );
     expect(() => new ToolRecovery({ version: 1, failures: [], settled: [], stopped: false }).throwIfStopped()).toThrow(
-      "The tool operation could not continue safely.",
+      "The tool recovery checkpoint could not be confirmed.",
     );
   });
 });
 
 describe.each(["pi", "opencode"] as const)("native tool recovery — %s", (name) => {
+  it.each([
+    ["missing", undefined, false, undefined, true],
+    ["malformed", "0", false, undefined, true],
+    ["success", 0, true, 0, undefined],
+    ["failure", 2, false, 2, undefined],
+  ] as const)("retains native %s completion facts without optional recovery", (_kind, status, ok, exitCode, cut) => {
+    const events: RunEvent[] = [];
+    const deps = { clock: () => 1000, emit: (event: RunEvent) => void events.push(event) };
+    if (name === "pi") {
+      const bridge = new PiBridge(deps);
+      bridge.observe({
+        type: "tool_execution_start",
+        toolCallId: "original",
+        toolName: "bash",
+        args: { command: "operation" },
+      });
+      bridge.gateSaw("original");
+      bridge.observe({
+        type: "tool_execution_end",
+        toolCallId: "original",
+        toolName: "bash",
+        isError: !ok,
+        result: {
+          content: [{ type: "text", text: "exit 0: display only" }],
+          ...(status === undefined ? {} : { structuredContent: { exit_code: status } }),
+        },
+      });
+    } else {
+      const bridge = new OpenCodeBridge({
+        ...deps,
+        rules: { identity: "read", checkout: "/work" },
+        relayedToolNames: new Set(),
+        seedLength: 0,
+        remainingMs: () => 60000,
+      });
+      const event = (type: string, data: Record<string, unknown>) =>
+        bridge.observe({
+          feed: "event",
+          at: 1000,
+          event: { id: type, type, data: { sessionID: "s", id: "original", ...data } },
+        });
+      event("session.tool.input.started", { name: "shell" });
+      event("session.tool.called", { input: { command: "operation" }, executed: false });
+      bridge.gateSaw("original");
+      event("session.tool.success", {
+        executed: false,
+        content: [{ type: "text", text: "exit 0: display only" }],
+        ...(status === undefined ? {} : { metadata: { status: "completed", truncated: false, exit: status } }),
+      });
+    }
+    expect(
+      events
+        .filter((event) => event.type === "tool_result")
+        .map(({ callId, ok, exitCode, cut }) => ({ callId, ok, exitCode, cut })),
+    ).toEqual([{ callId: "original", ok, exitCode, cut }]);
+  });
+
   async function shellFailure(text: string, kind: "legacy" | "command" | "unknown", cut = false) {
     const f = fixture();
     const events: RunEvent[] = [];
@@ -1097,8 +1400,8 @@ describe.each(["pi", "opencode"] as const)("native tool recovery — %s", (name)
     for (const text of ["native tool failed", "exit 2: example output", "Command exited with code 2"])
       expect(await shellFailure(text, "legacy")).toEqual({
         results: [
-          { callId: "first", ok: false, cut: undefined },
-          { callId: "second", ok: false, cut: undefined },
+          { callId: "first", ok: false, cut: true },
+          { callId: "second", ok: false, cut: true },
         ],
         codes: [undefined, undefined],
         admission: {
@@ -1126,8 +1429,8 @@ describe.each(["pi", "opencode"] as const)("native tool recovery — %s", (name)
     for (const text of ["native tool failed", "exit 2: example output", "Command exited with code 2"])
       expect(await shellFailure(text, "unknown")).toEqual({
         results: [
-          { callId: "first", ok: false, cut: undefined },
-          { callId: "second", ok: false, cut: undefined },
+          { callId: "first", ok: false, cut: true },
+          { callId: "second", ok: false, cut: true },
         ],
         codes: [undefined, undefined],
         admission: {
@@ -1149,6 +1452,99 @@ describe.each(["pi", "opencode"] as const)("native tool recovery — %s", (name)
         admission: { ok: true, turn: 1 },
       });
   });
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+  ] as const)(
+    "separates exact unknown results from a restored custody hold (restored: %s, late: %s)",
+    async (restored, late) => {
+      const tool: RunnableTool = {
+        name: "operation",
+        description: "",
+        inputSchema: {},
+        run: async () => {
+          throw Object.assign(new ExecInfraError("answer lost", "transport-lost"), { commandOutcome: "unknown" });
+        },
+      };
+      const original = fixture([tool]);
+      const answer = await original.call("original", tool.name, {});
+      const f = restored ? fixture([tool], original.saved.at(-1)) : original;
+      const events: RunEvent[] = [];
+      const deps = {
+        clock: () => 1000,
+        emit: (event: RunEvent) => {
+          events.push(event);
+        },
+        recovery: f.recovery,
+      };
+      const pi = new PiBridge(deps);
+      const openCode = new OpenCodeBridge({
+        ...deps,
+        rules: f.harness.rules,
+        relayedToolNames: new Set([tool.name]),
+        seedLength: 0,
+        remainingMs: () => 60000,
+      });
+      const id = restored ? "known-history-B" : late ? "late-inflight" : "original";
+      if (late)
+        await f.recovery.record(
+          id,
+          tool.name,
+          {},
+          { text: "answer lost", detail: { code: "outcome_unknown", recovery: "stop" } },
+        );
+      if (name === "pi") {
+        if (restored) pi.judgeGate = false;
+        else pi.gateSaw(id);
+        pi.observe({ type: "tool_execution_start", toolCallId: id, toolName: tool.name, args: {} });
+        pi.observe({
+          type: "tool_execution_end",
+          toolCallId: id,
+          toolName: tool.name,
+          isError: restored ? false : answer.isError,
+          result: { content: restored ? [{ type: "text", text: "known completion" }] : answer.content },
+        });
+      } else {
+        if (restored) openCode.observing = "catching-up";
+        else openCode.gateSaw(id);
+        for (const [type, data] of [
+          ["session.tool.input.started", { name: tool.name }],
+          ["session.tool.called", { input: {} }],
+          [
+            restored ? "session.tool.success" : "session.tool.failed",
+            restored
+              ? { content: [{ type: "text", text: "known completion" }] }
+              : { error: { message: "answer lost" } },
+          ],
+        ] as const)
+          openCode.observe({
+            feed: "event",
+            at: 1000,
+            event: {
+              id: id + type,
+              type,
+              created: 1000,
+              data: { sessionID: "s", id, assistantMessageID: "m", ...data },
+            },
+          });
+      }
+      const result = events.find((event) => event.type === "tool_result");
+      expect(result).toMatchObject({
+        type: "tool_result",
+        callId: id,
+        ok: restored,
+      });
+      expect(result?.type === "tool_result" && result.cut === true).toBe(!restored);
+      expect(f.recovery.isOutcomeHeld(id)).toBe(true);
+      expect(f.bearers.consumeTurn("r")).toEqual({
+        ok: false,
+        reason: "tool_recovery",
+        stop: { tool: tool.name, attempts: 1, reason: "outcome_unknown" },
+      });
+      expect(f.recovery.hasUnconfirmedEffects).toBe(true);
+    },
+  );
   if (name === "pi")
     it("does not reclassify replayed lifecycle refusals after reconstruction", async () => {
       const saved = new ToolRecovery().snapshot();

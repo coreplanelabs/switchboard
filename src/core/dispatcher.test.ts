@@ -67,6 +67,8 @@ import { knownToolsFor, launchResumes, resumeMessage } from "./resumeLaunch.js";
 import { bindSlackContext } from "./dispatch/slackContextBinding.js";
 import { reclaimRuns } from "./boot.js";
 import { piRunPaths, RUN_BEARER_ENV } from "./harness/pi/process.js";
+import { legacySandboxCredentialScrub } from "../execution/legacySandboxCredentials.js";
+import { SANDBOX_CREDENTIAL_FILE } from "../execution/sandboxCredentials.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor, prepareColdPublicationCheckout } from "../execution/factory.js";
 import { TEST_GITHUB_CREDENTIALS } from "../execution/testing/githubCredentials.js";
@@ -5776,11 +5778,40 @@ describe("executor provisioning by agent resources", () => {
     vi.stubEnv("GITHUB_APP_ID", ""); // keep githubEnvs off the network
     const provider = capturingProvider();
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const probes: string[] = [];
+    const credentialPreparation = legacySandboxCredentialScrub(SANDBOX_CREDENTIAL_FILE);
+    const expected = [
+      credentialPreparation,
+      "git rev-parse HEAD",
+      "git rev-parse --abbrev-ref HEAD",
+      "git rev-parse @{u}",
+      "git remote get-url origin",
+      "git status --porcelain -uno",
+      "git rev-list --count HEAD --not --remotes",
+      "ls -d */.git 2>/dev/null",
+    ];
+    vi.stubGlobal("fetch", async (url: unknown, init?: RequestInit) => {
+      const endpoint = new URL(String(url));
+      const command = String(JSON.parse(String(init?.body)).command);
+      if (endpoint.host !== "sandbox.example" || endpoint.pathname !== "/exec" || !expected.includes(command))
+        throw new Error(`unexpected sandbox request: ${endpoint.pathname} ${command}`);
+      probes.push(command);
+      // This backend selection fixture has no cloned repository. The process
+      // did complete; it reports that absence with a terminal exit status.
+      return Response.json({
+        stdout: "",
+        stderr: "no repository",
+        exitCode: command === credentialPreparation ? 0 : command.startsWith("git ") ? 128 : 2,
+        truncated: false,
+      });
+    });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(replies).toContainEqual(expect.stringContaining("answer"));
     const { executor } = await vi.mocked(makeExecutor).mock.results[0].value;
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+    expect([...new Set(probes)]).toEqual(expected);
+    expect(probes.filter((command) => command === credentialPreparation)).toHaveLength(1);
   });
 });
 
@@ -6272,6 +6303,7 @@ function residentFetchStub(
 ) {
   const calls: Array<{ path: string; host: string; body?: Record<string, unknown> }> = [];
   let attachedSha = "abc";
+  let attachedRef = "main";
   let attachedWorkspace: string | undefined;
   const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
     const { pathname: path, host } = new URL(String(url));
@@ -6291,8 +6323,9 @@ function residentFetchStub(
       const answer = (await response
         .clone()
         .json()
-        .catch(() => undefined)) as { sha?: unknown; workspace?: unknown } | undefined;
+        .catch(() => undefined)) as { sha?: unknown; ref?: unknown; workspace?: unknown } | undefined;
       if (typeof answer?.sha === "string") attachedSha = answer.sha;
+      if (typeof answer?.ref === "string") attachedRef = answer.ref;
       attachedWorkspace = typeof answer?.workspace === "string" ? answer.workspace : undefined;
       return response;
     }
@@ -6305,28 +6338,36 @@ function residentFetchStub(
       );
       const comparison = comparisonResult(command);
       if (comparison) return Response.json({ ...comparison, cwd: attachedWorkspace });
-      if (
-        handlers.exec === undefined &&
-        !preparingBase &&
-        ![
-          "git rev-parse HEAD",
-          "git rev-parse --verify HEAD",
-          ...(attachedWorkspace === undefined
-            ? []
-            : [
-                `git -C ${shellQuote(attachedWorkspace)} rev-parse HEAD`,
-                `git -C ${shellQuote(attachedWorkspace)} rev-parse --verify HEAD`,
-              ]),
-        ].includes(String(body?.command))
-      ) {
-        throw new Error(`unexpected fetch: ${String(url)}`);
+      if (handlers.exec !== undefined) return handlers.exec(body ?? {});
+      if (preparingBase)
+        return Response.json({ stdout: `${attachedSha}\n`, stderr: "", exitCode: 0, truncated: false });
+      const outputs = new Map<string, { stdout: string; exitCode: number }>();
+      // This default fixture is a clean attached checkout with no remote
+      // branch proof. Only explicit observation commands receive results.
+      for (const git of [
+        "git",
+        ...(attachedWorkspace === undefined ? [] : [`git -C ${shellQuote(attachedWorkspace)}`]),
+      ]) {
+        for (const command of ["rev-parse HEAD", "rev-parse --verify HEAD"])
+          outputs.set(`${git} ${command}`, { stdout: `${attachedSha}\n`, exitCode: 0 });
+        outputs.set(`${git} rev-parse --abbrev-ref HEAD`, { stdout: `${attachedRef}\n`, exitCode: 0 });
+        outputs.set(`${git} rev-parse @{u}`, { stdout: "", exitCode: 128 });
+        outputs.set(`${git} rev-parse ${shellQuote(`${attachedRef}@{u}`)}`, { stdout: "", exitCode: 128 });
+        outputs.set(`${git} rev-parse ${shellQuote(`refs/heads/${attachedRef}`)}`, {
+          stdout: `${attachedSha}\n`,
+          exitCode: 0,
+        });
+        for (const suffix of ["", " -uno"])
+          outputs.set(`${git} status --porcelain${suffix}`, { stdout: "", exitCode: 0 });
+        outputs.set(`${git} rev-list --count HEAD --not --remotes`, { stdout: "0\n", exitCode: 0 });
+        outputs.set(`${git} ls-remote --exit-code origin ${shellQuote(`refs/heads/${attachedRef}`)}`, {
+          stdout: "",
+          exitCode: 2,
+        });
       }
-      return (
-        handlers.exec?.(body ?? {}) ??
-        new Response(JSON.stringify({ stdout: `${attachedSha}\n`, stderr: "", exitCode: 0, truncated: false }), {
-          status: 200,
-        })
-      );
+      const result = outputs.get(String(body?.command));
+      if (result === undefined) throw new Error(`unexpected fetch: ${String(url)}`);
+      return Response.json({ ...result, stderr: "", truncated: false });
     }
     throw new Error(`unexpected fetch: ${String(url)}`);
   });
@@ -6337,7 +6378,7 @@ function residentFetchStub(
 describe("resident admission fixture command boundary", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("answers exact acknowledged checkout HEAD reads and refuses foreign paths or other commands", async () => {
+  it("answers exact acknowledged checkout observations and refuses foreign paths or mutation commands", async () => {
     const { fn } = residentFetchStub({
       attach: () =>
         new Response(
@@ -6363,9 +6404,23 @@ describe("resident admission fixture command boundary", () => {
         truncated: false,
       });
     }
+    expect(await (await exec("git -C '/workspace/review'\\''s checkout' status --porcelain")).json()).toEqual({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    });
+    expect(
+      await (await exec("git -C '/workspace/review'\\''s checkout' rev-list --count HEAD --not --remotes")).json(),
+    ).toEqual({ stdout: "0\n", stderr: "", exitCode: 0, truncated: false });
+    expect(
+      await (
+        await exec("git -C '/workspace/review'\\''s checkout' ls-remote --exit-code origin 'refs/heads/fix/head'")
+      ).json(),
+    ).toEqual({ stdout: "", stderr: "", exitCode: 2, truncated: false });
     for (const command of [
       "git -C '/workspace/foreign' rev-parse HEAD",
-      "git -C '/workspace/review'\\''s checkout' status --porcelain",
+      "git -C '/workspace/review'\\''s checkout' add -A",
       "git -C '/workspace/review'\\''s checkout' rev-parse HEAD; git reset --hard",
     ])
       await expect(exec(command)).rejects.toThrow("unexpected fetch");

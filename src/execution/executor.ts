@@ -187,14 +187,17 @@ export interface ReleaseResult {
  *  unreachable, an HTTP error, an in-body worker error (the sandbox's
  *  "Command execution failed" / exitCode 127 signal), or a worktree that stays
  *  unrecoverable after re-attach. This is categorically different from a normal
- *  nonzero command exit, which every Executor returns as ordinary output text
- *  and NEVER as a throw. Remote executors throw this (not a bare `Error`) for
+ *  nonzero command exit, which every Executor returns as a command result
+ *  and NEVER as a throw. Executors throw this (not a bare `Error`) for
  *  infra failures so a caller can tell a wedged sandbox from a command the
  *  agent should keep handling — the pi harness's container operations and the
  *  relayed tools read it as a failure of the operation, named. Extends
  *  `Error`, so `err.message`/`instanceof Error` callers are unaffected. */
 export class ExecInfraError extends Error {
   readonly infra = true as const;
+  /** Set only by the command producer when neither completion nor a
+   * pre-dispatch refusal is confirmed. Reasons and output are not this proof. */
+  declare commandOutcome?: "unknown";
   declare executionContext?: ExecutionDiagnosticContext;
   constructor(
     message: string,
@@ -388,6 +391,7 @@ export function executionContextOf(error: unknown): ExecutionDiagnosticContext |
  *  its request is dispatched again as a new run. */
 export class ExecSandboxRestartedError extends Error {
   readonly restarted = true as const;
+  declare commandOutcome?: "unknown";
   constructor(
     message: string,
     readonly waitedMs: number,
@@ -407,6 +411,7 @@ export class ExecSandboxRestartedError extends Error {
  *  pi's echo (harness-pi.md item 16), and never orphans a live pi. */
 export class ExecControlResetError extends Error {
   readonly controlReset = true as const;
+  declare commandOutcome?: "unknown";
   constructor(message: string) {
     super(message);
     this.name = "ExecControlResetError";
@@ -438,35 +443,21 @@ export class LocalExecutor implements Executor {
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
-    const timeoutMs = clampBashTimeout(opts?.timeoutMs);
-    const identityEnv = await this.resolveEnvs?.();
-    // The profile's identity wins a clash, as on E2B, Cloudflare and the
-    // resident. Passing an explicit map also prevents a factory-created local
-    // run from inheriting arbitrary host credentials.
-    const env =
-      identityEnv === undefined && opts?.env === undefined
-        ? undefined
-        : {
-            ...(opts?.env ?? {}),
-            ...identityEnv,
-          };
-    const r = await runBash(command, this.workspaceDir, opts?.signal, timeoutMs, env);
-    const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
-    if (r.timedOut) {
-      // Name the limit that fired (not a generic abort) so the model can
-      // self-correct: 124 is the exit code coreutils `timeout` uses too.
-      return truncate(`exit 124: ${bashTimeoutNote(timeoutMs)}\n${parts}`);
-    }
-    if (r.error) {
-      return truncate(`exit ${r.error.code ?? "error"}: ${r.error.message}\n${parts}`);
-    }
-    return truncate(parts || "(no output)");
+    const result = await this.execResult(command, opts);
+    const parts = [result.stdout, result.stderr].filter(Boolean).join("\n--- stderr ---\n");
+    return result.exitCode === 0 ? truncate(parts || "(no output)") : truncate(`exit ${result.exitCode}: ${parts}`);
   }
 
   async execResult(command: string, opts?: ExecOptions): Promise<ExecResult> {
     const identityEnv = await this.resolveEnvs?.();
     const env = identityEnv === undefined && opts?.env === undefined ? undefined : { ...opts?.env, ...identityEnv };
-    const result = await runBash(command, this.workspaceDir, opts?.signal, clampBashTimeout(opts?.timeoutMs), env);
+    if (opts?.signal?.aborted) {
+      const failure = new ExecInfraError("local command stopped before execution", "aborted");
+      Object.defineProperty(failure, "cause", { value: opts.signal.reason });
+      throw failure;
+    }
+    const timeoutMs = clampBashTimeout(opts?.timeoutMs);
+    const result = await runBash(command, this.workspaceDir, opts?.signal, timeoutMs, env);
     let exitCode: number;
     if (result.timedOut) exitCode = 124;
     else if (result.error) {
@@ -476,16 +467,20 @@ export class LocalExecutor implements Executor {
           "local command outcome is unavailable",
           opts?.signal?.aborted ? "aborted" : "transport-lost",
         );
+        failure.commandOutcome = "unknown";
         Object.defineProperty(failure, "cause", { value: result.error });
         throw failure;
       }
       exitCode = code;
     } else exitCode = 0; // execFile's null error is its zero-exit acknowledgement.
+    const stderr = result.timedOut
+      ? [bashTimeoutNote(timeoutMs), result.stderr].filter(Boolean).join("\n")
+      : result.stderr;
     return {
       stdout: result.stdout,
-      stderr: result.stderr,
+      stderr,
       exitCode,
-      truncated: result.stdout.length > MAX_OUTPUT || result.stderr.length > MAX_OUTPUT,
+      truncated: result.stdout.length > MAX_OUTPUT || stderr.length > MAX_OUTPUT,
     };
   }
 

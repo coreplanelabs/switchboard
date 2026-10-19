@@ -3,10 +3,25 @@ import { canonicalSeedJson } from "../runLedger/seedManifest.js";
 import { RefusalError, refusalOf } from "../refusal.js";
 import { TOOL_RECOVERY } from "../budgets.js";
 import { redactAndCap } from "../runEvents.js";
+import { ExecControlResetError, ExecInfraError, ExecSandboxRestartedError } from "../../execution/executor.js";
+import { UncertainStoreError } from "../storeFailure.js";
 
 export interface ToolFailure {
   code: "invalid_input" | "capability_unavailable" | "outcome_unknown" | "lifecycle";
   recovery: "correct" | "stop";
+}
+
+/** Translate trusted operation facts before tool output becomes model text. */
+export function toolFailureOf(error: unknown, reported?: ToolFailure): ToolFailure | undefined {
+  if (
+    error instanceof UncertainStoreError ||
+    ((error instanceof ExecInfraError ||
+      error instanceof ExecControlResetError ||
+      error instanceof ExecSandboxRestartedError) &&
+      error.commandOutcome === "unknown")
+  )
+    return { code: "outcome_unknown", recovery: "stop" };
+  return reported?.recovery === "stop" ? reported : undefined;
 }
 
 interface FailedOperation {
@@ -108,6 +123,8 @@ export class ToolRecovery {
   private state: ToolRecoveryState;
   private pending: Promise<void> = Promise.resolve();
   private nativeDrain?: () => Promise<void>;
+  private readonly unknownCalls = new Set<string>();
+  private broadOutcomeHold = false;
   /** Each active harness supplies its existing native-call result barrier. */
   bindNativeDrain(drain: () => Promise<void>): void {
     this.nativeDrain = drain;
@@ -116,15 +133,32 @@ export class ToolRecovery {
     previous?: unknown,
     private readonly save?: (state: ToolRecoveryState, tool: string) => Promise<boolean>,
   ) {
+    const restored = previous === undefined ? undefined : toolRecoveryStateOf(previous);
     this.state =
       previous === undefined
         ? { version: 1, settled: [], failures: [] }
-        : (toolRecoveryStateOf(previous) ?? {
+        : (restored ?? {
             version: 1,
             settled: [],
             failures: [],
-            stopped: { tool: "tool", attempts: 1, reason: "unavailable" },
+            stopped: { tool: "tool", attempts: 1, reason: "checkpoint_unavailable" },
           });
+    // The durable format has no causal IDs. A successor must hold the run
+    // even if a provider mirror already contains a flattened error result.
+    this.broadOutcomeHold =
+      this.state.stopped?.reason === "outcome_unknown" || this.state.stopped?.reason === "checkpoint_unavailable";
+  }
+  get hasUnconfirmedEffects(): boolean {
+    return this.broadOutcomeHold || this.unknownCalls.size > 0;
+  }
+  /** A broad hold does not assert an unknown exit for each individual call. */
+  isOutcomeHeld(callId: string): boolean {
+    return this.broadOutcomeHold || this.unknownCalls.has(digest(callId));
+  }
+  /** Only an observation owned by this instance supplies per-call evidence.
+   * A restored whole-run hold cannot rewrite another call's known result. */
+  isOutcomeUnknown(callId: string): boolean {
+    return this.unknownCalls.has(digest(callId));
   }
   snapshot(): ToolRecoveryState {
     return structuredClone(this.state);
@@ -168,6 +202,21 @@ export class ToolRecovery {
     // A known no-dispatch lifecycle refusal belongs to the existing ending.
     if (failure?.detail?.code === "lifecycle") return this.pending;
     const id = digest(callId);
+    if (failure?.detail?.code === "outcome_unknown" && failure.detail.recovery === "stop") {
+      if (this.unknownCalls.size < TOOL_RECOVERY.receipts) this.unknownCalls.add(id);
+      else if (!this.unknownCalls.has(id)) this.broadOutcomeHold = true;
+      // A late result can follow a normal receipt or a different terminal
+      // error. Neither removes custody of this possibly executed operation.
+      if (
+        this.state.settled.includes(id) ||
+        this.state.stopped ||
+        this.state.settled.length >= TOOL_RECOVERY.receipts
+      ) {
+        if (this.state.stopped?.reason !== "checkpoint_unavailable")
+          this.state.stopped = { tool: toolName(tool) ? tool : "tool", attempts: 1, reason: "outcome_unknown" };
+        return this.persist(tool);
+      }
+    }
     if (this.state.settled.includes(id) || this.state.stopped) return this.pending;
     if (!toolName(tool)) tool = "tool";
     const inputHash = digest(canonicalSeedJson(input));
@@ -212,6 +261,7 @@ export class ToolRecovery {
           ...(this.state.stopped ?? { tool, attempts: 1 }),
           reason: "checkpoint_unavailable",
         };
+        this.broadOutcomeHold = true;
       });
     return this.pending;
   }

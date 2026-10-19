@@ -464,7 +464,9 @@ describe("makeExecutor resident selection", () => {
   }
 
   /** FIFO fetch stub; a canned {reject} entry simulates a network failure, a {raw} entry a non-JSON body (the edge's page). */
-  function stubFetch(...responses: Array<{ status?: number; body?: unknown; raw?: string; reject?: string }>) {
+  function stubFetch(
+    ...responses: Array<{ status?: number; body?: unknown; raw?: string; reject?: string; onResponse?: () => void }>
+  ) {
     const calls: string[] = [];
     const bodies: Array<Record<string, unknown> | undefined> = [];
     const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
@@ -473,7 +475,9 @@ describe("makeExecutor resident selection", () => {
       const next = responses.shift();
       if (!next) throw new Error(`unexpected fetch: ${String(url)}`);
       if (next.reject) throw new TypeError(next.reject);
-      return new Response(next.raw ?? JSON.stringify(next.body ?? {}), { status: next.status ?? 200 });
+      const response = new Response(next.raw ?? JSON.stringify(next.body ?? {}), { status: next.status ?? 200 });
+      next.onResponse?.();
+      return response;
     });
     vi.stubGlobal("fetch", fn);
     return { fn, calls, bodies };
@@ -1412,20 +1416,35 @@ describe("makeExecutor resident selection", () => {
     }
   });
 
-  it("a failure beside a pending stop is that failure, not the stop: a deterministic attach refusal with the run's stop already requested still falls back cold, named — only the executor's typed aborted error reads as the stop", async () => {
+  it("a stop before fresh attachment sends no attach request and retains its cause", async () => {
     stubEnvs();
+    const { calls } = stubFetch({ body: { state: "warm", reason: "" } });
+    const control = new AbortController();
+    const cause = new Error("stopped before selection");
+    control.abort(cause);
+    const err = await makeExecutor(residentOpts(), { ...repoCtx(), stopSignal: control.signal }).catch(
+      (error: unknown) => error,
+    );
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect(err).toMatchObject({ reason: "aborted", cause });
+    expect((err as ExecInfraError).commandOutcome).toBeUndefined();
+    expect(calls).toEqual(["/status"]);
+  });
+
+  it("a failure beside a pending stop is that failure, not the stop: a deterministic attach refusal returned with a concurrent stop still falls back cold, named — only the executor's typed aborted error reads as the stop", async () => {
+    stubEnvs();
+    const control = new AbortController();
     const { calls } = stubFetch(
       { body: { state: "warm", reason: "" } },
-      { body: { error: "attach-failed at clone: exit 128", status: 500 } },
+      { body: { error: "attach-failed at clone: exit 128", status: 500 }, onResponse: () => control.abort() },
     );
-    const control = new AbortController();
-    control.abort();
     const { executor, note } = await makeExecutor(residentOpts(), { ...repoCtx(), stopSignal: control.signal });
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(note).toMatch(
       /^This run uses a new workspace because the shared workspace could not prepare this run \(resident attach failed \(.*exit 128.*\)\)$/,
     );
     expect(calls).toEqual(["/status", "/attach"]);
+    expect(control.signal.aborted).toBe(true);
   });
 
   it("the needs-ref retry by default draws on the first attach's one budget and the card names the total wait: a blip cleared before the 409 and another before the binding is one `after waiting 10s`", async () => {
@@ -2799,14 +2818,34 @@ describe("makeExecutor resident selection", () => {
       }
     });
 
-    it("a re-attach refusal beside a pending stop is the refusal: a 409 needs-recreate with the run's stop already requested is a WorkspaceReattachRefusedError, never read as the stop", async () => {
+    it("a stop before resumed attachment sends no attach request and retains its cause", async () => {
       stubEnvs();
-      stubFetch(
-        { body: { state: "warm", reason: "" } },
-        { status: 409, body: { error: "reuse-refused: the tree is gone", needs: "recreate" } },
-      );
+      const { calls } = stubFetch({ body: { state: "warm", reason: "" } });
       const control = new AbortController();
-      control.abort();
+      const cause = new Error("stopped before reattachment");
+      control.abort(cause);
+      const err = await makeExecutor(residentOpts(), {
+        ...repoCtx(),
+        reattach: recorded,
+        stopSignal: control.signal,
+      }).catch((error: unknown) => error);
+      expect(err).toBeInstanceOf(ExecInfraError);
+      expect(err).toMatchObject({ reason: "aborted", cause });
+      expect((err as ExecInfraError).commandOutcome).toBeUndefined();
+      expect(calls).toEqual(["/status"]);
+    });
+
+    it("a re-attach refusal beside a pending stop is the refusal: a 409 needs-recreate returned with a concurrent stop is a WorkspaceReattachRefusedError, never read as the stop", async () => {
+      stubEnvs();
+      const control = new AbortController();
+      const { calls } = stubFetch(
+        { body: { state: "warm", reason: "" } },
+        {
+          status: 409,
+          body: { error: "reuse-refused: the tree is gone", needs: "recreate" },
+          onResponse: () => control.abort(),
+        },
+      );
       const err = await makeExecutor(residentOpts(), {
         ...repoCtx(),
         reattach: recorded,
@@ -2814,6 +2853,8 @@ describe("makeExecutor resident selection", () => {
       }).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(WorkspaceReattachRefusedError);
       expect((err as WorkspaceReattachRefusedError).why).toContain("reuse-refused");
+      expect(calls).toEqual(["/status", "/attach"]);
+      expect(control.signal.aborted).toBe(true);
     });
 
     it("a hard stop during a resumed run's re-attach wait ends it with the stop's typed error — never the re-attach refusal that would dispatch the stopped request again", async () => {

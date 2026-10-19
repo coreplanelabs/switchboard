@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, watch, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -87,18 +87,22 @@ describe("LocalExecutor typed command outcome", () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it("keeps signal termination unknown instead of inventing exit 1", async () => {
-    const failure = await new LocalExecutor(dir).execResult("printf 'exit 0: successful'; kill -KILL $$").then(
-      () => null,
-      (error: unknown) => error,
-    );
-    expect(failure).toMatchObject({
-      message: "local command outcome is unavailable",
-      reason: "transport-lost",
-      cause: { signal: "SIGKILL" },
-    });
-    expect(failure).toBeInstanceOf(ExecInfraError);
-  });
+  it.each(["exec", "execResult"] as const)(
+    "keeps signal termination unknown instead of inventing exit 1 (%s)",
+    async (method) => {
+      const failure = await new LocalExecutor(dir)[method]("printf 'exit 0: successful'; kill -KILL $$").then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toMatchObject({
+        message: "local command outcome is unavailable",
+        commandOutcome: "unknown",
+        reason: "transport-lost",
+        cause: { signal: "SIGKILL" },
+      });
+      expect(failure).toBeInstanceOf(ExecInfraError);
+    },
+  );
 
   it("keeps a spawn failure unknown with its original cause", async () => {
     const failure = await new LocalExecutor(join(dir, "missing")).execResult("printf 'exit 0: successful'").then(
@@ -107,35 +111,44 @@ describe("LocalExecutor typed command outcome", () => {
     );
     expect(failure).toMatchObject({
       message: "local command outcome is unavailable",
+      commandOutcome: "unknown",
       reason: "transport-lost",
       cause: { code: "ENOENT" },
     });
     expect(failure).toBeInstanceOf(ExecInfraError);
   });
 
-  it("keeps max-buffer failure unknown instead of inventing exit 1", async () => {
-    const failure = await new LocalExecutor(dir)
-      .execResult(`node -e 'process.stdout.write("x".repeat(11 * 1024 * 1024))'`)
-      .then(
-        () => null,
-        (error: unknown) => error,
-      );
-    expect(failure).toMatchObject({
-      message: "local command outcome is unavailable",
-      reason: "transport-lost",
-      cause: { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
-    });
-    expect(failure).toBeInstanceOf(ExecInfraError);
-  });
+  it.each(["exec", "execResult"] as const)(
+    "keeps max-buffer failure unknown instead of inventing exit 1 (%s)",
+    async (method) => {
+      const failure = await new LocalExecutor(dir)
+        [method](`node -e 'process.stdout.write("x".repeat(11 * 1024 * 1024))'`)
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(failure).toMatchObject({
+        message: "local command outcome is unavailable",
+        commandOutcome: "unknown",
+        reason: "transport-lost",
+        cause: { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+      });
+      expect(failure).toBeInstanceOf(ExecInfraError);
+    },
+  );
 
-  it("preserves caller cancellation as an abort without a fabricated exit", async () => {
+  it("refuses a command before dispatch when its caller already aborted", async () => {
     const control = new AbortController();
     control.abort();
-    await expect(new LocalExecutor(dir).execResult("exec sleep 30", { signal: control.signal })).rejects.toMatchObject({
-      message: "local command outcome is unavailable",
+    const failure = await new LocalExecutor(dir)
+      .execResult("exec sleep 30", { signal: control.signal })
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      message: "local command stopped before execution",
       reason: "aborted",
-      cause: { code: "ABORT_ERR" },
+      cause: control.signal.reason,
     });
+    expect((failure as ExecInfraError).commandOutcome).toBeUndefined();
   });
 
   it.each([0, 7])("preserves a genuine exit under misleading output (%s)", async (exitCode) => {
@@ -154,7 +167,7 @@ describe("LocalExecutor typed command outcome", () => {
   it("keeps its verified own deadline as exit 124", async () => {
     expect(await new LocalExecutor(dir).execResult("exec sleep 30", { timeoutMs: 1_000 })).toEqual({
       stdout: "",
-      stderr: "",
+      stderr: "aborted at the 1s command timeout (pass the bash tool's timeoutMs for longer commands, max 1200000 ms)",
       exitCode: 124,
       truncated: false,
     });
@@ -164,16 +177,33 @@ describe("LocalExecutor typed command outcome", () => {
 // Feature: docs/reference/specs/harness-pi.md item 6 — a hard stop's AbortSignal kills
 // the local child process instead of waiting out its 5-minute budget.
 describe("LocalExecutor exec abort", () => {
-  it("kills a running command when the signal aborts and returns an exit line, never throws", async () => {
+  it("retains an after-start abort as unknown instead of returning correctable display text", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sb-local-abort-"));
     const ex = new LocalExecutor(dir);
     const ctl = new AbortController();
-    const started = Date.now();
-    const out = ex.exec("sleep 30", { signal: ctl.signal });
-    setTimeout(() => ctl.abort(), 50);
-    const text = await out;
-    expect(Date.now() - started).toBeLessThan(5_000);
-    expect(text).toMatch(/^exit /); // aborted → legible failure text, not a throw
+    let watcher!: ReturnType<typeof watch>;
+    const observed = new Promise<void>((resolve, reject) => {
+      watcher = watch(dir, () => {
+        try {
+          if (readFileSync(join(dir, "started"), "utf8") === "started") resolve();
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") reject(error);
+        }
+      });
+    });
+    const out = ex
+      .exec("printf started > started; exec sleep 30", { signal: ctl.signal })
+      .catch((error: unknown) => error);
+    try {
+      await observed;
+      ctl.abort();
+      expect(await out).toMatchObject({ reason: "aborted", commandOutcome: "unknown", cause: { code: "ABORT_ERR" } });
+      expect(readFileSync(join(dir, "started"), "utf8")).toBe("started");
+    } finally {
+      watcher.close();
+      ctl.abort();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
