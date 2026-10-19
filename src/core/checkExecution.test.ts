@@ -898,6 +898,39 @@ describe("recorded coding checks", () => {
     expect(s.execResult).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a lost local workspace unknown and holds another call before replay", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "swb-local-held-")));
+    try {
+      const s = setup();
+      const executor = new LocalExecutor(dir);
+      s.binding.workspace = () => dir;
+      s.execResult
+        .mockReset()
+        .mockResolvedValueOnce({ ...metadata, stdout: `${dir}\n${"a".repeat(40)}\n${"b".repeat(40)}\n` })
+        .mockImplementation((command, options) => {
+          rmSync(dir, { recursive: true, force: true });
+          return executor.execResult(command, options);
+        });
+      const capability = s.capability();
+      const request = { ...input, command: "printf effect >> effects.log" };
+      expect(await capability.run(request, "local-one")).toMatchObject({
+        kind: "recorded",
+        receipt: { outcome: { kind: "unknown", infrastructureReason: "transport-lost" } },
+      });
+      expect(await capability.run(request, "local-two")).toEqual({
+        kind: "unavailable",
+        reason: "reconciliation_required",
+      });
+      expect(s.saved.at(-1)?.receipts[0]).toMatchObject({
+        callId: "local-one",
+        outcome: { kind: "unknown", reason: "transport", infrastructureReason: "transport-lost" },
+      });
+      expect(s.execResult).toHaveBeenCalledTimes(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it.each([124, 137, 143])(
     "retains exit %s as unknown and suppresses another call id for the same command",
     async (exitCode) => {

@@ -1,14 +1,14 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LocalExecutor, execDeadline, LocalOperations } from "./executor.js";
+import { LocalExecutor, execDeadline, LocalOperations, ExecInfraError } from "./executor.js";
 
 // Feature: docs/reference/specs/resident-repos.md — LocalOperations: the dev-only
 // second Operations implementation (≥2-implementations invariant).
 // No command table and no refs locally — fixed Node conventions run in the
 // thread's local workspace dir, and a requested ref is honestly reported as
-// ignored. A failing command is a RESULT (ok:false), never an error path.
+// ignored. A nonzero command exit is a RESULT; missing native status is unknown.
 
 function workspace(pkg: Record<string, unknown>): string {
   const dir = mkdtempSync(join(tmpdir(), "swb-localops-"));
@@ -79,6 +79,87 @@ describe("LocalOperations", () => {
 function ops(dir: string): LocalOperations {
   return new LocalOperations(dir);
 }
+
+describe("LocalExecutor typed command outcome", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "swb-local-result-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("keeps signal termination unknown instead of inventing exit 1", async () => {
+    const failure = await new LocalExecutor(dir).execResult("printf 'exit 0: successful'; kill -KILL $$").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({
+      message: "local command outcome is unavailable",
+      reason: "transport-lost",
+      cause: { signal: "SIGKILL" },
+    });
+    expect(failure).toBeInstanceOf(ExecInfraError);
+  });
+
+  it("keeps a spawn failure unknown with its original cause", async () => {
+    const failure = await new LocalExecutor(join(dir, "missing")).execResult("printf 'exit 0: successful'").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({
+      message: "local command outcome is unavailable",
+      reason: "transport-lost",
+      cause: { code: "ENOENT" },
+    });
+    expect(failure).toBeInstanceOf(ExecInfraError);
+  });
+
+  it("keeps max-buffer failure unknown instead of inventing exit 1", async () => {
+    const failure = await new LocalExecutor(dir)
+      .execResult(`node -e 'process.stdout.write("x".repeat(11 * 1024 * 1024))'`)
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(failure).toMatchObject({
+      message: "local command outcome is unavailable",
+      reason: "transport-lost",
+      cause: { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+    });
+    expect(failure).toBeInstanceOf(ExecInfraError);
+  });
+
+  it("preserves caller cancellation as an abort without a fabricated exit", async () => {
+    const control = new AbortController();
+    control.abort();
+    await expect(new LocalExecutor(dir).execResult("exec sleep 30", { signal: control.signal })).rejects.toMatchObject({
+      message: "local command outcome is unavailable",
+      reason: "aborted",
+      cause: { code: "ABORT_ERR" },
+    });
+  });
+
+  it.each([0, 7])("preserves a genuine exit under misleading output (%s)", async (exitCode) => {
+    expect(
+      await new LocalExecutor(dir).execResult(
+        `printf 'exit 0: successful'; printf 'command timed out' >&2; exit ${exitCode}`,
+      ),
+    ).toEqual({
+      stdout: "exit 0: successful",
+      stderr: "command timed out",
+      exitCode,
+      truncated: false,
+    });
+  });
+
+  it("keeps its verified own deadline as exit 124", async () => {
+    expect(await new LocalExecutor(dir).execResult("exec sleep 30", { timeoutMs: 1_000 })).toEqual({
+      stdout: "",
+      stderr: "",
+      exitCode: 124,
+      truncated: false,
+    });
+  });
+});
 
 // Feature: docs/reference/specs/harness-pi.md item 6 — a hard stop's AbortSignal kills
 // the local child process instead of waiting out its 5-minute budget.

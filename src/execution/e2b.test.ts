@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Sandbox } from "e2b";
+import { Sandbox, CommandExitError, TimeoutError } from "e2b";
+import { ExecInfraError } from "./executor.js";
 import { E2BExecutor, E2B_CREDENTIAL_FILE } from "./e2b.js";
 import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
 import {
@@ -13,16 +14,12 @@ import {
 } from "./sandboxCredentials.js";
 
 // Feature: docs/reference/specs/execution.md item 11 — per-call bash timeout on the E2B
-// path: ExecOptions.timeoutMs (already clamped by the tool layer, re-clamped
-// here defensively) is passed to the SDK's commands.run, and the SDK's
-// TimeoutError renders as exit 124 naming the limit and the timeoutMs knob.
+// path: the clamped timeoutMs reaches commands.run. Only a typed terminal
+// result proves an exit; an SDK timeout retains the original unknown outcome.
 // The SDK constructor is private and network-bound, so the executor is built
 // on its prototype with a stubbed `sbx` — the same seam the class itself uses.
 
-type RunFn = (
-  cmd: string,
-  opts: { cwd: string; timeoutMs: number },
-) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+type RunFn = (cmd: string, opts: { cwd: string; timeoutMs: number }) => Promise<unknown>;
 
 function e2bWith(
   run: RunFn,
@@ -53,6 +50,66 @@ describe("E2B structured command stop boundary", () => {
 });
 
 const OK = { stdout: "ok", stderr: "", exitCode: 0 };
+
+describe("E2B typed command outcome", () => {
+  it("keeps transport failures unknown with the original cause instead of inventing an exit", async () => {
+    for (const original of [
+      new Error("connection lost"),
+      Object.assign(new Error("exit 0"), { name: "TimeoutError", exitCode: 2, stdout: "ok", stderr: "" }),
+    ]) {
+      const { ex, run } = e2bWith(async () => {
+        throw original;
+      });
+      const failure = await ex.execResult("change files").catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        message: "e2b command outcome is unavailable",
+        reason: "transport-lost",
+        cause: original,
+      });
+      expect(failure).toBeInstanceOf(ExecInfraError);
+      expect(failure instanceof Error && failure.cause).toBe(original);
+      expect(run).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it.each([undefined, -1, 256, 1.5, "0"])(
+    "refuses a malformed returned status without accepting output text (%s)",
+    async (exitCode) => {
+      const { ex } = e2bWith(async () => ({ stdout: "exit 0: successful", stderr: "", exitCode }));
+      await expect(ex.execResult("command")).rejects.toMatchObject({
+        message: "e2b command outcome is invalid",
+        reason: "worker-unavailable",
+      });
+    },
+  );
+
+  it.each([0, 2, 124, 255])("preserves a returned status under misleading stdout and stderr (%s)", async (exitCode) => {
+    const { ex } = e2bWith(async () => ({
+      stdout: "exit 0: successful",
+      stderr: "command timed out; Invalid username or token",
+      exitCode,
+    }));
+    expect(await ex.execResult("command")).toEqual({
+      stdout: "exit 0: successful",
+      stderr: "command timed out; Invalid username or token",
+      exitCode,
+      truncated: false,
+    });
+  });
+
+  it.each([2, 124])("preserves a genuine SDK CommandExitError as a terminal command result (%s)", async (exitCode) => {
+    const original = new CommandExitError({ stdout: "exit 0: successful", stderr: "boom", exitCode });
+    const { ex } = e2bWith(async () => {
+      throw original;
+    });
+    expect(await ex.execResult("command")).toEqual({
+      stdout: "exit 0: successful",
+      stderr: "boom",
+      exitCode,
+      truncated: false,
+    });
+  });
+});
 
 describe("E2B reused sandbox credential boundary", () => {
   it("scrubs before a reconnected sandbox is returned", async () => {
@@ -202,11 +259,8 @@ describe("E2BExecutor credential freshness", () => {
   });
 });
 
-// Feature: docs/reference/specs/execution.md item 5 — the e2b half of the
-// executor-side credential-file refresh (issue 1915): pi's bash children
-// inherit the env of pi's one start exec on this backend too, so the store
-// file is what keeps a late push authenticated, exactly as on the Cloudflare
-// sandbox path.
+// The legacy direct-call utility prepares credentials before execution.
+// Production supplies no App-token source; returned text never permits replay.
 describe("E2BExecutor credential file refresh", () => {
   const HOUR = 60 * 60_000;
 
@@ -228,25 +282,36 @@ describe("E2BExecutor credential file refresh", () => {
     expect(run).toHaveBeenCalledTimes(3);
   });
 
-  it("a push the remote refused for its credential refreshes once (a fresh mint) and re-sends once — never a loop", async () => {
-    const credential = vi.fn(async () => ({ token: "ghs_x", expiresAtMs: Date.now() + HOUR }));
-    let pushes = 0;
-    const { ex, run } = e2bWith(
+  it("does not replay a compound command after a credential refusal", async () => {
+    const command = "printf receipt >> receipt.log && git push origin work";
+    const effects: string[] = [];
+    const { ex } = e2bWith(
       async (cmd) => {
-        if (cmd.includes("push")) {
-          pushes += 1;
-          return { stdout: "", stderr: "remote: Invalid username or token", exitCode: 128 };
-        }
-        return OK;
+        if (cmd !== command) return OK;
+        effects.push("receipt written");
+        return { stdout: "", stderr: "remote: Invalid username or token", exitCode: 128 };
       },
       async () => ({}),
-      credential,
+      async () => ({ token: "ghs_test", expiresAtMs: Date.now() + HOUR }),
     );
-    const out = await ex.exec("git push origin HEAD");
-    expect(pushes).toBe(2); // one send, one re-send — a second refusal is the answer
-    expect(out).toContain("Invalid username or token");
-    expect(credential).toHaveBeenLastCalledWith({ fresh: true });
-    expect(run.mock.calls.filter(([c]) => String(c).includes("credential.helper")).length).toBe(2);
+    expect(await ex.exec(command)).toBe("exit 128:\nremote: Invalid username or token");
+    expect(effects).toEqual(["receipt written"]);
+  });
+
+  it("does not replay successful commands with refusal-looking stdout", async () => {
+    const command = "git push origin work && printf 'Invalid username or token'";
+    const effects: string[] = [];
+    const { ex } = e2bWith(
+      async (cmd) => {
+        if (cmd !== command) return OK;
+        effects.push("published once");
+        return { stdout: "Invalid username or token", stderr: "", exitCode: 0 };
+      },
+      async () => ({}),
+      async () => ({ token: "ghs_test", expiresAtMs: Date.now() + HOUR }),
+    );
+    expect(await ex.exec(command)).toBe("Invalid username or token");
+    expect(effects).toEqual(["published once"]);
   });
 
   it("does not expose a runner-owned publication transport in the model sandbox", async () => {
@@ -298,20 +363,21 @@ describe("E2BExecutor per-call timeout", () => {
     expect(run.mock.calls[0][1]).toMatchObject({ timeoutMs: 20 * 60_000 });
   });
 
-  it("renders the SDK's TimeoutError as exit 124 naming the limit and the timeoutMs knob", async () => {
+  it("keeps an SDK timeout unknown instead of claiming a command deadline kill", async () => {
+    const original = new TimeoutError("request deadline passed");
     const { ex } = e2bWith(async () => {
-      throw Object.assign(new Error("command timed out"), { name: "TimeoutError" });
+      throw original;
     });
-    const text = await ex.exec("sleep 9999", { timeoutMs: 60_000 });
-    expect(text).toMatch(/^exit 124:/);
-    expect(text).toContain("60s command timeout");
-    expect(text).toContain("timeoutMs");
-    expect(text).toContain("1200000");
+    await expect(ex.exec("sleep 9999", { timeoutMs: 60_000 })).rejects.toMatchObject({
+      message: "e2b command outcome is unavailable",
+      reason: "deadline-passed",
+      cause: original,
+    });
   });
 
   it("a nonzero exit is still surfaced as output, never the timeout wording", async () => {
     const { ex } = e2bWith(async () => {
-      throw Object.assign(new Error("exit 2"), { exitCode: 2, stdout: "", stderr: "boom" });
+      throw new CommandExitError({ exitCode: 2, stdout: "", stderr: "boom" });
     });
     const text = await ex.exec("false");
     expect(text).toMatch(/^exit 2:/);

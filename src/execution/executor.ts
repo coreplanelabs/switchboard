@@ -4,7 +4,7 @@ import type { CredentialInspection, CredentialInspectionInput } from "./credenti
 import type { ExecInfraReason, ExecResult } from "./execResult.js";
 export { EXEC_INFRA_REASONS } from "./execResult.js";
 export type { ExecInfraReason, ExecResult } from "./execResult.js";
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileException } from "node:child_process";
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
@@ -466,16 +466,24 @@ export class LocalExecutor implements Executor {
     const identityEnv = await this.resolveEnvs?.();
     const env = identityEnv === undefined && opts?.env === undefined ? undefined : { ...opts?.env, ...identityEnv };
     const result = await runBash(command, this.workspaceDir, opts?.signal, clampBashTimeout(opts?.timeoutMs), env);
+    let exitCode: number;
+    if (result.timedOut) exitCode = 124;
+    else if (result.error) {
+      const code = result.error.code;
+      if (typeof code !== "number" || !Number.isInteger(code) || code < 0 || code > 255) {
+        const failure = new ExecInfraError(
+          "local command outcome is unavailable",
+          opts?.signal?.aborted ? "aborted" : "transport-lost",
+        );
+        Object.defineProperty(failure, "cause", { value: result.error });
+        throw failure;
+      }
+      exitCode = code;
+    } else exitCode = 0; // execFile's null error is its zero-exit acknowledgement.
     return {
       stdout: result.stdout,
       stderr: result.stderr,
-      exitCode: result.timedOut
-        ? 124
-        : result.error
-          ? typeof result.error.code === "number"
-            ? result.error.code
-            : 1
-          : 0,
+      exitCode,
       truncated: result.stdout.length > MAX_OUTPUT || result.stderr.length > MAX_OUTPUT,
     };
   }
@@ -592,10 +600,11 @@ export class LocalOperations implements Operations {
 }
 
 async function runLocalCommand(command: string, cwd: string): Promise<{ exitCode: number; output: string }> {
-  const r = await runBash(command, cwd);
-  const output = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
-  const code = r.error ? (r.error.code ?? 1) : 0;
-  return { exitCode: typeof code === "number" ? code : 1, output };
+  const result = await new LocalExecutor(cwd).execResult(command);
+  return {
+    exitCode: result.exitCode,
+    output: [result.stdout, result.stderr].filter(Boolean).join("\n--- stderr ---\n"),
+  };
 }
 
 /** Shared bash spawn-and-collect (`bash -c` under the given budget — the
@@ -619,7 +628,7 @@ function runBash(
   stdout: string;
   stderr: string;
   timedOut: boolean;
-  error: { code?: number | string; message: string } | null;
+  error: ExecFileException | null;
 }> {
   const started = systemClock();
   return new Promise((res) => {
@@ -637,7 +646,7 @@ function runBash(
         ...(env ? { env: { ...publicEnv(), ...env } } : {}),
       },
       (err, stdout, stderr) => {
-        const e = err as (NodeJS.ErrnoException & { code?: number | string; signal?: string | null }) | null;
+        const e = err;
         res({
           stdout,
           stderr,
@@ -646,12 +655,12 @@ function runBash(
             // Node marks ITS OWN kill (the `timeout` option) with killed=true;
             // an external SIGKILL (OOM killer) after the budget elapsed leaves
             // killed=false and must not masquerade as `exit 124: …timeout`.
-            (e as { killed?: boolean }).killed === true &&
+            e.killed === true &&
             e.signal != null &&
             e.code == null &&
             !(signal?.aborted ?? false) &&
             systemClock() - started >= timeoutMs,
-          error: e ? { code: e.code, message: e.message } : null,
+          error: e,
         });
       },
     );
