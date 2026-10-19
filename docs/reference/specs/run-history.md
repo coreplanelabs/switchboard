@@ -1,5 +1,20 @@
 # Run history
 
+## Force deletion of one run's stored records
+
+`runs delete <id> --force` removes stored records even when original shutdown is unconfirmed. It requires `runs:write`, visibility of the target and destructive confirmation. Ordinary permission to stop one's own run does not grant this command. Stop and Kill retain their existing runtime contracts.
+
+The history service first saves the original non-content target identity and session keys, writes the deletion fence and removes the live owner and queued work in one transaction. It revokes that run's owner in its named shared sessions, then permanently removes its legacy private transcript. It finally removes the run's saved record, events, positive checkpoints, inbox, delivery rows, jobs, pending effects, logical ending, event revision and history links. A distinct completion receipt records the completed force deletion. An authorized retry uses the retained target identity and resumes idempotent cleanup; a normal Kill tombstone or an older server response cannot prove completion.
+
+Shared conversation text, negative custody checkpoints, original native/workspace records, source deduplication, ingress records, publication audit, external output, metrics and backups remain. Session revocation keeps other runs' owners and bytes, refuses the removed run's delayed owner assignment and requires exact run identity on later writes. The existing deletion feed can request local producer cancellation. Neither that signal nor record deletion confirms physical shutdown or releases a deployment hold. The command returns `runtimeShutdown: unconfirmed` and lists retained data.
+
+| Criterion | Proof |
+| --- | --- |
+| Authorized force deletion removes the exact target, reports unconfirmed shutdown and keeps another run; missing privilege or explicit force refuses. | `[unit]` `src/core/commands/runs.test.ts::runs.stop::force delete removes stored data without certifying shutdown`; `::force delete requires run write permission and explicit force` |
+| A committed response loss is reconciled only through the force-completion receipt. | `[unit]` `src/core/commands/runs.test.ts::runs.stop::force delete reconciles a committed deletion after its response is lost`; `src/core/runStoreWorker.test.ts::force deletion requires a force-specific acknowledgement and completion marker` |
+| Local stores keep ordinary and force completion distinct and reject delayed writes. | `[unit]` `src/core/runStore.test.ts::*::force deletion has its own completion receipt and fences a delayed put` |
+| Real SQLite deletion preserves another run and shared-session owner, fences stale history, claim, queue and transcript writers, and retains a resumable identity after partial cleanup. | `[worker]` `deploy/cloudflare-memory/runs.test.ts::unit context retention work::force delete removes only the selected live run and fences late writers`; `::force deletion retains its identity and resumes after incomplete cross-object cleanup: *`; `::force deletion without destructive consent is refused` |
+
 - **Code**: `src/core/requestFailure.ts`, `src/core/exceptionDiagnostic.ts`, `src/core/storageRequestContext.ts`, `src/core/storageTransport.ts`
 - **Tests**: `src/core/requestFailure.test.ts`, `deploy/cloudflare/containerStartContract.test.ts`, `src/core/storageRequestContext.test.ts`, `src/core/reviewFeedbackWorker.test.ts`
 

@@ -82,6 +82,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--thread <string>] [--parent <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>] [--mine] [--read-user <string>] [--read-repo <string>]` | List runs (live and persisted, newest first) — metadata only, never message text. | admins |
 | `runs stop <id> [--mode <soft\|hard>]` | End the current turn, clean up the runtime, and keep the run as stopped by user. Records who requested the stop. Needs stop permission for the run. | anyone |
 | `runs kill <id>` | Kill the runtime without a graceful turn shutdown and delete the run from live and saved run views. Destructive. Needs stop permission for the run. | anyone |
+| `runs delete <id> --force` | Delete one run's stored records with --force. Shared conversations and runtime custody remain; shutdown is not confirmed. | admins |
 | `runs unit <unit>` | A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read. | admins |
 | `runs children <id>` | The runs one run spawned — a conductor's children, live and finished — oldest started first. | admins |
 | `runs findings <pr>` | A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone. | admins |

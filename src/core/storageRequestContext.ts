@@ -40,7 +40,7 @@ const runId = codec<Run>(
 );
 const id = codec<{ id: string } & Body>((b) => [b.id]);
 const record = codec<{ record: { id: string } } & Body>((b) => [object(b.record).id]);
-const ids = codec<{ ids: readonly string[] } & Body>(
+const ids = codec<{ ids: readonly string[]; force?: boolean } & Body>(
   (b) => (Array.isArray(b.ids) ? b.ids : [undefined]),
   undefined,
   "runs",
@@ -192,6 +192,7 @@ export const STORAGE_OPERATIONS = {
   "/runs/coordinator/wake": nonRun("coordinator"),
   "/runs/decision-record/reserve": nonRun("decision-record"),
   "/runs/delete": id,
+  "/runs/deletion-identity": id,
   "/runs/deleted": ids,
   "/runs/events": id,
   "/runs/finish": finish,

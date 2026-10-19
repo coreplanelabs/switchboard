@@ -254,6 +254,201 @@ describe("unit context retention work", () => {
     );
   });
 
+  it("force delete removes only the selected live run and fences late writers", async () => {
+    const key = storeKey();
+    const saved = record("force-target", Date.now());
+    const sessionKey = `mcp:force-test:${saved.id}:review`;
+    const session = { key: sessionKey, seedFrom: 0, request: 0, range: { from: 0 } };
+    const claim = {
+      runId: saved.id,
+      threadKey: saved.threadKey,
+      gen: "g-old",
+      leaseMs: LEASE_MS,
+      startedAt: saved.startedAt,
+      meta: { channelId: saved.channelId, userId: saved.userId, threadKey: saved.threadKey, session },
+      card: null,
+      system: "",
+      tools: [],
+      state: {},
+    };
+    expect((await post("/runs/claim", { storeKey: key, run: claim })).data).toMatchObject({ ok: true });
+    await post("/runs/put", { storeKey: key, record: saved });
+    await post("/runs/put", { storeKey: key, record: record("force-neighbor", Date.now()) });
+    const transcript = { runId: saved.id, gen: "g-old" };
+    await post("/runs/session/owner", { key: sessionKey, runId: saved.id, gen: "g-old" });
+    expect(
+      (await post("/runs/session/owner", { key: sessionKey, runId: "force-neighbor", gen: "g-neighbor" })).status,
+    ).toBe(200);
+    await post("/runs/transcript/owner", transcript);
+    await post("/runs/transcript/write", {
+      ...transcript,
+      rows: [{ idx: 0, part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "private text" } }) }],
+      attachments: [],
+    });
+    expect(await post("/runs/delete", { storeKey: key, id: saved.id, destructive: true })).toEqual({
+      status: 409,
+      data: { ok: false, reason: "live" },
+    });
+    expect(await post("/runs/delete", { storeKey: key, id: saved.id, destructive: true, force: true })).toEqual({
+      status: 200,
+      data: { ok: true, deleted: true, destructive: true, force: true },
+    });
+    expect((await post("/runs/get", { storeKey: key, id: saved.id })).data).toEqual({ record: null });
+    expect((await post("/runs/get", { storeKey: key, id: "force-neighbor" })).data.record).toMatchObject({
+      id: "force-neighbor",
+    });
+    expect(await rowCount(key, "live_runs")).toBe(0);
+    expect(await rowCount(key, "run_events")).toBe(3);
+    expect((await post("/runs/put", { storeKey: key, record: saved })).data).toMatchObject({ stored: false });
+    expect(await post("/runs/claim", { storeKey: key, run: claim })).toEqual({
+      status: 409,
+      data: { error: "run_deleted" },
+    });
+    expect((await post("/runs/transcript/read", { runId: saved.id })).data).toEqual({ rows: [], attachments: [] });
+    expect(await post("/runs/transcript/owner", transcript)).toEqual({
+      status: 409,
+      data: { ok: false, reason: "unknown-run" },
+    });
+    expect(await post("/runs/deleted", { storeKey: key, ids: [saved.id], force: true })).toEqual({
+      status: 200,
+      data: { ids: [saved.id], force: true },
+    });
+    expect((await post("/runs/deletion-identity", { storeKey: key, id: saved.id })).data).toMatchObject({
+      identity: { id: saved.id, userId: "slack:UALICE", channelId: "slack:C1" },
+    });
+    expect(await post("/runs/session/owner", { key: sessionKey, runId: saved.id, gen: "g-old" })).toEqual({
+      status: 409,
+      data: { error: "run_deleted" },
+    });
+    expect(
+      (
+        await post("/runs/session/write", {
+          key: sessionKey,
+          runId: "force-neighbor",
+          gen: "g-neighbor",
+          rows: [
+            { idx: 0, part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "neighbor text" } }) },
+          ],
+          attachments: [],
+        })
+      ).status,
+    ).toBe(200);
+    expect((await post("/runs/session/read", { key: sessionKey, from: 0 })).data).toMatchObject({ rows: [{ idx: 0 }] });
+    const lateAdmission = await runInDurableObject(stubOf(key), async (instance) => {
+      try {
+        await instance.planeAdmit(
+          { runId: saved.id, requester: saved.userId, threadKey: saved.threadKey, request: {} },
+          Date.now(),
+        );
+        return "admitted";
+      } catch (error) {
+        return error instanceof Error ? error.message : "unknown refusal";
+      }
+    });
+    expect(lateAdmission).toBe("The run was deleted.");
+    expect(await rowCount(key, "plane_queue")).toBe(0);
+    expect(
+      await post("/runs/append", {
+        storeKey: key,
+        runId: saved.id,
+        gen: "g-old",
+        events: [{ type: "answer", text: "late", seq: 4 }],
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "unknown-run" } });
+  });
+
+  it("force deletion without destructive consent is refused", async () => {
+    const key = storeKey();
+    await post("/runs/put", { storeKey: key, record: record("force-consent", Date.now()) });
+    expect((await post("/runs/delete", { storeKey: key, id: "force-consent", force: true })).status).toBe(400);
+    expect((await post("/runs/get", { storeKey: key, id: "force-consent" })).data.record).toMatchObject({
+      id: "force-consent",
+    });
+  });
+
+  it.each(["saved", "queued"])(
+    "force deletion retains its identity and resumes after incomplete cross-object cleanup: %s",
+    async (source) => {
+      const key = storeKey();
+      const saved = record("force-interrupted", Date.now());
+      if (source === "saved") await post("/runs/put", { storeKey: key, record: saved });
+      else {
+        await post("/runs/claim", {
+          storeKey: key,
+          run: {
+            runId: "force-blocker",
+            threadKey: saved.threadKey,
+            gen: "g-blocker",
+            leaseMs: LEASE_MS,
+            startedAt: saved.startedAt,
+            meta: { channelId: saved.channelId, userId: saved.userId, threadKey: saved.threadKey },
+            card: null,
+            system: "",
+            tools: [],
+            state: {},
+          },
+        });
+        const admission = await runInDurableObject(stubOf(key), (instance) =>
+          instance.planeAdmit(
+            {
+              runId: saved.id,
+              requester: saved.userId,
+              threadKey: saved.threadKey,
+              request: { channelId: saved.channelId },
+            },
+            Date.now(),
+          ),
+        );
+        expect(admission.kind).toBe("queued");
+      }
+      await runInDurableObject(stubOf(key), async (instance) => {
+        const target = instance as unknown as { env: { RUN_TRANSCRIPTS: typeof env.RUN_TRANSCRIPTS } };
+        const original = target.env.RUN_TRANSCRIPTS;
+        let fail = true;
+        target.env = {
+          ...target.env,
+          RUN_TRANSCRIPTS: new Proxy(original, {
+            get(namespace, property) {
+              if (property === "get")
+                return (id: DurableObjectId) => {
+                  const transcript = original.get(id);
+                  return {
+                    purge: async () => {
+                      if (fail) {
+                        fail = false;
+                        throw new Error("fixture transcript unavailable");
+                      }
+                      return transcript.purge();
+                    },
+                  };
+                };
+              const value = Reflect.get(namespace, property);
+              return typeof value === "function"
+                ? (...args: unknown[]) => Reflect.apply(value, namespace, args)
+                : value;
+            },
+          }),
+        };
+      });
+      const request = { storeKey: key, id: saved.id, destructive: true, force: true };
+      expect((await post("/runs/delete", request)).status).toBe(500);
+      expect((await post("/runs/deletion-identity", { storeKey: key, id: saved.id })).data).toMatchObject({
+        identity: { id: saved.id, userId: "slack:UALICE" },
+      });
+      expect((await post("/runs/deleted", { storeKey: key, ids: [saved.id], force: true })).data).toEqual({
+        ids: [],
+        force: true,
+      });
+      expect((await post("/runs/put", { storeKey: key, record: saved })).data).toMatchObject({ stored: false });
+      expect((await post("/runs/delete", request)).data).toMatchObject({ ok: true, force: true });
+      expect((await post("/runs/deleted", { storeKey: key, ids: [saved.id], force: true })).data).toEqual({
+        ids: [saved.id],
+        force: true,
+      });
+      expect((await post("/runs/get", { storeKey: key, id: saved.id })).data).toEqual({ record: null });
+    },
+  );
+
   it("kill deletes run history and rejects a delayed record write", async () => {
     const key = storeKey();
     const saved = record("kill-target", Date.now());

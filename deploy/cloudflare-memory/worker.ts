@@ -2399,7 +2399,7 @@ class CanonicalArchiveRefusal extends Error {}
 class RunDeletedError extends Error {
   override readonly name = "RunDeletedError";
   constructor() {
-    super("The run was deleted by Kill.");
+    super("The run was deleted.");
   }
 }
 
@@ -2711,6 +2711,10 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
       CREATE TABLE IF NOT EXISTS ingress_deletions (effect_key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS run_deletions (run_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS run_data_deletions (
+        run_id TEXT PRIMARY KEY, identity_json TEXT, sessions_json TEXT NOT NULL,
+        complete INTEGER NOT NULL DEFAULT 0
+      );
       CREATE TABLE IF NOT EXISTS ingress_owners (
         effect_key TEXT PRIMARY KEY,
         content_expires_at INTEGER NOT NULL,
@@ -3259,6 +3263,13 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  the state — the decision and its consequences land together (orchestration-plane item 6). */
   private applyPlaneWrites(writes: PlaneWrite[]): void {
     for (const w of writes) {
+      const runId =
+        (w.table === "plane_queue" || w.table === "plane_reservations") && w.op === "put"
+          ? w.row.runId
+          : w.table === "plane_effects" && "runId" in w.effect
+            ? w.effect.runId
+            : undefined;
+      if (runId) this.requireRunDataPresent(runId);
       if (w.table === "plane_queue" && w.op === "put") {
         this.sql.exec(
           `INSERT OR REPLACE INTO plane_queue
@@ -3968,6 +3979,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   ): Promise<PlaneAskAnswer> {
     let answer!: PlaneAskAnswer;
     this.ctx.storage.transactionSync(() => {
+      this.requireRunDataPresent(post.runId);
       if (post.reaskMs !== undefined)
         this.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_reask_ms', ?)`, String(post.reaskMs));
       const decision = decide(this.planeState(), {
@@ -4249,6 +4261,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     const recorded: { runId: string; cause: PlaneEndingCause }[] = [];
     this.ctx.storage.transactionSync(() => {
       for (const o of outcomes) {
+        if (this.sql.exec("SELECT run_id FROM run_data_deletions WHERE run_id = ?", o.runId).toArray().length > 0)
+          continue;
         const cause = causeOfReclaim(o.outcome);
         if (cause === undefined) continue;
         recorded.push({ runId: o.runId, cause: this.recordPlaneEnding(o.runId, "interrupted", cause, now) });
@@ -9789,6 +9803,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     | ({ ok: true } & LiveEventPage)
     | { ok: false; reason: "snapshot-changed" | "event-too-large" | "pagination-required" }
   > {
+    this.requireRunDataPresent(runId);
     const maximum = this.sql
       .exec<{ seq: number }>("SELECT COALESCE(MAX(seq),0) AS seq FROM run_events WHERE run_id=?", runId)
       .one().seq;
@@ -10944,14 +10959,99 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { failedWrites };
   }
 
-  async deleted(ids: string[]): Promise<string[]> {
+  async deleted(ids: string[], force = false): Promise<string[]> {
     return this.sql
       .exec<{ run_id: string }>(
-        "SELECT run_id FROM run_deletions WHERE run_id IN (SELECT value FROM json_each(?))",
+        `SELECT run_id FROM ${force ? "run_data_deletions" : "run_deletions"} WHERE ${force ? "complete = 1 AND " : ""}run_id IN (SELECT value FROM json_each(?))`,
         JSON.stringify(ids),
       )
       .toArray()
       .map((row) => row.run_id);
+  }
+
+  private requireRunDataPresent(id: string): void {
+    if (this.sql.exec("SELECT run_id FROM run_data_deletions WHERE run_id = ?", id).toArray().length > 0)
+      throw new RunDeletedError();
+  }
+
+  deletionIdentity(id: string): Pick<RunListItem, "id" | "channelId" | "userId" | "channelVisibility" | "repo"> | null {
+    const row = this.sql
+      .exec<{ identity_json: string | null }>("SELECT identity_json FROM run_data_deletions WHERE run_id = ?", id)
+      .toArray()[0];
+    return row?.identity_json
+      ? (parseStoredJson(row.identity_json) as Pick<
+          RunListItem,
+          "id" | "channelId" | "userId" | "channelVisibility" | "repo"
+        >)
+      : null;
+  }
+
+  private async prepareDataDeletion(id: string): Promise<void> {
+    let sessions: string[] = [];
+    this.ctx.storage.transactionSync(() => {
+      const existing = this.sql
+        .exec<{ sessions_json: string }>("SELECT sessions_json FROM run_data_deletions WHERE run_id = ?", id)
+        .toArray()[0];
+      if (existing) {
+        sessions = parseStoredJson(existing.sessions_json) as string[];
+        return;
+      }
+      const live = this.liveRow(id);
+      const stored = this.sql
+        .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id = ?", id)
+        .toArray()[0];
+      const saved = stored ? parseSummary(stored) : undefined;
+      if (stored && !saved) throw new Error("Run deletion identity is unreadable.");
+      const queued = this.sql
+        .exec<{ requester: string; thread_key: string; request_json: string }>(
+          "SELECT requester, thread_key, request_json FROM plane_queue WHERE run_id = ?",
+          id,
+        )
+        .toArray()[0];
+      const request = queued ? (parseStoredJson(queued.request_json) as Record<string, unknown>) : undefined;
+      const queuedMeta = queued
+        ? {
+            userId: queued.requester,
+            channelId:
+              typeof request?.channelId === "string"
+                ? request.channelId
+                : queued.thread_key.slice(0, queued.thread_key.lastIndexOf(":")),
+            channelVisibility: "unknown" as const,
+            ...(typeof request?.repo === "string" ? { repo: request.repo } : {}),
+          }
+        : undefined;
+      const meta = live?.meta.channelId && live.meta.userId ? live.meta : (saved ?? queuedMeta);
+      if ((live || queued || saved) && (!meta?.channelId || !meta.userId))
+        throw new Error("Run deletion identity is unreadable.");
+      for (const session of [live?.meta.session, saved?.session]) {
+        if (session) sessions.push(session.key, ...(session.threadSession ? [session.threadSession] : []));
+      }
+      sessions = [...new Set(sessions)];
+      const identity = meta
+        ? {
+            id,
+            channelId: meta.channelId,
+            userId: meta.userId,
+            channelVisibility: meta.channelVisibility ?? "unknown",
+            ...(meta.repo ? { repo: meta.repo } : {}),
+          }
+        : null;
+      this.sql.exec(
+        "INSERT INTO run_data_deletions(run_id, identity_json, sessions_json) VALUES(?,?,?)",
+        id,
+        identity ? JSON.stringify(identity) : null,
+        JSON.stringify(sessions),
+      );
+      this.sql.exec("INSERT OR IGNORE INTO run_deletions(run_id) VALUES(?)", id);
+      this.sql.exec("DELETE FROM live_runs WHERE run_id = ?", id);
+      this.sql.exec("DELETE FROM plane_queue WHERE run_id = ?", id);
+      this.sql.exec("DELETE FROM plane_reservations WHERE run_id = ?", id);
+      this.sql.exec("DELETE FROM plane_effects WHERE json_extract(body_json, '$.runId') = ?", id);
+    });
+    // Each operation is idempotent and retains its own permanent refusal
+    // marker. The original identity above permits a later authorized resume.
+    for (const key of sessions) await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).revokeRun(id);
+    await this.env.RUN_TRANSCRIPTS.get(this.env.RUN_TRANSCRIPTS.idFromName(id)).purge();
   }
 
   /** Capture before deletion removes the reference index. Missing authority
@@ -11025,7 +11125,12 @@ export class RunHistoryDO extends DurableObject<Env> {
   async delete(
     id: string,
     destructive = false,
+    force = false,
   ): Promise<boolean | { ok: false; reason: "publication_pending" | "live" }> {
+    if (force && !destructive) throw new Error("force deletion requires destructive consent");
+    // This object is private to the selected run. Its permanent marker also
+    // rejects a delayed owner assignment after the canonical commit.
+    if (force) await this.prepareDataDeletion(id);
     let pinKeys: string[] = [];
     const result = await this.observeInputGate("delete", id, async () => {
       let deleted = false;
@@ -11033,11 +11138,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         // A live owner may also have a provisional terminal record. Neither
         // that record nor its events and context pins can be erased here.
-        if (this.liveRow(id)) {
+        const live = this.liveRow(id);
+        if (live && !force) {
           if (destructive) refused = true;
           return;
         }
         deleted = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE run_id = ?`, id).one().n === 1;
+        if (force && this.deletionIdentity(id)) deleted = true;
         // Retention may have removed the record while its checkpoint alias
         // survives. Explicit deletion still revokes the alias.
         if (!destructive && this.publicationRetains(id)) {
@@ -11049,8 +11156,19 @@ export class RunHistoryDO extends DurableObject<Env> {
           this.sql.exec("DELETE FROM plane_queue WHERE run_id=?", id);
           this.sql.exec("DELETE FROM plane_reservations WHERE run_id=?", id);
         }
+        if (force) {
+          for (const table of ["live_runs", "run_inbox", "run_inbox_deliveries", "run_jobs"])
+            this.sql.exec(`DELETE FROM ${table} WHERE run_id = ?`, id);
+          // Negative steps retain original workspace and unconsumed-input
+          // custody. Removing a display row cannot discharge those holds.
+          this.sql.exec("DELETE FROM run_steps WHERE run_id = ? AND step >= 0", id);
+          this.sql.exec("DELETE FROM plane_endings WHERE run_id = ?", id);
+          this.sql.exec("DELETE FROM plane_effects WHERE json_extract(body_json, '$.runId') = ?", id);
+          this.sql.exec("UPDATE run_data_deletions SET complete = 1 WHERE run_id = ?", id);
+        }
         pinKeys = this.deletionPinKeys(id);
         this.deleteRuns([id], true);
+        if (force) this.sql.exec("DELETE FROM run_event_versions WHERE run_id = ?", id);
       });
       if (refused)
         return { ok: false as const, reason: this.liveRow(id) ? ("live" as const) : ("publication_pending" as const) };
@@ -12363,6 +12481,7 @@ export class RunTranscriptDO extends DurableObject<Env> {
     this.sql = ctx.storage.sql;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS owner (k INTEGER PRIMARY KEY CHECK (k = 1), gen TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deletion (k INTEGER PRIMARY KEY CHECK (k = 1));
       CREATE TABLE IF NOT EXISTS run_messages (
         idx INTEGER NOT NULL,
         part INTEGER NOT NULL,
@@ -12377,7 +12496,9 @@ export class RunTranscriptDO extends DurableObject<Env> {
     `);
   }
 
-  async setOwner(gen: string): Promise<{ ok: true }> {
+  async setOwner(gen: string): Promise<FenceResult> {
+    if (this.sql.exec("SELECT k FROM deletion WHERE k = 1").toArray().length > 0)
+      return { ok: false, reason: "unknown-run" };
     const previous = this.owner();
     if (previous !== gen) {
       const used = new Set(
@@ -12461,6 +12582,16 @@ export class RunTranscriptDO extends DurableObject<Env> {
     });
     return { ok: true };
   }
+
+  async purge(): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("INSERT OR IGNORE INTO deletion(k) VALUES(1)");
+      this.sql.exec("DELETE FROM owner");
+      this.sql.exec("DELETE FROM run_messages");
+      this.sql.exec("DELETE FROM attachments");
+    });
+    return { ok: true };
+  }
 }
 
 /** A tool-result marker's size, for the byte policy's first estimate of how
@@ -12489,6 +12620,7 @@ export class SessionLogDO extends DurableObject<Env> {
     this.sql = ctx.storage.sql;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS owner (k INTEGER PRIMARY KEY CHECK (k = 1), run_id TEXT NOT NULL, gen TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS revoked_runs (run_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS turns (
         id INTEGER PRIMARY KEY,
@@ -12864,6 +12996,8 @@ export class SessionLogDO extends DurableObject<Env> {
   }
   async setOwner(runId: string, gen: string, maxBytes: number = DEFAULT_SESSION_LOG_MAX_BYTES): Promise<{ ok: true }> {
     this.ctx.storage.transactionSync(() => {
+      if (this.sql.exec("SELECT run_id FROM revoked_runs WHERE run_id = ?", runId).toArray().length > 0)
+        throw new RunDeletedError();
       if (
         this.sourceSeedRecords().some(
           (original) => original.cancelledBy && original.receipt.runId === runId && original.receipt.gen === gen,
@@ -12900,6 +13034,18 @@ export class SessionLogDO extends DurableObject<Env> {
     const row = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'max_bytes'`).toArray()[0];
     const n = row ? Number(row.value) : Number.NaN;
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_SESSION_LOG_MAX_BYTES;
+  }
+
+  async revokeRun(runId: string): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("INSERT OR IGNORE INTO revoked_runs(run_id) VALUES(?)", runId);
+      this.sql.exec("DELETE FROM owner WHERE run_id = ?", runId);
+    });
+    return { ok: true };
+  }
+
+  private requiresRunIdentity(): boolean {
+    return this.sql.exec("SELECT run_id FROM revoked_runs LIMIT 1").toArray().length > 0;
   }
 
   async checkpointSnapshot(from: number, to: number) {
@@ -13340,6 +13486,7 @@ export class SessionLogDO extends DurableObject<Env> {
       }
       if (
         owner.gen !== gen ||
+        (this.requiresRunIdentity() && !sourceUpdate && runId === undefined) ||
         (!sourceUpdate && (this.sourceMeta("sources") || runId !== undefined) && owner.runId !== runId)
       ) {
         out = { ok: false, reason: "fenced" };
@@ -13871,7 +14018,10 @@ export class SessionLogDO extends DurableObject<Env> {
         out = { ok: false, reason: "unknown-run" };
         return;
       }
-      if (owner.gen !== gen || ((this.sourceMeta("sources") || runId !== undefined) && owner.runId !== runId)) {
+      if (
+        owner.gen !== gen ||
+        ((this.sourceMeta("sources") || this.requiresRunIdentity() || runId !== undefined) && owner.runId !== runId)
+      ) {
         out = { ok: false, reason: "fenced" };
         return;
       }
@@ -14765,7 +14915,7 @@ async function handleLedger(
     if (pathname === "/runs/transcript/owner") {
       const g = gen(b.gen);
       if (!g.ok) return json({ error: g.error }, 400);
-      return json(await stub.setOwner(g.value));
+      return fenced(await stub.setOwner(g.value));
     }
     if (pathname === "/runs/transcript/write") {
       const g = gen(b.gen);
@@ -15964,7 +16114,16 @@ async function handleRuns(
     const key = parseStoreKey(b);
     if (!key.ok || !Array.isArray(b.ids) || b.ids.some((id) => typeof id !== "string" || !RUN_ID_PATTERN.test(id)))
       return json({ error: "invalid deletion query" }, 400);
-    return json({ ids: await stub(key.value).deleted(b.ids as string[]) });
+    if (b.force !== undefined && typeof b.force !== "boolean") return json({ error: "force must be a boolean" }, 400);
+    return json({
+      ids: await stub(key.value).deleted(b.ids as string[], b.force === true),
+      ...(b.force === true ? { force: true } : {}),
+    });
+  }
+  if (pathname === "/runs/deletion-identity") {
+    const parsed = parseRunTarget(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    return json({ identity: await stub(parsed.value.storeKey).deletionIdentity(parsed.value.id) });
   }
   if (pathname === "/runs/get") {
     const parsed = parseRunTarget(body);
@@ -16015,9 +16174,14 @@ async function handleRuns(
   if (!parsed.ok) return json({ error: parsed.error }, 400);
   if (typeof body === "object" && body !== null && "destructive" in body && typeof body.destructive !== "boolean")
     return json({ error: "destructive must be a boolean" }, 400);
+  const force = (body as { force?: unknown }).force;
+  if (force !== undefined && typeof force !== "boolean") return json({ error: "force must be a boolean" }, 400);
+  if (force === true && (body as { destructive?: boolean }).destructive !== true)
+    return json({ error: "force requires destructive deletion" }, 400);
   const deleted = await stub(parsed.value.storeKey).delete(
     parsed.value.id,
     (body as { destructive?: boolean }).destructive === true,
+    force === true,
   );
   if (typeof deleted !== "boolean") {
     console.log(`[runs/delete] ${parsed.value.storeKey} ${parsed.value.id} -> refused=${deleted.reason}`);
@@ -16028,6 +16192,7 @@ async function handleRuns(
     ok: true,
     deleted,
     ...((body as { destructive?: boolean }).destructive === true ? { destructive: true } : {}),
+    ...(force === true ? { force: true } : {}),
   });
 }
 
@@ -16053,6 +16218,7 @@ const ROUTES = new Set([
   "/runs/usage",
   "/runs/delete",
   "/runs/deleted",
+  "/runs/deletion-identity",
   "/runs/shutdown",
   "/runs/metrics-health",
   "/runs/review-feedback/list",
