@@ -1,5 +1,67 @@
 # Changelog
 
+## [1.306.0](https://github.com/coreplanelabs/switchboard/compare/v1.305.1...v1.306.0) (2026-10-19)
+
+
+### Features
+
+* **core:** check read access to incoming GitHub comments ([#3299](https://github.com/coreplanelabs/switchboard/issues/3299)) ([133554f](https://github.com/coreplanelabs/switchboard/commit/133554f3eb274180293a2eff2de46eec1f144973))
+* **core:** control scoped maintenance through CLI and MCP ([#3291](https://github.com/coreplanelabs/switchboard/issues/3291)) ([0893858](https://github.com/coreplanelabs/switchboard/commit/08938585c831c08eb8d1a6084ea6d57c41e4f7c2))
+* **core:** retain original tasks for archived source input ([#3326](https://github.com/coreplanelabs/switchboard/issues/3326)) ([1734d30](https://github.com/coreplanelabs/switchboard/commit/1734d30fa6e76a2dd5dd60a33794528b4cfbc036))
+* **core:** retain source references through context checkpoints ([#3301](https://github.com/coreplanelabs/switchboard/issues/3301)) ([4f60e7c](https://github.com/coreplanelabs/switchboard/commit/4f60e7c732786db2898e0e2f498f008fc37144eb))
+* **core:** verify saved source input against original records ([#3320](https://github.com/coreplanelabs/switchboard/issues/3320)) ([47d9f7e](https://github.com/coreplanelabs/switchboard/commit/47d9f7e64d42913e80e3ccff5b31aee4c7f27593))
+* **deploy:** reset application data and preserve settings ([#3305](https://github.com/coreplanelabs/switchboard/issues/3305)) ([4337f90](https://github.com/coreplanelabs/switchboard/commit/4337f90f9f6a7733fa7a2de69949e99dfa077b84))
+* **runs:** delete run records without a shutdown receipt ([#3343](https://github.com/coreplanelabs/switchboard/issues/3343)) ([aa3038f](https://github.com/coreplanelabs/switchboard/commit/aa3038fe02a2c5a631625de36f29279052586e58))
+* **skills:** apply engineering rules before coding and review ([#3307](https://github.com/coreplanelabs/switchboard/issues/3307)) ([e66d2a6](https://github.com/coreplanelabs/switchboard/commit/e66d2a6f49e44ce78649d6707066b8692df7ec8e))
+* **web:** give runs short titles and render Slack emoji ([#3298](https://github.com/coreplanelabs/switchboard/issues/3298)) ([9a87d76](https://github.com/coreplanelabs/switchboard/commit/9a87d767379c72ec5f8a05ca8e338f75d61d056b))
+* **web:** navigate long runs without losing your place ([#3331](https://github.com/coreplanelabs/switchboard/issues/3331)) ([8e3f2b0](https://github.com/coreplanelabs/switchboard/commit/8e3f2b03f60876987bf7253291488bf531b5b17d))
+* **web:** read pull request diffs from run rows ([#3314](https://github.com/coreplanelabs/switchboard/issues/3314)) ([803cf81](https://github.com/coreplanelabs/switchboard/commit/803cf81b829e803c9353475d950708816d23711a))
+
+
+### Bug fixes
+
+* **agents:** preserve typed command outcomes ([#3339](https://github.com/coreplanelabs/switchboard/issues/3339)) ([8397bbe](https://github.com/coreplanelabs/switchboard/commit/8397bbea72feaba182bcd97b10d5125ceffe13ad))
+* **core:** bound repeated GitHub source checks ([#3352](https://github.com/coreplanelabs/switchboard/issues/3352)) ([1027f45](https://github.com/coreplanelabs/switchboard/commit/1027f4599d14d596219e883e267c4bac7bddaa25))
+* **core:** finish reviews before optional checkpoints ([#3342](https://github.com/coreplanelabs/switchboard/issues/3342)) ([f07bc6e](https://github.com/coreplanelabs/switchboard/commit/f07bc6ec00d58ea139566b366fc52b0663f467f8))
+* **core:** leave unrecorded runs out of review tile totals ([#3333](https://github.com/coreplanelabs/switchboard/issues/3333)) ([b4697b6](https://github.com/coreplanelabs/switchboard/commit/b4697b6506bf99956ec7e31d043cf6d00a0729f9))
+* **core:** link failed runs to their original request errors ([1d81f71](https://github.com/coreplanelabs/switchboard/commit/1d81f71652497d31d3af45c0c458d709ac1ddd26))
+* **core:** name Cloudflare failures and bound safe retries ([#3340](https://github.com/coreplanelabs/switchboard/issues/3340)) ([26b447d](https://github.com/coreplanelabs/switchboard/commit/26b447d34d847dbd63491fb1459955411a73f9a4))
+* **core:** recheck data access before agents call the model ([#3297](https://github.com/coreplanelabs/switchboard/issues/3297)) ([65617d8](https://github.com/coreplanelabs/switchboard/commit/65617d84d121b576b5f1276f08f2c7bf1678bc3e))
+* **core:** refuse source folds after stored context changes ([#3292](https://github.com/coreplanelabs/switchboard/issues/3292)) ([40397fe](https://github.com/coreplanelabs/switchboard/commit/40397fe1975bafccc7f13adf5358d4f1101d74cc))
+* **core:** retain readable review context after login renewal ([#3313](https://github.com/coreplanelabs/switchboard/issues/3313)) ([6e7efb4](https://github.com/coreplanelabs/switchboard/commit/6e7efb44b3769e5a5595a33f9b09e9be4ed7f6e6))
+* **core:** retain validated targets on storage failures ([#3306](https://github.com/coreplanelabs/switchboard/issues/3306)) ([e601252](https://github.com/coreplanelabs/switchboard/commit/e601252dd16a2a7782bb9eaac3ef71654f733639))
+* **core:** show why private run recovery is held ([#3308](https://github.com/coreplanelabs/switchboard/issues/3308)) ([ffacd4f](https://github.com/coreplanelabs/switchboard/commit/ffacd4f46469a5d4bfe3361d7ce5de8073b9236f))
+* **core:** verify active service input before routing ([#3332](https://github.com/coreplanelabs/switchboard/issues/3332)) ([b70c535](https://github.com/coreplanelabs/switchboard/commit/b70c535cdb49a667146d534f68cd12644ddfa90a))
+* **core:** wait for the run in the stalled review publication test ([#3284](https://github.com/coreplanelabs/switchboard/issues/3284)) ([607e0c4](https://github.com/coreplanelabs/switchboard/commit/607e0c43d18c64cdabf89d97c293239aa0bd992c))
+* **costs:** count cached input tokens once ([#3353](https://github.com/coreplanelabs/switchboard/issues/3353)) ([c8b9afa](https://github.com/coreplanelabs/switchboard/commit/c8b9afaf1bd52cdaa69c4db987dfc60a1dcbe8f9))
+* **deploy:** release staging maintenance after failed previews ([#3321](https://github.com/coreplanelabs/switchboard/issues/3321)) ([e9d9a8a](https://github.com/coreplanelabs/switchboard/commit/e9d9a8af37441a53f229a59d2b31ce6efab3b7ff))
+* **deploy:** require staging Review only for release PRs ([#3317](https://github.com/coreplanelabs/switchboard/issues/3317)) ([abb4a01](https://github.com/coreplanelabs/switchboard/commit/abb4a01e795c9ffa6776d8ef3744d624f0426cdf))
+* **deploy:** use a light model for staging acceptance ([#3354](https://github.com/coreplanelabs/switchboard/issues/3354)) ([98b5d16](https://github.com/coreplanelabs/switchboard/commit/98b5d16b47a78dcfcf162ed277e1a9131b10cb89))
+* **mcp:** hold uncertain external tool calls ([#3335](https://github.com/coreplanelabs/switchboard/issues/3335)) ([3d674a3](https://github.com/coreplanelabs/switchboard/commit/3d674a3a5613a33a8802f2e5b0205b3e623f80e2))
+* **mcp:** reject mismatched and malformed tool replies ([#3327](https://github.com/coreplanelabs/switchboard/issues/3327)) ([aa1992f](https://github.com/coreplanelabs/switchboard/commit/aa1992f585e902b1bc0332d5eb59dd96def51258))
+* **memory:** bound run history reads and deletion cleanup ([#3303](https://github.com/coreplanelabs/switchboard/issues/3303)) ([791dcf8](https://github.com/coreplanelabs/switchboard/commit/791dcf845279461fdb4efd55f74c28b74ce62a8e))
+* **resident:** let active reviews finish before deployment ([#3294](https://github.com/coreplanelabs/switchboard/issues/3294)) ([48bd014](https://github.com/coreplanelabs/switchboard/commit/48bd01407df2d94cdc183c9d268746a4a5500596))
+* **resident:** quote legacy deployment permits for cleanup ([#3351](https://github.com/coreplanelabs/switchboard/issues/3351)) ([fd88d2f](https://github.com/coreplanelabs/switchboard/commit/fd88d2f7e30e7ab56213a28d1bb5ea0803f7897b))
+* **review:** retain meat progress and use its own deadline ([#3315](https://github.com/coreplanelabs/switchboard/issues/3315)) ([430396e](https://github.com/coreplanelabs/switchboard/commit/430396e57bcf57a591705a4c2b4442c4ec09a170))
+* **runs:** confirm committed kills after lost replies ([#3302](https://github.com/coreplanelabs/switchboard/issues/3302)) ([fbf7d78](https://github.com/coreplanelabs/switchboard/commit/fbf7d78d4beaf70b70c5bd834ed020b643eb21ba))
+* **runs:** inspect shutdown targets without stopping them ([#3318](https://github.com/coreplanelabs/switchboard/issues/3318)) ([5837b29](https://github.com/coreplanelabs/switchboard/commit/5837b29fcee487e790722fd395715c7a084e9ff8))
+* **runs:** keep a failed run's terminal record when a later stop arrives ([#3337](https://github.com/coreplanelabs/switchboard/issues/3337)) ([fae9c69](https://github.com/coreplanelabs/switchboard/commit/fae9c6960231e90cc59ff645f7aa71ed8974836b))
+* **runs:** keep refused requests under their accepted run IDs ([#3325](https://github.com/coreplanelabs/switchboard/issues/3325)) ([9dc4d8a](https://github.com/coreplanelabs/switchboard/commit/9dc4d8a9fe86a09558153a0ab7c5bd09fbe84bc6))
+* **runs:** kill original runtimes after restart recovery ([#3319](https://github.com/coreplanelabs/switchboard/issues/3319)) ([55bbd2e](https://github.com/coreplanelabs/switchboard/commit/55bbd2e72909ff76b978f0a098bfe94d7a404a89))
+* **runs:** trace storage stalls and recovery holds ([#3293](https://github.com/coreplanelabs/switchboard/issues/3293)) ([92a131f](https://github.com/coreplanelabs/switchboard/commit/92a131f5f90bdf3dbc749f47137195a06e5c15ab))
+* **ship:** start fresh PR reviews without old private context ([#3285](https://github.com/coreplanelabs/switchboard/issues/3285)) ([899ac05](https://github.com/coreplanelabs/switchboard/commit/899ac053449b222d2324e88f70f6cf83d394389b))
+* **slack:** identify failed source readers in diagnostics ([#3341](https://github.com/coreplanelabs/switchboard/issues/3341)) ([4be70af](https://github.com/coreplanelabs/switchboard/commit/4be70afcb1402bb7d88ba4e9149698488ac897c7))
+* **slack:** keep message identity separate from display text ([#3330](https://github.com/coreplanelabs/switchboard/issues/3330)) ([82be640](https://github.com/coreplanelabs/switchboard/commit/82be6402dec2487b2738a8cc09ef7058f732715f))
+* **tools:** keep checks in their trusted checkout ([#3323](https://github.com/coreplanelabs/switchboard/issues/3323)) ([ea33b40](https://github.com/coreplanelabs/switchboard/commit/ea33b40b5c5283a14404c6471234b2c554de4f6a))
+* **tools:** refuse incomplete diff evidence ([#3328](https://github.com/coreplanelabs/switchboard/issues/3328)) ([ee325c4](https://github.com/coreplanelabs/switchboard/commit/ee325c46bb5561e0bb45f482402904201a4e7677))
+* **web:** keep the shared text hook inert without the DOM global ([#3312](https://github.com/coreplanelabs/switchboard/issues/3312)) ([e92ef8a](https://github.com/coreplanelabs/switchboard/commit/e92ef8a83d27893fa25e96735081fa03aab73093))
+* **web:** keep unfinished work in bounded dashboard views ([#3304](https://github.com/coreplanelabs/switchboard/issues/3304)) ([1a58185](https://github.com/coreplanelabs/switchboard/commit/1a581858d00d24a03d961d622052bc51f4645156))
+* **web:** match action approvals to the dashboard ([#3288](https://github.com/coreplanelabs/switchboard/issues/3288)) ([c2a8258](https://github.com/coreplanelabs/switchboard/commit/c2a8258a789298acc52ba21a681c1d3082234397))
+* **web:** show people and clearer run rows ([#3290](https://github.com/coreplanelabs/switchboard/issues/3290)) ([e98d074](https://github.com/coreplanelabs/switchboard/commit/e98d074d792a1fa808e0e8a83f3c1f1758a76343))
+* **web:** show requester profiles and consistent run rows ([#3324](https://github.com/coreplanelabs/switchboard/issues/3324)) ([ddb9e90](https://github.com/coreplanelabs/switchboard/commit/ddb9e9095342f9c8e59d9d55f021f6b96d711aaa))
+* **web:** show unconfirmed Stop and Kill results ([#3300](https://github.com/coreplanelabs/switchboard/issues/3300)) ([e7bda42](https://github.com/coreplanelabs/switchboard/commit/e7bda4291c54f1b5f95eecb5e85af2e0de5595d5))
+* **workers:** show maintenance page when the bot is unavailable ([#3344](https://github.com/coreplanelabs/switchboard/issues/3344)) ([62fcc2f](https://github.com/coreplanelabs/switchboard/commit/62fcc2f00051f9649965f0ec90d6bd571ba6cdc7))
+
 ## [1.305.1](https://github.com/coreplanelabs/switchboard/compare/v1.305.0...v1.305.1) (2026-10-18)
 
 
