@@ -899,6 +899,39 @@ describe("bounded agent smoke", () => {
     }
   });
 
+  it("accepts Luna at medium effort over HTTP only with the expected exact-head verdict", async () => {
+    const selected = parseSmokeConfig({
+      ...config,
+      model: "openai/gpt-6-luna",
+      review: { ...config.review, transport: "http", effort: "medium", expectedVerdict: "request_changes" },
+    });
+    const { transport } = fixture();
+    const read = transport.readRun;
+    transport.readRun = async (id) => {
+      const row = (await read(id)) as Record<string, unknown>;
+      return id === "run-review"
+        ? { ...row, reviewPost: { ...(row.reviewPost as object), verdict: "request_changes" } }
+        : row;
+    };
+    const receipt = await runAgentSmoke({ config: selected, expectedCommit: commit, thread: "light", transport });
+    expect(receipt.capabilityOutcome).toBe("passed");
+    expect(receipt.scenarios[2]).toMatchObject({
+      actualEffort: "medium",
+      actualModel: "openai/gpt-6-luna",
+      artifact: { repo: "acme/smoke", number: 7, head },
+    });
+    expect((transport.request as ReturnType<typeof vi.fn>).mock.calls[2][0].text).toContain(
+      "model:openai/gpt-6-luna effort:medium",
+    );
+    const changedRead = transport.readRun;
+    transport.readRun = async (id) => {
+      const row = (await changedRead(id)) as Record<string, unknown>;
+      return id === "run-review" ? { ...row, reviewPost: { ...(row.reviewPost as object), verdict: "approve" } } : row;
+    };
+    const wrong = await runAgentSmoke({ config: selected, expectedCommit: commit, thread: "light-wrong", transport });
+    expect(wrong.scenarios[2]).toMatchObject({ outcome: "failed", reason: "review_verdict_mismatch" });
+  });
+
   it("sends an explicit model directive and records requested and actual models on every scenario", async () => {
     const { transport } = fixture();
     const read = transport.readRun;

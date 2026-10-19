@@ -39,9 +39,9 @@ on: # zizmor: ignore[dangerous-triggers]
         default: http
         options: [http, mcp]
       review_effort:
-        description: Explicit approved Review effort
+        description: Explicit Review effort (medium or high)
         type: string
-        default: high
+        default: medium
       model:
         description: Optional per-request full model ref for acceptance (provider/model)
         type: string
@@ -264,10 +264,7 @@ jobs:
           echo 'Acceptance: preparing the deployment plan.'
           npm run --silent cli -- deploy plan --allow-branch --json "${plan_args[@]}" > "$RUNNER_TEMP/staging-fleet.json"
           echo 'Acceptance: checking live scenarios; phase changes follow.'
-          smoke_args=()
-          if [ -n "$SMOKE_MODEL" ]; then smoke_args+=(--model "$SMOKE_MODEL"); fi
-          if [ -n "$SMOKE_REVIEW_TRANSPORT" ]; then smoke_args+=(--review-transport "$SMOKE_REVIEW_TRANSPORT"); fi
-          if [ -n "$SMOKE_REVIEW_EFFORT" ]; then smoke_args+=(--review-effort "$SMOKE_REVIEW_EFFORT"); fi
+          smoke_args=(--model "${SMOKE_MODEL:-openai/gpt-6-luna}" --review-transport "${SMOKE_REVIEW_TRANSPORT:-http}" --review-effort "${SMOKE_REVIEW_EFFORT:-medium}")
           if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
           npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-setup.json" --check --check-reader "${smoke_args[@]}"
       - name: deploy the captured commit to staging
@@ -350,10 +347,7 @@ jobs:
           plan_args=()
           if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then plan_args=(--retain-maintenance); fi
           npm run --silent cli -- deploy plan --allow-branch --json "${plan_args[@]}" > "$RUNNER_TEMP/staging-fleet.json"
-          smoke_args=()
-          if [ -n "$SMOKE_MODEL" ]; then smoke_args+=(--model "$SMOKE_MODEL"); fi
-          if [ -n "$SMOKE_REVIEW_TRANSPORT" ]; then smoke_args+=(--review-transport "$SMOKE_REVIEW_TRANSPORT"); fi
-          if [ -n "$SMOKE_REVIEW_EFFORT" ]; then smoke_args+=(--review-effort "$SMOKE_REVIEW_EFFORT"); fi
+          smoke_args=(--model "${SMOKE_MODEL:-openai/gpt-6-luna}" --review-transport "${SMOKE_REVIEW_TRANSPORT:-http}" --review-effort "${SMOKE_REVIEW_EFFORT:-medium}")
           if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
           npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-e2e.json" "${smoke_args[@]}"
           jq -e '.slackConnection.required == true and .slackConnection.connected == true and .slackConnection.checks == ((.scenarios | length) * 2)' "$RUNNER_TEMP/staging-e2e.json" > /dev/null
