@@ -1091,7 +1091,9 @@ export async function dispatch(
       setupRefusal ??= refusal;
       return;
     }
-    await recordRefusal(deps, msg, io, refusal, ending, trace, operatorEvent, audienceTrace.refusal);
+    await recordRefusal(deps, msg, io, refusal, ending, trace, operatorEvent, audienceTrace.refusal, {
+      ingressRunId: opts.ingressRunId,
+    });
     operatorEvent = undefined;
   };
   // A gate refusal is the site's `Refusal` — its own sentence, the cause from

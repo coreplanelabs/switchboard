@@ -31227,6 +31227,44 @@ describe("every refusal is a run record (record 0054, as amended)", () => {
     expect(await store.get("r2")).toBeNull();
   });
 
+  it("keeps the accepted ingress ID on a terminal gate refusal", async () => {
+    const { deps, store } = wired();
+    deps.runHistoryWriter = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      sleep: async () => {},
+      onPersisted: (id) => deps.runRegistry!.markPersisted(id),
+    });
+    const { io, replies } = fakeIO();
+    const runId = "12345678-1234-4234-8234-123456789012";
+    const outcome = await dispatch(deps, msg("agent:coding fix it"), io, { ingressRunId: runId });
+    expect(outcome).toMatchObject({ status: "refused", refusal: "agent_allowlist", cause: "policy" });
+    await deps.runHistoryWriter.settled();
+    const result = await createRunsService({ registry: deps.runRegistry!, store }).getRun(runId, {
+      include: "messages",
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        id: runId,
+        agent: "door",
+        finished: true,
+        persisted: true,
+        events: expect.arrayContaining([
+          {
+            type: "refusal",
+            code: "agent_allowlist",
+            cause: "policy",
+            text: replies[0],
+            at: expect.any(Number),
+            seq: expect.any(Number),
+          },
+        ]),
+      },
+    });
+    expect((await store.list({})).map((record) => record.id)).toEqual([runId]);
+  });
+
   it("the catch-all's uncaught refusal records with cause `system`: the ⚠️ reply as today, one `door` record carrying `uncaught`", async () => {
     const { deps, store } = wired();
     const { io, replies } = fakeIO();

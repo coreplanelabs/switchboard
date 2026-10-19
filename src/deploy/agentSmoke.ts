@@ -16,6 +16,7 @@ import { assertSmokeOriginMatchesPlan } from "./ingressSmoke.js";
 import { systemClock } from "../core/trace/clock.js";
 import { parseModelRef } from "../core/provider.js";
 import { RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
+import { causeOf, REFUSAL_CODES, type Refusal } from "../core/refusal.js";
 
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const component = z
@@ -216,6 +217,7 @@ interface ScenarioReceipt {
   requestKey?: string;
   receiptId?: string;
   admissionStatus?: string;
+  refusal?: Pick<Refusal, "code" | "cause">;
   requestedEffort?: string;
   actualEffort?: string;
   build?: SmokeBuild;
@@ -244,6 +246,7 @@ interface ScenarioReceipt {
 
 interface SmokeObservationError {
   code: string;
+  operation?: "runs_list" | "runs_get";
   rpcCode?: number;
   fields?: Array<{ path: string; code: string }>;
   http?: { status: number; authChallenge: boolean };
@@ -381,6 +384,36 @@ export interface AgentSmokeReceipt {
   productAcceptance: typeof PRODUCT_ACCEPTANCE_GAP;
 }
 
+/** A phase change can be printed without exposing the retained request or output. */
+export function smokeProgress(receipt: AgentSmokeReceipt) {
+  const row = receipt.scenarios
+    .slice()
+    .reverse()
+    .find((scenario) => scenario.outcome !== "skipped");
+  if (!row) return;
+  const safeId = (id: string) => redactSecrets(stripAnsi(id)).slice(0, 200);
+  return {
+    event: "smoke.progress",
+    scenario: row.id,
+    phase: row.reason,
+    outcome: row.outcome,
+    requestDeadlineMs: receipt.limits.scenarios.find((scenario) => scenario.id === row.id)!.requestDeadlineMs,
+    ...(row.runId ? { runId: safeId(row.runId) } : {}),
+    ...(row.receiptId ? { receiptId: safeId(row.receiptId) } : {}),
+    ...(row.refusal ? { refusal: row.refusal } : {}),
+    ...(row.observationError
+      ? {
+          observationError: {
+            code: row.observationError.code,
+            ...(row.observationError.operation ? { operation: row.observationError.operation } : {}),
+            ...(row.observationError.rpcCode !== undefined ? { rpcCode: row.observationError.rpcCode } : {}),
+            ...(row.observationError.http ? { http: row.observationError.http } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 /** Fixed capability representatives, selected once per deployment, not per model or preset. */
 function scenarios(config: SmokeConfig): SmokeScenario[] {
   const general = leaseMinimum("general"),
@@ -473,6 +506,7 @@ export async function runAgentSmoke(input: {
     const row = receipt.scenarios[index]!;
     row.outcome = "incomplete";
     row.reason = "build_unproven";
+    await save();
     try {
       const build = await readHealth();
       if (!build) {
@@ -602,6 +636,40 @@ export async function runAgentSmoke(input: {
       };
       const originalRecord = await input.transport.readRun(response.run.id, retainRun);
       await retainRun(originalRecord);
+      const decision = z
+        .object({
+          id: z.literal(response.run.id),
+          userId: z.literal(`${source}:${config.subject}`),
+          channelId: z.literal(`${source}:${config.channel}`),
+          threadKey: z.literal(`${source}:${config.channel}:${row.thread}`),
+          repo: z.literal(config.repo).optional(),
+          agent: z.literal("door"),
+          finished: z.literal(true),
+          persisted: z.literal(true),
+          provisional: z.literal(false).optional(),
+          restarting: z.literal(false).optional(),
+          events: z.array(z.unknown()),
+        })
+        .safeParse(originalRecord);
+      if (decision.success) {
+        row.outcome = "failed";
+        row.reason = "no_agent_run";
+        for (const event of decision.data.events) {
+          const refusal = z
+            .object({
+              type: z.literal("refusal"),
+              code: z.enum(REFUSAL_CODES),
+              cause: z.enum(["request", "policy", "system"]),
+            })
+            .safeParse(event);
+          if (refusal.success && refusal.data.cause === causeOf(refusal.data.code)) {
+            row.refusal = { code: refusal.data.code, cause: refusal.data.cause };
+            row.reason = "admission_refused";
+            break;
+          }
+        }
+        break;
+      }
       const run = runSchema.parse(originalRecord);
       row.userId = run.userId;
       row.threadKey = run.threadKey;
@@ -871,7 +939,7 @@ export function agentSmokeTransport(input: {
       return response;
     },
   });
-  const readerCall = async (name: string, args: Record<string, unknown>, signal: AbortSignal) => {
+  const readerCall = async (name: "runs_list" | "runs_get", args: Record<string, unknown>, signal: AbortSignal) => {
     http = undefined;
     try {
       return await mcp.callTool(name, args, { signal });
@@ -897,6 +965,7 @@ export function agentSmokeTransport(input: {
                       : "mcp_transport_failed";
       throw new SmokeReaderError({
         code,
+        operation: name,
         ...(error instanceof McpError && typeof error.code === "number" && Number.isSafeInteger(error.code)
           ? { rpcCode: error.code }
           : {}),

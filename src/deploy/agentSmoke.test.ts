@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { agentSmokeTransport, parseSmokeConfig, runAgentSmoke } from "./agentSmoke.js";
+import { agentSmokeTransport, parseSmokeConfig, runAgentSmoke, smokeProgress } from "./agentSmoke.js";
 import { handleMcpRequest } from "../channels/mcp.js";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
@@ -57,6 +57,36 @@ function withReaderProbe(fetch: typeof globalThis.fetch): typeof globalThis.fetc
 }
 
 describe("bounded agent smoke", () => {
+  it("prints only safe phase and original identity fields while retaining detailed evidence in the receipt", async () => {
+    const original = fixture();
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "progress",
+      transport: original.transport,
+    });
+    const row = receipt.scenarios[2]!;
+    row.receiptId = "organization:fixture:3";
+    row.intake = { request: { method: "POST", path: "/ingress", body: "private request", truncated: false } };
+    row.evidence = { identityVerified: true, record: { output: "private output" } };
+    expect(smokeProgress(receipt)).toEqual({
+      event: "smoke.progress",
+      scenario: "review",
+      phase: "accepted",
+      outcome: "passed",
+      requestDeadlineMs: 960000,
+      runId: "run-review",
+      receiptId: "organization:fixture:3",
+    });
+    row.receiptId = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    expect(smokeProgress(receipt)?.receiptId).toBe("«redacted-github-token»");
+    row.observationError = {
+      code: "record_invalid",
+      operation: "runs_get",
+      fields: [{ path: "private-field-marker", code: "invalid_type" }],
+    };
+    expect(smokeProgress(receipt)?.observationError).toEqual({ code: "record_invalid", operation: "runs_get" });
+  });
   it.each(["workspace", "review"] as const)(
     "keeps native saved output behind the original %s evidence gate",
     async (target) => {
@@ -2188,7 +2218,11 @@ describe("native HTTP run readiness", () => {
     threadKey: "http:smoke:readiness-answer",
   };
   const scope = { channelId: "http:smoke", userId: "http:smoke", repo: "acme/smoke", allowed: true };
-  function setup(page: (read: number) => unknown, getError?: number) {
+  function setup(
+    page: (read: number) => unknown,
+    getError?: number,
+    record: unknown = { id: "native-run", finished: true, persisted: true },
+  ) {
     const operations: string[] = [];
     let lists = 0;
     const transport = agentSmokeTransport({
@@ -2257,7 +2291,7 @@ describe("native HTTP run readiness", () => {
           jsonrpc: "2.0",
           id: message.id,
           result: {
-            content: [{ type: "text", text: 'runs.get: ok\n{"id":"native-run","finished":true,"persisted":true}' }],
+            content: [{ type: "text", text: `runs.get: ok\n${JSON.stringify(record)}` }],
           },
         });
       },
@@ -2280,6 +2314,58 @@ describe("native HTTP run readiness", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+  it("reports an original terminal refusal without waiting for a model run or admitting another scenario", async () => {
+    const s = setup(() => ({ runs: [owner], readScope: scope }), undefined, {
+      ...owner,
+      agent: "door",
+      finished: true,
+      persisted: true,
+      events: [{ type: "refusal", code: "agent_allowlist", cause: "policy", text: "private remote prose" }],
+    });
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "readiness",
+      transport: s.transport,
+    });
+    expect(receipt.scenarios[0]).toMatchObject({
+      runId: "native-run",
+      receiptId: "original-receipt",
+      outcome: "failed",
+      reason: "admission_refused",
+      refusal: { code: "agent_allowlist", cause: "policy" },
+    });
+    expect(receipt.scenarios.slice(1).map((row) => row.reason)).toEqual([
+      "prior_scenario_unproven",
+      "prior_scenario_unproven",
+    ]);
+    expect(s.operations).toEqual(["runs_list", "admit", "runs_list", "runs_get"]);
+    expect(JSON.stringify(receipt)).not.toContain("private remote prose");
+  });
+  it.each(["foreign requester", "mismatched cause"])("does not trust a terminal decision with a %s", async (fault) => {
+    const s = setup(() => ({ runs: [owner], readScope: scope }), undefined, {
+      ...owner,
+      ...(fault === "foreign requester" ? { userId: "http:other" } : {}),
+      agent: "door",
+      finished: true,
+      persisted: true,
+      events: [{ type: "refusal", code: "agent_allowlist", cause: "system", text: "private remote prose" }],
+    });
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "readiness",
+      transport: s.transport,
+    });
+    expect(receipt.scenarios[0]).toMatchObject({
+      runId: "native-run",
+      outcome: fault === "foreign requester" ? "incomplete" : "failed",
+      reason: fault === "foreign requester" ? "run_record_unproven" : "no_agent_run",
+    });
+    expect(receipt.scenarios[0]!.refusal).toBeUndefined();
+    expect(JSON.stringify(receipt)).not.toContain("private remote prose");
+    expect(s.operations).toEqual(["runs_list", "admit", "runs_list", "runs_get"]);
   });
   it.each([
     ["missing scope", { runs: [owner] }, "mcp_protocol_mismatch"],
@@ -2357,7 +2443,7 @@ describe("native HTTP run readiness", () => {
       runId: owner.id,
       receiptId: "original-receipt",
       outcome: "incomplete",
-      observationError: { code: "mcp_rpc_failed", rpcCode: -32002 },
+      observationError: { code: "mcp_rpc_failed", operation: "runs_get", rpcCode: -32002 },
     });
     expect(s.operations).toEqual(["runs_list", "admit", "runs_list", "runs_get"]);
     expect(JSON.stringify(receipt)).not.toContain("private remote");

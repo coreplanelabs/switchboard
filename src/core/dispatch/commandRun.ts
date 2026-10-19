@@ -319,6 +319,19 @@ async function recordDoorDecision(
     opts.ingressRunId ? { id: opts.ingressRunId } : {},
   );
   root.setAttrs({ runId: run.id });
+  if (opts.ingressRunId)
+    console.log(
+      JSON.stringify({
+        event: "run.request.decision",
+        phase: "registered",
+        runId: run.id,
+        traceId: root.traceId,
+        kind: decision.kind,
+        ...(decision.kind === "refusal"
+          ? { code: decision.refusal.code, cause: decision.refusal.cause }
+          : { outcome: decision.operator.outcome }),
+      }),
+    );
   registry.publish(run.id, {
     type: "input",
     text: redactSecrets(msg.text),
@@ -386,6 +399,7 @@ export async function recordRefusal(
   trace: RequestTrace,
   operator?: OperatorEventFields,
   audienceRefusal?: AudienceRefusalReceipt,
+  opts: Pick<CommandRunOptions, "ingressRunId"> = {},
 ): Promise<void> {
   await recordDoorDecision(
     deps,
@@ -394,6 +408,7 @@ export async function recordRefusal(
     ending,
     trace,
     audienceRefusal,
+    opts,
   );
 }
 

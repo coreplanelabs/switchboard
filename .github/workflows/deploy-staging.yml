@@ -261,7 +261,9 @@ jobs:
         run: |
           plan_args=()
           if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then plan_args=(--retain-maintenance); fi
+          echo 'Acceptance: preparing the deployment plan.'
           npm run --silent cli -- deploy plan --allow-branch --json "${plan_args[@]}" > "$RUNNER_TEMP/staging-fleet.json"
+          echo 'Acceptance: checking live scenarios; phase changes follow.'
           smoke_args=()
           if [ -n "$SMOKE_MODEL" ]; then smoke_args+=(--model "$SMOKE_MODEL"); fi
           if [ -n "$SMOKE_REVIEW_TRANSPORT" ]; then smoke_args+=(--review-transport "$SMOKE_REVIEW_TRANSPORT"); fi

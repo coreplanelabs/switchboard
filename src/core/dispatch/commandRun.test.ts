@@ -638,6 +638,42 @@ describe("recordRefusal — every refusal is a run record (record 0054, as amend
     expect(text.endsWith("…")).toBe(true);
   });
 
+  it("logs the original admission decision without request or refusal prose", async () => {
+    const d = deps();
+    const kept = keepingWriter();
+    d.runHistoryWriter = kept.writer;
+    const s = request("private request content", d);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await recordRefusal(
+        d,
+        s.message,
+        s.io,
+        refusalOf("setup_failed", "private service diagnostic"),
+        s.ending,
+        s.trace,
+        undefined,
+        undefined,
+        { ingressRunId: "accepted-owner" },
+      );
+      s.ending.drain(undefined);
+      expect(kept.records()[0]).toMatchObject({ id: "accepted-owner", agent: "door", status: "completed" });
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        {
+          event: "run.request.decision",
+          phase: "registered",
+          runId: "accepted-owner",
+          traceId: s.trace.root.traceId,
+          kind: "refusal",
+          code: "setup_failed",
+          cause: "system",
+        },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("keeps a preceding operator choice and the refusal on one trace-linked door record", async () => {
     const d = deps();
     const kept = keepingWriter();
