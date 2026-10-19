@@ -199,14 +199,14 @@ function wrapOperator<
   };
 }
 
-function wrapStorageException(
-  exception: import("../runStateWriteDiagnostic.js").StateWriteException,
-): import("../runStateWriteDiagnostic.js").StateWriteException {
+function wrapException(
+  exception: import("../exceptionDiagnostic.js").ExceptionDiagnostic,
+): import("../exceptionDiagnostic.js").ExceptionDiagnostic {
   return {
     ...exception,
     message: wrapUntrusted(exception.message),
     ...(exception.stack === undefined ? {} : { stack: wrapUntrusted(exception.stack) }),
-    ...(exception.cause ? { cause: wrapStorageException(exception.cause) } : {}),
+    ...(exception.cause ? { cause: wrapException(exception.cause) } : {}),
   };
 }
 
@@ -216,9 +216,9 @@ function wrapStorageFailure(
   const server = diagnostic.server;
   return {
     ...diagnostic,
-    ...(diagnostic.exception ? { exception: wrapStorageException(diagnostic.exception) } : {}),
+    ...(diagnostic.exception ? { exception: wrapException(diagnostic.exception) } : {}),
     ...(server && "exception" in server && server.exception
-      ? { server: { ...server, exception: wrapStorageException(server.exception) } }
+      ? { server: { ...server, exception: wrapException(server.exception) } }
       : {}),
   };
 }
@@ -261,6 +261,15 @@ export function wrapEvent(e: RunEvent): RunEvent {
         summary: wrapUntrusted(e.summary),
         ...(e.providerFailure ? { providerFailure: wrapProviderFailure(e.providerFailure) } : {}),
         ...(e.storageFailure ? { storageFailure: wrapStorageFailure(e.storageFailure) } : {}),
+        ...(e.checkpointFailure
+          ? {
+              checkpointFailure: {
+                ...e.checkpointFailure,
+                opening: wrapException(e.checkpointFailure.opening),
+                ...(e.checkpointFailure.recovery ? { recovery: wrapException(e.checkpointFailure.recovery) } : {}),
+              },
+            }
+          : {}),
         ...(e.modelFailure
           ? {
               modelFailure: {
