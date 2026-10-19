@@ -212,6 +212,30 @@ it("reads shared deletion fences and rejects a marker for an unrequested id", as
   await expect(store.deleted(["killed"])).rejects.toThrow("malformed result");
 });
 
+it("force deletion requires a force-specific acknowledgement and completion marker", async () => {
+  let supported = false;
+  const { fetch, calls } = fakeFetch(({ body }) => ({
+    status: 200,
+    body: body.ids
+      ? { ids: ["target"], ...(supported ? { force: true } : {}) }
+      : { ok: true, deleted: true, destructive: true, ...(supported ? { force: true } : {}) },
+  }));
+  const store = new WorkerRunStore({ ...OPTS, fetch });
+  await expect(store.delete("target", { destructive: true, force: true })).rejects.toThrow(
+    "did not confirm force deletion",
+  );
+  await expect(store.deleted(["target"], { force: true })).rejects.toThrow("did not confirm force deletion");
+  supported = true;
+  await store.delete("target", { destructive: true, force: true });
+  expect(await store.deleted(["target"], { force: true })).toEqual(["target"]);
+  expect(calls.map((call) => call.body)).toEqual([
+    { storeKey: OPTS.storeKey, id: "target", destructive: true, force: true },
+    { storeKey: OPTS.storeKey, ids: ["target"], force: true },
+    { storeKey: OPTS.storeKey, id: "target", destructive: true, force: true },
+    { storeKey: OPTS.storeKey, ids: ["target"], force: true },
+  ]);
+});
+
 describe("durable store acknowledgement continuity", () => {
   const aborted = () =>
     new Response(

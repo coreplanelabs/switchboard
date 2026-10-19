@@ -497,6 +497,11 @@ export interface LiveRunAccess {
 }
 
 export interface RunsService {
+  deletionTarget(id: string): Promise<Result<Resource>>;
+  /** Data-only removal; it never certifies original runtime shutdown. */
+  deleteRunData(
+    id: string,
+  ): Promise<Result<{ id: string; state: "deleted"; runtimeShutdown: "unconfirmed"; retained: readonly string[] }>>;
   listClaimObservations(query: { visibleTo: Predicate; after?: string; limit?: number }): Promise<ClaimObservationPage>;
   /** Match private canonical evidence to the ordinary run before the command authorizes it. */
   getCheckSource(selector: CheckSelector): Promise<Result<{ run: RunRecordView; source: CheckSourceRead }>>;
@@ -1275,6 +1280,42 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   };
 
   const service: RunsService = {
+    async deletionTarget(id) {
+      const identity = await store?.deletionIdentity?.(id);
+      if (identity) return { ok: true, value: { type: "run", ...identity } };
+      const existing = await service.getRun(id);
+      return existing.ok ? { ok: true, value: runResource(existing.value) } : existing;
+    },
+    async deleteRunData(id) {
+      if (!store) return { ok: false, error: "unavailable" };
+      try {
+        await store.delete(id, { destructive: true, force: true });
+      } catch (error) {
+        // Only this stronger receipt establishes that a lost force-delete
+        // reply committed. An ordinary Kill marker cannot qualify it.
+        const confirmed = await store.deleted([id], { force: true });
+        if (!confirmed.includes(id)) throw error;
+      }
+      if (!(await store.deleted([id], { force: true })).includes(id)) return { ok: false, error: "unavailable" };
+      await deletedRuns([id]);
+      return {
+        ok: true,
+        value: {
+          id,
+          state: "deleted",
+          runtimeShutdown: "unconfirmed",
+          retained: [
+            "shared conversations",
+            "runtime custody",
+            "source and ingress records",
+            "publication audit",
+            "external output",
+            "metrics",
+            "backups",
+          ],
+        },
+      };
+    },
     deletedRuns,
     async listClaimObservations({ visibleTo, ...query }) {
       if (!ledger?.listClaimObservations) throw new Error("Claim observations are unavailable");

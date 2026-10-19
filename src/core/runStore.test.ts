@@ -1,4 +1,13 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,6 +23,48 @@ import { WorkerRunStore } from "./runStoreWorker.js";
 
 const DAY = 86_400_000;
 const NOW = 1_800_000_000_000;
+
+it("file force deletion keeps a neighboring put made while deletion is pending", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "force-delete-neighbor-"));
+  try {
+    const store = new FileRunStore(dir, { now: () => NOW });
+    await store.put(record("delete-a", NOW));
+    const deleting = store.delete("delete-a", { destructive: true, force: true });
+    await store.put(record("keep-b", NOW));
+    await deleting;
+    expect((await store.list({})).map((row) => row.id)).toEqual(["keep-b"]);
+    expect((await store.get("keep-b"))?.id).toBe("keep-b");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it("file force deletion keeps its identity across an interrupted index write and restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "force-delete-"));
+  try {
+    const store = new FileRunStore(dir, { now: () => NOW });
+    await store.put(record("disk-target", NOW));
+    const index = join(dir, "index.jsonl");
+    const deleting = store.delete("disk-target", { destructive: true, force: true });
+    rmSync(index);
+    mkdirSync(index);
+    await expect(deleting).rejects.toThrow();
+    const reopened = new FileRunStore(dir, { now: () => NOW });
+    expect(await reopened.deletionIdentity("disk-target")).toEqual({
+      id: "disk-target",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      channelVisibility: "unknown",
+    });
+    expect(await reopened.deleted(["disk-target"], { force: true })).toEqual([]);
+    rmSync(index, { recursive: true });
+    await reopened.delete("disk-target", { destructive: true, force: true });
+    expect(await reopened.deleted(["disk-target"], { force: true })).toEqual(["disk-target"]);
+    expect(await reopened.put(record("disk-target", NOW))).toMatchObject({ stored: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function events(n: number, size = 20): RunEvent[] {
   return Array.from({ length: n }, (_, i) => ({
@@ -724,6 +775,23 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect(await store.get("killed")).toBeNull();
       expect(await store.getSummary("killed")).toBeNull();
       expect(await store.list({ limit: 10 })).toEqual([]);
+    });
+
+    it("force deletion has its own completion receipt and fences a delayed put", async () => {
+      const { store } = make();
+      await store.put(record("ordinary", NOW));
+      await store.put(record("forced", NOW));
+      await store.delete("ordinary", { destructive: true });
+      await store.delete("forced", { destructive: true, force: true });
+      expect(await store.deleted(["ordinary", "forced"], { force: true })).toEqual(["forced"]);
+      expect(await store.deletionIdentity?.("forced")).toEqual({
+        id: "forced",
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        channelVisibility: "unknown",
+      });
+      expect(await store.put(record("forced", NOW))).toMatchObject({ stored: false });
+      expect(await store.deleted(["ordinary", "forced"])).toEqual(["ordinary", "forced"]);
     });
   });
 }

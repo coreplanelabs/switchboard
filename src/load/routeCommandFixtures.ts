@@ -162,6 +162,20 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
   }),
   f("c45h", "happy", "kill run r-123 and delete its saved row", "runs.kill", { args: ["r-123"], options: {} }),
   f("c45p", "paraphrase", "remove run r-9 now without a wrap-up", "runs.kill", { args: ["r-9"], options: {} }),
+  f("c-delete-h", "happy", "force delete stored records for run r-123 even if shutdown is unknown", "runs.delete", {
+    args: ["r-123"],
+    options: { force: true },
+  }),
+  f(
+    "c-delete-p",
+    "paraphrase",
+    "remove only the database records for run r-9 without a shutdown receipt",
+    "runs.delete",
+    {
+      args: ["r-9"],
+      options: { force: true },
+    },
+  ),
   f("c11h", "happy", "show the runs of unit ship-acme-1:U16", "runs.unit", { args: ["ship-acme-1:U16"], options: {} }),
   f("c11p", "paraphrase", "which runs belong to unit ship-acme-1:U17?", "runs.unit", {
     args: ["ship-acme-1:U17"],
@@ -374,6 +388,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c08d", "are my instructions actually being followed?", "config.instructions", ["config.instructions"]),
   d("c09d", "why did the last run fail", "runs.list"),
   d("c45d", "should I kill the run that is taking forever?", "runs.kill"),
+  d("c-delete-d", "should I force delete this run's stored data?", "runs.delete"),
   d("c10d", "should I stop the run that is taking forever?", "runs.stop"),
   d("c11d", "how is the plan's second unit going overall?", "runs.unit"),
   d("c12d", "did the conductor's children do a good job?", "runs.children"),

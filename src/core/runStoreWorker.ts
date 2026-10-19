@@ -117,9 +117,35 @@ type RunStoreRoute =
   | "/runs/events"
   | "/runs/delete"
   | "/runs/deleted"
+  | "/runs/deletion-identity"
   | "/runs/usage";
 
 export class WorkerRunStore implements RunStore {
+  async deletionIdentity(id: string) {
+    if (!RUN_ID_PATTERN.test(id)) return null;
+    return this.read("/runs/deletion-identity", { storeKey: this.opts.storeKey, id }, async (data) => {
+      if (data.identity === null) return null;
+      const identity = data.identity;
+      if (!identity || typeof identity !== "object" || Array.isArray(identity))
+        throw new PermanentStoreError("Invalid deletion identity.");
+      const value = identity as Record<string, unknown>;
+      if (
+        value.id !== id ||
+        typeof value.channelId !== "string" ||
+        typeof value.userId !== "string" ||
+        (value.repo !== undefined && typeof value.repo !== "string") ||
+        !["public", "private", "dm", "machine", "unknown"].includes(String(value.channelVisibility))
+      )
+        throw new PermanentStoreError("Invalid deletion identity.");
+      return {
+        id,
+        channelId: value.channelId,
+        userId: value.userId,
+        channelVisibility: value.channelVisibility as RunListItem["channelVisibility"],
+        ...(typeof value.repo === "string" ? { repo: value.repo } : {}),
+      };
+    });
+  }
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
 
@@ -253,16 +279,22 @@ export class WorkerRunStore implements RunStore {
     );
   }
 
-  async deleted(ids: readonly string[]): Promise<string[]> {
+  async deleted(ids: readonly string[], opts?: { force: true }): Promise<string[]> {
     if (ids.length === 0) return [];
-    return await this.read("/runs/deleted", { storeKey: this.opts.storeKey, ids }, async (data): Promise<string[]> => {
-      if (!Array.isArray(data.ids) || data.ids.some((id) => typeof id !== "string" || !ids.includes(id)))
-        throw new PermanentStoreError("run store /runs/deleted returned a malformed result");
-      return data.ids as string[];
-    });
+    return await this.read(
+      "/runs/deleted",
+      { storeKey: this.opts.storeKey, ids, ...(opts?.force ? { force: true } : {}) },
+      async (data): Promise<string[]> => {
+        if (opts?.force && data.force !== true)
+          throw new PermanentStoreError("The history service did not confirm force deletion.");
+        if (!Array.isArray(data.ids) || data.ids.some((id) => typeof id !== "string" || !ids.includes(id)))
+          throw new PermanentStoreError("run store /runs/deleted returned a malformed result");
+        return data.ids as string[];
+      },
+    );
   }
 
-  async delete(id: string, opts?: { destructive: true }): Promise<void> {
+  async delete(id: string, opts?: { destructive: true; force?: true }): Promise<void> {
     if (!RUN_ID_PATTERN.test(id)) return;
     return await this.post(
       "/runs/delete",
@@ -270,11 +302,14 @@ export class WorkerRunStore implements RunStore {
         storeKey: this.opts.storeKey,
         id,
         ...(opts?.destructive ? { destructive: true } : {}),
+        ...(opts?.force ? { force: true } : {}),
       },
       undefined,
       "write",
       undefined,
       async (result): Promise<void> => {
+        if (opts?.force && result.force !== true)
+          throw new PermanentStoreError("The history service did not confirm force deletion.");
         if (opts?.destructive && result.destructive !== true)
           throw new PermanentStoreError("The history service did not confirm the Kill deletion fence.");
       },

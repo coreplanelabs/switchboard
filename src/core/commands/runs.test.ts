@@ -526,6 +526,7 @@ describe("runs.* registrations", () => {
       "runs.check",
       "runs.children",
       "runs.claims",
+      "runs.delete",
       "runs.events",
       "runs.findings",
       "runs.friction",
@@ -1405,6 +1406,65 @@ describe("runs.stop", () => {
       destructive: control.destructive,
     }).toEqual({ requested: mode, aborted: mode === "hard", destructive: false });
     expect(await (await deps.runs()).getRun(id)).toMatchObject({ ok: true, value: { id, finished: false } });
+  });
+
+  it("force delete removes stored data without certifying shutdown", async () => {
+    const { registry, deps, store } = await setup();
+    expect(
+      await registry.invoke("runs.delete", { args: ["fin-x"], options: { force: true } }, cli, deps),
+    ).toMatchObject({
+      ok: true,
+      value: { id: "fin-x", state: "deleted", runtimeShutdown: "unconfirmed" },
+    });
+    expect(await store.deleted(["fin-x", "fin-y"])).toEqual(["fin-x"]);
+    expect((await store.get("fin-y"))?.id).toBe("fin-y");
+    expect(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, cli, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+  });
+
+  it("force delete requires run write permission and explicit force", async () => {
+    const { registry, deps, store } = await setup();
+    const owner = callerWith("chat", "slack:UALICE", ["runs:read"]);
+    expect(
+      await registry.invoke("runs.delete", { args: ["fin-x"], options: { force: true } }, owner, deps),
+    ).toMatchObject({ ok: false, error: "unauthorized", status: 403 });
+    expect(await registry.invoke("runs.delete", { args: ["fin-x"], options: {} }, cli, deps)).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      status: 400,
+    });
+    expect((await store.get("fin-x"))?.id).toBe("fin-x");
+  });
+
+  it("force delete reconciles a committed deletion after its response is lost", async () => {
+    const { registry, deps, store } = await setup();
+    const original = store.delete.bind(store);
+    vi.spyOn(store, "delete").mockImplementationOnce(async (id, options) => {
+      await original(id, options);
+      throw new Error("fixture response lost");
+    });
+    expect(
+      await registry.invoke("runs.delete", { args: ["fin-x"], options: { force: true } }, cli, deps),
+    ).toMatchObject({ ok: true, value: { id: "fin-x", state: "deleted", runtimeShutdown: "unconfirmed" } });
+    expect(await store.deleted(["fin-x"], { force: true })).toEqual(["fin-x"]);
+    expect((await store.get("fin-y"))?.id).toBe("fin-y");
+  });
+
+  it("force delete reports incomplete storage as unavailable and keeps other records", async () => {
+    const { registry, deps, store } = await setup();
+    vi.spyOn(store, "delete").mockRejectedValueOnce(new PermanentStoreError("fixture storage failure"));
+    expect(
+      await registry.invoke("runs.delete", { args: ["fin-x"], options: { force: true } }, cli, deps),
+    ).toMatchObject({
+      ok: false,
+      error: "unavailable",
+      status: 503,
+      message: "Stored run deletion could not be confirmed.",
+    });
+    expect((await store.get("fin-x"))?.id).toBe("fin-x");
+    expect((await store.get("fin-y"))?.id).toBe("fin-y");
   });
 
   it("kill deletes a saved run through the authorized command", async () => {

@@ -637,6 +637,11 @@ export const COMMAND_FIXTURES: Readonly<
     hints: { id: FIXTURE.persistedRun },
     why: "the saved run has positive original shutdown proof, so removal does not pretend a live fixture producer has stopped",
   },
+  "runs.delete": {
+    hints: { id: FIXTURE.persistedRun, force: true },
+    variants: { "force=false": { expect: { ok: false, error: "invalid_input", field: "force" } } },
+    why: "the privileged data deletion requires an explicit force flag and retains unconfirmed runtime custody",
+  },
   "runs.unit": {
     hints: { unit: FIXTURE.unitKey },
     why: "the argument is the coordinator store's unit key `<instance>:<unit>` — the generic `unit` hint is a plan's bare unit id for `contract render`",

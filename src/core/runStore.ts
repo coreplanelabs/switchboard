@@ -79,7 +79,21 @@ export interface RunEventsPage {
   nextAfterSeq?: number;
 }
 
+type DeletionIdentity = Pick<RunListItem, "id" | "channelId" | "userId" | "channelVisibility" | "repo">;
+
+const deletionIdentityOf = (record: RunListItem): DeletionIdentity => ({
+  id: record.id,
+  channelId: record.channelId,
+  userId: record.userId,
+  channelVisibility: record.channelVisibility ?? "unknown",
+  ...(record.repo ? { repo: record.repo } : {}),
+});
+
 export interface RunStore {
+  /** Original non-content identity retained for resuming one force deletion. */
+  deletionIdentity?(
+    id: string,
+  ): Promise<Pick<RunListItem, "id" | "channelId" | "userId" | "channelVisibility" | "repo"> | null>;
   /** `trace.span`: the caller's span, under which a Worker store's request is an
    *  `http.client` span (docs/reference/specs/tracing.md item 24); the local stores ignore it. */
   put(record: RunRecord, trace?: TraceOptions): Promise<PutResult>;
@@ -106,9 +120,9 @@ export interface RunStore {
    *  events past `afterSeq` is `{ events: [] }`, never null. */
   events(id: string, opts: RunEventsOptions): Promise<RunEventsPage | null>;
   /** Remove a run and its events (the incident lever for a redaction miss). Unknown id is a no-op. */
-  delete(id: string, opts?: { destructive: true }): Promise<void>;
+  delete(id: string, opts?: { destructive: true; force?: true }): Promise<void>;
   /** IDs permanently removed by Kill, including records held by another process. */
-  deleted(ids: readonly string[]): Promise<string[]>;
+  deleted(ids: readonly string[], opts?: { force: true }): Promise<string[]>;
   /** What the runs that finished in the range cost, as the cells every cost
    *  dimension reads (docs/reference/specs/costs.md items 10–10a): per requester,
    *  thread, channel, agent and UTC day, a child billed to its parent's
@@ -277,6 +291,10 @@ export interface LocalStoreOptions {
 /** In-process store for tests and dev. Not durable — never the production
  *  choice on its own (AGENTS.md invariant 6). */
 export class InMemoryRunStore implements RunStore {
+  private readonly deletionIdentities = new Map<string, DeletionIdentity>();
+  async deletionIdentity(id: string): Promise<DeletionIdentity | null> {
+    return this.deletionIdentities.get(id) ?? null;
+  }
   private readonly killed = new Set<string>();
   private readonly records = new Map<string, { record: RunRecord; bytes: number }>();
   private readonly policy: RetentionPolicy;
@@ -345,16 +363,20 @@ export class InMemoryRunStore implements RunStore {
     return record ? pageEvents(record.events, opts) : null;
   }
 
-  async deleted(ids: readonly string[]): Promise<string[]> {
-    return ids.filter((id) => this.killed.has(id));
+  private readonly forceDeleted = new Set<string>();
+  async deleted(ids: readonly string[], opts?: { force: true }): Promise<string[]> {
+    return ids.filter((id) => (opts?.force ? this.forceDeleted : this.killed).has(id));
   }
 
-  async delete(id: string, opts?: { destructive: true }): Promise<void> {
+  async delete(id: string, opts?: { destructive: true; force?: true }): Promise<void> {
     if (!isValidRunId(id)) return;
     const record = this.records.get(id)?.record;
+    if (opts?.force && record && !this.deletionIdentities.has(id))
+      this.deletionIdentities.set(id, deletionIdentityOf(record));
     if (!opts?.destructive && record && terminalPublicationRetentionRequired(record))
       throw new Error("unresolved publication prevents history deletion");
     if (opts?.destructive) this.killed.add(id);
+    if (opts?.force) this.forceDeleted.add(id);
     this.records.delete(id);
   }
 
@@ -391,6 +413,19 @@ const DIR_MODE = 0o700;
  * Fly/compose, ephemeral on Cloudflare Containers — hence an explicit opt-in.
  */
 export class FileRunStore implements RunStore {
+  async deletionIdentity(id: string): Promise<DeletionIdentity | null> {
+    if (!isValidRunId(id) || !existsSync(join(this.dir, `${id}.deletion`))) return null;
+    const value = JSON.parse(readFileSync(join(this.dir, `${id}.deletion`), "utf8")) as DeletionIdentity;
+    if (
+      value.id !== id ||
+      typeof value.channelId !== "string" ||
+      typeof value.userId !== "string" ||
+      !["public", "private", "dm", "machine", "unknown"].includes(String(value.channelVisibility)) ||
+      (value.repo !== undefined && typeof value.repo !== "string")
+    )
+      throw new Error("Run deletion identity is unreadable.");
+    return value;
+  }
   private readonly dir: string;
   private readonly policy: RetentionPolicy;
   private readonly now: () => number;
@@ -583,18 +618,28 @@ export class FileRunStore implements RunStore {
     return { ...report, ...(earliest !== undefined ? { earliestFinishedAt: earliest } : {}) };
   }
 
-  async deleted(ids: readonly string[]): Promise<string[]> {
-    return ids.filter((id) => isValidRunId(id) && existsSync(join(this.dir, `${id}.killed`)));
+  async deleted(ids: readonly string[], opts?: { force: true }): Promise<string[]> {
+    return ids.filter(
+      (id) => isValidRunId(id) && existsSync(join(this.dir, `${id}.${opts?.force ? "data-deleted" : "killed"}`)),
+    );
   }
 
-  async delete(id: string, opts?: { destructive: true }): Promise<void> {
+  async delete(id: string, opts?: { destructive: true; force?: true }): Promise<void> {
     if (!isValidRunId(id)) return;
-    const index = this.readIndex();
+    let index = this.readIndex();
     if (opts?.destructive) {
       this.ensureDir();
+      if (opts.force && !(await this.deletionIdentity(id))) {
+        const record = index.find((row) => row.id === id) ?? this.readRecord(id);
+        if (record) this.writeAtomic(join(this.dir, `${id}.deletion`), JSON.stringify(deletionIdentityOf(record)));
+      }
+      // The identity read yields. Preserve any neighbor saved before this
+      // synchronous deletion commit instead of rewriting an older index.
+      if (opts.force) index = this.readIndex();
       this.writeAtomic(join(this.dir, `${id}.killed`), "");
       rmSync(this.recordPath(id), { force: true });
       this.compact(index.filter((r) => r.id !== id));
+      if (opts.force) this.writeAtomic(join(this.dir, `${id}.data-deleted`), "");
       return;
     }
     if (!index.some((r) => r.id === id) && !existsSync(this.recordPath(id))) return;

@@ -284,6 +284,7 @@ describe("the real catalogue", () => {
       "pulls.rebase",
       "repo.offboard",
       "repo.rebuild",
+      "runs.delete",
       "runs.kill",
       "runs.stop",
     ]);

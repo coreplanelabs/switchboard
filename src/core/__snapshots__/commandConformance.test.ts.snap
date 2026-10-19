@@ -2046,6 +2046,32 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "runs:write",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "runs.delete",
+    "options": [
+      {
+        "name": "force",
+        "required": true,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "runs:read",
     "args": [
       {

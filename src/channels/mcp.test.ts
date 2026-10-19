@@ -1052,6 +1052,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
       "runs_settlecheck",
       "runs_stop",
       "runs_kill",
+      "runs_delete",
       "runs_unit",
       "runs_children",
       "runs_findings",

@@ -651,6 +651,54 @@ export const runsStop = defineCommand({
   },
 });
 
+export const runsDelete = defineCommand({
+  id: "runs.delete",
+  args: [idArg],
+  options: z.object({
+    force: flag
+      .refine((enabled) => enabled, "force must be true")
+      .describe("Delete stored run data even when shutdown is unconfirmed"),
+  }),
+  action: "runs:write",
+  effect: "write",
+  annotations: {
+    destructive: true,
+    risk: () => "permanently deletes this run's stored data without confirming shutdown",
+  },
+  describe:
+    "Delete one run's stored records with --force. Shared conversations and runtime custody remain; shutdown is not confirmed.",
+  handler: async ({ args, options, caller, deps }) => {
+    if (!options.force)
+      throw new CommandError("invalid_input", "Use --force to delete stored data without a shutdown receipt.");
+    try {
+      const runs = await deps.runs();
+      const target = unwrap(await runs.deletionTarget(args.id));
+      const decision = authorize(caller.actor, "runs:write", target);
+      if (!decision.allow) {
+        (deps.denied ?? logDenied)({
+          commandId: "runs.delete",
+          actorId: caller.actor.id,
+          action: "runs:write",
+          reason: decision.reason,
+        });
+        throw new CommandError("not_found", "no run found");
+      }
+      const result = await runs.deleteRunData(args.id);
+      if (!result.ok && result.error === "unavailable")
+        throw new CommandError("unavailable", "Stored run deletion could not be confirmed.");
+      return asJson(unwrap(result));
+    } catch (error) {
+      if (
+        error instanceof PermanentStoreError ||
+        error instanceof TransientStoreError ||
+        error instanceof RouteMissingError
+      )
+        throw new CommandError("unavailable", "Stored run deletion could not be confirmed.");
+      throw error;
+    }
+  },
+});
+
 export const runsKill = defineCommand({
   id: "runs.kill",
   args: [idArg],
@@ -879,6 +927,7 @@ export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [
   runsSettleCheck,
   runsStop,
   runsKill,
+  runsDelete,
   runsUnit,
   runsChildren,
   runsFindings,
