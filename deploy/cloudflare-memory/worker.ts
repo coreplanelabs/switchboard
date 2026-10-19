@@ -10676,10 +10676,11 @@ export class RunHistoryDO extends DurableObject<Env> {
           event_count: number;
           finished_at: number;
           bytes: number;
+          status: string;
           summary_json: string;
           metrics_emitted: number;
         }>(
-          `SELECT event_count, finished_at, bytes, summary_json, metrics_emitted FROM runs WHERE run_id = ?`,
+          `SELECT event_count, finished_at, bytes, status, summary_json, metrics_emitted FROM runs WHERE run_id = ?`,
           record.id,
         )
         .toArray()[0];
@@ -10696,12 +10697,20 @@ export class RunHistoryDO extends DurableObject<Env> {
       // the run's end — or erase a `restarting` row's deadline and kept point,
       // so the sweep could never count it — and a `restarting` close the
       // store's fallback put lands after the successor's finish would replace
-      // the run's terminal close. Answered as stored, with nothing written: the
-      // row, its events and the sessions table stay exactly as they were.
+      // the run's terminal close. A stop never replaces a run that already
+      // completed or failed (issue 3334): a `stopped_soft`/`stopped_hard` record
+      // over that row would say a person stopped the run and erase its setup
+      // result, while its metrics point still says how it really ended. An
+      // `interrupted` row stays open to a stop: a same-id restart after a
+      // container replacement closes `interrupted` without the restart marker,
+      // and the user may then stop its successor. Answered as stored, with nothing
+      // written: the row, its events and the sessions table stay exactly as
+      // they were.
       const existingProvisional = existing !== undefined && summaryCloseOf(existing.summary_json).provisional === true;
       if (
         (stored.provisional === true && existing !== undefined && !existingProvisional) ||
-        (!isTerminalClose(stored) && existingTerminal)
+        (!isTerminalClose(stored) && existingTerminal) ||
+        (existingTerminal && isStopStatus(stored.status) && ENDED_BY_THE_RUN.has(existing.status))
       ) {
         const retained = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs`).one().n;
         return { ok: true as const, retained, stored: true, rewritten: false, emits: false };
@@ -11845,6 +11854,14 @@ function unclaimedRestartPoint(point: RunMetricsPoint): RunMetricsPoint {
   if (outcome < blobs.length) blobs[outcome] = "error";
   return { indexes: point.indexes, blobs, doubles: point.doubles };
 }
+
+/** A status a stop request closes a run with. */
+function isStopStatus(status: string): boolean {
+  return status === "stopped_soft" || status === "stopped_hard";
+}
+
+/** Statuses with which a run ended on its own, which a later stop never replaces. */
+const ENDED_BY_THE_RUN: ReadonlySet<string> = new Set(["completed", "failed"]);
 
 /** A stored summary's close fields — `provisional` and `restarting` — read
  *  alone; an unreadable summary reads as a terminal close, as it always did. */
