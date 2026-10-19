@@ -16,6 +16,7 @@
 // reported as incomplete rather than rendered as a smaller change.
 
 import { distillDiffStats, type DigestRange, type DigestReport } from "../core/diffDigest.js";
+import { redactAndCap } from "../core/redact.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { gitInCheckout } from "../execution/workspaceAdvance.js";
 import type { RunnableTool } from "./runnableTool.js";
@@ -25,7 +26,6 @@ const NAME_STATUS_MARK = "@@diff_digest:name-status@@";
 // `adds\tdels\tpath` line, so only the line we echoed ourselves separates the
 // two listings.
 const NAME_STATUS_MARK_LINE = /^@@diff_digest:name-status@@$/m;
-const OUTPUT_CUT_RE = /^\.\.\.\[truncated \d+ chars\]$/m;
 
 export const diffDigestTool: RunnableTool = {
   sideEffectFree: true,
@@ -54,13 +54,17 @@ export const diffDigestTool: RunnableTool = {
     let observedRange: DigestRange | undefined;
     const report = (
       value: DigestReport,
-      reason?: "review_target_unavailable" | "listing_truncated" | "range_unconfirmed",
+      reason?: "review_target_unavailable" | "listing_truncated" | "range_unconfirmed" | "command_failed",
     ) => {
-      if (reason && ctx.digestTarget)
+      if (reason)
         console.log(
           JSON.stringify({
             event: "review_digest_refused",
             repo: ctx.repo,
+            agent: ctx.agentName,
+            // Caller expressions can contain private data. Keep only the
+            // bounded source category; the controller already supplies pins.
+            base: base ? "custom" : target ? "canonical" : "origin/HEAD",
             pr: ctx.reviewHistory?.target.number,
             head: target && /^[0-9a-f]{40}$/i.test(target.head) ? target.head : undefined,
             baseRef: target?.baseRef,
@@ -102,7 +106,17 @@ export const diffDigestTool: RunnableTool = {
         `printf '%s\\n' '@@diff_digest:range@@' "$digest_base" "$digest_head" "$digest_target" && `
       : "";
     const listing = `${pin}${git} diff --numstat ${range} && echo ${NAME_STATUS_MARK} && ${git} diff --name-status ${range}`;
-    let raw = await ctx.executor.exec(listing);
+    const failed = (detail: string): string => {
+      report(
+        { complete: false, base: baseName, reason: "the Git command did not complete successfully" },
+        "command_failed",
+      );
+      return `diff_digest: could not compute the diff (base \`${baseName}\`).\n${redactAndCap(detail, 1000)}`;
+    };
+    const execute = ctx.executor.execResult?.bind(ctx.executor);
+    if (!execute) return failed("structured command outcomes are unavailable");
+    let result = await execute(listing);
+    let raw = result.stdout;
     const readRange = () => {
       const match = /^@@diff_digest:range@@\n([0-9a-f]{40})\n([0-9a-f]{40})\n([0-9a-f]{40})\n/.exec(raw);
       observedRange =
@@ -110,40 +124,34 @@ export const diffDigestTool: RunnableTool = {
           ? { base: match[1], head: match[2], canonicalBase: match[3], baseRef: target.baseRef }
           : undefined;
     };
+    // This fixed prefix is a complete machine frame even when the later
+    // file listing is cut. It binds retention, never totals from that cut.
     readRange();
-    // The Executor's output cap, checked FIRST: a listing this long (one line
-    // per file) means thousands of files, and the cut can land before the
-    // marker — which would otherwise read as a failed command. Totals from a
-    // cut listing would be a smaller change than the real one — the exact
-    // failure this tool exists to prevent.
     const incomplete = (): string => {
       const reason = "the file listing exceeded the executor's output cap";
       report({ complete: false, base: baseName, reason }, "listing_truncated");
       return `diff_digest: ${reason} — the digest cannot state totals for this change (base \`${baseName}\`). Read the diff file by file (\`git diff --name-only ${baseName}...HEAD\`).`;
     };
-    if (OUTPUT_CUT_RE.test(raw)) return incomplete();
-    // A merge-base range needs the base's history. A shallow clone (the cold
-    // sandbox's own `git clone --depth`) may hold neither the base ref nor the
-    // merge base; deepen it once — the whole history, every branch — and retry.
-    // A full clone is never fetched here (the resident's read-only tree has an
-    // origin it cannot fetch from, by design; its failure stays legible).
+    // Native stream caps can be smaller than the display renderer's cap.
+    // Only the structured result proves that both listings arrived in full.
+    if (result.truncated) return incomplete();
     let marker = NAME_STATUS_MARK_LINE.exec(raw);
-    if (!marker) {
-      const shallow = (await ctx.executor.exec(`${git} rev-parse --is-shallow-repository`)).trim() === "true";
-      if (shallow) {
-        await ctx.executor.exec(`${git} fetch --unshallow --quiet origin "+refs/heads/*:refs/remotes/origin/*"`);
-        raw = await ctx.executor.exec(listing);
+    if (result.exitCode !== 0 && !marker) {
+      // A shallow clone can lack the merge base. Deepen once only after a
+      // complete, successful observation; an unknown fetch is never replayed.
+      const shallow = await execute(`${git} rev-parse --is-shallow-repository`);
+      if (shallow.exitCode !== 0 || shallow.truncated) return failed(shallow.stderr || shallow.stdout);
+      if (shallow.stdout.trim() === "true") {
+        const fetched = await execute(`${git} fetch --unshallow --quiet origin "+refs/heads/*:refs/remotes/origin/*"`);
+        if (fetched.exitCode !== 0 || fetched.truncated) return failed(fetched.stderr || fetched.stdout);
+        result = await execute(listing);
+        raw = result.stdout;
         readRange();
-        if (OUTPUT_CUT_RE.test(raw)) return incomplete();
+        if (result.truncated) return incomplete();
         marker = NAME_STATUS_MARK_LINE.exec(raw);
       }
     }
-    // The Executor returns command failures as text (never throws). If the diff
-    // failed, an empty listing would render a misleading "no changes" — surface
-    // the error instead.
-    if (!marker) {
-      return `diff_digest: could not compute the diff (base \`${baseName}\`).\n${raw.trim()}`;
-    }
+    if (result.exitCode !== 0 || !marker) return failed(result.stderr || result.stdout);
     if (target && !observedRange) {
       const reason = "the digest did not confirm the pinned review head and base";
       report({ complete: false, base: baseName, reason }, "range_unconfirmed");

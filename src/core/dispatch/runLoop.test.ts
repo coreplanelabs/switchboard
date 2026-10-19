@@ -10093,7 +10093,14 @@ describe("the pi harness — the review preset", () => {
             : command.includes("rev-parse")
               ? `${worktreeHead}\n`
               : "",
-        execResult: async () => ({ exitCode: 0, stdout: worktreeHead + "\n", stderr: "", truncated: false }),
+        execResult: async (command: string) => ({
+          exitCode: 0,
+          stdout: command.includes("@@diff_digest:range@@")
+            ? `@@diff_digest:range@@\n${(command.includes("prior^{commit}") ? "c" : "e").repeat(40)}\n${worktreeHead}\n${"e".repeat(40)}\n1\t0\tsrc/x.ts\n@@diff_digest:name-status@@\nM\tsrc/x.ts\n`
+            : worktreeHead + "\n",
+          stderr: "",
+          truncated: false,
+        }),
         moveTo: async (sha: string) => {
           if (requiresIdle && (await container.alive(container.pid)))
             throw new Error("workspace-preserved: live owner advance unverified");
@@ -12603,25 +12610,27 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       repoCtx,
       cold: { ref: repoCtx.ref!, sha: HEAD, workspace: "/workspace/original-review" },
       executor: {
-        execResult: async () => ({
-          stdout: mode === "different checkout head" ? other : HEAD,
-          stderr: "",
-          exitCode: 0,
-          truncated: false,
-        }),
-        exec: async (command) => {
+        execResult: async (command) => {
           if (command.includes("@@diff_digest:range@@")) {
             expect(command).toContain("git -C '/workspace/original-review'");
             expect(command).toContain("'origin/main^{commit}'");
             if (mode === "unavailable listing") throw new Error("unavailable");
-            return (
-              `@@diff_digest:range@@\n${mode === "incremental base" ? other : base}\n` +
-              `${mode === "different listing head" ? other : HEAD}\n${base}\n` +
-              `${mode === "changed totals" ? 8 : 7}\t2\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n` +
-              (mode === "truncated listing" ? "...[truncated 10 chars]\n" : "")
-            );
+            return {
+              stdout:
+                `@@diff_digest:range@@\n${mode === "incremental base" ? other : base}\n` +
+                `${mode === "different listing head" ? other : HEAD}\n${base}\n` +
+                `${mode === "changed totals" ? 8 : 7}\t2\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n`,
+              stderr: "",
+              exitCode: 0,
+              truncated: mode === "truncated listing",
+            };
           }
-          return command.includes("rev-parse") ? HEAD : "";
+          return {
+            stdout: mode === "different checkout head" ? other : HEAD,
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          };
         },
       },
       review: {
@@ -15999,10 +16008,15 @@ describe("runLoop checkout-bound tools", () => {
       agent: "review",
       cold: { ref: "work", sha: "a".repeat(40), workspace: "/workspace/checkout" },
       executor: {
-        exec: async (command) =>
+        execResult: async (command) =>
           command.startsWith("git -C '/workspace/checkout' diff --numstat")
-            ? "1\t0\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n"
-            : "exit 129: Not a git repository",
+            ? {
+                stdout: "1\t0\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n",
+                stderr: "",
+                exitCode: 0,
+                truncated: false,
+              }
+            : { stdout: "", stderr: "Not a git repository", exitCode: 129, truncated: false },
       },
       harness: {
         harnesses: roster(observed.harness),

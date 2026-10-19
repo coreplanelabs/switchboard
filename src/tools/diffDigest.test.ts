@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { LocalExecutor, type Executor } from "../execution/executor.js";
+import { LocalExecutor, type Executor, type ExecResult } from "../execution/executor.js";
 import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DigestReport } from "../core/diffDigest.js";
+import { retainDigest } from "../core/diffDigest.js";
+import { checkDigestCoverage } from "../core/digestCoverage.js";
 import { TOOLSETS } from "./toolsets.js";
 import { diffDigestTool } from "./diffDigest.js";
 import type { ToolContext } from "./runnableTool.js";
@@ -14,9 +16,17 @@ import type { ToolContext } from "./runnableTool.js";
 // through the Executor seam and distills the listing. Most tests use a fake
 // Executor; the last one runs the real LocalExecutor on a real repository.
 
-function ctxWith(exec: (cmd: string) => Promise<string>): ToolContext {
+function ctxWith(answer: (cmd: string) => Promise<string | ExecResult>): ToolContext {
+  const result = async (command: string): Promise<ExecResult> => {
+    const value = await answer(command);
+    return typeof value === "string" ? { stdout: value, stderr: "", exitCode: 0, truncated: false } : value;
+  };
   const executor: Executor = {
-    exec,
+    exec: async (command) => {
+      const value = await result(command);
+      return value.exitCode === 0 ? value.stdout : `exit ${value.exitCode}: ${value.stderr}`;
+    },
+    execResult: result,
     readFile: async () => "",
     writeFile: async () => "Wrote",
   };
@@ -28,7 +38,7 @@ const LISTING = (numstat: string, nameStatus: string) => `${numstat}\n@@diff_dig
 const ONE_FILE = LISTING("1\t0\tsrc/a.ts", "M\tsrc/a.ts");
 
 /** A fake executor that answers each command from a script, recording them. */
-function scripted(answers: Array<(cmd: string) => string>) {
+function scripted(answers: Array<(cmd: string) => string | ExecResult>) {
   const commands: string[] = [];
   const ctx = ctxWith(async (cmd) => {
     commands.push(cmd);
@@ -40,6 +50,98 @@ function scripted(answers: Array<(cmd: string) => string>) {
 }
 
 describe("diff_digest tool", () => {
+  it.each(["initial listing", "after history fetch"])(
+    "retains full review coverage after a clipped comparison: %s",
+    async (stage) => {
+      const reports: DigestReport[] = [];
+      let saved: DigestReport | undefined;
+      let comparisons = 0;
+      const prefix = (base: string) => `@@diff_digest:range@@\n${base}\n${"b".repeat(40)}\n${"a".repeat(40)}\n`;
+      const ctx = ctxWith(async (command) => {
+        if (command.includes("--is-shallow-repository")) return "true\n";
+        if (command.includes("fetch --unshallow")) return "";
+        comparisons++;
+        if (comparisons === 1) return prefix("a".repeat(40)) + ONE_FILE;
+        if (comparisons === 2 && stage === "after history fetch")
+          return { stdout: "", stderr: "no merge base", exitCode: 128, truncated: false };
+        return { stdout: prefix("c".repeat(40)) + ONE_FILE, stderr: "", exitCode: 0, truncated: true };
+      });
+      ctx.digestTarget = () => ({ baseRef: "main", head: "b".repeat(40) });
+      ctx.onDigest = (next) => {
+        reports.push(next);
+        saved = retainDigest(saved, next);
+      };
+      await diffDigestTool.run({}, ctx);
+      expect(await diffDigestTool.run({ base: "c".repeat(40) }, ctx)).toContain("cannot state totals");
+      expect(reports.at(-1)).toMatchObject({ complete: false });
+      expect(reports.at(-1)).not.toHaveProperty("totals");
+      expect(saved).toEqual({
+        complete: true,
+        base: "origin/main",
+        totals: { files: 1, additions: 1, deletions: 0 },
+        range: { base: "a".repeat(40), head: "b".repeat(40), canonicalBase: "a".repeat(40), baseRef: "main" },
+      });
+      expect(
+        checkDigestCoverage({
+          digest: saved,
+          pr: { changedFiles: 1, additions: 1, deletions: 0 },
+          head: "b".repeat(40),
+          baseRef: "main",
+        }),
+      ).toEqual({ ok: true, compared: true });
+    },
+  );
+
+  it("logs a coding refusal with bounded reason and base context", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const ctx = ctxWith(async () => ({ stdout: "", stderr: "PRIVATE_FAILURE", exitCode: 1, truncated: false }));
+    ctx.agentName = "coding";
+    ctx.repo = "acme/api";
+    try {
+      expect(await diffDigestTool.run({}, ctx)).toContain("could not compute");
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        {
+          event: "review_digest_refused",
+          repo: "acme/api",
+          agent: "coding",
+          base: "origin/HEAD",
+          reason: "command_failed",
+        },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it.each(["partial prefix", "changed head", "changed canonical base"])(
+    "holds clipped coverage without a confirmed matching range: %s",
+    async (kind) => {
+      let saved: DigestReport | undefined;
+      let calls = 0;
+      const ctx = ctxWith(async () => {
+        calls++;
+        if (calls === 1)
+          return `@@diff_digest:range@@\n${"a".repeat(40)}\n${"b".repeat(40)}\n${"a".repeat(40)}\n${ONE_FILE}`;
+        const stdout =
+          kind === "partial prefix"
+            ? `@@diff_digest:range@@\n${"c".repeat(40)}\n`
+            : `@@diff_digest:range@@\n${"c".repeat(40)}\n${(kind === "changed head" ? "d" : "b").repeat(40)}\n${(kind === "changed canonical base" ? "d" : "a").repeat(40)}\n`;
+        return { stdout, stderr: "", exitCode: 0, truncated: true };
+      });
+      ctx.digestTarget = () => ({ baseRef: "main", head: "b".repeat(40) });
+      ctx.onDigest = (next) => {
+        saved = retainDigest(saved, next);
+      };
+      await diffDigestTool.run({}, ctx);
+      expect(saved).toMatchObject({ complete: true, totals: { files: 1, additions: 1, deletions: 0 } });
+      expect(await diffDigestTool.run({ base: "old" }, ctx)).toContain("cannot state totals");
+      expect(saved).toMatchObject({ complete: false, base: "old" });
+      expect(checkDigestCoverage({ digest: saved, pr: { changedFiles: 1, additions: 1, deletions: 0 } })).toMatchObject(
+        { ok: false },
+      );
+    },
+  );
+
   it("records a bounded refusal without logging the caller's base expression", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const ctx = ctxWith(
@@ -56,6 +158,7 @@ describe("diff_digest tool", () => {
         {
           event: "review_digest_refused",
           repo: "acme/api",
+          base: "custom",
           pr: 42,
           head: "c".repeat(40),
           baseRef: "main",
@@ -79,6 +182,86 @@ describe("diff_digest tool", () => {
     ]);
   });
 
+  it("refuses a Resident-truncated listing even when display output has no cut marker", async () => {
+    const reports: DigestReport[] = [];
+    const paths = Array.from({ length: 4000 }, (_, i) => `src/file-${String(i).padStart(4, "0")}.ts`);
+    const listing = LISTING(
+      paths.map((path) => `0\t1\t${path}`).join("\n"),
+      paths.map((path) => `D\t${path}`).join("\n"),
+    );
+    const stdout = listing.slice(0, 100_000);
+    const stderr = "output truncated to 100000 chars per stream";
+    const ctx = ctxWith(async () => `${stdout}\n--- stderr ---\n${stderr}`);
+    ctx.executor.execResult = async () => ({ stdout, stderr, exitCode: 0, truncated: true });
+    ctx.onDigest = (report) => reports.push(report);
+    const out = await diffDigestTool.run({}, ctx);
+    expect(out).toContain("cannot state totals");
+    expect(reports).toEqual([
+      { complete: false, base: "origin/HEAD", reason: "the file listing exceeded the executor's output cap" },
+    ]);
+  });
+
+  it("refuses failed listings and shallow observations before accepting their text", async () => {
+    for (const stage of ["listing", "probe failed", "probe truncated", "fetch failed", "fetch truncated"] as const) {
+      const reports: DigestReport[] = [];
+      const ctx = ctxWith(async () => ONE_FILE);
+      ctx.onDigest = (report) => reports.push(report);
+      ctx.executor.execResult = async (command): Promise<ExecResult> => {
+        if (command.includes("--is-shallow-repository"))
+          return {
+            stdout: "true\n",
+            stderr: "",
+            exitCode: stage === "probe failed" ? 1 : 0,
+            truncated: stage === "probe truncated",
+          };
+        if (command.includes("fetch --unshallow"))
+          return {
+            stdout: "",
+            stderr: "fetch failed",
+            exitCode: stage === "fetch failed" ? 1 : 0,
+            truncated: stage === "fetch truncated",
+          };
+        return stage === "listing"
+          ? { stdout: ONE_FILE, stderr: "listing failed", exitCode: 1, truncated: false }
+          : { stdout: "", stderr: "no merge base", exitCode: 128, truncated: false };
+      };
+      const out = await diffDigestTool.run({}, ctx);
+      expect(out).toContain("could not compute the diff");
+      expect(reports).toEqual([
+        { complete: false, base: "origin/HEAD", reason: "the Git command did not complete successfully" },
+      ]);
+    }
+  });
+
+  it("refuses executors without structured outcomes before interpreting display text", async () => {
+    const reports: DigestReport[] = [];
+    const ctx = ctxWith(async () => ONE_FILE);
+    delete ctx.executor.execResult;
+    ctx.onDigest = (report) => reports.push(report);
+    expect(await diffDigestTool.run({}, ctx)).toContain("structured command outcomes are unavailable");
+    expect(reports).toEqual([
+      { complete: false, base: "origin/HEAD", reason: "the Git command did not complete successfully" },
+    ]);
+  });
+
+  it("preserves an unknown fetch outcome without retrying the fetch or listing", async () => {
+    const commands: string[] = [];
+    const lost = new Error("fetch response lost");
+    const ctx = ctxWith(async () => ONE_FILE);
+    ctx.executor.execResult = async (command) => {
+      commands.push(command);
+      if (command.includes("fetch --unshallow")) throw lost;
+      return command.includes("--is-shallow-repository")
+        ? { stdout: "true\n", stderr: "", exitCode: 0, truncated: false }
+        : { stdout: "", stderr: "no merge base", exitCode: 128, truncated: false };
+    };
+    await expect(diffDigestTool.run({}, ctx)).rejects.toBe(lost);
+    expect(commands.filter((command) => command.includes("fetch --unshallow"))).toEqual([
+      'git fetch --unshallow --quiet origin "+refs/heads/*:refs/remotes/origin/*"',
+    ]);
+    expect(commands.filter((command) => command.includes("--numstat"))).toHaveLength(1);
+  });
+
   it("runs the merge-base range as stats — `--numstat` and `--name-status` over `<base>...HEAD` — never the unified diff", async () => {
     const { ctx, commands } = scripted([() => ONE_FILE]);
     await diffDigestTool.run({ base: "release-1.2" }, ctx);
@@ -95,10 +278,10 @@ describe("diff_digest tool", () => {
     expect(commands[0]).toContain("origin/HEAD");
   });
 
-  it("surfaces a git failure instead of reporting an empty diff, and reports no digest", async () => {
+  it("surfaces a git failure instead of reporting an empty diff, and reports incomplete coverage", async () => {
     const reports: DigestReport[] = [];
     const { ctx } = scripted([
-      () => "exit 128: fatal: bad revision 'nope...HEAD'",
+      () => ({ stdout: "", stderr: "fatal: bad revision 'nope...HEAD'", exitCode: 128, truncated: false }),
       () => "false", // not a shallow clone → no fetch, the failure stands
     ]);
     ctx.onDigest = (r) => reports.push(r);
@@ -106,12 +289,14 @@ describe("diff_digest tool", () => {
     expect(out).toMatch(/could not compute/i);
     expect(out).toContain("fatal: bad revision");
     expect(out).not.toMatch(/no changes/i);
-    expect(reports).toEqual([]);
+    expect(reports).toEqual([
+      { complete: false, base: "nope", reason: "the Git command did not complete successfully" },
+    ]);
   });
 
   it("a shallow clone with no merge base is deepened once (every branch), then the listing is retried", async () => {
     const { ctx, commands } = scripted([
-      () => "exit 128: fatal: origin/main...HEAD: no merge base",
+      () => ({ stdout: "", stderr: "fatal: origin/main...HEAD: no merge base", exitCode: 128, truncated: false }),
       () => "true\n",
       () => "",
       () => ONE_FILE,
@@ -125,7 +310,10 @@ describe("diff_digest tool", () => {
   });
 
   it("a full clone is never fetched: the failure is reported as is", async () => {
-    const { ctx, commands } = scripted([() => "exit 128: fatal: origin/main...HEAD: no merge base", () => "false"]);
+    const { ctx, commands } = scripted([
+      () => ({ stdout: "", stderr: "fatal: origin/main...HEAD: no merge base", exitCode: 128, truncated: false }),
+      () => "false",
+    ]);
     const out = await diffDigestTool.run({}, ctx);
     expect(commands).toHaveLength(2);
     expect(commands.some((c) => c.includes("git fetch"))).toBe(false);
@@ -135,7 +323,7 @@ describe("diff_digest tool", () => {
   it("a listing cut by the executor's output cap is reported as incomplete — never rendered as a smaller change", async () => {
     const reports: DigestReport[] = [];
     const cut = `${"1\t0\tsrc/a.ts\n".repeat(3)}@@diff_digest:name-status@@\nM\tsrc/a.ts\n...[truncated 9000 chars]`;
-    const ctx = ctxWith(async () => cut);
+    const ctx = ctxWith(async () => ({ stdout: cut, stderr: "", exitCode: 0, truncated: true }));
     ctx.onDigest = (r) => reports.push(r);
     const out = await diffDigestTool.run({}, ctx);
     expect(out).toMatch(/cannot state totals/);
@@ -146,7 +334,7 @@ describe("diff_digest tool", () => {
   it("a listing cut BEFORE the marker is still incomplete — never 'could not compute', and no shallow probe or fetch", async () => {
     const reports: DigestReport[] = [];
     const cut = `${"1\t0\tsrc/a.ts\n".repeat(3)}...[truncated 9000 chars]`;
-    const { ctx, commands } = scripted([() => cut]);
+    const { ctx, commands } = scripted([() => ({ stdout: cut, stderr: "", exitCode: 0, truncated: true })]);
     ctx.onDigest = (r) => reports.push(r);
     const out = await diffDigestTool.run({}, ctx);
     expect(out).toMatch(/cannot state totals/);
