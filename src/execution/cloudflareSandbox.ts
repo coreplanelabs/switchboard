@@ -48,8 +48,6 @@ import {
 import {
   SandboxCredentialRefresher,
   SandboxCredentialRefreshError,
-  isGitCredentialRefusal,
-  isGitPushCommand,
   type SandboxCredentialSource,
 } from "./sandboxCredentials.js";
 import { systemClock } from "../core/trace/clock.js";
@@ -222,23 +220,22 @@ export class CloudflareSandboxExecutor implements Executor {
   }
 
   /** Land the credential file in the sandbox when the refresher says a write
-   *  is due (before every exec; `fresh` on the 401-retry path). Answers whether
-   *  a write ran. A due refresh that cannot mint is the run's legible end —
+   *  is due before an exec. A due refresh that cannot mint is the run's legible end —
    *  `ExecInfraError`/`refused`, no wait clears it — so the run's post-step
    *  reports the branch state (the unpushed commits named) instead of the
    *  model sleeping against a wall of 401s. */
-  private async refreshCredential(opts?: { fresh?: boolean; signal?: AbortSignal; span?: Span }): Promise<boolean> {
+  private async refreshCredential(opts?: { signal?: AbortSignal; span?: Span }): Promise<void> {
     const source = this.opts.credential;
-    if (source === undefined) return false;
+    if (source === undefined) return;
     this.refresher ??= new SandboxCredentialRefresher(source, systemClock);
     let write;
     try {
-      write = await this.refresher.dueWrite(opts?.fresh ? { fresh: true } : undefined);
+      write = await this.refresher.dueWrite();
     } catch (err) {
       if (err instanceof SandboxCredentialRefreshError) throw new ExecInfraError(err.message, "refused");
       throw err;
     }
-    if (write === null) return false;
+    if (write === null) return;
     // The write is its own exec — never through exec(), which would re-enter
     // this refresh. The credential line rides the body's env beside the
     // resolved credential map, never the command text.
@@ -252,7 +249,6 @@ export class CloudflareSandboxExecutor implements Executor {
     // Recorded only now: a write exec that failed above is re-planned on the
     // next exec instead of believed fresh until the margin.
     write.confirm();
-    return true;
   }
 
   /** One request to the Worker, with the transport-level retries, and the
@@ -283,6 +279,7 @@ export class CloudflareSandboxExecutor implements Executor {
     skipScrub = false,
     singleSend = false,
     logObservation = false,
+    waitForKnownBusy = false,
   ): Promise<Record<string, unknown>> {
     if (signal?.aborted) throw sandboxStopped(route);
     if (this.opts.scrubLegacyCredentials && !skipScrub) {
@@ -322,12 +319,18 @@ export class CloudflareSandboxExecutor implements Executor {
     for (;;) {
       const answer = await this.send(route, sent, headers, budgetMs, signal, span, singleSend);
       if (answer.kind === "ok") return answer.data;
-      if (singleSend && !(logObservation && answer.knownLogWait === true))
+      if (
+        singleSend &&
+        !(answer.executionDiagnostic && (logObservation ? answer.knownLogWait === true : waitForKnownBusy))
+      ) {
+        if (!answer.executionDiagnostic)
+          throw new ExecInfraError("sandbox /exec: dispatch refusal could not be verified", "answered");
         throw new ExecCapacityError(
           "The typed command was refused before execution.",
           undefined,
           answer.executionDiagnostic,
         );
+      }
       const setupRemaining = this.opts.setupRemainingMs?.();
       const setupWaitMs =
         typeof setupRemaining === "number" && Number.isFinite(setupRemaining) && setupRemaining >= 0
@@ -426,15 +429,13 @@ export class CloudflareSandboxExecutor implements Executor {
         // either way an infra failure that fail-fast counts, never an
         // indefinite wait. A hard stop takes the generic path below, typed
         // `aborted`: the runner has already moved on and does not read the message.
-        if (deadline.aborted && !signal?.aborted)
-          throw new ExecInfraError(sandboxNoAnswerMessage(route, budgetMs), "deadline-passed");
-        // Network-level failure ("fetch failed"): undici drops the connection
-        // after ~300s without response headers, so a command that outlives the
-        // sandbox's COMMAND_TIMEOUT_MS margin surfaces here, not as exit 124.
-        // Don't retry — the command may have side effects and may still be
-        // running in the sandbox; give the agent a legible error instead. Infra
-        // (not a command exit): the runner counts these toward fail-fast.
-        throw new ExecInfraError(requestFailedMessage("sandbox", route, err), infraReasonOfRequestFailure(err, signal));
+        // A lost answer never proves that a command did not execute.
+        const failure =
+          deadline.aborted && !signal?.aborted
+            ? new ExecInfraError(sandboxNoAnswerMessage(route, budgetMs), "deadline-passed")
+            : new ExecInfraError(requestFailedMessage("sandbox", route, err), infraReasonOfRequestFailure(err, signal));
+        Object.defineProperty(failure, "cause", { value: err });
+        throw failure;
       }
       // Heartbeat whitespace around one JSON document parses unchanged; a
       // non-JSON body (an edge error page) is {} and the status speaks below.
@@ -523,30 +524,43 @@ export class CloudflareSandboxExecutor implements Executor {
 
   /** Facts for runner-owned effects. A possibly executed command is never replayed. */
   async execResult(command: string, opts?: ExecOptions): Promise<ExecResult> {
+    return this.executeCommand(command, opts, false);
+  }
+
+  /** Both entry points keep unknown effects single-send. Display callers keep
+   * bounded waits for proven no-dispatch replies; structured writes stay strict. */
+  private async executeCommand(
+    command: string,
+    opts: ExecOptions | undefined,
+    waitForKnownBusy: boolean,
+  ): Promise<ExecResult> {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
+    const body: Record<string, unknown> = { command };
+    if (opts?.timeoutMs !== undefined) body.timeoutMs = timeoutMs;
+    if (opts?.env !== undefined) body.env = opts.env;
     await this.refreshCredential({ signal: opts?.signal, span: opts?.span });
     const r = await this.call(
       "/exec",
-      {
-        command,
-        timeoutMs,
-        ...(opts?.env ? { env: opts.env } : {}),
-      },
+      body,
       opts?.signal,
       timeoutMs,
       opts?.span,
       false,
       true,
       opts?.busyObservation === "harness_log",
+      waitForKnownBusy,
     );
     if (
       typeof r.stdout !== "string" ||
       typeof r.stderr !== "string" ||
+      typeof r.exitCode !== "number" ||
       !Number.isInteger(r.exitCode) ||
+      r.exitCode < 0 ||
+      r.exitCode > 255 ||
       typeof r.truncated !== "boolean"
     )
       throw new ExecInfraError("sandbox /exec: invalid command result", "worker-unavailable");
-    return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode as number, truncated: r.truncated };
+    return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode, truncated: r.truncated };
   }
 
   moveTo(sha: string, opts?: MoveOptions): Promise<{ sha: string }> {
@@ -671,38 +685,9 @@ export class CloudflareSandboxExecutor implements Executor {
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
-    // Per-call budget (docs/reference/specs/execution.md item 11): rides in the body only
-    // when the caller asked for one, so an older sandbox Worker sees the body
-    // it always did (it enforces its tuned 280s limit); the Worker clamps
-    // server-side with the same [1s, 20 min] bounds — never this number alone.
-    const body: Record<string, unknown> = { command };
-    if (opts?.timeoutMs !== undefined) body.timeoutMs = clampBashTimeout(opts.timeoutMs);
-    // A caller's extra environment (docs/reference/specs/harness-pi.md item 4)
-    // joins the sandbox's own credential in the body's one env map (`call`
-    // merges them, the credential winning a clash).
-    if (opts?.env !== undefined) body.env = opts.env;
-    // The credential file first, when the token it holds nears expiry — so
-    // this exec (and the harness children that outlive the env they inherited)
-    // never runs against a dying token (execution.md item 5).
-    await this.refreshCredential({ signal: opts?.signal, span: opts?.span });
-    // The fleet wait may spend up to the command's own budget (item 14) — a
-    // command the run gave 60 s should not wait five minutes for a slot.
-    const run = async () => {
-      const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs), opts?.span, false);
-      const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
-      const exitCode = Number(r.exitCode ?? 0);
-      return exitCode !== 0 ? `exit ${exitCode}:\n${parts}` : parts || "(no output)";
-    };
-    let out = await run();
-    // A push the remote refused for its credential is a credential fault, not
-    // the command's: ONE fresh mint + rewrite, ONE re-send (a push is
-    // idempotent at the same tip) — never a backoff loop. A failed fresh mint
-    // throws above, ending the run with the branch state for the post-step.
-    if (isGitPushCommand(command) && isGitCredentialRefusal(out)) {
-      const rewrote = await this.refreshCredential({ fresh: true, signal: opts?.signal, span: opts?.span });
-      if (rewrote) out = await run();
-    }
-    return truncate(out);
+    const result = await this.executeCommand(command, opts, true);
+    const parts = [result.stdout, result.stderr].filter(Boolean).join("\n--- stderr ---\n");
+    return truncate(result.exitCode !== 0 ? `exit ${result.exitCode}:\n${parts}` : parts || "(no output)");
   }
 
   /** Read the original durable attempt without another native install. */

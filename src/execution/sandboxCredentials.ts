@@ -33,24 +33,6 @@ export function credentialWriteScript(file: string = SANDBOX_CREDENTIAL_FILE): s
   ].join(" && ");
 }
 
-/** GitHub's refusal of a dead or revoked token, as it reaches a git remote
- *  operation's output — the incident's exact wording, plus git's own summary
- *  line for an HTTP 401 against github.com. */
-export function isGitCredentialRefusal(output: string): boolean {
-  return /Invalid username or token|Authentication failed for 'https:\/\/github\.com/.test(output);
-}
-
-/** Whether a command runs `git push` — the one remote write whose re-send
- *  after a credential refresh is safe (a push is idempotent at the same tip).
- *  Anchored so only option tokens (`-C <dir>`, `-c k=v`, `--git-dir=…`) may sit
- *  between `git` and `push`: a local subcommand's own `push` (`git stash push`,
- *  `git notes … push`) is never a remote write and must not match. */
-export function isGitPushCommand(command: string): boolean {
-  return /(^|[\s;&|(`])git(\s+(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path)\s+[^\s;&|`\n]+|\s+-[^\s;&|`\n]*)*\s+push(\s|$)/.test(
-    command,
-  );
-}
-
 /** The credential as the executor's source answers it: the token and when it
  *  expires (null for a static PAT, which never does). */
 export interface SandboxCredential {
@@ -58,11 +40,10 @@ export interface SandboxCredential {
   expiresAtMs: number | null;
 }
 
-/** Where a sandbox executor gets its credential: `resolveGithubCredential` in
- *  production (githubApp.ts), a stub in tests. `fresh` skips the mint cache —
- *  the 401-retry path's ask, where re-serving the refused token buys nothing.
- *  Answers null when the run holds no GitHub credential (then there is nothing
- *  to keep fresh, and the refresher disables itself). */
+/** A legacy direct caller's credential source. Production executor construction
+ *  leaves it unwired. An explicit utility caller can request a fresh mint;
+ *  executors only prepare credentials before a command and never replay it
+ *  because of returned text. Null disables further credential preparation. */
 export type SandboxCredentialSource = (opts?: { fresh?: boolean }) => Promise<SandboxCredential | null>;
 
 /** What the refresher asks the executor to run before the exec: the write
@@ -101,7 +82,7 @@ export class SandboxCredentialRefresher {
   ) {}
 
   /** The write due before the next exec, minting when the resident's decision
-   *  says so (or unconditionally under `fresh` — the 401-retry path). Throws
+   *  says so (or on an explicit utility caller's `fresh` request). Throws
    *  `SandboxCredentialRefreshError` when a mint the exec NEEDS fails: a fresh
    *  ask, a first write, or a written token already past its expiry; a mint
    *  failure while the written token still lives is left for the next exec. */

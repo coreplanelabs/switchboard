@@ -1,8 +1,8 @@
 import { advanceWorkspace } from "./workspaceAdvance.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, posix } from "node:path";
-import { Sandbox } from "e2b";
-import { bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
+import { Sandbox, CommandExitError, TimeoutError, type CommandResult } from "e2b";
+import { clampBashTimeout } from "./bashTimeout.js";
 import {
   ExecInfraError,
   truncate,
@@ -17,8 +17,6 @@ import {
 import {
   SandboxCredentialRefresher,
   SandboxCredentialRefreshError,
-  isGitCredentialRefusal,
-  isGitPushCommand,
   type SandboxCredentialSource,
 } from "./sandboxCredentials.js";
 import { SANDBOX_CREDENTIAL_WRITE_TIMEOUT_MS } from "../core/budgets.js";
@@ -167,25 +165,25 @@ export class E2BExecutor implements Executor {
   }
 
   /** Land the credential file in the micro-VM when the refresher says a write
-   *  is due (before every exec; `fresh` on the 401-retry path) — the same
+   *  is due before an exec — the same
    *  contract as the Cloudflare sandbox executor's (sandboxCredentials.ts):
    *  the credential line rides the write's own `envs`, never command text; the
    *  write's global-helper reset displaces the setup's `!gh auth
    *  git-credential`, so git stops answering with the token pi's children
    *  inherited at their one start; a due refresh that cannot mint (or land)
    *  ends the run `ExecInfraError`/`refused` for the post-step's report. */
-  private async refreshCredential(opts?: { fresh?: boolean }): Promise<boolean> {
+  private async refreshCredential(): Promise<void> {
     const source = this.credential;
-    if (source === undefined) return false;
+    if (source === undefined) return;
     this.refresher ??= new SandboxCredentialRefresher(source, systemClock, E2B_CREDENTIAL_FILE);
     let write;
     try {
-      write = await this.refresher.dueWrite(opts?.fresh ? { fresh: true } : undefined);
+      write = await this.refresher.dueWrite();
     } catch (err) {
       if (err instanceof SandboxCredentialRefreshError) throw new ExecInfraError(err.message, "refused");
       throw err;
     }
-    if (write === null) return false;
+    if (write === null) return;
     // The write is its own command — never through exec(), which would
     // re-enter this refresh. The SDK throws on a non-zero exit.
     try {
@@ -199,7 +197,6 @@ export class E2BExecutor implements Executor {
     }
     // Recorded only now: a failed write is re-planned on the next exec.
     write.confirm();
-    return true;
   }
 
   /** The e2b command API takes no AbortSignal, so a hard run stop
@@ -212,39 +209,45 @@ export class E2BExecutor implements Executor {
     // exec (and the harness children that outlive the env they inherited) never
     // runs against a dying token (execution.md item 5).
     await this.refreshCredential();
-    let out = await this.run(command, opts);
-    // A push the remote refused for its credential is a credential fault, not
-    // the command's: ONE fresh mint + rewrite, ONE re-send (a push is
-    // idempotent at the same tip) — never a backoff loop.
-    if (isGitPushCommand(command) && isGitCredentialRefusal(out)) {
-      const rewrote = await this.refreshCredential({ fresh: true });
-      if (rewrote) out = await this.run(command, opts);
-    }
-    return truncate(out);
+    // Command output is evidence, never permission to send the command again.
+    return truncate(await this.run(command, opts));
   }
 
   private async runResult(command: string, opts?: ExecOptions): Promise<ExecResult> {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
     const envs = (await this.resolveEnvs()) ?? {};
     if (opts?.signal?.aborted) throw new Error("workspace command stopped");
-    const result = await this.sbx.commands.run(command, { cwd: WORKDIR, timeoutMs, envs }).catch((err: unknown) => {
-      const e = err as { name?: string; exitCode?: number; stdout?: string; stderr?: string; message?: string };
-      // The SDK's deadline kill throws TimeoutError with no exit code —
-      // render it as exit 124 naming the limit that fired, so the model can
-      // self-correct instead of reading a generic failure.
-      // Exactly the SDK's TimeoutError — a message-regex fallback would also
-      // catch CONNECTION timeouts and mislabel them as the command deadline.
-      if (e.exitCode === undefined && e.name === "TimeoutError") {
-        return { exitCode: 124, stdout: e.stdout ?? "", stderr: bashTimeoutNote(timeoutMs) };
+    let result: CommandResult;
+    try {
+      result = await this.sbx.commands.run(command, { cwd: WORKDIR, timeoutMs, envs });
+    } catch (error) {
+      // Only the SDK's terminal-result type establishes a command exit.
+      // SDK timeouts also cover request loss and do not prove a process kill.
+      if (error instanceof CommandExitError) result = error;
+      else {
+        const failure = new ExecInfraError(
+          "e2b command outcome is unavailable",
+          error instanceof TimeoutError ? "deadline-passed" : "transport-lost",
+        );
+        Object.defineProperty(failure, "cause", { value: error });
+        throw failure;
       }
-      // e2b throws on non-zero exit; surface it as output like LocalExecutor
-      return {
-        exitCode: e.exitCode ?? 1,
-        stdout: e.stdout ?? "",
-        stderr: e.stderr ?? e.message ?? String(err),
-      };
-    });
-    return { ...result, truncated: result.stdout.length > MAX_OUTPUT || result.stderr.length > MAX_OUTPUT };
+    }
+    if (
+      !result ||
+      typeof result.stdout !== "string" ||
+      typeof result.stderr !== "string" ||
+      !Number.isInteger(result.exitCode) ||
+      result.exitCode < 0 ||
+      result.exitCode > 255
+    )
+      throw new ExecInfraError("e2b command outcome is invalid", "worker-unavailable");
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      truncated: result.stdout.length > MAX_OUTPUT || result.stderr.length > MAX_OUTPUT,
+    };
   }
 
   async execResult(command: string, opts?: ExecOptions): Promise<ExecResult> {

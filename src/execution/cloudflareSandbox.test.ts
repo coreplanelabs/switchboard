@@ -50,7 +50,7 @@ afterEach(() => {
 
 describe("Cloudflare reused sandbox credential boundary", () => {
   it("scrubs the old App token file before the first model command, once per executor", async () => {
-    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
     const ex = new CloudflareSandboxExecutor({ ...OPTS, scrubLegacyCredentials: true });
     await ex.exec("git status");
     await ex.exec("git log -1");
@@ -80,7 +80,7 @@ describe("CloudflareSandboxExecutor trace context", () => {
     const execSpan = root.start("exec.exec");
     configureInternalHosts(internalHostsOf([OPTS.url]));
     try {
-      const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+      const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
       await new CloudflareSandboxExecutor(OPTS).exec("echo hi", { span: execSpan });
       const client = log.ended("http.client")!;
       expect(client.parentSpanId).toBe(execSpan.id);
@@ -106,7 +106,7 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
   const sentEnv = (c: { init: RequestInit }) => sentBody(c).env as Record<string, string>;
 
   it("resolves the sandbox env on EVERY call, so each command carries the credential current at its start", async () => {
-    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
     let token = "ghs_first";
     const resolveEnvs = vi.fn(async () => ({ GH_TOKEN: token }));
     const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs });
@@ -124,7 +124,7 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
   // joins the resolved credential in the body's one env map; on a name clash
   // the sandbox's own credential wins — a caller never renames the token.
   it("a caller's env rides beside the resolved credential in the body, the credential winning a clash", async () => {
-    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
     const resolveEnvs = vi.fn(async () => ({ GH_TOKEN: "ghs_real" }));
     const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs });
     await ex.exec("pi --version", { env: { SWITCHBOARD_RUN_BEARER: "sbr_x.y", GH_TOKEN: "ghs_forged" } });
@@ -132,7 +132,7 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
   });
 
   it("reserves a per-effect door credential override while an ordinary env cannot replace it", async () => {
-    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
     const ex = new CloudflareSandboxExecutor({
       ...OPTS,
       resolveEnvs: async () => ({ GH_ENTERPRISE_TOKEN: "model-bearer" }),
@@ -148,7 +148,7 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
   // (record 0062) rides the same shared resolver: the four variables reach
   // the body's env beside the credential on every command.
   it("the four commit identity variables reach the body's env beside the credential", async () => {
-    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
     const FOUR = {
       GIT_AUTHOR_NAME: "ivy-dev",
       GIT_AUTHOR_EMAIL: "4242+ivy-dev@users.noreply.github.com",
@@ -170,19 +170,16 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
   });
 });
 
-// Feature: docs/reference/specs/execution.md item 5 — the credential FILE the
-// executor keeps fresh in the sandbox (issue 1915): the harness process
-// inherits the env of its one start exec, so its git children need a store
-// file the executor rewrites when the token nears expiry; a push the remote
-// refused for its credential gets ONE fresh mint and ONE re-send, never a
-// backoff loop; a refresh that cannot mint ends the run legibly.
+// The legacy direct-call utility prepares credentials before execution.
+// Production supplies no App-token source; returned text never permits replay.
 describe("CloudflareSandboxExecutor credential file refresh", () => {
   const HOUR = 60 * 60_000;
-  const OK = { stdout: "ok", stderr: "", exitCode: 0 };
+  const OK = { stdout: "ok", stderr: "", exitCode: 0, truncated: false };
   const REFUSED = {
     stdout: "",
     stderr: "remote: Invalid username or token. Password authentication is not supported for Git operations.",
     exitCode: 128,
+    truncated: false,
   };
 
   function stubFetchSeq(bodies: unknown[]) {
@@ -215,28 +212,45 @@ describe("CloudflareSandboxExecutor credential file refresh", () => {
     expect(credential).toHaveBeenCalledTimes(1);
   });
 
-  it("a push the remote refused for its credential refreshes once (a fresh mint, skipping the cache) and re-sends once — never a loop: a second refusal is the answer", async () => {
-    const { calls } = stubFetchSeq([OK, OK, REFUSED, OK, OK]);
-    const credential = vi.fn(async () => ({ token: "ghs_x", expiresAtMs: Date.now() + HOUR }));
-    const ex = new CloudflareSandboxExecutor({ ...OPTS, credential });
-    await ex.exec("echo warm"); // write + command
-    const out = await ex.exec("git push -u origin fix-x"); // refused → fresh write → re-send ok
-    expect(out).toBe("ok");
-    expect(calls).toHaveLength(5);
-    expect(sentBody(calls[2]!).command).toBe("git push -u origin fix-x");
-    expect(String(sentBody(calls[3]!).command)).toContain("credential.helper");
-    expect(sentBody(calls[4]!).command).toBe("git push -u origin fix-x");
-    expect(credential).toHaveBeenLastCalledWith({ fresh: true });
-
-    // A push still refused after the one retry is answered as it is — no loop.
-    const again = stubFetchSeq([OK, REFUSED, OK, REFUSED]);
-    const ex2 = new CloudflareSandboxExecutor({
-      ...OPTS,
-      credential: async () => ({ token: "ghs_y", expiresAtMs: Date.now() + HOUR }),
+  it("does not replay a compound command after a credential refusal", async () => {
+    const command = "printf receipt >> receipt.log && git push origin work";
+    const effects: string[] = [];
+    vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
+      const sent = JSON.parse(String(init?.body)) as { command: string };
+      if (sent.command === command) effects.push("receipt written");
+      return new Response(JSON.stringify(sent.command === command ? REFUSED : OK), { status: 200 });
     });
-    const refused = await ex2.exec("git push origin fix-x"); // write, push refused, fresh write, push refused
-    expect(refused).toContain("Invalid username or token");
-    expect(again.calls).toHaveLength(4);
+    const ex = new CloudflareSandboxExecutor({
+      ...OPTS,
+      credential: async () => ({ token: "ghs_test", expiresAtMs: Date.now() + HOUR }),
+    });
+    expect(await ex.exec(command)).toBe(
+      "exit 128:\nremote: Invalid username or token. Password authentication is not supported for Git operations.",
+    );
+    expect(effects).toEqual(["receipt written"]);
+  });
+
+  it("does not replay successful commands with refusal-looking stdout", async () => {
+    const command = "git push origin work && printf 'Invalid username or token'";
+    const effects: string[] = [];
+    vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
+      const sent = JSON.parse(String(init?.body)) as { command: string };
+      if (sent.command === command) effects.push("published once");
+      return new Response(
+        JSON.stringify(
+          sent.command === command
+            ? { stdout: "Invalid username or token", stderr: "", exitCode: 0, truncated: false }
+            : OK,
+        ),
+        { status: 200 },
+      );
+    });
+    const ex = new CloudflareSandboxExecutor({
+      ...OPTS,
+      credential: async () => ({ token: "ghs_test", expiresAtMs: Date.now() + HOUR }),
+    });
+    expect(await ex.exec(command)).toBe("Invalid username or token");
+    expect(effects).toEqual(["published once"]);
   });
 
   it("a non-push command whose output carries the refusal wording is never re-sent", async () => {
@@ -290,7 +304,7 @@ describe("CloudflareSandboxExecutor env transport", () => {
   const sentHeaders = (c: { init: RequestInit }) => c.init.headers as Record<string, string>;
 
   it("sends the map in the body and NO x-env-* header on any route", async () => {
-    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, content: "c" });
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false, content: "c" });
     const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x", OTHER: "v" }) });
     await ex.exec("gh pr view 1");
     await ex.readFile("README.md");
@@ -312,7 +326,7 @@ describe("CloudflareSandboxExecutor env transport", () => {
   });
 
   it("an empty env is still the one body shape: `env: {}`, so the Worker reads one field on every route", async () => {
-    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
     await new CloudflareSandboxExecutor(OPTS).exec("ls");
     expect(sentBody(calls[0])).toEqual({ command: "ls", env: {} });
   });
@@ -320,7 +334,7 @@ describe("CloudflareSandboxExecutor env transport", () => {
 
 describe("CloudflareSandboxExecutor per-call timeout", () => {
   it("sends the requested timeoutMs in the /exec body, clamped to the 20-min ceiling", async () => {
-    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
     const ex = new CloudflareSandboxExecutor(OPTS);
     await expect(ex.exec("npm test", { timeoutMs: 25 * 60_000 })).resolves.toBe("ok");
     expect(sentBody(calls[0]).timeoutMs).toBe(20 * 60_000);
@@ -328,7 +342,7 @@ describe("CloudflareSandboxExecutor per-call timeout", () => {
   });
 
   it("no timeoutMs → the body an older sandbox Worker expects (no timeoutMs key at all)", async () => {
-    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
     const ex = new CloudflareSandboxExecutor(OPTS);
     await ex.exec("ls");
     expect("timeoutMs" in sentBody(calls[0])).toBe(false);
@@ -350,7 +364,7 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
     stderr: "fleet-busy: no free per-thread sandbox",
     exitCode: 127,
   };
-  const OK = { stdout: "ok", stderr: "", exitCode: 0 };
+  const OK = { stdout: "ok", stderr: "", exitCode: 0, truncated: false };
 
   /** Fetch that answers the scripted responses in order, then repeats the last. */
   function scriptedFetch(responses: Array<{ status?: number; body: unknown }>) {
@@ -518,7 +532,15 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
 
   it("every OTHER in-body error is still ExecInfraError after exactly one send — nothing else is replayed", async () => {
     const { calls } = scriptedFetch([
-      { body: { error: "Command execution failed", stdout: "", stderr: "Command execution failed", exitCode: 127 } },
+      {
+        body: {
+          error: "Command execution failed",
+          stdout: "",
+          stderr: "Command execution failed",
+          exitCode: 127,
+          truncated: false,
+        },
+      },
     ]);
     const ex = new CloudflareSandboxExecutor(OPTS);
     const outcome = ex.exec("echo hi").catch((e: unknown) => e);
@@ -558,7 +580,7 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
 // signal — a bare exit 127 with no output stays a legitimate command result.
 describe("CloudflareSandboxExecutor in-body empty error", () => {
   it("an empty-string error is ExecInfraError after exactly one fetch — the Worker's failure shape with its text missing", async () => {
-    const { calls } = stubFetch({ error: "", stdout: "", stderr: "", exitCode: 127 });
+    const { calls } = stubFetch({ error: "", stdout: "", stderr: "", exitCode: 127, truncated: false });
     const ex = new CloudflareSandboxExecutor(OPTS);
     const err = await ex.exec("echo hi").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
@@ -569,13 +591,13 @@ describe("CloudflareSandboxExecutor in-body empty error", () => {
   });
 
   it("a body WITHOUT an error key and exit 127 with empty output is the normal `exit 127:` result — `foo 2>/dev/null` is legitimate", async () => {
-    stubFetch({ stdout: "", stderr: "", exitCode: 127 });
+    stubFetch({ stdout: "", stderr: "", exitCode: 127, truncated: false });
     const ex = new CloudflareSandboxExecutor(OPTS);
     await expect(ex.exec("foo 2>/dev/null")).resolves.toBe("exit 127:\n");
   });
 
   it("exit 0 with no error key and no output renders (no output)", async () => {
-    stubFetch({ stdout: "", stderr: "", exitCode: 0 });
+    stubFetch({ stdout: "", stderr: "", exitCode: 0, truncated: false });
     const ex = new CloudflareSandboxExecutor(OPTS);
     await expect(ex.exec("true")).resolves.toBe("(no output)");
   });
@@ -755,7 +777,7 @@ describe("CloudflareSandboxExecutor per-send deadline", () => {
   });
 
   it("an answer inside the deadline is unaffected, and nothing fires after it", async () => {
-    stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    stubFetch({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
     const ex = new CloudflareSandboxExecutor(OPTS);
     await expect(ex.exec("echo ok", { timeoutMs: 60_000 })).resolves.toBe("ok");
     await vi.advanceTimersByTimeAsync(60 * 60_000); // an unhandled abort here would fail the test
@@ -781,7 +803,7 @@ describe("CloudflareSandboxExecutor per-send deadline", () => {
       error: "fleet-busy: no free per-thread sandbox",
       reason: "fleet-busy",
       stdout: "",
-      stderr: "fleet-busy",
+      stderr: "fleet-busy: no free per-thread sandbox",
       exitCode: 127,
     });
     const state = track(new CloudflareSandboxExecutor(OPTS).exec("npm test", { timeoutMs: 60_000 }));
@@ -873,17 +895,17 @@ describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
     error: "sandbox-starting: the thread's sandbox container is starting (container not running; starting it)",
     reason: "sandbox-starting",
     stdout: "",
-    stderr: "sandbox-starting: …",
+    stderr: "sandbox-starting: the thread's sandbox container is starting (container not running; starting it)",
     exitCode: 127,
   };
   const BUSY_EXEC = {
     error: "fleet-busy: no free per-thread sandbox",
     reason: "fleet-busy",
     stdout: "",
-    stderr: "…",
+    stderr: "fleet-busy: no free per-thread sandbox",
     exitCode: 127,
   };
-  const OK = { stdout: "ok", stderr: "", exitCode: 0 };
+  const OK = { stdout: "ok", stderr: "", exitCode: 0, truncated: false };
 
   function scriptedFetch(responses: Array<{ status?: number; body: unknown }>) {
     const calls: Array<{ url: string; init: RequestInit }> = [];
@@ -1182,7 +1204,7 @@ describe("CloudflareSandboxExecutor runtime-busy wait", () => {
       cause: "Container is taking too long to accept the connection; the application could be overwhelmed with load",
     }),
   );
-  const OK = { stdout: "alive", stderr: "", exitCode: 0 };
+  const OK = { stdout: "alive", stderr: "", exitCode: 0, truncated: false };
 
   function scriptedFetch(responses: Array<{ status?: number; body: unknown }>) {
     const calls: Array<{ url: string; init: RequestInit }> = [];
@@ -1302,6 +1324,110 @@ describe("CloudflareSandboxExecutor runtime-busy wait", () => {
 
 // Feature: execution.md — the first coding baseline consumes typed outcomes.
 describe("Cloudflare typed command outcome", () => {
+  it.each([500, 502, 503])("does not replay display commands after an unknown HTTP response (%s)", async (status) => {
+    vi.useFakeTimers();
+    try {
+      const effects: string[] = [];
+      vi.stubGlobal("fetch", async () => {
+        effects.push("native attempt");
+        return new Response("unknown response", { status });
+      });
+      const outcome = new CloudflareSandboxExecutor(OPTS).exec("effectful command").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await outcome).toBeInstanceOf(ExecInfraError);
+      expect(effects).toEqual(["native attempt"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits only on a qualified refusal before dispatch for display commands", async () => {
+    vi.useFakeTimers();
+    try {
+      const effects: string[] = [];
+      let requests = 0;
+      const ready = { stdout: "done", stderr: "", exitCode: 0, truncated: false };
+      vi.stubGlobal("fetch", async () => {
+        requests++;
+        if (requests === 1) return Response.json(runtimeBusyExecAnswer("not dispatched"));
+        effects.push("native attempt");
+        return Response.json(ready);
+      });
+      const outcome = new CloudflareSandboxExecutor(OPTS)
+        .exec("effectful command", { timeoutMs: 10_000 })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(await outcome).toBe("done");
+      expect(effects).toEqual(["native attempt"]);
+      expect(requests).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps strict structured writes single-send on a qualified refusal", async () => {
+    const { calls } = stubFetch(runtimeBusyExecAnswer("not dispatched"));
+    await expect(new CloudflareSandboxExecutor(OPTS).execResult("effectful command")).rejects.toBeInstanceOf(
+      ExecCapacityError,
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each(["exec", "execResult"] as const)(
+    "preserves the original unknown transport failure without another send (%s)",
+    async (method) => {
+      const original = new Error("response lost after admission");
+      const effects: string[] = [];
+      vi.stubGlobal("fetch", async () => {
+        effects.push("native attempt");
+        throw original;
+      });
+      const failure = await new CloudflareSandboxExecutor(OPTS)
+        [method]("effectful command")
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ExecInfraError);
+      expect(failure instanceof Error && failure.cause).toBe(original);
+      expect(effects).toEqual(["native attempt"]);
+    },
+  );
+
+  it("keeps an unverified busy response unknown without waiting or repeating", async () => {
+    const effects: string[] = [];
+    vi.stubGlobal("fetch", async () => {
+      effects.push("native attempt");
+      return Response.json({ ...runtimeBusyExecAnswer("not proven"), stdout: "some effect completed" });
+    });
+    await expect(new CloudflareSandboxExecutor(OPTS).execResult("effectful command")).rejects.toMatchObject({
+      message: "sandbox /exec: dispatch refusal could not be verified",
+      reason: "answered",
+    });
+    expect(effects).toEqual(["native attempt"]);
+  });
+
+  it.each([undefined, -1, 256, 1.5, "0"])(
+    "display exec refuses a missing or malformed status (%s)",
+    async (exitCode) => {
+      const { calls } = stubFetch({ stdout: "successful output", stderr: "", exitCode, truncated: false });
+      await expect(new CloudflareSandboxExecutor(OPTS).exec("command")).rejects.toMatchObject({
+        message: "sandbox /exec: invalid command result",
+        reason: "worker-unavailable",
+      });
+      expect(calls).toHaveLength(1);
+    },
+  );
+  it("display exec requires an explicit native completeness flag", async () => {
+    stubFetch({ stdout: "successful output", stderr: "", exitCode: 0 });
+    await expect(new CloudflareSandboxExecutor(OPTS).exec("command")).rejects.toThrow("invalid command result");
+  });
+  it("renders validated success and failure without parsing output text", async () => {
+    for (const exitCode of [0, 2]) {
+      stubFetch({ stdout: "hello", stderr: "warning", exitCode, truncated: false });
+      expect(await new CloudflareSandboxExecutor(OPTS).exec("command")).toBe(
+        exitCode === 0 ? "hello\n--- stderr ---\nwarning" : "exit 2:\nhello\n--- stderr ---\nwarning",
+      );
+    }
+  });
+
   it("preserves empty success and actual truncation without presentation parsing", async () => {
     const raw = { stdout: "", stderr: "", exitCode: 0, truncated: false };
     const { calls } = stubFetch(raw);
@@ -1313,6 +1439,20 @@ describe("Cloudflare typed command outcome", () => {
   it("refuses malformed or legacy result fields", async () => {
     stubFetch({ stdout: "", stderr: "", exitCode: 0 });
     await expect(new CloudflareSandboxExecutor(OPTS).execResult("test")).rejects.toThrow("invalid command result");
+  });
+  it.each([-1, 256, 1.5])("refuses an invalid command exit status (%s)", async (exitCode) => {
+    stubFetch({ stdout: "exit 0: successful", stderr: "", exitCode, truncated: false });
+    await expect(new CloudflareSandboxExecutor(OPTS).execResult("command")).rejects.toThrow("invalid command result");
+  });
+  it.each([0, 2, 124, 255])("preserves a terminal status under misleading output (%s)", async (exitCode) => {
+    const raw = {
+      stdout: "exit 0: successful",
+      stderr: "command timed out; Invalid username or token",
+      exitCode,
+      truncated: false,
+    };
+    stubFetch(raw);
+    expect(await new CloudflareSandboxExecutor(OPTS).execResult("command")).toEqual(raw);
   });
   it("does not replay an uncertain HTTP failure", async () => {
     const fetch = vi.fn(async () => new Response("lost response", { status: 502 }));

@@ -6,8 +6,6 @@ import {
   SandboxCredentialRefresher,
   credentialLine,
   credentialWriteScript,
-  isGitCredentialRefusal,
-  isGitPushCommand,
 } from "./sandboxCredentials.js";
 import { CREDENTIAL_EXPIRY_MARGIN_MS } from "./residentCredentials.js";
 
@@ -32,31 +30,6 @@ describe("credentialWriteScript", () => {
 
   it("the credential line is the store helper's shape", () => {
     expect(credentialLine("ghs_abc")).toBe("https://x-access-token:ghs_abc@github.com");
-  });
-});
-
-describe("the credential-refusal and push recognizers", () => {
-  it("recognizes GitHub's dead-token wording and git's 401 summary; an ordinary failure is not a refusal", () => {
-    expect(isGitCredentialRefusal("remote: Invalid username or token. Password authentication is not supported")).toBe(
-      true,
-    );
-    expect(isGitCredentialRefusal("fatal: Authentication failed for 'https://github.com/o/r.git/'")).toBe(true);
-    expect(isGitCredentialRefusal("error: failed to push some refs (non-fast-forward)")).toBe(false);
-    expect(isGitCredentialRefusal("")).toBe(false);
-  });
-
-  it("recognizes a git push however it is framed, and nothing else", () => {
-    expect(isGitPushCommand("git push -u origin fix-x")).toBe(true);
-    expect(isGitPushCommand("cd /workspace/checkout && git push origin HEAD")).toBe(true);
-    expect(isGitPushCommand("git -C /workspace/checkout push")).toBe(true);
-    expect(isGitPushCommand("git status && git push --force-with-lease")).toBe(true);
-    expect(isGitPushCommand("git -c http.lowSpeedLimit=0 push origin HEAD")).toBe(true);
-    expect(isGitPushCommand("git pull --rebase")).toBe(false);
-    expect(isGitPushCommand("git fetch origin main")).toBe(false);
-    expect(isGitPushCommand("grep push src/a.ts")).toBe(false);
-    // A local subcommand's own `push` is not a remote write: never re-sent.
-    expect(isGitPushCommand("git stash push -m wip")).toBe(false);
-    expect(isGitPushCommand("git notes push")).toBe(false);
   });
 });
 

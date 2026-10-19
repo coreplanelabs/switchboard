@@ -173,12 +173,14 @@ describe("closed typed execution refusal observations", () => {
     { ...busy, containerId: "" },
     { ...busy, containerId: "x".repeat(513) },
     { ...busy, truncated: true },
-  ])("keeps a malformed busy body generic without changing its one-send refusal", async (body) => {
+  ])("keeps a malformed busy body unknown after one send without claiming no dispatch", async (body) => {
     const fetch = vi.fn(async () => response(body));
     vi.stubGlobal("fetch", fetch);
     const error = await new CloudflareSandboxExecutor(options).execResult("private command").catch((e) => e);
-    expect(error).toBeInstanceOf(ExecCapacityError);
-    expect(error.message).toBe("The typed command was refused before execution.");
+    expect(error).toBeInstanceOf(ExecInfraError);
+    expect(error).not.toBeInstanceOf(ExecCapacityError);
+    expect(error.message).toBe("sandbox /exec: dispatch refusal could not be verified");
+    expect(error.reason).toBe("answered");
     expect(error.executionDiagnostic).toBeUndefined();
     expect(fetch).toHaveBeenCalledTimes(1);
   });
