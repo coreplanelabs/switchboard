@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MCP_PROTOCOL_VERSION, sseDataFrames, StreamableHttpMcpClient } from "./client.js";
 import { fakeMcpServerFetch } from "./fake.js";
-import { McpError } from "./types.js";
+import { McpCallOutcomeUnknownError, McpError } from "./types.js";
 import { readTool } from "./testing/sourceRead.js";
 
 const TOOLS = [
@@ -107,6 +107,37 @@ describe("StreamableHttpMcpClient", () => {
         { sourceSession: "original" },
       ),
     ).toEqual(result);
+  });
+
+  it("preserves a lost call's cause without publishing transport details", async () => {
+    const cause = new Error("Bearer abcdefghijklmnopqrstuvwxyz");
+    const c = new StreamableHttpMcpClient({
+      url: "https://mcp.example/mcp",
+      fetch: async () => {
+        throw cause;
+      },
+    });
+    const error = await c.callTool("write", {}, { sourceSession: "original" }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(McpCallOutcomeUnknownError);
+    expect(error).toMatchObject({ code: "transport", message: "MCP transport failed", cause: { cause } });
+    expect((error as Error).message).not.toContain("abcdefghijklmnopqrstuvwxyz");
+  });
+
+  it.each([
+    ["request_id", { jsonrpc: "2.0", id: -1, result: { content: [] } }],
+    ["jsonrpc_version", { jsonrpc: "1.0", result: { content: [] } }],
+    ["response_outcome", { jsonrpc: "2.0" }],
+    ["content", { jsonrpc: "2.0", result: {} }],
+    ["content_part", { jsonrpc: "2.0", result: { content: [{ type: "text", text: 7 }] } }],
+    ["is_error", { jsonrpc: "2.0", result: { content: [], isError: "false" } }],
+    ["structured_content", { jsonrpc: "2.0", result: { content: [], structuredContent: [] } }],
+  ] as const)("names the fixed protocol reason %s without remote values", async (reason, frame) => {
+    const c = responseClient((id) => ({ id, ...frame }));
+    await expect(c.callTool("write", {}, { sourceSession: "original" })).rejects.toMatchObject({
+      code: "protocol",
+      protocolReason: reason,
+      message: `MCP reply failed validation (${reason})`,
+    });
   });
 
   it.each(["sse", "batch"])("refuses ambiguous duplicate %s responses without replay", async (transport) => {
