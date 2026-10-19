@@ -11,6 +11,7 @@ import { getSandbox } from "@cloudflare/sandbox";
 import { systemClock } from "../../src/core/trace/clock.js";
 import { createTracer } from "../../src/core/trace/tracer.js";
 import { workerLogSink } from "../../src/core/trace/workerTrace.js";
+import { cloudflareErrorMessage } from "../../src/core/cloudflareErrors.js";
 import type { Env } from "./worker";
 
 /** Container sleep window, passed to every getSandbox() for ResidentDO.
@@ -68,7 +69,8 @@ export const R2_TRANSFER_TIMEOUT_MS = 5 * 60_000;
  *  lease is the install budget plus this. */
 export const DEPS_STEP_OVERHEAD_MS = 4 * GIT_NETWORK_TIMEOUT_MS + DEFAULT_EXEC_TIMEOUT_MS;
 
-export const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+export const errMsg = (err: unknown): string =>
+  cloudflareErrorMessage(err instanceof Error ? err.message : String(err));
 
 /** The Worker's one tracer and its `slow` log sink, whose filter drops a
  *  refusal's line: the entry's edge and step roots and the refresh instance's

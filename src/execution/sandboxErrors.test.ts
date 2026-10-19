@@ -308,6 +308,14 @@ describe("isFleetBusyError / thrownShape", () => {
 // whose message was `""`, the Worker's `shape.message ?? String(err)` kept the
 // empty string, and seven commands rendered as silent `exit 127`s.
 describe("thrownText", () => {
+  it("names Cloudflare's boundary for a platform reference without relabeling application errors", () => {
+    expect(thrownText({ message: "internal error; reference = 0123456789abcdefghijklmn" })).toBe(
+      "Failed inside Cloudflare's infrastructure boundary: internal error; reference = 0123456789abcdefghijklmn",
+    );
+    expect(thrownText({ message: "git: internal error; reference = 0123456789abcdefghijklmn" })).toBe(
+      "git: internal error; reference = 0123456789abcdefghijklmn",
+    );
+  });
   it("returns the SDK's message verbatim (trimmed) when it has one", () => {
     expect(thrownText({ name: "SandboxError", message: "Session 'x' not found" })).toBe("Session 'x' not found");
     expect(thrownText({ message: "  fetch failed \n" })).toBe("fetch failed");

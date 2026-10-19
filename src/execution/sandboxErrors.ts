@@ -15,6 +15,8 @@
 // `ContainerUnavailableError` (code `CONTAINER_UNAVAILABLE`) for the same
 // condition; the recognizer below takes the type first and the text second.
 
+import { cloudflareErrorMessage } from "../core/cloudflareErrors.js";
+
 /** The named reason the Worker answers with, mirroring the resident's
  *  `mirror-busy` (resident-repos.md) — a machine token the executor matches
  *  on, never the SDK's message text. */
@@ -314,7 +316,7 @@ export function startWaitExhaustedMessage(waitedMs: number): string {
  *  this is only the text that leaves the Worker. */
 export function thrownText(shape: ThrownShape): string {
   const text = shape.message?.trim() ?? "";
-  if (text) return text;
+  if (text) return cloudflareErrorMessage(text);
   const who = shape.name
     ? `${shape.name}${shape.code !== undefined ? `, code ${String(shape.code)}` : ""}`
     : "no error name";

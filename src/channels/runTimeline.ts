@@ -23,6 +23,7 @@
 
 import { formatDuration } from "../core/time/formatDuration.js";
 import { isHarnessScope, type HarnessScope } from "../core/harness/scope.js";
+import { storageFailureDiagnosticOf, storageFailureNote } from "../core/storageFailureDiagnostic.js";
 
 export interface TimelineResult {
   ok: boolean;
@@ -414,10 +415,19 @@ export function createRunTimeline(): RunTimeline {
         return [{ kind: "note", text: str(e.text), noteKind: "notes", at: num(e.at) }];
       case "replay_note":
         return [{ kind: "replay_note", text: str(e.summary) }];
-      case "run_note":
+      case "run_note": {
+        const diagnostic = e.kind === "storage_failure" ? storageFailureDiagnosticOf(e.storageFailure) : undefined;
+        const note = diagnostic ? storageFailureNote(diagnostic, str(e.summary)) : undefined;
         return [
-          { kind: "note", text: str(e.summary), noteKind: str(e.kind), mode: str(e.mode) || undefined, at: num(e.at) },
+          {
+            kind: "note",
+            text: note ? str(note.summary) : str(e.summary),
+            noteKind: str(e.kind),
+            mode: str(e.mode) || undefined,
+            at: num(e.at),
+          },
         ];
+      }
       case "assistant":
         return [{ kind: "step", step: openStep({ text: str(e.text), at: num(e.at) }) }];
       case "review_artifact":

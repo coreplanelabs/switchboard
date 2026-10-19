@@ -1,4 +1,5 @@
 import type { RunEvent } from "./runEvents.js";
+import { cloudflareErrorMessage } from "./cloudflareErrors.js";
 import {
   captureException,
   exceptionOf,
@@ -392,19 +393,26 @@ export function isStorageDiagnosticAppend(request: StoreRequestWitness): boolean
   return request.operation === "/runs/append" && request.diagnosticOnly === true;
 }
 
-export function storageFailureNote(diagnostic: StorageFailureDiagnostic): RunEvent {
+export function storageFailureNote(
+  diagnostic: StorageFailureDiagnostic,
+  originalSummary?: string,
+): Extract<RunEvent, { type: "run_note" }> {
   const exception =
     diagnostic.server && "exception" in diagnostic.server ? diagnostic.server.exception : diagnostic.exception;
   const cause =
     diagnostic.server && "reason" in diagnostic.server
       ? `: ${diagnostic.server.reason}`
       : exception
-        ? `: ${exception.name}: ${exception.message}`
+        ? `: ${exception.name}: ${cloudflareErrorMessage(exception.message)}`
         : "";
+  const keepOriginal = !exception || cloudflareErrorMessage(exception.message) === exception.message;
   return {
     type: "run_note",
     kind: "storage_failure",
-    summary: `Storage request failed: ${diagnostic.operation} (${diagnostic.phase}${diagnostic.httpStatus ? `, HTTP ${diagnostic.httpStatus}` : ""})${cause}`,
+    summary:
+      originalSummary !== undefined && keepOriginal
+        ? originalSummary
+        : `Storage request failed: ${diagnostic.operation} (${diagnostic.phase}${diagnostic.httpStatus ? `, HTTP ${diagnostic.httpStatus}` : ""})${cause}`,
     storageFailure: diagnostic,
   };
 }

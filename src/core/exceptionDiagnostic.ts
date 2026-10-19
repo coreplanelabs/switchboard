@@ -1,5 +1,6 @@
 import { redactAndCap } from "./redact.js";
 import { unwrapUntrusted, wrapUntrusted } from "./untrusted.js";
+import { cloudflareErrorMessage } from "./cloudflareErrors.js";
 
 export interface ExceptionDiagnostic {
   name: string;
@@ -74,7 +75,7 @@ export function captureException(error: unknown, depth = 0): ExceptionDiagnostic
   const code = exceptionCode(e?.code);
   return withoutDecoderProse({
     name: redactAndCap(typeof e?.name === "string" ? e.name : "ThrownValue", 79),
-    message: redactAndCap(typeof e?.message === "string" ? e.message : String(error), 512),
+    message: redactAndCap(cloudflareErrorMessage(typeof e?.message === "string" ? e.message : String(error)), 512),
     ...(typeof e?.stack === "string" ? { stack: redactAndCap(e.stack, 1024) } : {}),
     ...(code ? { code } : {}),
     ...Object.fromEntries(

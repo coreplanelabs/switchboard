@@ -6,6 +6,7 @@ import { formatDuration } from "./time/formatDuration.js";
 import { partition, type LossInterval, type Partition, type Window } from "./trace/partition.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import type { SpanRecord } from "./trace/types.js";
+import { storageFailureNote } from "./storageFailureDiagnostic.js";
 
 // Run-friction analyzer (docs/reference/specs/run-friction.md): a PURE, deterministic
 // function from a run's RunEvent stream to a structured diagnosis of what cost
@@ -610,7 +611,12 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
         });
         return;
       case "storage_failure":
-        findings.push({ category: "infra_failure", severity: "high", summary: ev.summary, eventIndex: index });
+        findings.push({
+          category: "infra_failure",
+          severity: "high",
+          summary: ev.storageFailure ? storageFailureNote(ev.storageFailure, ev.summary).summary : ev.summary,
+          eventIndex: index,
+        });
         return;
       case "drain_wait":
         // The run was admitted onto a drained fleet (resident-repos item 69;

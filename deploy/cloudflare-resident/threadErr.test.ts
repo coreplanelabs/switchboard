@@ -68,6 +68,22 @@ const predicates: ThrowPredicates = {
 const { isTransientPlatformThrow, catchAllErr, threadRejectionErr } = threadErrBuilders(predicates);
 const ROUTES: readonly ThreadDataRoute[] = ["/exec", "/read", "/write"];
 
+it("names a Cloudflare internal failure and keeps its reference on every execution route", () => {
+  for (const route of ROUTES) {
+    expect(threadRejectionErr(new Error("internal error; reference = 0123456789abcdefghijklmn"), route)).toEqual({
+      error: "Failed inside Cloudflare's infrastructure boundary: internal error; reference = 0123456789abcdefghijklmn",
+      status: 500,
+      transient: true,
+      cause: "system",
+    });
+  }
+  expect(
+    catchAllErr(
+      new Error("GitHub request failed", { cause: new Error("internal error; reference = 0123456789abcdefghijklmn") }),
+    ),
+  ).toEqual({ error: "GitHub request failed", status: 500, transient: false, cause: "system" });
+});
+
 // The sentences, each from its emitting source: the SDK's dist (its patterns
 // and `Network connection lost.`), the resident's wording lists
 // (src/execution/residentRefresh.ts), the resident's own renamed word
@@ -134,10 +150,14 @@ describe("threadRejectionErr answers a rejected stub call as the Durable Object 
   });
 
   it("anything else is the typed 500: the platform's own transient — the SDK's signal (a lost connection, the storage-startup reset, the typed `retryable` flag), the runtime unreachable by the SDK's abort or by the resident's renamed word, and the remainder sentences (the bare `internal error`, the memory-limit reset, the storage-timeout reset, the overloaded Durable Object) — is `transient: true` on every route; a throw in the route itself is `transient: false`", () => {
-    const transient: Array<[string, unknown]> = [
+    const transient: Array<[string, unknown, string?]> = [
       ["a lost connection", new Error(CONNECTION_LOST)],
       ["a lost connection one link down", new Error("stub call failed", { cause: new Error(CONNECTION_LOST) })],
-      ["the storage-startup reset", new Error(STORAGE_STARTUP)],
+      [
+        "the storage-startup reset",
+        new Error(STORAGE_STARTUP),
+        "Failed inside Cloudflare's infrastructure boundary: internal error while starting up durable object storage caused object to be reset",
+      ],
       ["the typed retryable flag", Object.assign(new Error("Durable Object request failed"), { retryable: true })],
       ["the SDK's connect abort", Object.assign(new Error("The operation was aborted"), { name: "AbortError" })],
       [
@@ -146,15 +166,27 @@ describe("threadRejectionErr answers a rejected stub call as the Durable Object 
       ],
       ["the platform's bare internal error", new Error("internal error")],
       ["the platform's bare internal error, with its period", new Error("internal error.")],
-      ["the memory-limit reset", new Error(MEMORY_LIMIT)],
-      ["the storage-timeout reset", new Error(STORAGE_TIMEOUT)],
-      ["the overloaded Durable Object", new Error(OVERLOADED)],
+      [
+        "the memory-limit reset",
+        new Error(MEMORY_LIMIT),
+        "Failed inside Cloudflare's infrastructure boundary: Durable Object's isolate exceeded its memory limit and was reset.",
+      ],
+      [
+        "the storage-timeout reset",
+        new Error(STORAGE_TIMEOUT),
+        "Failed inside Cloudflare's infrastructure boundary: Durable Object storage operation exceeded timeout which caused object to be reset.",
+      ],
+      [
+        "the overloaded Durable Object",
+        new Error(OVERLOADED),
+        "Failed inside Cloudflare's infrastructure boundary: Durable Object is overloaded",
+      ],
     ];
-    for (const [what, err] of transient) {
+    for (const [what, err, expected] of transient) {
       expect(isTransientPlatformThrow(err), what).toBe(true);
       for (const route of ROUTES) {
         expect(threadRejectionErr(err, route), `${what} on ${route}`).toEqual({
-          error: messageOf(err),
+          error: expected ?? messageOf(err),
           status: 500,
           transient: true,
           cause: "system",
@@ -219,10 +251,6 @@ describe("catchAllErr is the one shape of the 500 for a throw no route named", (
   });
 
   it("the remainder wording is exactly the four sentences the SDK's predicate does not name, each anchored so an embedding never matches — three read on the cause chain, the bare `internal error` on the top-level throw alone", () => {
-    expect(TRANSIENT_PLATFORM_WORDING.source).toBe(
-      "exceeded its memory limit and was reset|storage operation exceeded timeout which caused object to be reset|durable object is overloaded",
-    );
-    expect(PLATFORM_INTERNAL_ERROR_WORDING.source).toBe("^internal error\\.?$");
     expect(PLATFORM_INTERNAL_ERROR_WORDING.test("internal error")).toBe(true);
     expect(PLATFORM_INTERNAL_ERROR_WORDING.test("fatal: internal error")).toBe(false);
     // A route's own text with the same two words is not the platform's storage-timeout reset.

@@ -13,8 +13,60 @@ import {
 import { storeRequestWitness } from "./storeResponse.js";
 import { parseRunEventLines } from "./runEventLines.js";
 import { createRunTimeline } from "../channels/runTimeline.js";
+import { analyzeRunFriction } from "./runFriction.js";
 
 describe("storage diagnostic captures", () => {
+  it("names Cloudflare's boundary on new and retained storage failures without blaming a generic 500", async () => {
+    const request = await storeRequestWitness("/runs/step", '{"runId":"original","gen":"owner"}');
+    const diagnostic = {
+      version: 1 as const,
+      operation: "/runs/step",
+      requestDigest: request.digest,
+      phase: "http" as const,
+      httpStatus: 500,
+      server: {
+        stage: "request" as const,
+        errorKind: "error" as const,
+        exception: { name: "Error", message: "internal error; reference = 0123456789abcdefghijklmn" },
+      },
+    };
+    const expected =
+      "Storage request failed: /runs/step (http, HTTP 500): Error: Failed inside Cloudflare's infrastructure boundary: internal error; reference = 0123456789abcdefghijklmn";
+    expect(storageFailureNote(diagnostic).summary).toBe(expected);
+    const retained = {
+      type: "run_note" as const,
+      kind: "storage_failure" as const,
+      summary:
+        "Storage request failed: /runs/step (http, HTTP 500): Error: internal error; reference = 0123456789abcdefghijklmn",
+      storageFailure: diagnostic,
+    };
+    const parsed = parseRunEventLines(JSON.stringify(retained));
+    expect(createRunTimeline().push(parsed.events[0])).toMatchObject([{ kind: "note", text: expected }]);
+    expect(analyzeRunFriction([retained]).findings).toEqual([
+      { category: "infra_failure", severity: "high", summary: expected, eventIndex: 0 },
+    ]);
+    expect(
+      createRunTimeline().push({
+        ...retained,
+        summary: "Storage checkpoint remains unconfirmed.",
+        storageFailure: { ...diagnostic, server: undefined },
+      }),
+    ).toMatchObject([{ kind: "note", text: "Storage checkpoint remains unconfirmed." }]);
+    expect(storageFailureNote({ ...diagnostic, server: undefined }).summary).toBe(
+      "Storage request failed: /runs/step (http, HTTP 500)",
+    );
+    expect(
+      storageFailureNote({
+        ...diagnostic,
+        server: {
+          ...diagnostic.server,
+          exception: { name: "Error", message: "git: internal error; reference = 0123456789abcdefghijklmn" },
+        },
+      }).summary,
+    ).toBe(
+      "Storage request failed: /runs/step (http, HTTP 500): Error: git: internal error; reference = 0123456789abcdefghijklmn",
+    );
+  });
   it("clears a reused error before capture and bounds unavailable targets without decoding request bytes", async () => {
     const error = new Error("offline");
     const requestA = await storeRequestWitness("/runs/delete", '{"id":"old"}');
