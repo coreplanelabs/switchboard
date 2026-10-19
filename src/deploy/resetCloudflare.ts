@@ -121,15 +121,19 @@ export class ResetCloudflare {
       const domains = endpoints[worker.script]?.domains;
       if (
         !domains ||
-        domains.length !== 1 ||
-        domains[0].hostname !== worker.hostname ||
-        domains[0].zone_name !== (worker.zone ?? profile.zone) ||
-        typeof domains[0].zone_id !== "string" ||
-        domains[0].enabled !== true ||
-        domains[0].environment !== "production"
+        domains.filter((domain) => domain.hostname === worker.hostname).length !== 1 ||
+        new Set(domains.map((domain) => domain.hostname)).size !== domains.length ||
+        domains.some(
+          (domain) =>
+            domain.service !== worker.script ||
+            domain.zone_name !== (worker.zone ?? profile.zone) ||
+            typeof domain.zone_id !== "string" ||
+            domain.enabled !== true ||
+            domain.environment !== "production",
+        )
       )
         throw new Error("reset routing ownership is unverified");
-      zones.add(domains[0].zone_id);
+      for (const domain of domains) zones.add(String(domain.zone_id));
     }
     const workers = new Set(Object.values(profile.workers).map((worker) => worker.script));
     for (const zone of zones) {

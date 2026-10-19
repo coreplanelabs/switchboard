@@ -73,6 +73,24 @@ function fixture() {
 }
 
 describe("reset hosting restoration", () => {
+  it("retains declared auxiliary domains and refuses an undeclared alias", () => {
+    const { rendered, capture } = fixture();
+    const config = JSON.parse(rendered);
+    config.routes.push({ pattern: "git.gateway.example.test", custom_domain: true });
+    capture.endpoints.gateway.domains.push({
+      ...capture.endpoints.gateway.domains[0],
+      hostname: "git.gateway.example.test",
+    });
+    expect(JSON.parse(restoreHostingConfig(JSON.stringify(config), capture)).routes).toEqual([
+      { pattern: "gateway.example.test", custom_domain: true },
+      { pattern: "git.gateway.example.test", custom_domain: true },
+    ]);
+    capture.endpoints.gateway.domains.push({
+      ...capture.endpoints.gateway.domains[0],
+      hostname: "unknown.example.test",
+    });
+    expect(() => restoreHostingConfig(JSON.stringify(config), capture)).toThrow("cannot reproduce custom domains");
+  });
   it("retains deployed variables and capacity in the creation config without copying secret values", () => {
     const { rendered, capture } = fixture();
     expect(JSON.parse(restoreHostingConfig(rendered, capture))).toEqual({
