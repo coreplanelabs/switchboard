@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import RunPage from "../../green/pages/Run.vue";
 import { wrapUntrusted } from "@core/core/untrusted.js";
-import { enableAutoUnmount, flushPromises } from "@vue/test-utils";
+import { DOMWrapper, enableAutoUnmount, flushPromises } from "@vue/test-utils";
 import { ALL_ON, mountApp, type MountAppOptions } from "../testing/mount";
 import { loadDiffs } from "../modules/pr-review/diffsLibrary";
 import { browser } from "../lib/browser";
@@ -895,7 +895,12 @@ describe("RunPage — history mode", () => {
     expect(w.find("#request").text()).toContain("<img src=x");
   });
 
-  it("shows the run meta line: agent · model · effort · linked repo · the branch linked to its tree · the head sha linked to its commit · GitHub-marked PR; a hostile repo never links", () => {
+  it("shows runtime facts separately from PR links and keeps branch and commit links in details; hostile values never link", async () => {
+    async function details(wrapper: ReturnType<typeof mountApp>) {
+      await wrapper.find('[aria-label="Pull request details"]').trigger("click");
+      await flushPromises();
+      return new DOMWrapper(document.querySelector(".run-pr-details")!);
+    }
     const w = mountApp(RunPage, {
       seed: historySeed([
         input,
@@ -918,23 +923,25 @@ describe("RunPage — history mode", () => {
     expect(meta.text()).toContain("review");
     expect(meta.text()).toContain("anthropic/claude-fable-5");
     expect(meta.text()).toContain("high effort");
-    // The harness and whose word put the run there (harness.md item 10): a reader never guesses which override did.
     expect(meta.find(".harness").text()).toBe("opencode harness (user scope)");
-    const hrefs = meta.findAll("a").map((a) => a.attributes("href"));
-    expect(hrefs).toEqual([
+    expect(meta.findAll("a")).toHaveLength(0);
+    const pr = w.find(".run-pr-context .prlink");
+    expect(pr.attributes("href")).toBe("https://github.com/acme/web/pull/12");
+    expect(pr.find("svg").exists()).toBe(true);
+    const panel = await details(w);
+    expect(panel.findAll("a").map((a) => a.attributes("href"))).toEqual([
       "https://github.com/acme/web",
       "https://github.com/acme/web/tree/main",
       "https://github.com/acme/web/commit/0123456789abcdef0123456789abcdef01234567",
-      "https://github.com/acme/web/pull/12",
     ]);
-    expect(meta.find(".reftag").text()).toBe("main");
-    expect(meta.find(".reftag").element.tagName).toBe("A"); // the branch is a destination
-    expect(meta.find(".sha").text()).toBe("0123456"); // seven characters, the full sha on hover
-    expect(meta.find(".sha").attributes("title")).toContain("0123456789abcdef0123456789abcdef01234567");
-    expect(meta.find(".prlink svg").exists()).toBe(true);
-    for (const a of meta.findAll("a")) expect(a.attributes("target")).toBe("_blank");
+    expect(panel.find(".reftag").text()).toBe("main");
+    expect(panel.find(".reftag").element.tagName).toBe("A");
+    expect(panel.find(".sha").text()).toBe("0123456");
+    expect(panel.find(".sha").attributes("title")).toBe("0123456789abcdef0123456789abcdef01234567");
+    for (const a of [...panel.findAll("a"), pr]) expect(a.attributes("target")).toBe("_blank");
+    w.unmount();
+    await flushPromises();
 
-    // A hostile repo never links — and neither does a branch or sha under it.
     const hostile = mountApp(RunPage, {
       seed: historySeed([
         input,
@@ -944,27 +951,37 @@ describe("RunPage — history mode", () => {
           model: "m",
           repo: "javascript:alert(1)//x",
           ref: "main",
+          pr: 12,
           headSha: "0123456789abcdef0123456789abcdef01234567",
           at: 1,
         },
       ] as LiveFrame[]),
     });
-    expect(hostile.find("#runmeta").findAll("a")).toHaveLength(0);
-    expect(hostile.find("#runmeta .reftag").text()).toBe("main"); // the fact stays, as text
-    // A branch outside git's ref grammar is text too, under a good repo.
+    expect(hostile.find(".run-pr-context a").exists()).toBe(false);
+    const hostilePanel = await details(hostile);
+    expect(hostilePanel.findAll("a")).toHaveLength(0);
+    expect(hostilePanel.find(".reftag").text()).toBe("main");
+    expect(hostilePanel.find(".reftag").element.tagName).toBe("SPAN");
+    hostile.unmount();
+    await flushPromises();
+
     const oddRef = mountApp(RunPage, {
       seed: historySeed([
         input,
-        { type: "run_meta", agent: "review", model: "m", repo: "acme/web", ref: "a..b", at: 1 },
+        {
+          type: "run_meta",
+          agent: "review",
+          model: "m",
+          repo: "acme/web",
+          ref: "a..b",
+          pr: 12,
+          at: 1,
+        },
       ] as LiveFrame[]),
     });
-    expect(oddRef.find("#runmeta .reftag").element.tagName).toBe("SPAN");
-    expect(
-      oddRef
-        .find("#runmeta")
-        .findAll("a")
-        .map((a) => a.attributes("href")),
-    ).toEqual(["https://github.com/acme/web"]);
+    const oddPanel = await details(oddRef);
+    expect(oddPanel.find(".reftag").element.tagName).toBe("SPAN");
+    expect(oddPanel.findAll("a").map((a) => a.attributes("href"))).toEqual(["https://github.com/acme/web"]);
   });
 
   it("collects context turns into the collapsed Earlier-in-this-thread block with a count", () => {
@@ -1184,7 +1201,7 @@ describe("RunPage — history mode", () => {
     expect(quoted).toContain("15:26 · teammate: we concluded: ship it");
     expect(quoted).not.toContain("UNTRUSTED");
     expect(quoted).not.toContain("Referenced thread ·");
-    const order = Array.from(w.find(".max-w-6xl").element.children).map((el) => el.id);
+    const order = Array.from(w.find(".run-body").element.children).map((el) => el.id);
     expect(order).toEqual(["request", "reply", "references", "context", "thisrun", "timeline", "log"]);
   });
 
@@ -1211,7 +1228,7 @@ describe("RunPage — history mode", () => {
     expect(heading.find("#fold").classes()).toContain("ml-auto"); // at the right edge
     expect(heading.find("#fold svg").exists()).toBe(false); // text, like the card's controls
     expect(heading.find("#fold").text()).toBe("Expand all");
-    const order = Array.from(w.find(".max-w-6xl").element.children).map((el) => el.id);
+    const order = Array.from(w.find(".run-body").element.children).map((el) => el.id);
     // A finished run's page leads with its outcome: the Reply sits right under the Request.
     expect(order).toEqual(["request", "reply", "context", "thisrun", "timeline", "log"]);
     expect(w.find("#reply").attributes("data-position")).toBe("first");
@@ -1244,16 +1261,16 @@ describe("RunPage — history mode", () => {
     });
     expect(w.find("#request .expandable .md").exists()).toBe(true);
     expect(w.find("#request .expandable .body").attributes("style")).toContain("--expandable-lines: 3");
-    // The facts bar sits under the header, before the Request, with the Reading diff control at its right edge.
-    const blocks = Array.from(w.find(".max-w-6xl").element.children).map((el) => el.id);
-    expect(blocks.indexOf("runmeta")).toBe(0);
-    expect(blocks.indexOf("request")).toBe(1);
+    // Runtime facts stay in the header; the request stays first in the document.
+    const blocks = Array.from(w.find(".run-body").element.children).map((el) => el.id);
+    expect(w.find(".run-header #runmeta").exists()).toBe(true);
+    expect(blocks.indexOf("request")).toBe(0);
     expect(w.find("#request #runmeta").exists()).toBe(false);
     const button = w.find('[data-testid="reading-diff-button"]');
     expect(button.element.tagName).toBe("BUTTON");
     expect(button.text()).toBe("Reading diff");
     expect(button.classes()).toContain("text-primary"); // the weight of the chips beside it
-    expect(button.classes()).toContain("ml-auto");
+    expect(w.find(".run-pr-context [data-testid=reading-diff-button]").exists()).toBe(true);
     expect(button.find("[class*='i-lucide-git-compare'], .iconify").exists()).toBe(true);
     expect(button.attributes("class")).not.toContain("border"); // not a boxed UButton any more
     w.unmount();
@@ -2185,13 +2202,13 @@ describe("RunPage — history mode: the Findings link (agent-ship item 18)", () 
     const w = mountApp(RunPage, {
       seed: historySeed(events, { status: "completed", findingsLedger: { unit: "plan-p-1:U16", rows: 3 } }),
     });
-    const link = w.find("#runmeta a.findings");
+    const link = w.find(".run-pr-context a.findings");
     expect(link.exists()).toBe(true);
     expect(link.attributes("href")).toBe("/runs/unit/plan-p-1%3AU16#findings");
     expect(link.text()).toBe("Findings · 3");
     expect(link.attributes("title")).toBe("the pull request's findings ledger on its unit's page");
     // It sits beside the pull request link, in the same facts bar.
-    expect(w.find("#runmeta a.prlink").exists()).toBe(true);
+    expect(w.find(".run-pr-context a.prlink").exists()).toBe(true);
     const without = mountApp(RunPage, { seed: historySeed(events, { status: "completed" }) });
     expect(without.find("a.findings").exists()).toBe(false);
   });
@@ -2207,5 +2224,46 @@ describe("RunPage — the run's thread (web-chat.md item 4)", () => {
     expect(slack.find("#request [data-testid=thread-link]").attributes("href")).toBe("/threads/slack%3AC1%3A1712.34");
     const without = mountApp(RunPage, { seed: historySeed([input]) });
     expect(without.find("#request [data-testid=thread-link]").exists()).toBe(false);
+  });
+});
+
+describe("RunPage — compact navigation", () => {
+  it("separates runtime facts from compact PR context and keeps request and summary controls in the sticky header", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([
+        input,
+        {
+          type: "run_meta",
+          agent: "review",
+          model: "anthropic/model",
+          effort: "high",
+          harness: "pi",
+          repo: "acme/web",
+          ref: "main",
+          pr: 7,
+          headSha: "0123456789abcdef0123456789abcdef01234567",
+          at: 2,
+        },
+      ] as LiveFrame[]),
+    });
+    expect(w.get(".run-header #runmeta .agent").text()).toBe("review");
+    expect(w.get("#runmeta .agent").attributes("data-agent-hue")).toBe("review");
+    expect(w.get("#runmeta .model").text()).toBe("anthropic/model");
+    expect(w.get(".run-pr-context .prlink").text()).toContain("acme/web #7");
+    expect(w.find("#runmeta .prlink").exists()).toBe(false);
+    expect(w.get(".run-header [data-testid=request-preview-trigger]").text()).toBe("Request");
+    expect(w.get(".run-header [data-testid=summary-preview-trigger]").text()).toBe("Run summary");
+    expect(w.get("[data-testid=follow-output]").text()).toContain("Latest output");
+  });
+  it("omits the PR context line when a run has no PR", () => {
+    const w = mountApp(RunPage, {
+      seed: historySeed([
+        input,
+        { type: "run_meta", agent: "general", model: "anthropic/model", repo: "acme/web", ref: "main", at: 2 },
+      ] as LiveFrame[]),
+    });
+    expect(w.get("#runmeta .agent").text()).toBe("general");
+    expect(w.find(".run-pr-context").exists()).toBe(false);
+    expect(w.get(".run-header #state").text()).toBe("");
   });
 });

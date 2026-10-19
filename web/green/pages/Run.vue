@@ -2,7 +2,8 @@
 defineOptions({ name: "GreenRunPage" });
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import PageHeading from "../components/PageHeading.vue";
+import { useResizeObserver } from "@vueuse/core";
+import RunScrollControls from "../../src/components/run/RunScrollControls.vue";
 import ExpandableText from "../../src/components/ExpandableText.vue";
 import MarkdownText from "../../src/components/MarkdownText.vue";
 import SlackMark from "../../src/components/SlackMark.vue";
@@ -17,7 +18,6 @@ import RunChildrenBlock from "../../src/components/run/RunChildrenBlock.vue";
 import { buildTimeline, type TimelinePhase } from "../../src/lib/timelineVm";
 import { runOwnerOf } from "@core/core/runOwner.js";
 import { useSeed, useViewingAs } from "../../src/lib/seed";
-import { threadHref } from "../../src/lib/indexRow";
 import { useWallClock } from "../../src/lib/wallClock";
 import { browser } from "../../src/lib/browser";
 import { useEventSourceFactory } from "../../src/lib/eventSource";
@@ -46,7 +46,7 @@ import { durationTone, heatStyle } from "../../src/lib/durationTone";
 import { formatClock, formatDateTime, formatDuration, formatLocalIso, formatUsd } from "../../src/lib/format";
 import { githubCommitUrl, githubPrUrl, githubRepoUrl, githubTreeUrl, shortSha } from "../../src/lib/githubLinks";
 import { phasePaint } from "../../src/lib/termPaint";
-import { statusLabel, PROVISIONAL_LABEL } from "../../src/lib/indexRow";
+import { AGENT_HUE, agentHue, threadHref, statusLabel, PROVISIONAL_LABEL } from "../../src/lib/indexRow";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
 // The per-run page: one timeline of the whole run, LIVE (follows the
@@ -268,6 +268,8 @@ const eventsHref = isHistory && seed?.mode === "history" ? `/runs/${encodeURICom
  *  scrolls there and flashes it once (the `revealed` class, web/src/style.css). */
 function reveal(anchor: string): void {
   if (!model.reveal(anchor)) return;
+  outputNavigation.value?.pause();
+  summaryPreviewOpen.value = false;
   void nextTick().then(() => {
     const el = document.getElementById(anchor);
     if (!el) return;
@@ -422,11 +424,28 @@ function noteClass(note: NoteVm): string {
   return routine || legacyRetry ? "bg-info/10 text-info" : "bg-warn/10 text-warn";
 }
 
-// ---- follow the stream only when the viewer is already at the tail -------------
-const logEnd = ref<HTMLElement | null>(null);
-function atTail(): boolean {
-  return window.innerHeight + window.scrollY >= document.body.scrollHeight - 60;
+const runHeader = ref<HTMLElement | null>(null);
+const headerHeight = ref(0);
+const outputNavigation = ref<InstanceType<typeof RunScrollControls> | null>(null);
+const requestPreviewOpen = ref(false);
+const summaryPreviewOpen = ref(false);
+useResizeObserver(runHeader, () => {
+  headerHeight.value = runHeader.value?.getBoundingClientRect().height ?? 0;
+});
+function jumpToBlock(id: string): void {
+  outputNavigation.value?.pause();
+  requestPreviewOpen.value = false;
+  summaryPreviewOpen.value = false;
+  void nextTick().then(() => {
+    const target = document.getElementById(id);
+    if (target && runHeader.value?.parentElement?.contains(target))
+      target.scrollIntoView?.({
+        block: "start",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+      });
+  });
 }
+
 // PR-review panel (docs/reference/specs/reading-diff.md item 12): the collector is the
 // runs→module adapter — it reads the same frames the timeline gets and, when
 // this run is a PR review carrying reading-diff artifacts, gates the button.
@@ -444,10 +463,8 @@ const abridge =
 onUnmounted(() => abridge?.dispose());
 
 function handle(e: unknown): void {
-  const wasAtTail = atTail();
   model.handle(e);
   prReview.handle(e);
-  if (wasAtTail) requestAnimationFrame(() => logEnd.value?.scrollIntoView?.({ block: "nearest" }));
 }
 
 // ---- the stream / the seed -----------------------------------------------------
@@ -534,13 +551,23 @@ const lineageUnitHref = lineage?.unit ? `/runs/unit/${encodeURIComponent(lineage
 /** The REVIEW/CODING row's links (item 19): the repo, the branch, the head
  *  commit and the PR, each built only from a value whose shape was verified
  *  (`githubLinks.ts`) — an odd value renders as text, never as a link. */
+const prReference = computed(() => ({
+  repo: state.meta?.repo ?? prReview.state.pr.repo,
+  number: state.meta?.pr ?? state.prOpened?.number ?? prReview.state.pr.number,
+}));
+const hasPrContext = computed(() => prReference.value.number !== undefined || prReview.state.ready);
+const prDetailsText = computed(() =>
+  [state.meta?.ref ? "Branch: " + state.meta.ref : "", state.meta?.headSha ? "Commit: " + state.meta.headSha : ""]
+    .filter(Boolean)
+    .join("\n"),
+);
 const links = computed(() => {
   const m = state.meta;
   return {
-    repo: githubRepoUrl(m?.repo),
-    tree: githubTreeUrl(m?.repo, m?.ref),
-    commit: githubCommitUrl(m?.repo, m?.headSha),
-    pr: githubPrUrl(m?.repo, m?.pr),
+    repo: githubRepoUrl(prReference.value.repo),
+    tree: githubTreeUrl(prReference.value.repo, m?.ref),
+    commit: githubCommitUrl(prReference.value.repo, m?.headSha),
+    pr: githubPrUrl(prReference.value.repo, prReference.value.number),
   };
 });
 /** The harness and whose word put the run there (harness.md item 10) — `opencode
@@ -568,94 +595,203 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
 </script>
 
 <template>
-  <div class="green-run-evidence">
-    <PageHeading
-      :title="state.title ?? seed?.runTitle ?? 'Run details'"
-      description="Inspect the request, response, tools, and delivery evidence."
-    />
-    <div class="green-evidence-toolbar">
-      <RouterLink class="back text-sm text-primary no-underline hover:underline" to="/runs">← All runs</RouterLink>
-    </div>
-    <div class="green-evidence-toolbar">
-      <span class="conn flex items-center gap-2 font-mono">
-        <template v-if="phase === 'ended'">
-          <span v-if="endChip.ok" class="ok text-ok" role="img" aria-label="succeeded">✓</span>
-          <span v-else class="chip rounded border px-1.5 text-[0.7rem]" :class="CHIP_CLS[endChip.cls]">{{
-            endChip.word
-          }}</span>
-          <span
-            id="state"
-            class="dur text-xs tabular-nums"
-            :class="[endPaint ? 'heat' : 'text-muted', endHeat.level >= 2 ? 'font-medium' : '']"
-            :style="endPaint"
-            :data-heat="endHeat.level"
-            >{{ endDuration }}</span
+  <div class="green-run-evidence" :style="{ '--run-header-height': headerHeight + 'px' }">
+    <header ref="runHeader" class="run-header mx-auto max-w-6xl">
+      <div class="run-heading">
+        <div class="run-title">
+          <RouterLink class="back run-back" to="/runs" aria-label="All runs"
+            ><UIcon name="i-lucide-arrow-left" aria-hidden="true"
+          /></RouterLink>
+          <h1>{{ state.title ?? seed?.runTitle ?? "Run details" }}</h1>
+        </div>
+        <div v-if="hasPrContext" class="run-pr-context">
+          <a v-if="links.pr" class="prlink" :href="links.pr" target="_blank" rel="noopener noreferrer">
+            <GithubMark /><span class="truncate">{{ prReference.repo }} #{{ prReference.number }}</span>
+          </a>
+          <span v-else-if="prReference.number" class="prlink"
+            ><GithubMark /><span class="truncate">{{ prReference.repo }} #{{ prReference.number }}</span></span
           >
-          <span v-if="costText" id="cost" class="cost text-xs tabular-nums text-muted" :title="costTitle"
-            >· {{ costText }}</span
+          <UPopover v-if="state.meta?.ref || state.meta?.headSha" :content="{ align: 'end' }">
+            <UTooltip :text="prDetailsText"
+              ><button type="button" class="run-info" aria-label="Pull request details">
+                <UIcon name="i-lucide-info" aria-hidden="true" /></button
+            ></UTooltip>
+            <template #content>
+              <div class="run-preview run-pr-details">
+                <p class="run-preview-label">Pull request details</p>
+                <a v-if="links.repo" class="repo" :href="links.repo" target="_blank" rel="noopener noreferrer">{{
+                  prReference.repo
+                }}</a>
+                <span v-else class="repo">{{ prReference.repo }}</span>
+                <span class="run-preview-label mt-3">Branch</span>
+                <a v-if="links.tree" class="reftag" :href="links.tree" target="_blank" rel="noopener noreferrer">{{
+                  state.meta?.ref
+                }}</a>
+                <span v-else class="reftag">{{ state.meta?.ref ?? "Not recorded" }}</span>
+                <span class="run-preview-label mt-3">Commit</span>
+                <a
+                  v-if="links.commit && state.meta?.headSha"
+                  class="sha"
+                  :href="links.commit"
+                  :title="state.meta.headSha"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >{{ shortSha(state.meta.headSha) }}</a
+                >
+                <span v-else class="sha">{{
+                  state.meta?.headSha ? shortSha(state.meta.headSha) : "Not recorded"
+                }}</span>
+              </div>
+            </template>
+          </UPopover>
+          <button
+            v-if="prReview.state.ready"
+            type="button"
+            class="reading-diff inline-flex cursor-pointer items-center gap-1 whitespace-nowrap text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
+            data-testid="reading-diff-button"
+            @click="prPanelOpen = true"
           >
-          <span v-if="delivery" id="delivery" class="text-xs text-muted">· {{ delivery }}</span>
-        </template>
-        <template v-else>
-          <span id="statedot" class="pulse text-[1.1em] leading-none" :class="pulseCls">∿</span>
-          <span
-            id="state"
-            class="text-xs tabular-nums"
-            :class="stopError ? 'text-bad' : 'text-muted'"
-            :title="
-              phase === 'running' && !stopError
-                ? 'the whole run, since we received the message'
-                : phase === 'finished'
-                  ? 'the agent stopped; the reply is being posted'
-                  : undefined
-            "
-            >{{ headerText }}</span
+            <UIcon name="i-lucide-git-compare" class="size-3.5 shrink-0" aria-hidden="true" />Reading diff
+          </button>
+          <RouterLink
+            v-if="findingsHref && findingsLedger"
+            class="findings"
+            :to="findingsHref"
+            title="the pull request's findings ledger on its unit's page"
+            >Findings · {{ findingsLedger.rows }}</RouterLink
           >
-        </template>
-      </span>
-    </div>
-    <div class="green-evidence-toolbar">
-      <span v-if="!actionsHidden" id="actions" class="actions flex gap-1.5">
-        <UTooltip
-          v-if="!state.stopMode && phase !== 'disconnected'"
-          text="End the current turn, clean up resources, and keep the stopped run"
+        </div>
+      </div>
+      <div class="run-statusline">
+        <span class="conn flex items-center gap-2 font-mono">
+          <template v-if="phase === 'ended'">
+            <span v-if="endChip.ok" class="ok text-ok" role="img" aria-label="succeeded">✓</span>
+            <span v-else class="chip rounded border px-1.5 text-[0.7rem]" :class="CHIP_CLS[endChip.cls]">{{
+              endChip.word
+            }}</span>
+            <span
+              id="state"
+              class="dur text-xs tabular-nums"
+              :class="[endPaint ? 'heat' : 'text-muted', endHeat.level >= 2 ? 'font-medium' : '']"
+              :style="endPaint"
+              :data-heat="endHeat.level"
+              >{{ endDuration }}</span
+            >
+            <span v-if="costText" id="cost" class="cost text-xs tabular-nums text-muted" :title="costTitle"
+              >· {{ costText }}</span
+            >
+            <span v-if="delivery" id="delivery" class="text-xs text-muted">· {{ delivery }}</span>
+          </template>
+          <template v-else>
+            <span id="statedot" class="pulse text-[1.1em] leading-none" :class="pulseCls">∿</span>
+            <span
+              id="state"
+              class="text-xs tabular-nums"
+              :class="stopError ? 'text-bad' : 'text-muted'"
+              :title="
+                phase === 'running' && !stopError
+                  ? 'the whole run, since we received the message'
+                  : phase === 'finished'
+                    ? 'the agent stopped; the reply is being posted'
+                    : undefined
+              "
+              >{{ headerText }}</span
+            >
+          </template>
+        </span>
+        <span v-if="!actionsHidden" id="actions" class="actions flex gap-1.5">
+          <UTooltip
+            v-if="!state.stopMode && phase !== 'disconnected'"
+            text="End the current turn, clean up resources, and keep the stopped run"
+          >
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="outline"
+              label="Stop"
+              :disabled="stopDisabled"
+              @click="requestStop('stop')"
+            />
+          </UTooltip>
+          <UTooltip text="Kill immediately and delete the run row">
+            <UButton
+              size="xs"
+              color="error"
+              variant="outline"
+              label="Kill"
+              :disabled="stopDisabled"
+              @click="requestStop('kill')"
+            />
+          </UTooltip>
+        </span>
+      </div>
+      <div v-if="state.meta" id="runmeta" class="runmeta run-runtime-facts">
+        <span
+          class="agent shrink-0 rounded px-1.5 py-0.5 font-mono text-[0.65rem] font-medium leading-none uppercase tracking-wide"
+          :class="AGENT_HUE[agentHue(state.meta.agent)]"
+          :data-agent-hue="agentHue(state.meta.agent)"
+          >{{ state.meta.agent }}</span
         >
-          <UButton
-            size="xs"
-            color="neutral"
-            variant="outline"
-            label="Stop"
-            :disabled="stopDisabled"
-            @click="requestStop('stop')"
-          />
-        </UTooltip>
-        <UTooltip text="Kill immediately and delete the run row">
-          <UButton
-            size="xs"
-            color="error"
-            variant="outline"
-            label="Kill"
-            :disabled="stopDisabled"
-            @click="requestStop('kill')"
-          />
-        </UTooltip>
-      </span>
-    </div>
+        <span class="model">{{ state.meta.model }}</span>
+        <span v-if="state.meta.effort" class="effort">{{ state.meta.effort }} effort</span>
+        <span v-if="harnessFact" class="harness">{{ harnessFact }}</span>
+      </div>
+      <nav class="run-quick-nav" aria-label="Run context">
+        <UPopover v-if="state.request" v-model:open="requestPreviewOpen" :content="{ align: 'start' }">
+          <button type="button" class="run-quick-button" data-testid="request-preview-trigger">
+            <UIcon name="i-lucide-message-square" aria-hidden="true" />Request<UIcon
+              name="i-lucide-chevron-down"
+              class="run-quick-chevron"
+              aria-hidden="true"
+            />
+          </button>
+          <template #content
+            ><div class="run-preview">
+              <p class="run-preview-label">Initial request</p>
+              <MarkdownText :text="state.request.text" /><button
+                type="button"
+                class="run-preview-jump"
+                @click="jumpToBlock('request')"
+              >
+                Open full request<UIcon name="i-lucide-arrow-up-right" aria-hidden="true" />
+              </button></div
+          ></template>
+        </UPopover>
+        <UPopover v-if="timeline" v-model:open="summaryPreviewOpen" :content="{ align: 'start' }">
+          <button type="button" class="run-quick-button" data-testid="summary-preview-trigger">
+            <UIcon name="i-lucide-chart-no-axes-combined" aria-hidden="true" /><span class="run-summary-prefix"
+              >Run </span
+            >summary<UIcon name="i-lucide-chevron-down" class="run-quick-chevron" aria-hidden="true" />
+          </button>
+          <template #content>
+            <div class="run-preview">
+              <p class="run-preview-label">Run summary</p>
+              <p>{{ timeline.lede }}</p>
+              <ol v-if="timeline.ranked.length" class="run-summary-steps">
+                <li v-for="item in timeline.ranked" :key="item.anchor">
+                  <button type="button" @click="reveal(item.anchor)">
+                    <span class="tabular-nums">{{ formatDuration(item.ms, "clock") }}</span
+                    ><span class="truncate">{{ item.label }}</span
+                    ><UIcon name="i-lucide-arrow-up-right" aria-hidden="true" />
+                  </button>
+                </li>
+              </ol>
+              <button type="button" class="run-preview-jump" @click="jumpToBlock('timeline')">
+                Open full summary<UIcon name="i-lucide-arrow-up-right" aria-hidden="true" />
+              </button>
+            </div>
+          </template>
+        </UPopover>
+        <RunScrollControls ref="outputNavigation" :live="live" />
+      </nav>
+    </header>
 
-    <div class="mx-auto max-w-6xl">
+    <div class="run-body mx-auto max-w-6xl">
       <!-- The page is FOUR blocks a first-time reader can name, each headed
            the same way (small caps label · muted facts · the moment at the
            right edge): REQUEST — what came in; EARLIER IN THIS THREAD — the
            turns the model was given, folded; THIS RUN — the timeline's summary
            card and then the steps; REPLY — what went back. -->
-
-      <!-- The facts bar (item 19/21): what the run is about, first thing under the
-         header — agent · model · effort · the harness and whose word put the run
-         on it · linked repo · the branch (a link to it
-         on GitHub) · the head commit (a link) · GitHub-marked #PR · the Reading
-         diff control at the right edge. Every link is built from a
-         shape-verified value; an odd one stays text. A reader with three
-         seconds gets the run's identity before any prose. -->
 
       <!-- The way up (item 33): a spawned run names its pipeline (or parent)
            run and — a ship unit's thread run — its unit, each a page here. -->
@@ -684,79 +820,6 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <span v-if="lineage.unit?.thread" class="threadkind">{{ lineage.unit.thread }} thread</span>
       </div>
 
-      <div
-        v-if="state.meta"
-        id="runmeta"
-        class="runmeta facts mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 px-(--sb-gutter) font-mono text-xs text-dimmed"
-      >
-        <span class="agent text-[0.68rem] font-medium uppercase tracking-wider text-toned">{{ state.meta.agent }}</span>
-        <span class="model">{{ state.meta.model }}</span>
-        <span v-if="state.meta.effort" class="effort">{{ state.meta.effort }} effort</span>
-        <span v-if="harnessFact" class="harness">{{ harnessFact }}</span>
-        <a
-          v-if="links.repo"
-          class="text-primary no-underline hover:underline"
-          :href="links.repo"
-          target="_blank"
-          rel="noopener noreferrer"
-          >{{ state.meta.repo }}</a
-        >
-        <span v-else-if="state.meta.repo" class="repo">{{ state.meta.repo }}</span>
-        <a
-          v-if="links.tree"
-          class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned no-underline hover:border-primary hover:text-primary"
-          :href="links.tree"
-          target="_blank"
-          rel="noopener noreferrer"
-          title="the branch on GitHub"
-          >{{ state.meta.ref }}</a
-        >
-        <span
-          v-else-if="state.meta.ref"
-          class="reftag rounded border border-accented px-1.5 text-[0.75rem] text-toned"
-          >{{ state.meta.ref }}</span
-        >
-        <a
-          v-if="links.commit && state.meta.headSha"
-          class="sha tabular-nums text-toned no-underline hover:text-primary hover:underline"
-          :href="links.commit"
-          target="_blank"
-          rel="noopener noreferrer"
-          :title="`the head commit ${state.meta.headSha}`"
-          >{{ shortSha(state.meta.headSha) }}</a
-        >
-        <a
-          v-if="links.pr"
-          class="prlink whitespace-nowrap text-primary no-underline hover:underline"
-          :href="links.pr"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <GithubMark class="mr-1 align-[-0.125em]" />#{{ state.meta.pr }}
-        </a>
-        <!-- The pull request's findings ledger (agent-ship item 18): a link to the
-             unit page's block, present exactly when the seed names where it lives. -->
-        <RouterLink
-          v-if="findingsHref && findingsLedger"
-          class="findings whitespace-nowrap text-primary no-underline hover:underline"
-          :to="findingsHref"
-          title="the pull request's findings ledger on its unit's page"
-          >Findings · {{ findingsLedger.rows }}</RouterLink
-        >
-        <!-- The review's reading diff (docs/reference/specs/reading-diff.md item 12):
-             present exactly when the run published reading-diff artifacts —
-             a link-weight control like the chips beside it. -->
-        <button
-          v-if="prReview.state.ready"
-          type="button"
-          class="reading-diff ml-auto inline-flex cursor-pointer items-center gap-1 whitespace-nowrap text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
-          data-testid="reading-diff-button"
-          @click="prPanelOpen = true"
-        >
-          <UIcon name="i-lucide-git-compare" class="size-3.5 shrink-0" aria-hidden="true" />
-          Reading diff
-        </button>
-      </div>
       <!-- Request -->
       <!-- The card's spacing states the hierarchy: the frame (label, meta)
            and the framed prose breathe by the same rhythm — the meta row is
@@ -1108,7 +1171,6 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           :slow="waiting.slow"
           :model="state.model"
         />
-        <li ref="logEnd" aria-hidden="true" />
       </ol>
 
       <!-- Reply, on a live page: it lands last, as it arrives. -->
@@ -1137,3 +1199,233 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
     </PrReviewSlideover>
   </div>
 </template>
+
+<style scoped>
+.green-run-evidence {
+  padding-bottom: 80px;
+}
+.green-run-evidence :deep([id]) {
+  scroll-margin-top: calc(var(--run-header-height, 160px) + 12px);
+}
+.run-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  padding: 10px 0 12px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.run-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 16px;
+}
+.run-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.run-title h1 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 22px;
+  line-height: 1.35;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+.run-back,
+.run-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  color: var(--ui-text-muted);
+  cursor: pointer;
+}
+.run-back:hover,
+.run-info:hover {
+  color: var(--ui-text-highlighted);
+  background: var(--ui-bg-muted);
+}
+.run-back .iconify,
+.run-info .iconify {
+  width: 17px;
+  height: 17px;
+}
+.run-pr-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+.prlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ui-primary);
+  text-decoration: none;
+}
+.prlink:hover {
+  text-decoration: underline;
+}
+.run-statusline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 8px 0;
+  min-height: 28px;
+}
+.conn {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.run-runtime-facts {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+  padding-bottom: 3px;
+}
+.run-quick-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
+  overflow-x: auto;
+}
+.run-quick-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 8px;
+  flex-shrink: 0;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  color: var(--ui-text-toned);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.run-quick-button:hover {
+  border-color: var(--ui-border-accented);
+  background: var(--ui-bg-muted);
+}
+.run-quick-button .iconify {
+  width: 14px;
+  height: 14px;
+}
+.run-preview {
+  width: min(460px, calc(100vw - 32px));
+  max-height: min(480px, 60dvh);
+  overflow: auto;
+  padding: 16px;
+  font-size: 13px;
+}
+.run-preview-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--ui-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.run-pr-details > a,
+.run-pr-details > .reftag,
+.run-pr-details > .sha {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.run-pr-details a {
+  color: var(--ui-primary);
+}
+.run-preview-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  margin-top: 12px;
+  color: var(--ui-primary);
+  cursor: pointer;
+}
+.run-preview-jump .iconify {
+  width: 14px;
+  height: 14px;
+}
+.run-summary-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+}
+.run-summary-steps button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  cursor: pointer;
+  text-align: left;
+}
+.run-summary-steps button > span:first-child {
+  flex-shrink: 0;
+  color: var(--ui-text-muted);
+}
+.run-summary-steps .iconify {
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+@media (max-width: 767px) {
+  .run-header {
+    padding-top: 8px;
+  }
+  .run-heading {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+  .run-title h1 {
+    font-size: 20px;
+  }
+  .run-pr-context {
+    min-height: 36px;
+  }
+  .run-pr-context .prlink {
+    flex: 1;
+  }
+  .run-back,
+  .run-info {
+    min-width: 44px;
+    height: 44px;
+  }
+  .run-quick-button {
+    min-height: 44px;
+    gap: 4px;
+    padding: 0 6px;
+  }
+  .run-summary-prefix,
+  .run-quick-chevron {
+    display: none;
+  }
+  .run-preview-jump,
+  .run-summary-steps button {
+    min-height: 44px;
+  }
+}
+</style>

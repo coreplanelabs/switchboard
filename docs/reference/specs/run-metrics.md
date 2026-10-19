@@ -183,7 +183,7 @@ The browser entry point serves Usage, System health and JSON through the same sc
 
 | Criterion | Proof |
 |---|---|
-| Usage and System health retain desktop and phone captures in both themes | `[unit]` `src/docs/screenshotManifest.test.ts::expectedFiles::is one PNG per surface per theme, named <surface>-<theme>.png`, `src/docs/screenshotManifest.test.ts::capture profiles::preserves all existing desktop outputs and themes` |
+| Usage and System health retain desktop and phone captures in both themes | `[unit]` `src/docs/screenshotManifest.test.ts::expectedFiles::is one PNG per capture per theme, including the landing page phone views`, `src/docs/screenshotManifest.test.ts::capture profiles::preserves all existing desktop outputs and themes` |
 | Actual server wiring serves both tabs and JSON for the current native account, with current proof before and after the reader | `[agent]` On the final staging candidate, use an authenticated account to open both tabs and JSON, preserve the date range, verify current-user scope and then authorized selected-person/Everyone scopes. Confirm a lost or unavailable native proof returns no report. Local handler proofs do not establish this live callback. |
 
 ## Local review preview parity

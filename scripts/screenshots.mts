@@ -225,6 +225,10 @@ async function runGen(): Promise<number> {
               const response = await page.goto(`${origin}${surface.path}`, { waitUntil: "load" });
               if (!response?.ok()) throw new Error(`Preview failed: ${surface.name}`);
               await page.waitForSelector("#app header");
+              // The fixture label belongs in local previews, not in website product images.
+              await page.locator(".green-notice.green-info").evaluateAll((banners) => {
+                for (const banner of banners) banner.remove();
+              });
               await page.evaluate(() => document.fonts.ready);
               // Icons paint a frame after mount; retain the fixed settle.
               await page.waitForTimeout(500);
