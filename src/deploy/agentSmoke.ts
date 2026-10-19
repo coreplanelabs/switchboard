@@ -61,7 +61,7 @@ const configSchema = z
         head: sha,
         expectedVerdict: z.enum(["approve", "request_changes"]).optional(),
         transport: z.enum(["http", "mcp"]).optional(),
-        effort: z.literal("high").optional(),
+        effort: z.enum(["medium", "high"]).optional(),
       })
       .strict(),
     maxObservedUsd: z.number().finite().positive().max(10),

@@ -396,6 +396,29 @@ globalThis.fetch = async (url, init) => {
       }
     },
   );
+  it("uses Luna and medium effort in automatic HTTP acceptance even when deployment inputs are absent", () => {
+    const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+    const steps = workflow.jobs.deploy.steps.filter((step: { run?: string }) => step.run?.includes("smoke:ingress"));
+    for (const step of steps) {
+      const commands = step.run.slice(
+        step.run.indexOf("smoke_args="),
+        step.run.indexOf("jq -e") >= 0 ? step.run.indexOf("jq -e") : undefined,
+      );
+      const result = spawnSync("bash", ["-c", `npm() { printf '%s\\n' "$@"; }; ${commands}`], {
+        encoding: "utf8",
+        env: { PATH: process.env.PATH, RUNNER_TEMP: "/fixture" },
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim().split("\n").slice(-6)).toEqual([
+        "--model",
+        "openai/gpt-6-luna",
+        "--review-transport",
+        "http",
+        "--review-effort",
+        "medium",
+      ]);
+    }
+  });
   it("forwards the same MCP Review model and effort through preflight and final acceptance in the existing job", () => {
     const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
     expect(workflow.on.workflow_dispatch.inputs.review_transport).toMatchObject({
@@ -408,7 +431,7 @@ globalThis.fetch = async (url, init) => {
       expect(step.env.SMOKE_REVIEW_TRANSPORT).toBe("${{ env.STAGING_REVIEW_TRANSPORT }}");
       expect(step.env.SMOKE_REVIEW_EFFORT).toBe("${{ env.STAGING_REVIEW_EFFORT }}");
       const commands = step.run.slice(
-        step.run.indexOf("smoke_args=()"),
+        step.run.indexOf("smoke_args="),
         step.run.indexOf("jq -e") >= 0 ? step.run.indexOf("jq -e") : undefined,
       );
       const result = spawnSync("bash", ["-c", `npm() { printf '%s\n' "$@"; }; ${commands}`], {
@@ -767,8 +790,8 @@ globalThis.fetch = async (url, init) => {
   });
 
   it.each([
-    { event: "pull_request_target", inputs: {}, expected: "" },
-    { event: "workflow_dispatch", inputs: { model: "" }, expected: "" },
+    { event: "pull_request_target", inputs: {}, expected: "openai/gpt-6-luna" },
+    { event: "workflow_dispatch", inputs: { model: "" }, expected: "openai/gpt-6-luna" },
     {
       event: "workflow_dispatch",
       inputs: { model: "anthropic/claude-sonnet-4-5" },
@@ -830,7 +853,12 @@ globalThis.fetch = async (url, init) => {
             join(directory, "staging-setup.json"),
             "--check",
             "--check-reader",
-            ...(expected ? ["--model", expected] : []),
+            "--model",
+            expected,
+            "--review-transport",
+            "http",
+            "--review-effort",
+            "medium",
           ],
           [
             "run",
@@ -839,7 +867,12 @@ globalThis.fetch = async (url, init) => {
             "--",
             join(directory, "staging-fleet.json"),
             join(directory, "staging-e2e.json"),
-            ...(expected ? ["--model", expected] : []),
+            "--model",
+            expected,
+            "--review-transport",
+            "http",
+            "--review-effort",
+            "medium",
           ],
         ]);
       } finally {

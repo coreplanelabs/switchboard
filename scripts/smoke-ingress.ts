@@ -25,7 +25,7 @@ const { positionals, values } = parseArgs({
 const [planPath, receiptPath] = positionals;
 if (!planPath || !receiptPath || positionals.length !== 2 || (values["check-reader"] && !values.check)) {
   throw new Error(
-    "usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check [--check-reader]] [--model provider/model] [--review-transport http|mcp] [--review-effort high] [--require-vouched-controls]",
+    "usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check [--check-reader]] [--model provider/model] [--review-transport http|mcp] [--review-effort medium|high] [--require-vouched-controls]",
   );
 }
 // Outside the tree, written atomically before admission and after each known phase.
