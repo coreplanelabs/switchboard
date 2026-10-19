@@ -252,6 +252,7 @@ export function toListItem(record: RunRecord, bytes: number): RunListItem {
     branchPushReceipts: _branchPushReceipts,
     sourceReads: _sourceReads,
     githubSource: _githubSource,
+    sourceTask: _sourceTask,
     orchestratorDecisions: _orchestratorDecisions,
     branchIdentityBaseline: _branchIdentityBaseline,
     workReads: _workReads,

@@ -1,3 +1,4 @@
+import { sameSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
 import { INBOX_DELIVERY_RECEIPTS_MAX } from "../budgets.js";
 import { nativeClaimObservationOf, claimObservationKey, claimObservationQueryOf } from "./claimObservation.js";
 import { matchesVisibility } from "../runRecord.js";
@@ -1501,6 +1502,12 @@ export class InMemoryRunLedger implements RunLedger {
     );
     if (!restoredChecks) return undefined;
     if (restoredChecks.checks !== undefined) incoming = { ...incoming, checkExecutions: restoredChecks.checks };
+    const sourceTask = evidence?.sourceTask ?? record?.sourceTask;
+    if (sourceTask !== undefined) {
+      const retainedTask = preserveCheckpointState({ sourceTask }, incoming);
+      if (!retainedTask || !workEvidenceBelongsToRun(retainedTask, owner)) return undefined;
+      incoming = retainedTask;
+    }
     const baseline =
       evidence && Object.hasOwn(evidence, "branchIdentityBaseline")
         ? evidence.branchIdentityBaseline
@@ -1609,7 +1616,7 @@ export class InMemoryRunLedger implements RunLedger {
     const restored = this.preserveArchivedBaseline(req.runId, req.state ?? {}, { id: req.runId, ...req.meta });
     const state = restored && preserveCheckpointState(existing?.runId === req.runId ? existing.state : {}, restored);
     if (!state) throw new Error("checkpoint state is immutable");
-    if (!workEvidenceBelongsToRun(state, { id: req.runId, ...req.meta }))
+    if (!workEvidenceBelongsToRun(state, { id: req.runId, ...req.meta }, req.meta))
       throw new Error("work evidence does not match its canonical run");
     req = { ...req, state };
     const decision = decideClaim(
@@ -2159,7 +2166,7 @@ export class InMemoryRunLedger implements RunLedger {
     if (!row) return { ok: false, reason: "unknown-run" };
     if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     if (!preserveCheckpointState(row.state, assignment.statePatch ?? {})) return { ok: false, reason: "fenced" };
-    if (!workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta }))
+    if (!workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta }, row.meta))
       return { ok: false, reason: "fenced" };
     const result = assignLedgerLiveState(row.liveState, row.liveStateSeq ?? 0, assignment);
     if (!result.ok) return result;
@@ -2218,7 +2225,8 @@ export class InMemoryRunLedger implements RunLedger {
     const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
     const preserved = preserveCheckpointState(row.state, state, mintSeed);
     if (!preserved) return { ok: false, reason: "fenced" };
-    if (!workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta })) return { ok: false, reason: "fenced" };
+    if (!workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }, row.meta))
+      return { ok: false, reason: "fenced" };
     if (mintSeed) {
       const receipt = preserved.unitSeedReceipt as UnitSeedReceipt;
       const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
@@ -2590,6 +2598,8 @@ export class InMemoryRunLedger implements RunLedger {
     const retainedSteps = this.prepareInboxSegment(runId);
     const canonicalWork = this.preserveArchivedBaseline(runId, row.state, record);
     if (!canonicalWork) return { ok: false, reason: "fenced" };
+    if (record.sourceTask !== undefined && !sameSourceTaskSnapshot(record.sourceTask, canonicalWork.sourceTask))
+      return { ok: false, reason: "fenced" };
     const {
       branchPublication: _speculativePublication,
       doorPublicationPending: _speculativeDoor,
@@ -2620,14 +2630,21 @@ export class InMemoryRunLedger implements RunLedger {
       JSON.stringify(record.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
     )
       return { ok: false, reason: "fenced" };
-    for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
+    for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline", "sourceTask"] as const) {
       const canonical = canonicalWork[field];
       if (canonical === undefined) continue;
-      if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
+      if (
+        record[field] !== undefined &&
+        (field === "sourceTask"
+          ? !sameSourceTaskSnapshot(record[field], canonical)
+          : JSON.stringify(record[field]) !== JSON.stringify(canonical))
+      )
         return { ok: false, reason: "fenced" };
       record = { ...record, [field]: structuredClone(canonical) };
     }
     if (!workEvidenceBelongsToRun(record, record)) return { ok: false, reason: "fenced" };
+    if (record.sourceTask !== undefined && utf8ByteLength(JSON.stringify(record)) > MAX_RECORD_BYTES)
+      throw new Error("source task evidence exceeds record byte limit");
     const priorReceipt =
       this.live.get(runId)?.state.contextCheckpointReceipt ?? this.finished.get(runId)?.contextCheckpointReceipt;
     if (

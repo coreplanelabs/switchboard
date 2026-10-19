@@ -229,6 +229,8 @@ export const INTAKE_DELIVERY_CLAIM_MS = 5 * MINUTE_MS;
 
 /** Inactive source reception limits; qualify throughput before enabling a producer. */
 export const SOURCE_EVENT_MAX_BYTES = 400 * 1024;
+/** Retained original task data; oversized snapshots stay unproved. */
+export const SOURCE_TASK_SNAPSHOT_MAX_BYTES = 16 * 1024;
 export const SOURCE_EVENT_STORE_MAX_BYTES = 32 * 1024 * 1024;
 export const SOURCE_EVENT_STORE_MAX_COUNT = 1024;
 export const SOURCE_EVENT_WAKE_MS = 30 * SECOND_MS;

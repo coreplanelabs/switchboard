@@ -322,6 +322,38 @@ describe("RunsService.getRun", () => {
     const cold = await svc.getRun("profile-run", { include: "messages" });
     expect(cold.ok && cold.value.profile).toEqual(profile);
   });
+  it("keeps original task proof out of ordinary persisted views", async () => {
+    const { store, svc } = setup();
+    const base = { ...record("task-proof", NOW), agent: "orchestrator" };
+    const sourceTask = {
+      version: 1 as const,
+      owner: { runId: base.id, requesterId: base.userId, channelId: base.channelId, threadKey: base.threadKey },
+      task: {
+        repo: base.repo ?? null,
+        ref: "private-task-proof-only",
+        baseRef: null,
+        headSha: null,
+        pr: null,
+        operationTarget: null,
+        githubSource: null,
+        recordTaskKey: null,
+      },
+    };
+    await store!.put({ ...base, sourceTask });
+    expect(await store!.get(base.id)).toMatchObject({
+      id: base.id,
+      sourceTask: { task: { ref: "private-task-proof-only" } },
+    });
+    expect(await svc.getRun(base.id)).toMatchObject({ ok: true, value: { id: base.id, agent: "orchestrator" } });
+    for (const view of [
+      await svc.getRun(base.id),
+      await svc.getRun(base.id, { include: "messages" }),
+      await svc.listRuns({ status: "all", visibleTo: ALL }),
+    ]) {
+      expect(JSON.stringify(view)).not.toContain("sourceTask");
+      expect(JSON.stringify(view)).not.toContain("private-task-proof-only");
+    }
+  });
   it("never exposes internal source archives or handoff context through any persisted projection", async () => {
     const { store, svc } = setup();
     const base = record("archive", NOW);

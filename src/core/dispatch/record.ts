@@ -25,6 +25,7 @@ import { usageOfEvents } from "../runUsage.js";
 import {
   branchPushReceiptsOf,
   fitRecordToBudget,
+  workEvidenceBelongsToRun,
   failureContextOfEvents,
   decisionRecordOfEvents,
   instanceIdOfEvents,
@@ -253,6 +254,11 @@ export function reclaimedRunRecord(input: {
 }): RunRecord {
   const { row, events, status, finishedAt } = input;
   const saved = row.state;
+  if (
+    saved.sourceTask !== undefined &&
+    !workEvidenceBelongsToRun({ sourceTask: saved.sourceTask }, { id: row.runId, ...row.meta }, row.meta)
+  )
+    throw new Error("The retained source task could not be verified.");
   const orchestratorDecisions = orchestratorDecisionsOf(saved.orchestratorDecisions, {
     runId: row.runId,
     requesterId: row.meta.userId,
@@ -351,6 +357,9 @@ export function reclaimedRunRecord(input: {
     // must reject it rather than laundering a failed archive as legacy.
     ...(row.state.contextCheckpointReceipt !== undefined
       ? { contextCheckpointReceipt: row.state.contextCheckpointReceipt as RunRecord["contextCheckpointReceipt"] }
+      : {}),
+    ...(row.state.sourceTask !== undefined
+      ? { sourceTask: structuredClone(row.state.sourceTask) as RunRecord["sourceTask"] }
       : {}),
     ...(row.state.sourceReads !== undefined ? { sourceReads: row.state.sourceReads as RunRecord["sourceReads"] } : {}),
     ...(row.state.branchPushReceipts !== undefined
@@ -524,6 +533,7 @@ export function assembleRunRecord(input: {
    *  undefined) for every run a person or a schedule started. */
   parentRunId?: string;
   childHandoff?: RunRecord["childHandoff"];
+  sourceTask?: RunRecord["sourceTask"];
   sourceReads?: RunRecord["sourceReads"];
   workReads?: RunRecord["workReads"];
   branchIdentityBaseline?: RunRecord["branchIdentityBaseline"];
@@ -668,6 +678,7 @@ export function assembleRunRecord(input: {
     ...(input.contextCheckpointReceipt !== undefined
       ? { contextCheckpointReceipt: structuredClone(input.contextCheckpointReceipt) }
       : {}),
+    ...(input.sourceTask !== undefined ? { sourceTask: structuredClone(input.sourceTask) } : {}),
     ...(input.sourceReads !== undefined ? { sourceReads: structuredClone(input.sourceReads) } : {}),
     ...(input.branchIdentityBaseline !== undefined
       ? { branchIdentityBaseline: structuredClone(input.branchIdentityBaseline) }

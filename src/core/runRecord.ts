@@ -1,4 +1,10 @@
 import { isOrchestratorCommandDecision, orchestratorDecisionsOf } from "./dispatch/orchestratorDecisions.js";
+import {
+  captureSourceTaskSnapshot,
+  sourceTaskSnapshotOf,
+  type SourceTaskSnapshot,
+} from "./references/sourceTaskSnapshot.js";
+import type { LiveRunMeta } from "./runLedger/types.js";
 import { cancellationOf, cancellationRecordMatches } from "./runLedger/cancellation.js";
 import { RUN_ID_PATTERN } from "./runIdentity.js";
 import { githubPullSourceContextOf, type GithubPullSourceContext } from "../execution/githubReadSource.js";
@@ -300,6 +306,8 @@ export interface RunRecord {
   targetPr?: number;
   /** Original native GitHub task identity. Internal data, not current access proof. */
   githubSource?: GithubPullSourceContext;
+  /** Exact original task data. Internal proof only; omitted from normal views. */
+  sourceTask?: SourceTaskSnapshot;
   /** How the review run's post-step ended (docs/reference/specs/agent-review.md
    *  item 18): the verdict posted to a named pull request at a pinned head, or
    *  not posted with the reason — what a coordinator's `read-record` answers
@@ -921,6 +929,7 @@ export type RunListItem = Omit<
   | "readingDiffAbridge"
   | "sourceReads"
   | "githubSource"
+  | "sourceTask"
   | "orchestratorDecisions"
   | "branchIdentityBaseline"
   | "workReads"
@@ -1387,9 +1396,22 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.childHandoff !== undefined && !isChildHandoff(r.childHandoff)) return false;
   if (
     !workEvidenceBelongsToRun(
-      { workReads: r.workReads, unitSeedReceipt: r.unitSeedReceipt, branchIdentityBaseline: r.branchIdentityBaseline },
+      {
+        workReads: r.workReads,
+        unitSeedReceipt: r.unitSeedReceipt,
+        branchIdentityBaseline: r.branchIdentityBaseline,
+        sourceTask: r.sourceTask,
+      },
       r as unknown as RunRecord,
     )
+  )
+    return false;
+  if (
+    r.sourceTask !== undefined &&
+    (r.agent !== "orchestrator" ||
+      r.parentRunId !== undefined ||
+      r.parentInstanceId !== undefined ||
+      r.childHandoff !== undefined)
   )
     return false;
   if (r.sourceReads !== undefined) {
@@ -1615,6 +1637,7 @@ export function isRunListItem(v: unknown): v is RunListItem {
     r.branchPushReceipts !== undefined ||
     r.sourceReads !== undefined ||
     r.githubSource !== undefined ||
+    r.sourceTask !== undefined ||
     r.branchIdentityBaseline !== undefined ||
     r.workReads !== undefined ||
     r.unitSeedReceipt !== undefined ||
@@ -1739,10 +1762,27 @@ export function isRunWorkOwner(value: unknown): value is RunWorkOwner {
 }
 
 export function workEvidenceBelongsToRun(
-  evidence: { workReads?: unknown; unitSeedReceipt?: unknown; branchIdentityBaseline?: unknown },
+  evidence: { workReads?: unknown; unitSeedReceipt?: unknown; branchIdentityBaseline?: unknown; sourceTask?: unknown },
   owner: RunWorkOwner,
+  liveTask?: LiveRunMeta,
 ): boolean {
   if (!isRunWorkEvidence(evidence)) return false;
+  if (evidence.sourceTask !== undefined) {
+    const task = sourceTaskSnapshotOf(evidence.sourceTask);
+    if (
+      !task ||
+      task.owner.runId !== owner.id ||
+      task.owner.requesterId !== owner.userId ||
+      task.owner.channelId !== owner.channelId ||
+      task.owner.threadKey !== owner.threadKey
+    )
+      return false;
+    if (
+      liveTask !== undefined &&
+      JSON.stringify(task) !== JSON.stringify(captureSourceTaskSnapshot({ runId: owner.id, meta: liveTask }))
+    )
+      return false;
+  }
   const baseline = evidence.branchIdentityBaseline as BranchIdentityBaseline | undefined;
   if (
     baseline &&
@@ -1789,7 +1829,9 @@ export function isRunWorkEvidence(value: {
   workReads?: unknown;
   unitSeedReceipt?: unknown;
   branchIdentityBaseline?: unknown;
+  sourceTask?: unknown;
 }): boolean {
+  if (value.sourceTask !== undefined && !sourceTaskSnapshotOf(value.sourceTask)) return false;
   if (
     value.workReads !== undefined &&
     (!Array.isArray(value.workReads) ||
@@ -1806,6 +1848,7 @@ export function isRunWorkEvidence(value: {
         workReads: value.workReads,
         unitSeedReceipt: value.unitSeedReceipt,
         branchIdentityBaseline: value.branchIdentityBaseline,
+        sourceTask: value.sourceTask,
       }),
     ) <= MAX_RECORD_BYTES
   );

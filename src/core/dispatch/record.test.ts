@@ -1,4 +1,5 @@
 import type { AudienceTrace } from "../audienceDecision.js";
+import { captureSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
 import type { RunEvent } from "../runEvents.js";
 import { describe, expect, it, vi } from "vitest";
 import { createRunHistoryWriter, type RunHistoryWriter } from "../runHistoryWriter.js";
@@ -325,6 +326,44 @@ describe("private context refusal receipt on the finished run", () => {
 });
 
 describe("durable source archive assembly", () => {
+  it("keeps the original task on terminal recovery and refuses corrupt task proof", () => {
+    const meta = {
+      agent: "orchestrator",
+      userId: "cli:user",
+      channelId: "cli:main",
+      threadKey: "cli:task-recovery",
+      repo: "fixture/api",
+      ref: "accepted-branch",
+      headSha: "a".repeat(40),
+      pr: 7,
+    };
+    const sourceTask = captureSourceTaskSnapshot({ runId: "task-recovery", meta });
+    const row: LiveRunRow = {
+      runId: "task-recovery",
+      threadKey: meta.threadKey,
+      ownerGen: "old",
+      meta,
+      phase: "handoff",
+      startedAt: 1,
+      leaseUntil: 100,
+      stop: null,
+      card: null,
+      system: "root",
+      tools: [],
+      state: { sourceTask },
+    };
+    expect(reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 50 })).toMatchObject({
+      sourceTask: {
+        version: 1,
+        owner: { runId: "task-recovery" },
+        task: { ref: "accepted-branch", headSha: "a".repeat(40) },
+      },
+    });
+    row.state.sourceTask = { ...sourceTask, version: 2 };
+    expect(() => reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 50 })).toThrow(
+      "The retained source task could not be verified.",
+    );
+  });
   it("archives only the committed context checkpoint", async () => {
     const meta = {
       agent: "general",

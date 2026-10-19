@@ -1,4 +1,5 @@
 import { testSourceInput } from "../../src/core/testing/sourceInputs.ts";
+import { captureSourceTaskSnapshot } from "../../src/core/references/sourceTaskSnapshot.ts";
 import { checkStateFixture } from "../../src/core/testing/checkState.ts";
 import type { CheckExecutionState } from "../../src/core/checkExecutionTypes.ts";
 import { cancellationRecordMatches } from "../../src/core/runLedger/cancellation.ts";
@@ -19307,6 +19308,98 @@ describe("terminal native retirement authority", () => {
 });
 
 describe("source-input context readers in SQLite", () => {
+  it("retains the acknowledged source task through state, finish and private archive readback", async () => {
+    const key = storeKey(),
+      id = "source-task-root",
+      thread = "cli:source-task";
+    const options = {
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => fetchMemoryTest(String(input), init),
+    };
+    const ledger = new WorkerRunLedger(options),
+      store = new WorkerRunStore(options);
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, id, thread, "g1", {
+            startedAt: Date.now() - 1_000,
+            meta: {
+              agent: "orchestrator",
+              userId: "cli:user",
+              channelId: "cli:main",
+              threadKey: thread,
+              repo: "fixture/api",
+              ref: "accepted-branch",
+              baseRef: "main",
+              headSha: "a".repeat(40),
+              pr: 7,
+              operationTarget: { repo: "fixture/api", ref: "accepted-branch" },
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    const row = (await ledger.listLive()).find((value) => value.runId === id)!;
+    const original = {
+      version: 1,
+      owner: { runId: id, requesterId: "cli:user", channelId: "cli:main", threadKey: thread },
+      task: {
+        repo: "fixture/api",
+        ref: "accepted-branch",
+        baseRef: "main",
+        headSha: "a".repeat(40),
+        pr: 7,
+        operationTarget: { repo: "fixture/api", ref: "accepted-branch" },
+        githubSource: null,
+        recordTaskKey: null,
+      },
+    };
+    expect(captureSourceTaskSnapshot(row)).toEqual(original);
+    expect(await ledger.setState(id, "g1", { sourceTask: { ...original, task: { ...original.task, pr: 8 } } })).toEqual(
+      { ok: false, reason: "fenced" },
+    );
+    expect(await ledger.setState(id, "g1", { sourceTask: original })).toEqual({ ok: true });
+    expect(await ledger.setState(id, "g1", {})).toEqual({ ok: true });
+    expect((await ledger.listLive()).find((value) => value.runId === id)?.state.sourceTask).toEqual(original);
+    const terminal: RunRecord = {
+      ...record(id, thread),
+      agent: "orchestrator",
+      userId: "cli:user",
+      channelId: "cli:main",
+      repo: "fixture/api",
+      targetPr: 7,
+      headSha: "b".repeat(40),
+      startedAt: row.startedAt,
+      finishedAt: row.startedAt + 1,
+      sourceTask: original,
+      events: [],
+      eventCount: 0,
+      storedEventCount: 0,
+    };
+    expect(await ledger.finish(id, "g1", terminal)).toMatchObject({ ok: true, stored: true });
+    expect((await store.get(id))?.sourceTask).toEqual(original);
+    expect((await store.get(id))?.headSha).toBe("b".repeat(40));
+    await store.put({ ...terminal, label: "updated presentation" });
+    expect((await store.get(id))?.sourceTask).toEqual(original);
+    const listed = (await store.list({ limit: 10 })).find((value) => value.id === id);
+    expect(listed).toMatchObject({ id, headSha: "b".repeat(40) });
+    expect(listed).not.toHaveProperty("sourceTask");
+    const raw = await runInDurableObject(
+      env.RUNS.get(env.RUNS.idFromName(key)),
+      (_instance: RunHistoryDO, state) =>
+        state.storage.sql
+          .exec<{ summary_json: string; work_evidence_json: string }>(
+            "SELECT summary_json,work_evidence_json FROM runs WHERE run_id=?",
+            id,
+          )
+          .toArray()[0]!,
+    );
+    expect(JSON.parse(raw.summary_json)).not.toHaveProperty("sourceTask");
+    expect(JSON.parse(raw.work_evidence_json).sourceTask).toEqual(original);
+  });
   it("retains exact source references in state, session snapshots and the root retention index", async () => {
     const key = storeKey(),
       id = "source-context-consumer",
