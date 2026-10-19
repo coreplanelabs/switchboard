@@ -552,6 +552,11 @@ export const COMMAND_FIXTURES: Readonly<
     hints: { after: "original-run|original" },
     why: "the cursor binds an original run and generation rather than arbitrary text",
   },
+  "runs.original": {
+    hints: { gen: "g1" },
+    baseline: { gen: "g1" },
+    why: "the read selects the fixture original generation rather than a generic sample",
+  },
   "metrics.reviews": {
     // Two whole UTC days a week apart, `--from` first: the generic string sample is no day.
     hints: {

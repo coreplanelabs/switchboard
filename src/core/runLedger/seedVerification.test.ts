@@ -201,6 +201,29 @@ describe("receiver confirmation and authenticated source release", () => {
     expect(source.kind).toBe("verified");
     return { ...fixture, source };
   }
+  it("reads original evidence without adopting or releasing the recorded source", async () => {
+    const { store, ref } = await ready();
+    const original = structuredClone(store.live.get(id));
+    expect(await store.readOriginal({ runId: id, gen })).toMatchObject({
+      kind: "source",
+      evidence: {
+        promotion: { state: "commit-recorded", bodySha256: ref.bodySha256 },
+        source: { state: "verification-recorded" },
+        physicalEnding: "not-assessed",
+        failedRequestBinding: "unknown",
+      },
+    });
+    expect(store.live.get(id)).toEqual(original);
+    expect((await store.confirmPromotion(ref)).kind).toBe("confirmed");
+    expect((await store.releaseExpectedSeed(key, ref)).kind).toBe("verified");
+    expect(await store.readOriginal({ runId: id, gen })).toMatchObject({
+      kind: "source",
+      evidence: {
+        promotion: { state: "confirmation-recorded" },
+        source: { state: "release-recorded-matched" },
+      },
+    });
+  });
   it("confirms actual canonical source and seed facts, then releases only the temporary source mutation hold", async () => {
     const { store, ref, source } = await ready();
     const confirm = await store.confirmPromotion(ref);

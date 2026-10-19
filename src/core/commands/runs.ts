@@ -1,6 +1,7 @@
 import { runMetadata } from "../runDisplay.js";
 import { cancellationFailureMessage } from "../runLedger/cancellation.js";
 import { claimObservationCursor } from "../runLedger/claimObservation.js";
+import { originalSelectorSchema } from "../runLedger/originalEvidence.js";
 import { checkSelectorSchema, type CheckSelector } from "../checkInspection.js";
 import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
@@ -391,6 +392,33 @@ export const runsList = defineCommand({
       visibleTo,
     });
     return asJson({ ...page, runs: page.runs.map(wrapRunView), ...(scopeProof ? { readScope: scopeProof } : {}) });
+  },
+});
+
+export const runsOriginal = defineCommand({
+  id: "runs.original",
+  args: [idArg],
+  options: z.object({ gen: originalSelectorSchema.shape.gen.describe("original owner generation") }),
+  surfaces: { chat: false },
+  enabledWhen: (caps) => caps.runLedger,
+  action: "runs:read",
+  effect: "read",
+  describe:
+    "Inspect bounded stored evidence for one current original. Does not repeat writes, settle a run, or prove process ending.",
+  handler: async ({ args, options, caller, deps }) => {
+    const source = await (await deps.runs()).originalEvidence({ runId: args.id, gen: options.gen });
+    if (source.kind !== "source") throw new CommandError("not_found", "no run found");
+    const decision = authorize(caller.actor, "runs:read", source.resource);
+    if (!decision.allow) {
+      (deps.denied ?? logDenied)({
+        commandId: "runs.original",
+        actorId: caller.actor.id,
+        action: "runs:read",
+        reason: decision.reason,
+      });
+      throw new CommandError("not_found", "no run found");
+    }
+    return asJson(source.evidence);
   },
 });
 
@@ -919,6 +947,7 @@ export const runsSearch = defineCommand({
 
 export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [
   runsList,
+  runsOriginal,
   runsClaims,
   runsGet,
   runsEvents,

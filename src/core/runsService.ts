@@ -2,6 +2,7 @@ import type { PersonProfile } from "./names.js";
 import type { CancellationRefusal, CancellationObservation } from "./runLedger/cancellation.js";
 import { cancellationMatches, cancellationOf, cancellationRefusalOf } from "./runLedger/cancellation.js";
 import type { ClaimObservationPage } from "./runLedger/claimObservation.js";
+import { originalReadOf } from "./runLedger/originalEvidence.js";
 import {
   checkSourceReadOf,
   checkSourceIdentityHash,
@@ -497,6 +498,9 @@ export interface LiveRunAccess {
 }
 
 export interface RunsService {
+  originalEvidence(
+    selector: import("./runLedger/originalEvidence.js").OriginalSelector,
+  ): Promise<import("./runLedger/originalEvidence.js").OriginalRead>;
   deletionTarget(id: string): Promise<Result<Resource>>;
   /** Data-only removal; it never certifies original runtime shutdown. */
   deleteRunData(
@@ -620,7 +624,10 @@ export interface RunsServiceDeps {
   ledger?:
     | (Pick<RunLedger, "listLive" | "readEvents" | "requestStop" | "finish" | "planeWithdraw" | "planeQueued"> &
         Partial<
-          Pick<RunLedger, "prepareCancellation" | "finishCancellation" | "readCheckSource" | "listClaimObservations">
+          Pick<
+            RunLedger,
+            "prepareCancellation" | "finishCancellation" | "readCheckSource" | "listClaimObservations" | "readOriginal"
+          >
         >)
     | null;
   /** Only the bot that owns this generation may close its paused rows.
@@ -1317,6 +1324,19 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       };
     },
     deletedRuns,
+    async originalEvidence(selector) {
+      const source = originalReadOf(await ledger?.readOriginal?.(selector));
+      if (
+        !source ||
+        (source.kind === "source" &&
+          (privateWorkerRun(source) ||
+            source.resource.id !== selector.runId ||
+            source.evidence.runId !== selector.runId ||
+            source.evidence.gen !== selector.gen))
+      )
+        return { kind: "unavailable", reason: "missing" };
+      return source;
+    },
     async listClaimObservations({ visibleTo, ...query }) {
       if (!ledger?.listClaimObservations) throw new Error("Claim observations are unavailable");
       return ledger.listClaimObservations({ ...query, ordinaryOnly: true, visibleTo: toVisibilityFilter(visibleTo) });

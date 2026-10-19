@@ -1,3 +1,12 @@
+import { inspectOriginal, type OriginalSnapshot } from "../../src/core/runLedger/originalEvidenceReader.js";
+import {
+  originalSelectorSchema,
+  ORIGINAL_CELL_BYTES,
+  ORIGINAL_RECEIPT_BYTES,
+  originalUnavailable,
+  type OriginalRead,
+  type OriginalSelector,
+} from "../../src/core/runLedger/originalEvidence.js";
 import { sameSourceTaskSnapshot } from "../../src/core/references/sourceTaskSnapshot.js";
 import type { StorageOperation } from "../../src/core/storageRequestContext.js";
 import {
@@ -78,9 +87,12 @@ import { parseStoredJson } from "../../src/core/storedJson.ts";
 import {
   STORAGE_FAILURE_DIAGNOSTIC_HEADER,
   STORAGE_REQUEST_ID_HEADER,
+  STORAGE_REQUEST_DIGEST_HEADER,
+  storageRequestDigestOf,
   storageFailureNotice,
   storageFailureLog,
   storageRequestIdOf,
+  newStorageRequestId,
 } from "../../src/core/storageFailureDiagnostic.ts";
 import { hasConfirmationConsent, type ConfirmationConsentSource } from "../../src/core/confirmationConsent.ts";
 import { holdUnreadIngress } from "../../src/core/runLedger/unreadIngress.ts";
@@ -2404,6 +2416,112 @@ class RunDeletedError extends Error {
 }
 
 type CheckpointGateCorrelation = { requestId?: string; requestDigest?: string };
+type SeedGuardCorrelation = CheckpointGateCorrelation & { guardId?: string };
+type SeedGuardBranch = "released-receipt" | "verify-source" | "missing" | "mismatch" | "corrupt" | "cancelled";
+type WriteStage =
+  | "entry"
+  | "validation"
+  | "promotion-preflight"
+  | "source-owner-read"
+  | "assign-live-state-rpc"
+  | "session-write-rpc"
+  | "source-proof"
+  | "transaction"
+  | "result";
+function writeProgress(
+  objectId: string | null,
+  incarnationId: string | null,
+  runId: string | undefined,
+  ownerGen: string | undefined,
+  operation: "promotion-hold" | "source-session-owner" | "assign-live-state" | "session-write",
+  input?: CheckpointGateCorrelation,
+) {
+  const requestId = storageRequestIdOf(input?.requestId);
+  const requestDigest = storageRequestDigestOf(input?.requestDigest);
+  const stages = new Map<WriteStage, number>();
+  return (
+    stage: WriteStage,
+    outcome: "started" | "completed" | "held" | "failed" | "returned",
+    details: {
+      targetObjectId?: string;
+      rows?: number;
+      attachments?: number;
+      sources?: boolean;
+      ok?: boolean;
+      errorName?: string;
+    } = {},
+  ) => {
+    try {
+      const now = systemClock();
+      if (outcome === "started") stages.set(stage, now);
+      console.log(
+        JSON.stringify({
+          event: "storage.write.progress",
+          side: objectId === null ? "worker" : "object",
+          objectId,
+          operation,
+          incarnationId,
+          ...(requestId ? { requestId } : {}),
+          ...(requestDigest ? { requestDigest } : {}),
+          runId: typeof runId === "string" && RUN_ID_PATTERN.test(runId) ? runId : null,
+          ownerGen: typeof ownerGen === "string" && GEN_PATTERN.test(ownerGen) ? ownerGen : null,
+          stage,
+          outcome,
+          ...details,
+          elapsedMs: Math.max(0, now - (stages.get(stage) ?? now)),
+          build: BUILD,
+        }),
+      );
+    } catch {
+      /* A failed diagnostic sink cannot alter or acknowledge the write. */
+    }
+  };
+}
+
+/** Object IDs identify the target without exposing a private session key or payload. */
+function seedGuardProgress(
+  objectId: string,
+  runId: string,
+  ownerGen: string,
+  input?: SeedGuardCorrelation,
+  incarnationId?: string,
+) {
+  const guardId = storageRequestIdOf(input?.guardId) ?? newStorageRequestId();
+  const requestId = storageRequestIdOf(input?.requestId);
+  const requestDigest = storageRequestDigestOf(input?.requestDigest);
+  const correlation = { guardId, ...(requestId ? { requestId } : {}), ...(requestDigest ? { requestDigest } : {}) };
+  const stages = new Map<string, number>();
+  return {
+    correlation,
+    emit(
+      stage: "source-receipt" | "promotion-read" | "source-proof",
+      outcome: "started" | "completed" | "held" | "failed",
+      details: { targetObjectId?: string; branch?: SeedGuardBranch; errorName?: string } = {},
+    ) {
+      try {
+        const now = systemClock();
+        if (outcome === "started") stages.set(stage, now);
+        console.log(
+          JSON.stringify({
+            event: "storage.seed_guard.progress",
+            ...correlation,
+            objectId,
+            incarnationId,
+            runId: RUN_ID_PATTERN.test(runId) ? runId : null,
+            ownerGen: GEN_PATTERN.test(ownerGen) ? ownerGen : null,
+            stage,
+            outcome,
+            ...details,
+            elapsedMs: Math.max(0, now - (stages.get(stage) ?? now)),
+            build: BUILD,
+          }),
+        );
+      } catch {
+        /* An unavailable telemetry sink cannot change the original guard result. */
+      }
+    },
+  };
+}
 type CheckpointStage =
   | "source-read"
   | "source-snapshot"
@@ -6917,10 +7035,33 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** A source write proves its canonical session through the claimed row. */
-  async sourceSessionOwner(runId: string, gen: string, key: string): Promise<SessionSourceOwner | null> {
-    const row = this.liveRow(runId);
-    if (!row || row.ownerGen !== gen || row.meta.session?.key !== key) return null;
-    return { key, threadKey: row.meta.threadKey, channelId: row.meta.channelId, requester: row.meta.userId };
+  async sourceSessionOwner(
+    runId: string,
+    gen: string,
+    key: string,
+    correlation?: CheckpointGateCorrelation,
+  ): Promise<SessionSourceOwner | null> {
+    const progress = writeProgress(
+      this.ctx.id.toString(),
+      this.incarnationId,
+      runId,
+      gen,
+      "source-session-owner",
+      correlation,
+    );
+    progress("entry", "started");
+    const finish = (result: SessionSourceOwner | null) => {
+      progress("result", "returned", { ok: result !== null });
+      return result;
+    };
+    try {
+      const row = this.liveRow(runId);
+      if (!row || row.ownerGen !== gen || row.meta.session?.key !== key) return finish(null);
+      return finish({ key, threadKey: row.meta.threadKey, channelId: row.meta.channelId, requester: row.meta.userId });
+    } catch (error) {
+      progress("result", "failed", { errorName: checkpointErrorName(error) });
+      throw error;
+    }
   }
 
   /** A later ledger owner gets a larger attachment fence, even for the same run ID. */
@@ -7567,6 +7708,86 @@ export class RunHistoryDO extends DurableObject<Env> {
     );
   }
 
+  async readOriginal(selector: OriginalSelector, storeKey: string): Promise<OriginalRead> {
+    const capture = (): OriginalSnapshot | Extract<OriginalRead, { kind: "unavailable" }> => {
+      const row = this.sql
+        .exec<{
+          run_id: string;
+          owner_gen: string;
+          started_at: number;
+          phase: string;
+          stop: string | null;
+          meta_json: string | null;
+          meta_bytes: number;
+          state_json: string | null;
+          state_bytes: number;
+        }>(
+          `SELECT run_id,owner_gen,started_at,phase,stop,
+          CASE WHEN length(CAST(meta_json AS BLOB))<=? AND json_valid(meta_json) THEN json_object(
+            'userId',json_extract(meta_json,'$.userId'), 'channelId',json_extract(meta_json,'$.channelId'),
+            'channelVisibility',json_extract(meta_json,'$.channelVisibility'), 'repo',json_extract(meta_json,'$.repo'),
+            'threadKey',json_extract(meta_json,'$.threadKey')) END AS meta_json,
+          length(CAST(meta_json AS BLOB)) AS meta_bytes,
+          CASE WHEN length(CAST(state_json AS BLOB))<=? THEN state_json END AS state_json,
+          coalesce(length(CAST(state_json AS BLOB)),0) AS state_bytes
+         FROM live_runs WHERE run_id=?`,
+          ORIGINAL_CELL_BYTES,
+          ORIGINAL_CELL_BYTES,
+          selector.runId,
+        )
+        .toArray()[0];
+      if (!row) return { kind: "unavailable", reason: "missing" };
+      if (row.meta_json === null)
+        return { kind: "unavailable", reason: row.meta_bytes > ORIGINAL_CELL_BYTES ? "oversize" : "corrupt" };
+      const bounded = (query: string, limit: number, ...args: (string | number)[]) =>
+        this.sql.exec<{ json: string | null; bytes: number }>(query, limit, ...args).toArray()[0] ?? {
+          json: null,
+          bytes: 0,
+        };
+      return {
+        storeKey,
+        runId: row.run_id,
+        ownerGen: row.owner_gen,
+        startedAt: row.started_at,
+        phase: row.phase,
+        stop: row.stop,
+        meta: parseStoredJson(row.meta_json),
+        state: { json: row.state_json, bytes: row.state_bytes },
+        step: bounded(
+          "SELECT CASE WHEN length(CAST(json AS BLOB))<=? THEN json END AS json,length(CAST(json AS BLOB)) AS bytes FROM run_steps WHERE run_id=? AND step>=0 ORDER BY step DESC LIMIT 1",
+          ORIGINAL_RECEIPT_BYTES,
+          selector.runId,
+        ),
+        allocation: bounded(
+          "SELECT CASE WHEN length(CAST(allocation_json AS BLOB))<=? THEN allocation_json END AS json,length(CAST(allocation_json AS BLOB)) AS bytes FROM workspace_settlements WHERE owner_key=? AND revision=1 AND allocation_json IS NOT NULL",
+          ORIGINAL_CELL_BYTES,
+          workspaceDurabilityKey(selector.runId),
+        ),
+        eventThrough: this.sql
+          .exec<{ seq: number | null }>("SELECT max(seq) AS seq FROM run_events WHERE run_id=?", selector.runId)
+          .one().seq,
+      };
+    };
+    const initial = capture();
+    if ("kind" in initial) return initial;
+    const before = JSON.stringify(initial);
+    const result = await inspectOriginal(selector, initial, async (key, ref) =>
+      this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).readOriginalSeed(key, ref),
+    );
+    if (before !== JSON.stringify(capture()) && result.kind === "source")
+      return {
+        ...result,
+        evidence: {
+          version: 1,
+          runId: selector.runId,
+          gen: selector.gen,
+          availability: "unavailable",
+          reason: "changed",
+        },
+      };
+    return result;
+  }
+
   /** Restore only the original baseline; other segment state keeps its existing lifetime. */
   async readCheckSource(selector: CheckSelector): Promise<CheckSourceRead> {
     const live = this.liveRow(selector.runId);
@@ -7666,44 +7887,74 @@ export class RunHistoryDO extends DurableObject<Env> {
     return raw !== undefined && (!workspaceDurabilityArchiveOf(raw) || promotionPending(raw));
   }
   /** Thin negative precondition from actual private state; never a witness or permit. */
-  async promotionHold(runId: string, gen?: string): Promise<PromotionHold | null> {
-    const row = this.liveRow(runId);
-    if (!row || (gen !== undefined && row.ownerGen !== gen)) return null;
-    const raw = this.allocationArchive(runId),
-      before = canonicalSeedJson(raw),
-      archive = workspaceDurabilityArchiveOf(raw);
-    if (raw === undefined) return null;
-    if (archive?.promotionConfirmation && !this.promotionHeld(runId)) {
-      try {
-        const confirmation = archive.promotionConfirmation;
-        const source = await this.env.SESSION_LOGS.get(
-          this.env.SESSION_LOGS.idFromName(confirmation.key),
-        ).readExpectedSeed(confirmation.key, sourceSeedReferenceOfReceipt(confirmation));
-        if (
-          source.kind === "verified" &&
-          source.release &&
-          canonicalSeedJson(source.release.confirmation) === canonicalSeedJson(confirmation) &&
-          before === canonicalSeedJson(this.allocationArchive(runId))
-        )
-          return null;
-      } catch {
-        /* Unknown source release preserves the original. */
-      }
-      return { kind: "held", reason: "promotion_pending", runId };
-    }
-    if (!this.promotionHeld(runId)) return null;
-    const original = await this.readPromotion({ runId, gen: row.ownerGen });
-    const current = this.liveRow(runId);
-    if (!current || current.ownerGen !== row.ownerGen) return null;
-    return {
-      kind: "held",
-      reason: original.kind !== "held" ? "promotion_pending" : "promotion_corrupt",
-      runId: current.runId,
+  async promotionHold(runId: string, gen?: string, correlation?: SeedGuardCorrelation): Promise<PromotionHold | null> {
+    const write = writeProgress(this.ctx.id.toString(), this.incarnationId, runId, gen, "promotion-hold", correlation);
+    write("entry", "started");
+    const finish = (result: PromotionHold | null) => {
+      write("result", "returned", { ok: result === null });
+      return result;
     };
+    try {
+      const row = this.liveRow(runId);
+      if (!row || (gen !== undefined && row.ownerGen !== gen)) return finish(null);
+      const raw = this.allocationArchive(runId),
+        before = canonicalSeedJson(raw),
+        archive = workspaceDurabilityArchiveOf(raw);
+      if (raw === undefined) return finish(null);
+      if (archive?.promotionConfirmation && !this.promotionHeld(runId)) {
+        const confirmation = archive.promotionConfirmation;
+        const progress = seedGuardProgress(
+          this.ctx.id.toString(),
+          runId,
+          row.ownerGen,
+          correlation,
+          this.incarnationId,
+        );
+        let targetObjectId: string | undefined;
+        try {
+          const target = this.env.SESSION_LOGS.idFromName(confirmation.key);
+          targetObjectId = target.toString();
+          progress.emit("source-receipt", "started", { targetObjectId });
+          const source = await this.env.SESSION_LOGS.get(target).readExpectedSeed(
+            confirmation.key,
+            sourceSeedReferenceOfReceipt(confirmation),
+            progress.correlation,
+          );
+          if (
+            source.kind === "verified" &&
+            source.release &&
+            canonicalSeedJson(source.release.confirmation) === canonicalSeedJson(confirmation) &&
+            before === canonicalSeedJson(this.allocationArchive(runId))
+          ) {
+            progress.emit("source-receipt", "completed", { targetObjectId: target.toString() });
+            return finish(null);
+          }
+          progress.emit("source-receipt", "held", { targetObjectId: target.toString() });
+        } catch (error) {
+          progress.emit("source-receipt", "failed", {
+            targetObjectId,
+            errorName: checkpointErrorName(error),
+          });
+        }
+        return finish({ kind: "held", reason: "promotion_pending", runId });
+      }
+      if (!this.promotionHeld(runId)) return finish(null);
+      const original = await this.readPromotion({ runId, gen: row.ownerGen });
+      const current = this.liveRow(runId);
+      if (!current || current.ownerGen !== row.ownerGen) return finish(null);
+      return finish({
+        kind: "held",
+        reason: original.kind !== "held" ? "promotion_pending" : "promotion_corrupt",
+        runId: current.runId,
+      });
+    } catch (error) {
+      write("result", "failed", { errorName: checkpointErrorName(error) });
+      throw error;
+    }
   }
-  private async requirePromotionRelease(runId: string, gen: string): Promise<void> {
+  private async requirePromotionRelease(runId: string, gen: string, correlation?: SeedGuardCorrelation): Promise<void> {
     const raw = canonicalSeedJson(this.allocationArchive(runId));
-    if (await this.promotionHold(runId, gen)) throw new PromotionPendingError(runId);
+    if (await this.promotionHold(runId, gen, correlation)) throw new PromotionPendingError(runId);
     if (raw !== canonicalSeedJson(this.allocationArchive(runId))) throw new PromotionPendingError(runId);
   }
   async preparePromotion(bodyJson: string, expectedSeedInput?: ExpectedSeedManifest): Promise<PromotionPrepareResult> {
@@ -8319,102 +8570,137 @@ export class RunHistoryDO extends DurableObject<Env> {
     runId: string,
     gen: string,
     assignment: LiveStateAssignRequest,
+    correlation?: SeedGuardCorrelation,
   ): Promise<LiveStateAssignResult> {
-    if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
-      await this.requirePromotionRelease(runId, gen);
-    if (
-      (assignment.statePatch &&
-        (Object.hasOwn(assignment.statePatch, "cancellation") ||
-          Object.hasOwn(assignment.statePatch, "killRequested"))) ||
-      workspaceAuthorityFieldsPresent(assignment.statePatch)
-    )
-      return { ok: false, reason: "fenced" };
-    let out: LiveStateAssignResult = { ok: false, reason: "unknown-run" };
-    this.ctx.storage.transactionSync(() => {
-      const row = this.liveRow(runId);
-      if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
-      const fence = checkFence(row, gen);
-      if (!fence.ok) {
-        out = fence;
-        return;
+    const progress = writeProgress(
+      this.ctx.id.toString(),
+      this.incarnationId,
+      runId,
+      gen,
+      "assign-live-state",
+      correlation,
+    );
+    let stage: WriteStage = "entry";
+    progress(stage, "started");
+    const finish = (result: LiveStateAssignResult): LiveStateAssignResult => {
+      if (stage === "validation") progress(stage, result.ok ? "completed" : "held", { ok: result.ok });
+      progress("result", "returned", { ok: result.ok });
+      return result;
+    };
+    try {
+      if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion) {
+        stage = "promotion-preflight";
+        progress(stage, "started");
+        await this.requirePromotionRelease(runId, gen, correlation);
+        progress(stage, "returned");
       }
-      if (!row) {
-        out = { ok: false, reason: "unknown-run" };
-        return;
-      }
+      stage = "validation";
+      progress(stage, "started");
       if (
-        !preserveCheckpointState(row.state, assignment.statePatch ?? {}) ||
-        !workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta }, row.meta)
-      ) {
-        out = { ok: false, reason: "fenced" };
-        return;
-      }
-      const result = assignLedgerLiveState(row.liveState, row.liveStateSeq ?? 0, assignment);
-      if (!result.ok) {
-        out = result;
-        return;
-      }
-      let liveStateSeq = row.liveStateSeq ?? 0;
-      const last = this.sql
-        .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_events WHERE run_id = ?`, runId)
-        .one().m;
-      let lastEventSeq = last ?? 0;
-      for (const source of assignment.sourceEvents ?? []) {
-        if (source.seq <= lastEventSeq) {
+        (assignment.statePatch &&
+          (Object.hasOwn(assignment.statePatch, "cancellation") ||
+            Object.hasOwn(assignment.statePatch, "killRequested"))) ||
+        workspaceAuthorityFieldsPresent(assignment.statePatch)
+      )
+        return finish({ ok: false, reason: "fenced" });
+      let out: LiveStateAssignResult = { ok: false, reason: "unknown-run" };
+      progress("validation", "completed");
+      stage = "transaction";
+      progress(stage, "started");
+      this.ctx.storage.transactionSync(() => {
+        const row = this.liveRow(runId);
+        if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
+        const fence = checkFence(row, gen);
+        if (!fence.ok) {
+          out = fence;
+          return;
+        }
+        if (!row) {
+          out = { ok: false, reason: "unknown-run" };
+          return;
+        }
+        if (
+          !preserveCheckpointState(row.state, assignment.statePatch ?? {}) ||
+          !workEvidenceBelongsToRun(
+            { ...row.state, ...assignment.statePatch },
+            { id: row.runId, ...row.meta },
+            row.meta,
+          )
+        ) {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
+        const result = assignLedgerLiveState(row.liveState, row.liveStateSeq ?? 0, assignment);
+        if (!result.ok) {
+          out = result;
+          return;
+        }
+        let liveStateSeq = row.liveStateSeq ?? 0;
+        const last = this.sql
+          .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_events WHERE run_id = ?`, runId)
+          .one().m;
+        let lastEventSeq = last ?? 0;
+        for (const source of assignment.sourceEvents ?? []) {
+          if (source.seq <= lastEventSeq) {
+            out = { ok: false, reason: "stale-sequence" };
+            return;
+          }
+          lastEventSeq = source.seq;
+        }
+        const boundarySeq = result.event ? (assignment.eventSeq ?? lastEventSeq + 1) : undefined;
+        if (boundarySeq !== undefined && boundarySeq <= lastEventSeq) {
           out = { ok: false, reason: "stale-sequence" };
           return;
         }
-        lastEventSeq = source.seq;
-      }
-      const boundarySeq = result.event ? (assignment.eventSeq ?? lastEventSeq + 1) : undefined;
-      if (boundarySeq !== undefined && boundarySeq <= lastEventSeq) {
-        out = { ok: false, reason: "stale-sequence" };
-        return;
-      }
-      for (const source of assignment.sourceEvents ?? []) {
-        this.sql.exec(
-          `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
-          runId,
-          source.seq,
-          JSON.stringify(source),
-        );
-        liveStateSeq = source.seq;
-      }
-      if (result.event && boundarySeq !== undefined) {
-        liveStateSeq = boundarySeq;
-        this.sql.exec(
-          `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
-          runId,
+        for (const source of assignment.sourceEvents ?? []) {
+          this.sql.exec(
+            `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
+            runId,
+            source.seq,
+            JSON.stringify(source),
+          );
+          liveStateSeq = source.seq;
+        }
+        if (result.event && boundarySeq !== undefined) {
+          liveStateSeq = boundarySeq;
+          this.sql.exec(
+            `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
+            runId,
+            liveStateSeq,
+            JSON.stringify({ ...result.event, seq: liveStateSeq }),
+          );
+        }
+        const state = preserveCheckpointState(row.state, {
+          ...row.state,
+          ...assignment.statePatch,
+          liveState: result.liveState,
           liveStateSeq,
-          JSON.stringify({ ...result.event, seq: liveStateSeq }),
+        });
+        if (!state) {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
+        if (isContextDependencies(state.contextDependencies))
+          this.pinContext(runId, undefined, state.contextDependencies);
+        // The terminal event and no-replay phase must survive a restart together.
+        this.sql.exec(
+          `UPDATE live_runs SET state_json = ?, phase = ? WHERE run_id = ?`,
+          JSON.stringify(state),
+          assignment.state === "ended" ? "finishing" : row.phase,
+          runId,
         );
-      }
-      const state = preserveCheckpointState(row.state, {
-        ...row.state,
-        ...assignment.statePatch,
-        liveState: result.liveState,
-        liveStateSeq,
+        out = {
+          ...result,
+          ...(result.event ? { event: { ...result.event, seq: liveStateSeq } } : {}),
+          liveStateSeq,
+        };
       });
-      if (!state) {
-        out = { ok: false, reason: "fenced" };
-        return;
-      }
-      if (isContextDependencies(state.contextDependencies))
-        this.pinContext(runId, undefined, state.contextDependencies);
-      // The terminal event and no-replay phase must survive a restart together.
-      this.sql.exec(
-        `UPDATE live_runs SET state_json = ?, phase = ? WHERE run_id = ?`,
-        JSON.stringify(state),
-        assignment.state === "ended" ? "finishing" : row.phase,
-        runId,
-      );
-      out = {
-        ...result,
-        ...(result.event ? { event: { ...result.event, seq: liveStateSeq } } : {}),
-        liveStateSeq,
-      };
-    });
-    return out;
+      progress("transaction", "returned", { ok: out.ok });
+      return finish(out);
+    } catch (error) {
+      progress(stage, "failed", { errorName: checkpointErrorName(error) });
+      throw error;
+    }
   }
 
   stateWriteGuard(runId: string, gen: string): StateWriteGuard {
@@ -8437,7 +8723,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const pending = (): PromotionHold => ({ kind: "held", reason: "promotion_pending", runId });
     if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion) {
       const before = canonicalSeedJson(this.allocationArchive(runId));
-      const hold = await this.promotionHold(runId, gen);
+      const hold = await this.promotionHold(runId, gen, correlation);
       if (hold) return hold;
       if (before !== canonicalSeedJson(this.allocationArchive(runId))) return pending();
     }
@@ -12614,6 +12900,7 @@ type SessionTurnRow = { id: number; idx: number; part: number; json: string; tex
  */
 export class SessionLogDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  private readonly incarnationId = crypto.randomUUID();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -12943,46 +13230,95 @@ export class SessionLogDO extends DurableObject<Env> {
     });
     return result;
   }
-  async readExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
-    if (this.sourceSeedRecord(input)?.cancelledBy) return { kind: "held", reason: "mismatch" };
-    const ref = sourceSeedReferenceOf(input);
-    if (!ref || !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(key))) return { kind: "held", reason: "mismatch" };
-    let receipt: SourceSeedReceipt | undefined;
+  /** Read recorded receipt metadata only. Never verify, release or reload source payloads. */
+  async readOriginalSeed(key: string, ref: SourceSeedReference): Promise<unknown> {
+    if (!sourceSeedReferenceOf(ref) || !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(key)))
+      return originalUnavailable("mismatch");
+    for (const name of [sourceSeedOriginalKey(ref), "expected_seed_pending", "expected_seed_release"]) {
+      const row = this.sql
+        .exec<{ bytes: number }>("SELECT length(CAST(value AS BLOB)) AS bytes FROM meta WHERE key=?", name)
+        .toArray()[0];
+      if (row && row.bytes > ORIGINAL_RECEIPT_BYTES) return originalUnavailable("oversize");
+    }
     try {
-      receipt = this.sourceSeedRecord(ref)?.receipt;
-    } catch {
-      return { kind: "held", reason: "corrupt" };
+      return this.sourceSeedRecord(ref);
+    } catch (error) {
+      if (error instanceof SourceSeedPendingError) return originalUnavailable("corrupt");
+      throw error;
     }
-    if (!receipt) return { kind: "held", reason: "missing" };
-    if (!sourceSeedReferenceMatches(receipt, ref, key)) return { kind: "held", reason: "mismatch" };
-    if (this.sourceSeedRecord(ref)?.release !== undefined) {
+  }
+
+  async readExpectedSeed(
+    key: string,
+    input: SourceSeedReference,
+    correlation?: SeedGuardCorrelation,
+  ): Promise<SourceSeedResult> {
+    const progress = seedGuardProgress(this.ctx.id.toString(), input.runId, input.gen, correlation, this.incarnationId);
+    let stage: "source-receipt" | "promotion-read" | "source-proof" = "source-receipt";
+    const finish = (result: SourceSeedResult, branch: SeedGuardBranch): SourceSeedResult => {
+      progress.emit("source-receipt", result.kind === "verified" ? "completed" : "held", { branch });
+      return result;
+    };
+    progress.emit("source-receipt", "started");
+    try {
+      if (this.sourceSeedRecord(input)?.cancelledBy) return finish({ kind: "held", reason: "mismatch" }, "cancelled");
+      const ref = sourceSeedReferenceOf(input);
+      if (!ref || !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(key)))
+        return finish({ kind: "held", reason: "mismatch" }, "mismatch");
+      let receipt: SourceSeedReceipt | undefined;
       try {
-        return { kind: "verified", receipt: structuredClone(receipt), release: this.sourceSeedRecord(ref)!.release! };
+        receipt = this.sourceSeedRecord(ref)?.receipt;
       } catch {
-        return { kind: "held", reason: "corrupt" };
+        return finish({ kind: "held", reason: "corrupt" }, "corrupt");
       }
+      if (!receipt) return finish({ kind: "held", reason: "missing" }, "missing");
+      if (!sourceSeedReferenceMatches(receipt, ref, key))
+        return finish({ kind: "held", reason: "mismatch" }, "mismatch");
+      if (this.sourceSeedRecord(ref)?.release !== undefined) {
+        try {
+          return finish(
+            { kind: "verified", receipt: structuredClone(receipt), release: this.sourceSeedRecord(ref)!.release! },
+            "released-receipt",
+          );
+        } catch {
+          return finish({ kind: "held", reason: "corrupt" }, "corrupt");
+        }
+      }
+      const target = this.env.RUNS.idFromName(ref.storeKey);
+      stage = "promotion-read";
+      progress.emit("promotion-read", "started", { targetObjectId: target.toString(), branch: "verify-source" });
+      const actual = await this.env.RUNS.get(target).readPromotion({
+          runId: ref.runId,
+          gen: ref.gen,
+          bodySha256: ref.bodySha256,
+        }),
+        expected = authenticatedSeedExpectation(key, ref, actual);
+      progress.emit("promotion-read", "completed", { targetObjectId: target.toString(), branch: "verify-source" });
+      if (!expected) return finish({ kind: "held", reason: "mismatch" }, "mismatch");
+      stage = "source-proof";
+      progress.emit("source-proof", "started", { branch: "verify-source" });
+      const snapshot = this.sourceSeedSnapshot(expected.from, expected.through),
+        before = canonicalSeedJson(snapshot),
+        hashes = await verifiedSourceSeedHashes(snapshot, expected),
+        revision = await this.custodyPinRevision();
+      if (
+        !hashes ||
+        canonicalSeedJson(this.sourceSeedSnapshot(expected.from, expected.through)) !== before ||
+        canonicalSeedJson(this.sourceSeedPending()) !== canonicalSeedJson(receipt) ||
+        !revision?.guarded ||
+        revision.revision < receipt.pinRevision ||
+        !this.rangePins()[ref.runId]?.some((r) => r.from === receipt!.from && r.to === receipt!.through)
+      ) {
+        progress.emit("source-proof", "held", { branch: "corrupt" });
+        return finish({ kind: "held", reason: "corrupt" }, "corrupt");
+      }
+      progress.emit("source-proof", "completed", { branch: "verify-source" });
+      return finish({ kind: "verified", receipt: structuredClone(receipt) }, "verify-source");
+    } catch (error) {
+      if (stage !== "source-receipt") progress.emit(stage, "failed", { errorName: checkpointErrorName(error) });
+      progress.emit("source-receipt", "failed", { errorName: checkpointErrorName(error) });
+      throw error;
     }
-    const actual = await this.env.RUNS.get(this.env.RUNS.idFromName(ref.storeKey)).readPromotion({
-        runId: ref.runId,
-        gen: ref.gen,
-        bodySha256: ref.bodySha256,
-      }),
-      expected = authenticatedSeedExpectation(key, ref, actual);
-    if (!expected) return { kind: "held", reason: "mismatch" };
-    const snapshot = this.sourceSeedSnapshot(expected.from, expected.through),
-      before = canonicalSeedJson(snapshot),
-      hashes = await verifiedSourceSeedHashes(snapshot, expected),
-      revision = await this.custodyPinRevision();
-    if (
-      !hashes ||
-      canonicalSeedJson(this.sourceSeedSnapshot(expected.from, expected.through)) !== before ||
-      canonicalSeedJson(this.sourceSeedPending()) !== canonicalSeedJson(receipt) ||
-      !revision?.guarded ||
-      revision.revision < receipt.pinRevision ||
-      !this.rangePins()[ref.runId]?.some((r) => r.from === receipt!.from && r.to === receipt!.through)
-    )
-      return { kind: "held", reason: "corrupt" };
-    return { kind: "verified", receipt: structuredClone(receipt) };
   }
   /** Actual source precondition, not a fabricated ownership fence or terminal witness. */
   async expectedSeedMutationHold(): Promise<{
@@ -13442,168 +13778,201 @@ export class SessionLogDO extends DurableObject<Env> {
     sourceUpdate?: { runId: string; sources: SessionSources },
     runId?: string,
     seed = false,
+    correlation?: CheckpointGateCorrelation,
   ): Promise<FenceResult & { bytes?: number; sourcesSaved?: true }> {
-    const frozen = structuredClone({ rows, attachments, sourceUpdate });
-    rows = frozen.rows;
-    attachments = frozen.attachments;
-    sourceUpdate = frozen.sourceUpdate;
-    const projected = projectTranscriptRows(rows, [
-      ...this.attachmentsOf(rows).filter((a) => !attachments.some((b) => b.ref === a.ref)),
-      ...attachments,
-    ]);
-    const verified = await verifiedSourceResults(projected.rows);
-    let out: FenceResult & { bytes?: number; sourcesSaved?: true } = { ok: true };
-    this.ctx.storage.transactionSync(() => {
-      const pending = this.sourceSeedPending();
-      if (pending) {
+    const progress = writeProgress(
+      this.ctx.id.toString(),
+      this.incarnationId,
+      sourceUpdate?.runId ?? runId,
+      gen,
+      "session-write",
+      correlation,
+    );
+    let stage: WriteStage = "entry";
+    progress(stage, "started", {
+      rows: rows.length,
+      attachments: attachments.length,
+      sources: sourceUpdate !== undefined,
+    });
+    stage = "validation";
+    progress(stage, "started");
+    try {
+      const frozen = structuredClone({ rows, attachments, sourceUpdate });
+      rows = frozen.rows;
+      attachments = frozen.attachments;
+      sourceUpdate = frozen.sourceUpdate;
+      const projected = projectTranscriptRows(rows, [
+        ...this.attachmentsOf(rows).filter((a) => !attachments.some((b) => b.ref === a.ref)),
+        ...attachments,
+      ]);
+      progress("validation", "completed");
+      stage = "source-proof";
+      progress(stage, "started");
+      const verified = await verifiedSourceResults(projected.rows);
+      progress(stage, "completed");
+      let out: FenceResult & { bytes?: number; sourcesSaved?: true } = { ok: true };
+      stage = "transaction";
+      progress(stage, "started");
+      this.ctx.storage.transactionSync(() => {
+        const pending = this.sourceSeedPending();
+        if (pending) {
+          const owner = this.owner();
+          const unchanged =
+            owner?.runId === (sourceUpdate?.runId ?? runId) &&
+            owner?.gen === gen &&
+            rows.every(
+              (r) =>
+                this.sql
+                  .exec<{ json: string }>("SELECT json FROM turns WHERE idx=? AND part=?", r.idx, r.part)
+                  .toArray()[0]?.json === r.json,
+            ) &&
+            attachments.every((a) => {
+              const old = this.sql
+                .exec<{ media_type: string; data: string }>(
+                  "SELECT media_type,data FROM attachments WHERE ref=?",
+                  a.ref,
+                )
+                .toArray()[0];
+              return old?.data === a.data && old.media_type === a.mediaType;
+            }) &&
+            (!sourceUpdate || canonicalSeedJson(sourceUpdate.sources) === canonicalSeedJson(this.sources()));
+          if (unchanged) {
+            out = { ok: true, ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
+            return;
+          }
+          throw new SourceSeedPendingError(pending.key, pending.runId);
+        }
         const owner = this.owner();
-        const unchanged =
-          owner?.runId === (sourceUpdate?.runId ?? runId) &&
-          owner?.gen === gen &&
-          rows.every(
-            (r) =>
-              this.sql
-                .exec<{ json: string }>("SELECT json FROM turns WHERE idx=? AND part=?", r.idx, r.part)
-                .toArray()[0]?.json === r.json,
-          ) &&
-          attachments.every((a) => {
-            const old = this.sql
-              .exec<{ media_type: string; data: string }>("SELECT media_type,data FROM attachments WHERE ref=?", a.ref)
-              .toArray()[0];
-            return old?.data === a.data && old.media_type === a.mediaType;
-          }) &&
-          (!sourceUpdate || canonicalSeedJson(sourceUpdate.sources) === canonicalSeedJson(this.sources()));
-        if (unchanged) {
-          out = { ok: true, ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
+        if (owner === undefined) {
+          out = { ok: false, reason: "unknown-run" };
           return;
         }
-        throw new SourceSeedPendingError(pending.key, pending.runId);
-      }
-      const owner = this.owner();
-      if (owner === undefined) {
-        out = { ok: false, reason: "unknown-run" };
-        return;
-      }
-      if (
-        owner.gen !== gen ||
-        (this.requiresRunIdentity() && !sourceUpdate && runId === undefined) ||
-        (!sourceUpdate && (this.sourceMeta("sources") || runId !== undefined) && owner.runId !== runId)
-      ) {
-        out = { ok: false, reason: "fenced" };
-        return;
-      }
-      if (sourceUpdate) {
-        if (owner.runId !== sourceUpdate.runId) {
-          out = { ok: false, reason: "fenced" };
-          return;
-        }
-        const pending = this.sourceMeta("source_pending_owner");
-        const previous =
-          pending && pending !== `${owner.runId}:${gen}` ? taintSessionSources(this.sources()) : this.sources();
-        const start = this.sql
-          .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'source_start'`)
-          .toArray()[0]?.value;
-        const sources = mergeSessionSources(previous, sourceUpdate.sources, start === "0");
-        this.sql.exec(
-          `INSERT INTO meta (key, value) VALUES ('sources', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-          JSON.stringify(sources),
-        );
-        if (JSON.stringify(sources) !== JSON.stringify(sourceUpdate.sources)) {
-          out = { ok: false, reason: "fenced" };
-          return;
-        }
-      }
-      if (sourceUpdate) {
-        this.setSourceMeta("source_owner", `${owner.runId}:${gen}`);
-        this.sql.exec(`DELETE FROM meta WHERE key = 'source_pending_owner'`);
-      } else if (
-        rows.length &&
-        this.sourceMeta("sources") &&
-        this.sourceMeta("source_owner") !== `${owner.runId}:${gen}`
-      ) {
-        // A writer that cannot attest source completeness must not inherit a prior writer's receipt.
-        this.setSourceMeta("source_pending_owner", `${owner.runId}:${gen}`);
-      }
-      const pins = this.rangePins();
-      for (const row of rows) {
-        if (!sessionRowIsPinned(pins, row.idx)) continue;
-        const original = this.sql
-          .exec<{ json: string }>(`SELECT json FROM turns WHERE idx = ? AND part = ?`, row.idx, row.part)
-          .toArray()[0];
-        if (original?.json !== row.json) {
-          out = { ok: false, reason: "fenced" };
-          return;
-        }
-      }
-      if (attachments.some((a) => !validTranscriptChunk(a))) {
-        out = { ok: false, reason: "fenced" };
-        return;
-      }
-      try {
-        projectTranscriptRows(rows, [
-          ...this.attachmentsOf(rows).filter((a) => !attachments.some((b) => b.ref === a.ref)),
-          ...attachments,
-        ]);
-      } catch {
-        out = { ok: false, reason: "fenced" };
-        return;
-      }
-      for (const attachment of attachments) {
-        const original = this.sql
-          .exec<{ media_type: string; data: string }>(
-            `SELECT media_type, data FROM attachments WHERE ref = ?`,
-            attachment.ref,
-          )
-          .toArray()[0];
         if (
-          original &&
-          (original.data !== attachment.data || original.media_type !== attachment.mediaType) &&
-          this.sql
-            .exec<{ idx: number; json: string }>(`SELECT idx, json FROM turns`)
-            .toArray()
-            .some((row) => sessionRowIsPinned(pins, row.idx) && attachmentRefsOf(row.json).includes(attachment.ref))
+          owner.gen !== gen ||
+          (this.requiresRunIdentity() && !sourceUpdate && runId === undefined) ||
+          (!sourceUpdate && (this.sourceMeta("sources") || runId !== undefined) && owner.runId !== runId)
         ) {
           out = { ok: false, reason: "fenced" };
           return;
         }
-      }
-      for (const a of attachments) {
-        this.sql.exec(
-          `INSERT OR REPLACE INTO attachments (ref, media_type, data, bytes) VALUES (?, ?, ?, ?)`,
-          a.ref,
-          a.mediaType,
-          a.data,
-          utf8ByteLength(a.data),
-        );
-      }
-      const tracked = this.sources();
-      if (tracked?.context && projected.rows.some((r) => rowKind(r.json) === "tool_result")) {
-        const indices = [...new Set(rows.map((r) => r.idx))];
-        const old = this.sql
-          .exec<{ idx: number; part: number; json: string }>(
-            `SELECT idx, part, json FROM turns WHERE kind = 'tool_use' OR idx IN (SELECT value FROM json_each(?)) ORDER BY idx, part`,
-            JSON.stringify(indices),
+        if (sourceUpdate) {
+          if (owner.runId !== sourceUpdate.runId) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          const pending = this.sourceMeta("source_pending_owner");
+          const previous =
+            pending && pending !== `${owner.runId}:${gen}` ? taintSessionSources(this.sources()) : this.sources();
+          const start = this.sql
+            .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'source_start'`)
+            .toArray()[0]?.value;
+          const sources = mergeSessionSources(previous, sourceUpdate.sources, start === "0");
+          this.sql.exec(
+            `INSERT INTO meta (key, value) VALUES ('sources', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+            JSON.stringify(sources),
+          );
+          if (JSON.stringify(sources) !== JSON.stringify(sourceUpdate.sources)) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+        }
+        if (sourceUpdate) {
+          this.setSourceMeta("source_owner", `${owner.runId}:${gen}`);
+          this.sql.exec(`DELETE FROM meta WHERE key = 'source_pending_owner'`);
+        } else if (
+          rows.length &&
+          this.sourceMeta("sources") &&
+          this.sourceMeta("source_owner") !== `${owner.runId}:${gen}`
+        ) {
+          // A writer that cannot attest source completeness must not inherit a prior writer's receipt.
+          this.setSourceMeta("source_pending_owner", `${owner.runId}:${gen}`);
+        }
+        const pins = this.rangePins();
+        for (const row of rows) {
+          if (!sessionRowIsPinned(pins, row.idx)) continue;
+          const original = this.sql
+            .exec<{ json: string }>(`SELECT json FROM turns WHERE idx = ? AND part = ?`, row.idx, row.part)
+            .toArray()[0];
+          if (original?.json !== row.json) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+        }
+        if (attachments.some((a) => !validTranscriptChunk(a))) {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
+        try {
+          projectTranscriptRows(rows, [
+            ...this.attachmentsOf(rows).filter((a) => !attachments.some((b) => b.ref === a.ref)),
+            ...attachments,
+          ]);
+        } catch {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
+        for (const attachment of attachments) {
+          const original = this.sql
+            .exec<{ media_type: string; data: string }>(
+              `SELECT media_type, data FROM attachments WHERE ref = ?`,
+              attachment.ref,
+            )
+            .toArray()[0];
+          if (
+            original &&
+            (original.data !== attachment.data || original.media_type !== attachment.mediaType) &&
+            this.sql
+              .exec<{ idx: number; json: string }>(`SELECT idx, json FROM turns`)
+              .toArray()
+              .some((row) => sessionRowIsPinned(pins, row.idx) && attachmentRefsOf(row.json).includes(attachment.ref))
+          ) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+        }
+        for (const a of attachments) {
+          this.sql.exec(
+            `INSERT OR REPLACE INTO attachments (ref, media_type, data, bytes) VALUES (?, ?, ?, ?)`,
+            a.ref,
+            a.mediaType,
+            a.data,
+            utf8ByteLength(a.data),
+          );
+        }
+        const tracked = this.sources();
+        if (tracked?.context && projected.rows.some((r) => rowKind(r.json) === "tool_result")) {
+          const indices = [...new Set(rows.map((r) => r.idx))];
+          const old = this.sql
+            .exec<{ idx: number; part: number; json: string }>(
+              `SELECT idx, part, json FROM turns WHERE kind = 'tool_use' OR idx IN (SELECT value FROM json_each(?)) ORDER BY idx, part`,
+              JSON.stringify(indices),
+            )
+            .toArray();
+          if (
+            uncoveredSourceResult(
+              projectTranscriptRows(old, this.attachmentsOf(old)).rows,
+              projected.rows,
+              tracked.context,
+              seed ? undefined : owner.runId,
+              verified,
+            )
           )
-          .toArray();
-        if (
-          uncoveredSourceResult(
-            projectTranscriptRows(old, this.attachmentsOf(old)).rows,
-            projected.rows,
-            tracked.context,
-            seed ? undefined : owner.runId,
-            verified,
-          )
-        )
-          this.setSourceMeta("sources", JSON.stringify(taintSessionSources(tracked)));
-      }
-      if (sourceUpdate && JSON.stringify(this.sources()) !== JSON.stringify(sourceUpdate.sources)) {
-        out = { ok: false, reason: "fenced" };
-        return;
-      }
-      for (const r of rows) this.putRow(r, r.json, false);
-      out = { ok: true, bytes: this.enforceBytePolicy(), ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
-    });
-    return out;
+            this.setSourceMeta("sources", JSON.stringify(taintSessionSources(tracked)));
+        }
+        if (sourceUpdate && JSON.stringify(this.sources()) !== JSON.stringify(sourceUpdate.sources)) {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
+        for (const r of rows) this.putRow(r, r.json, false);
+        out = { ok: true, bytes: this.enforceBytePolicy(), ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
+      });
+      progress("transaction", "returned", { ok: out.ok });
+      progress("result", "returned", { ok: out.ok });
+      return out;
+    } catch (error) {
+      progress(stage, "failed", { errorName: checkpointErrorName(error) });
+      throw error;
+    }
   }
 
   private removeSearchCells(id: number): void {
@@ -14078,6 +14447,7 @@ const LEDGER_ROUTES = new Set<string>([
   "/runs/source-events/release",
   "/runs/source-events/relevance",
   "/runs/check-source",
+  "/runs/original",
   "/runs/ingress/unread",
   "/runs/ingress/unread-hold",
   "/runs/ingress/unread-claim",
@@ -14648,6 +15018,7 @@ async function handleLedger(
   requestId?: string,
   nativeClient = false,
   reviewStopClient = false,
+  requestDigest?: string,
 ): Promise<Response> {
   if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
   const b = body as Record<string, unknown>;
@@ -14670,7 +15041,7 @@ async function handleLedger(
         return json(
           pathname.endsWith("/verify")
             ? await stub.verifyExpectedSeed(key.value, reference)
-            : await stub.readExpectedSeed(key.value, reference),
+            : await stub.readExpectedSeed(key.value, reference, { requestId }),
         );
       }
       if (pathname === "/runs/session/checkpoint") {
@@ -14715,36 +15086,68 @@ async function handleLedger(
         if (!rows.ok) return json({ error: rows.error }, 400);
         const attachments = parseAttachments(b.attachments);
         if (!attachments.ok) return json({ error: attachments.error }, 400);
-        if (b.sources !== undefined) {
-          if (!isSessionSources(b.sources) || typeof b.sourceRunId !== "string")
-            return json({ error: "invalid trusted source metadata" }, 400);
-          let owner: SessionSourceOwner | null | undefined;
-          if (b.storeKey !== undefined) {
-            const store = parseStoreKey(b);
-            if (!store.ok) return json({ error: store.error }, 400);
-            owner = await env.RUNS.get(env.RUNS.idFromName(store.value)).sourceSessionOwner(
-              b.sourceRunId,
-              g.value,
-              key.value,
-            );
-          }
-          if (!sourcesBelongToSession(key.value, b.sources, owner))
-            return json({ error: "source metadata does not belong to the claimed session" }, 409);
-        }
-        const r = await stub.write(
+        const progress = writeProgress(
+          null,
+          null,
+          typeof b.sourceRunId === "string" ? b.sourceRunId : typeof b.runId === "string" ? b.runId : undefined,
           g.value,
-          rows.value,
-          attachments.value,
-          b.sources !== undefined
-            ? { runId: b.sourceRunId as string, sources: b.sources as SessionSources }
-            : undefined,
-          typeof b.runId === "string" ? b.runId : undefined,
-          b.seed === true,
+          "session-write",
+          { requestId, requestDigest },
         );
-        console.log(
-          `[runs/session/write] ${key.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
-        );
-        return fenced(b.transcriptCodec === 1 ? { ...r, transcriptCodec: 1 } : r);
+        let stage: WriteStage = "validation";
+        progress(stage, "started");
+        try {
+          if (b.sources !== undefined) {
+            if (!isSessionSources(b.sources) || typeof b.sourceRunId !== "string") {
+              progress("validation", "held", { ok: false });
+              return json({ error: "invalid trusted source metadata" }, 400);
+            }
+            let owner: SessionSourceOwner | null | undefined;
+            if (b.storeKey !== undefined) {
+              const store = parseStoreKey(b);
+              if (!store.ok) return json({ error: store.error }, 400);
+              stage = "source-owner-read";
+              progress(stage, "started", { targetObjectId: env.RUNS.idFromName(store.value).toString() });
+              owner = await env.RUNS.get(env.RUNS.idFromName(store.value)).sourceSessionOwner(
+                b.sourceRunId,
+                g.value,
+                key.value,
+                { requestId, requestDigest },
+              );
+              progress(stage, "returned", { ok: owner !== null });
+              stage = "validation";
+            }
+            if (!sourcesBelongToSession(key.value, b.sources, owner)) {
+              progress("validation", "held", { ok: false });
+              return json({ error: "source metadata does not belong to the claimed session" }, 409);
+            }
+          }
+          progress("validation", "completed");
+          stage = "session-write-rpc";
+          progress(stage, "started", {
+            targetObjectId: env.SESSION_LOGS.idFromName(key.value).toString(),
+            rows: rows.value.length,
+            attachments: attachments.value.length,
+            sources: b.sources !== undefined,
+          });
+          const r = await stub.write(
+            g.value,
+            rows.value,
+            attachments.value,
+            b.sources !== undefined
+              ? { runId: b.sourceRunId as string, sources: b.sources as SessionSources }
+              : undefined,
+            typeof b.runId === "string" ? b.runId : undefined,
+            b.seed === true,
+            { requestId, requestDigest },
+          );
+          progress(stage, "returned", { ok: r.ok });
+          progress("result", "returned", { ok: r.ok });
+          return fenced(b.transcriptCodec === 1 ? { ...r, transcriptCodec: 1 } : r);
+        } catch (error) {
+          progress(stage, "failed", { errorName: checkpointErrorName(error) });
+          throw error;
+        }
       }
       if (pathname === "/runs/session/append") {
         const rowId = parseRowId(b.rowId);
@@ -14906,6 +15309,14 @@ async function handleLedger(
     const key = parseStoreKey(b);
     if (!key.ok) return json({ kind: "unavailable" }, 400);
     return json(await env.RUNS.get(env.RUNS.idFromName(key.value)).readCheckSource(selector.data));
+  }
+
+  if (pathname === "/runs/original") {
+    const selector = originalSelectorSchema.safeParse({ runId: b.runId, gen: b.gen });
+    const key = parseStoreKey(b);
+    if (!selector.success || !key.ok || Object.keys(b).some((name) => !["storeKey", "runId", "gen"].includes(name)))
+      return json({ error: "invalid original selector" }, 400);
+    return json(await env.RUNS.get(env.RUNS.idFromName(key.value)).readOriginal(selector.data, key.value));
   }
 
   if (pathname.startsWith("/runs/transcript/")) {
@@ -15192,11 +15603,21 @@ async function handleLedger(
       owner = gen(b.gen);
     if (id.ok && owner.ok) {
       let pending: PromotionHold | null;
+      const progress = writeProgress(null, null, id.value, owner.value, "promotion-hold", {
+        requestId,
+        requestDigest: rpcWitness?.digest ?? requestDigest,
+      });
       try {
+        progress("promotion-preflight", "started", { targetObjectId: env.RUNS.idFromName(key.value).toString() });
         pending = await stateRpc("promotion-preflight", () =>
-          env.RUNS.get(env.RUNS.idFromName(key.value)).promotionHold(id.value, owner.value),
+          env.RUNS.get(env.RUNS.idFromName(key.value)).promotionHold(id.value, owner.value, {
+            requestId,
+            requestDigest: rpcWitness?.digest ?? requestDigest,
+          }),
         );
+        progress("promotion-preflight", pending ? "held" : "returned");
       } catch (error) {
+        progress("promotion-preflight", "failed", { errorName: checkpointErrorName(error) });
         if (!stateWitness || error instanceof StateWriteBoundaryError) throw error;
         throw new StateWriteBoundaryError(
           {
@@ -15924,8 +16345,16 @@ async function handleLedger(
     if (typeof b.assignment !== "object" || b.assignment === null)
       return json({ error: "assignment must be an object" }, 400);
     const assignment = b.assignment as unknown as LiveStateAssignRequest;
-    const r = await stub.assignLiveState(runId.value, g.value, assignment);
-    return r.ok ? json(r) : json(r, r.reason === "fenced" || r.reason === "unknown-run" ? 409 : 400);
+    const progress = writeProgress(null, null, runId.value, g.value, "assign-live-state", { requestId, requestDigest });
+    try {
+      progress("assign-live-state-rpc", "started", { targetObjectId: env.RUNS.idFromName(key.value).toString() });
+      const r = await stub.assignLiveState(runId.value, g.value, assignment, { requestId, requestDigest });
+      progress("assign-live-state-rpc", "returned", { ok: r.ok });
+      return r.ok ? json(r) : json(r, r.reason === "fenced" || r.reason === "unknown-run" ? 409 : 400);
+    } catch (error) {
+      progress("assign-live-state-rpc", "failed", { errorName: checkpointErrorName(error) });
+      throw error;
+    }
   }
   if (pathname === "/runs/step") {
     const record = parseStep(b.record);
@@ -16048,10 +16477,21 @@ async function handleRuns(
   nativeClient = false,
   reviewStopClient = false,
   requestId?: string,
+  requestDigest?: string,
 ): Promise<Response> {
   const stub = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
   if (LEDGER_ROUTES.has(pathname))
-    return handleLedger(pathname, body, env, undefined, undefined, requestId, nativeClient, reviewStopClient);
+    return handleLedger(
+      pathname,
+      body,
+      env,
+      undefined,
+      undefined,
+      requestId,
+      nativeClient,
+      reviewStopClient,
+      requestDigest,
+    );
   if (pathname.startsWith("/runs/review-feedback/")) {
     if (!body || typeof body !== "object" || Array.isArray(body))
       return json({ error: "invalid review feedback request" }, 400);
@@ -16312,6 +16752,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
               storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
               request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
               request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
+              storageRequestDigestOf(request.headers.get(STORAGE_REQUEST_DIGEST_HEADER)),
             )
           : handleRuns(
               url.pathname,
@@ -16320,6 +16761,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
               request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
               request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
               storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
+              storageRequestDigestOf(request.headers.get(STORAGE_REQUEST_DIGEST_HEADER)),
             ));
     } catch (error) {
       if (error instanceof Error && error.name === "RunDeletedError") throw error;

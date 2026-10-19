@@ -1,6 +1,7 @@
 import { liveEventSnapshotOf, sameLiveEventSnapshot, type LiveEventSnapshot } from "./runLedger/eventPage.js";
 import { prepareInboxDelivery, inboxDeliveryResultOf, type InboxDeliveryResult } from "./runLedger/inboxDelivery.js";
 import { EXECUTION_PROTOCOL_HEADER, NATIVE_REVIEW_STOP_HEADER } from "./runLedger/types.js";
+import { originalReadOf, type OriginalRead, type OriginalSelector } from "./runLedger/originalEvidence.js";
 import {
   nativeClaimObservationOf,
   claimObservationKey,
@@ -582,6 +583,25 @@ export class WorkerRunLedger implements RunLedger {
     if (!Number.isSafeInteger(r.data.fence) || (r.data.fence as number) <= 0)
       throw this.invalidResult(new PermanentStoreError("run ledger resident claim: invalid fence"), r);
     return { ok: true, fence: r.data.fence as number };
+  }
+
+  async readOriginal(selector: OriginalSelector): Promise<OriginalRead> {
+    this.checkIds(selector.runId, selector.gen);
+    const result = await this.read("/runs/original", {
+      storeKey: this.opts.storeKey,
+      runId: selector.runId,
+      gen: selector.gen,
+    });
+    const value = originalReadOf(result.data);
+    if (
+      !value ||
+      (value.kind === "source" &&
+        (value.resource.id !== selector.runId ||
+          value.evidence.runId !== selector.runId ||
+          value.evidence.gen !== selector.gen))
+    )
+      throw this.invalidResult(new PermanentStoreError("run ledger /runs/original: invalid bounded evidence"), result);
+    return value;
   }
 
   async readCheckSource(selector: CheckSelector): Promise<CheckSourceRead> {

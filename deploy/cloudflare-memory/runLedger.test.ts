@@ -100,6 +100,7 @@ import { githubFileTool } from "../../src/tools/github.ts";
 import type { ToolContext } from "../../src/tools/runnableTool.ts";
 import { InMemoryGithubApi } from "../../src/execution/githubApi.ts";
 import { mergeContextDependencies } from "../../src/core/references/contextDependencies.ts";
+import { sourceSeedOriginalKey } from "../../src/core/runLedger/seedVerification.ts";
 
 const unreadOrigin = {
   version: 1 as const,
@@ -2726,6 +2727,200 @@ describe("original workspace durability in real SQLite", () => {
     };
     return { client, reference, sessionKey, sk, messages, built };
   }
+  it("reads prepared original bytes without treating preparation as a committed claim", async () => {
+    const sk = storeKey(),
+      req = request(sk, null);
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: sk,
+      fetch: (url, init) => fetchMemoryTest(String(url), init),
+    });
+    expect(await client.claim(req.run)).toMatchObject({ ok: true });
+    expect(
+      (
+        await client.preparePromotion(
+          JSON.stringify({ ...req, run: { ...req.run, phase: "live", system: "PRIVATE_ORIGINAL_PROMPT" } }),
+        )
+      ).kind,
+    ).toBe("prepared");
+    expect(await client.readOriginal({ runId: id, gen: "g1" })).toMatchObject({
+      kind: "source",
+      evidence: { promotion: { state: "prepared-recorded" }, physicalEnding: "not-assessed" },
+    });
+    expect((await client.listLive())[0].phase).toBe("attaching");
+    expect(JSON.stringify(await client.readOriginal({ runId: id, gen: "g1" }))).not.toContain(
+      "PRIVATE_ORIGINAL_PROMPT",
+    );
+  });
+
+  it("refuses original evidence when current metadata no longer matches the frozen requester", async () => {
+    const { client, sk } = await originalSourceFixture();
+    const history = env.RUNS.get(env.RUNS.idFromName(sk));
+    await runInDurableObject(history, (_owner, state) => {
+      state.storage.sql.exec(
+        "UPDATE live_runs SET meta_json=json_set(meta_json,'$.userId','slack:UOTHER') WHERE run_id=?",
+        id,
+      );
+    });
+    expect(await client.readOriginal({ runId: id, gen: "g1" })).toEqual({ kind: "unavailable", reason: "corrupt" });
+  });
+
+  it("reads original source receipt phases without verifying or releasing their payload", async () => {
+    const { client, reference, sessionKey, sk } = await originalSourceFixture();
+    const read = () => client.readOriginal({ runId: id, gen: "g1" });
+    expect(await read()).toMatchObject({
+      kind: "source",
+      evidence: {
+        promotion: { state: "commit-recorded", bodySha256: reference.bodySha256 },
+        source: { state: "unavailable", reason: "missing" },
+      },
+    });
+    expect((await client.verifyExpectedSeed(sessionKey, reference)).kind).toBe("verified");
+    const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey));
+    let restore!: () => void;
+    await runInDurableObject(log, (owner, state) => {
+      const exec = state.storage.sql.exec.bind(state.storage.sql);
+      const calls = vi.spyOn(state.storage.sql, "exec").mockImplementation((query, ...bindings) => {
+        if (
+          /^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b/i.test(query) ||
+          /\bFROM (turns|attachments)\b/i.test(query)
+        )
+          throw new Error("original evidence must not mutate or load source payloads");
+        return exec(query, ...bindings);
+      });
+      restore = () => calls.mockRestore();
+    });
+    try {
+      expect(await read()).toMatchObject({ kind: "source", evidence: { source: { state: "verification-recorded" } } });
+    } finally {
+      await runInDurableObject(log, () => restore());
+    }
+    expect(
+      await client.step(
+        id,
+        "g1",
+        {
+          step: 0,
+          seq: 0,
+          turnIndex: 1,
+          inFlight: [],
+          inboxConsumedSeq: 0,
+          remainingMs: 1500000,
+          turn: 0,
+          iteration: 0,
+        },
+        [],
+        sessionKey,
+      ),
+    ).toEqual({ ok: true });
+    expect((await client.confirmPromotion(reference)).kind).toBe("confirmed");
+    expect(await read()).toMatchObject({
+      kind: "source",
+      evidence: { promotion: { state: "confirmation-recorded" }, source: { state: "verification-recorded" } },
+    });
+    const before = await log.custodyPinRevision();
+    expect((await client.releaseExpectedSeed(sessionKey, reference)).kind).toBe("verified");
+    expect(await read()).toMatchObject({
+      kind: "source",
+      evidence: { source: { state: "release-recorded-matched" }, physicalEnding: "not-assessed" },
+    });
+    expect(await log.custodyPinRevision()).toEqual(before);
+    expect(JSON.stringify(await read())).not.toContain("original source notes");
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), (_owner, state) => {
+      state.storage.sql.exec("UPDATE live_runs SET owner_gen='successor' WHERE run_id=?", id);
+    });
+    expect(await read()).toMatchObject({ kind: "source", evidence: { availability: "unavailable", reason: "fenced" } });
+  });
+
+  it.each(["legacy", "cancelled", "corrupt", "oversize"] as const)(
+    "keeps original source metadata honest for %s receipts",
+    async (mode) => {
+      const { client, reference, sessionKey } = await originalSourceFixture();
+      expect((await client.verifyExpectedSeed(sessionKey, reference)).kind).toBe("verified");
+      await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), (_owner, state) => {
+        const name = sourceSeedOriginalKey(reference);
+        if (mode === "legacy") state.storage.sql.exec("DELETE FROM meta WHERE key=?", name);
+        else {
+          const original = JSON.parse(
+            state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key=?", name).one().value,
+          );
+          state.storage.sql.exec(
+            "UPDATE meta SET value=? WHERE key=?",
+            mode === "cancelled"
+              ? JSON.stringify({ ...original, cancelledBy: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" })
+              : mode === "corrupt"
+                ? "{"
+                : "x".repeat(70000),
+            name,
+          );
+        }
+      });
+      expect(await client.readOriginal({ runId: id, gen: "g1" })).toMatchObject({
+        kind: "source",
+        evidence: {
+          source:
+            mode === "legacy"
+              ? { state: "verification-recorded" }
+              : { state: "unavailable", reason: mode === "cancelled" ? "mismatch" : mode },
+          physicalEnding: "not-assessed",
+        },
+      });
+    },
+  );
+
+  it("discards original evidence when its owner changes during the source read", async () => {
+    const { client, reference, sessionKey, sk } = await originalSourceFixture();
+    expect((await client.verifyExpectedSeed(sessionKey, reference)).kind).toBe("verified");
+    const history = env.RUNS.get(env.RUNS.idFromName(sk));
+    let restore!: () => void;
+    await runInDurableObject(history, (owner: RunHistoryDO, state) => {
+      const target = owner as unknown as { env: { SESSION_LOGS: typeof env.SESSION_LOGS } };
+      const namespace = target.env.SESSION_LOGS;
+      const original = target.env;
+      target.env = {
+        ...target.env,
+        SESSION_LOGS: new Proxy(namespace, {
+          get(receiver, property) {
+            if (property === "get")
+              return (id: DurableObjectId) =>
+                new Proxy(namespace.get(id), {
+                  get(stub, method) {
+                    if (method === "readOriginalSeed")
+                      return async (...args: Parameters<SessionLogDO["readOriginalSeed"]>) => {
+                        const result = await stub.readOriginalSeed(...args);
+                        state.storage.sql.exec("UPDATE live_runs SET owner_gen='g2' WHERE run_id=?", reference.runId);
+                        return result;
+                      };
+                    const value = Reflect.get(stub, method);
+                    return typeof value === "function" ? value.bind(stub) : value;
+                  },
+                });
+            const value = Reflect.get(receiver, property);
+            return typeof value === "function" ? value.bind(receiver) : value;
+          },
+        }),
+      };
+      restore = () => {
+        target.env = original;
+      };
+    });
+    try {
+      const result = await client.readOriginal({ runId: id, gen: "g1" });
+      expect(result).toMatchObject({ kind: "source", evidence: { availability: "unavailable", reason: "changed" } });
+      if (result.kind !== "source") throw new Error("original read was unavailable");
+      expect(result.evidence).toEqual({
+        version: 1,
+        runId: id,
+        gen: "g1",
+        availability: "unavailable",
+        reason: "changed",
+      });
+    } finally {
+      await runInDurableObject(history, () => restore());
+    }
+  });
+
   it("commits actual source verification receipt and pending holder through HTTP, refusing source mutations and newer-revision removal", async () => {
     const { client, reference, sessionKey, messages } = await originalSourceFixture();
     const verified = await client.verifyExpectedSeed(sessionKey, reference);
@@ -2853,6 +3048,185 @@ describe("original workspace durability in real SQLite", () => {
     expect(await f.client.verifyExpectedSeed(f.sessionKey, f.reference)).toMatchObject({ kind: "verified" });
     return f;
   }
+  it.each(["released", "unreleased"] as const)(
+    "traces the original seed guard target and %s branch without changing its result",
+    async (mode) => {
+      const { client, reference, sessionKey, sk } = await confirmationFixture();
+      expect((await client.confirmPromotion(reference)).kind).toBe("confirmed");
+      if (mode === "released") expect((await client.releaseExpectedSeed(sessionKey, reference)).kind).toBe("verified");
+      const history = env.RUNS.get(env.RUNS.idFromName(sk));
+      const before = await client.listLive();
+      const logs: string[] = [];
+      const logger = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      const requestId = "11111111-1111-4111-8111-111111111111";
+      try {
+        const response = await post(
+          "/runs/live-state",
+          { storeKey: sk, runId: id, gen: "g1", assignment: {} },
+          { ...AUTH, "x-switchboard-storage-request-id": requestId },
+        );
+        expect(response.status).toBe(mode === "released" ? 400 : 423);
+      } finally {
+        logger.mockRestore();
+      }
+      const trace = logs
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .filter((event) => event.event === "storage.seed_guard.progress");
+      expect(trace).toContainEqual(
+        expect.objectContaining({
+          requestId,
+          runId: id,
+          ownerGen: "g1",
+          objectId: history.id.toString(),
+          targetObjectId: env.SESSION_LOGS.idFromName(sessionKey).toString(),
+          stage: "source-receipt",
+          outcome: "started",
+        }),
+      );
+      expect(trace).toContainEqual(
+        expect.objectContaining({
+          requestId,
+          runId: id,
+          objectId: env.SESSION_LOGS.idFromName(sessionKey).toString(),
+          stage: "source-receipt",
+          outcome: "completed",
+          branch: mode === "released" ? "released-receipt" : "verify-source",
+        }),
+      );
+      expect(trace.every((event) => event.requestId === requestId)).toBe(true);
+      for (const guardId of new Set(trace.map((event) => event.guardId))) {
+        expect(guardId).toMatch(/^[a-f0-9-]{36}$/);
+        const joined = trace.filter((event) => event.guardId === guardId);
+        expect(joined).toContainEqual(expect.objectContaining({ objectId: history.id.toString(), outcome: "started" }));
+        expect(joined).toContainEqual(
+          expect.objectContaining({
+            objectId: env.SESSION_LOGS.idFromName(sessionKey).toString(),
+            outcome: "completed",
+          }),
+        );
+      }
+      expect(JSON.stringify(trace)).not.toContain(sessionKey);
+      expect(JSON.stringify(trace)).not.toContain("original source");
+      expect(await client.listLive()).toEqual(before);
+    },
+  );
+  it.each(["missing", "corrupt", "throwing-sink", "unsafe-correlation"] as const)(
+    "keeps the original seed guard held with %s trace input",
+    async (mode) => {
+      const { client, reference, sessionKey, sk } = await confirmationFixture();
+      expect((await client.confirmPromotion(reference)).kind).toBe("confirmed");
+      const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey));
+      if (mode === "missing" || mode === "corrupt")
+        await runInDurableObject(log, (_owner, state) => {
+          const key = sourceSeedOriginalKey(reference);
+          state.storage.sql.exec("DELETE FROM meta WHERE key IN ('expected_seed_pending','expected_seed_release')");
+          if (mode === "missing") state.storage.sql.exec("DELETE FROM meta WHERE key=?", key);
+          else state.storage.sql.exec("UPDATE meta SET value=? WHERE key=?", "PRIVATE_INVALID_RECEIPT", key);
+        });
+      const before = await client.listLive();
+      const revision = await log.custodyPinRevision();
+      const lines: string[] = [];
+      const logger = vi.spyOn(console, "log").mockImplementation((line) => {
+        lines.push(String(line));
+        if (mode === "throwing-sink" && String(line).includes("storage.seed_guard.progress"))
+          throw new Error("PRIVATE_LOG_SINK_FAILURE");
+      });
+      try {
+        expect(
+          await env.RUNS.get(env.RUNS.idFromName(sk)).promotionHold(
+            id,
+            "g1",
+            mode === "unsafe-correlation"
+              ? {
+                  requestId: "PRIVATE_REQUEST_TOKEN",
+                  requestDigest: "PRIVATE_REQUEST_BODY",
+                  guardId: "PRIVATE_GUARD_KEY",
+                }
+              : undefined,
+          ),
+        ).toEqual({
+          kind: "held",
+          reason: "promotion_pending",
+          runId: id,
+        });
+      } finally {
+        logger.mockRestore();
+      }
+      const trace = lines
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .filter((event) => event.event === "storage.seed_guard.progress");
+      expect(trace).toContainEqual(
+        expect.objectContaining({
+          objectId: env.RUNS.idFromName(sk).toString(),
+          stage: "source-receipt",
+          outcome: mode === "corrupt" ? "failed" : "held",
+        }),
+      );
+      if (mode === "missing" || mode === "corrupt")
+        expect(trace).toContainEqual(
+          expect.objectContaining({
+            objectId: log.id.toString(),
+            stage: "source-receipt",
+            outcome: mode === "corrupt" ? "failed" : "held",
+            ...(mode === "missing" ? { branch: "missing" } : { errorName: "SourceSeedPendingError" }),
+          }),
+        );
+      expect(trace.every((event) => JSON.stringify(event).length < 2048)).toBe(true);
+      expect(JSON.stringify(trace)).not.toContain("PRIVATE_");
+      expect(JSON.stringify(trace)).not.toContain(sessionKey);
+      expect(await client.listLive()).toEqual(before);
+      expect(await log.custodyPinRevision()).toEqual(revision);
+    },
+  );
+  it("records the original seed target before an unfinished guard RPC", async () => {
+    const { client, reference, sk } = await confirmationFixture();
+    expect((await client.confirmPromotion(reference)).kind).toBe("confirmed");
+    const lines: string[] = [];
+    const logger = vi.spyOn(console, "log").mockImplementation((line) => lines.push(String(line)));
+    try {
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner: RunHistoryDO) => {
+        const target = owner as unknown as { env: { SESSION_LOGS: typeof env.SESSION_LOGS } };
+        const original = target.env;
+        let release!: () => void;
+        const wait = new Promise<{ kind: "held"; reason: "unknown" }>((resolve) => {
+          release = () => resolve({ kind: "held", reason: "unknown" });
+        });
+        const namespace = target.env.SESSION_LOGS;
+        target.env = {
+          ...target.env,
+          SESSION_LOGS: new Proxy(namespace, {
+            get(receiver, property) {
+              if (property === "get") return () => ({ readExpectedSeed: () => wait });
+              const value = Reflect.get(receiver, property);
+              return typeof value === "function" ? value.bind(receiver) : value;
+            },
+          }),
+        };
+        const pending = owner.promotionHold(id, "g1");
+        try {
+          const trace = lines
+            .filter((line) => line.startsWith("{"))
+            .map((line) => JSON.parse(line))
+            .filter((event) => event.event === "storage.seed_guard.progress");
+          expect(trace.map(({ stage, outcome }) => ({ stage, outcome }))).toEqual([
+            { stage: "source-receipt", outcome: "started" },
+          ]);
+          expect(trace[0].targetObjectId).toMatch(/^[a-f0-9]{64}$/);
+        } finally {
+          release();
+          try {
+            expect(await pending).toEqual({ kind: "held", reason: "promotion_pending", runId: id });
+          } finally {
+            target.env = original;
+          }
+        }
+      });
+    } finally {
+      logger.mockRestore();
+    }
+  });
   it.each([true, false])(
     "a lost cancellation terminal acknowledgment reconciles only a committed record: committed=%s",
     async (committed) => {
@@ -19642,6 +20016,171 @@ describe("source-input context readers in SQLite", () => {
   });
 });
 
+describe("original run evidence", () => {
+  it("reads a fenced original boundary without exposing private state or changing it", async () => {
+    const key = storeKey(),
+      runId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const body = claimBody(key, runId, "mcp:fixture:original", "g1", {
+      state: {
+        privateValue: "PRIVATE_STATE_AND_PROCESS_PATH",
+        harnessLaunch: {
+          version: 1,
+          harness: "pi",
+          phase: "prepared",
+          ordinal: 0,
+          sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+        },
+      },
+    });
+    expect((await post("/runs/claim", body)).status).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    const before = await stub.listLive();
+    let restore!: () => void;
+    await runInDurableObject(stub, (_owner, state) => {
+      const exec = state.storage.sql.exec.bind(state.storage.sql);
+      const guard = vi.spyOn(state.storage.sql, "exec").mockImplementation((query, ...bindings) => {
+        if (/^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b/i.test(query))
+          throw new Error("read-only original evidence mutated SQLite");
+        return exec(query, ...bindings);
+      });
+      restore = () => guard.mockRestore();
+    });
+    let response!: Awaited<ReturnType<typeof post>>;
+    try {
+      response = await post("/runs/original", { storeKey: key, runId, gen: "g1" });
+    } finally {
+      await runInDurableObject(stub, () => restore());
+    }
+    expect(response.status).toBe(200);
+    expect(response.data).toMatchObject({
+      kind: "source",
+      evidence: {
+        version: 1,
+        runId,
+        gen: "g1",
+        selection: "current-original",
+        launch: { state: "recorded", phase: "prepared", ordinal: 0 },
+        step: { state: "unavailable", reason: "missing" },
+        failedRequestBinding: "unknown",
+        physicalEnding: "not-assessed",
+      },
+    });
+    expect(JSON.stringify(response.data)).not.toContain("PRIVATE_STATE_AND_PROCESS_PATH");
+    expect(await stub.listLive()).toEqual(before);
+    expect((await post("/runs/original", { storeKey: key, runId, gen: "other" })).data).toMatchObject({
+      kind: "source",
+      evidence: { availability: "unavailable", reason: "fenced" },
+    });
+  });
+  it.each(["oversize", "corrupt"] as const)(
+    "keeps %s state unavailable without loading unrelated histories",
+    async (mode) => {
+      const key = storeKey(),
+        runId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+      expect((await post("/runs/claim", claimBody(key, runId, "mcp:fixture:original"))).status).toBe(200);
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await runInDurableObject(stub, (_owner, state) => {
+        state.storage.sql.exec(
+          "UPDATE live_runs SET state_json=? WHERE run_id=?",
+          mode === "oversize" ? JSON.stringify({ private: "x".repeat(1100000) }) : "{",
+          runId,
+        );
+      });
+      const response = await post("/runs/original", { storeKey: key, runId, gen: "g1" });
+      expect(response.status).toBe(200);
+      expect(response.data).toMatchObject({
+        kind: "source",
+        evidence: { state: { state: "unavailable", reason: mode }, launch: { state: "unavailable", reason: mode } },
+      });
+      expect(JSON.stringify(response.data).length).toBeLessThan(8192);
+      expect((await post("/runs/original", { storeKey: key, runId, gen: "g1", state: {} })).status).toBe(400);
+    },
+  );
+  it("hashes the stored value separately from the failed HTTP request witness", async () => {
+    const key = storeKey(),
+      runId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    expect((await post("/runs/claim", claimBody(key, runId, "mcp:fixture:original"))).status).toBe(200);
+    const result = await post("/runs/original", { storeKey: key, runId, gen: "g1" });
+    expect(result.data).toMatchObject({
+      kind: "source",
+      evidence: {
+        state: { state: "recorded", digest: "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a" },
+        failedRequestBinding: "unknown",
+        appendAcknowledgement: "not-recorded",
+      },
+    });
+  });
+  it("reports a canonical step and recorded producer without acknowledging an unknown append", async () => {
+    const key = storeKey(),
+      runId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const policy = { version: 1, commandRoute: "hosted-review", identity: "read" };
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, runId, "mcp:fixture:original", "g1", {
+            state: {
+              harnessLaunch: { version: 1, harness: "pi", phase: "prepared", ordinal: 0, sessionPolicy: policy },
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await post("/runs/state", {
+          storeKey: key,
+          runId,
+          gen: "g1",
+          state: {
+            harnessLaunch: { version: 1, harness: "pi", phase: "begun", ordinal: 0, sessionPolicy: policy },
+            harness: {
+              harness: "pi",
+              pid: 42,
+              logOffset: 0,
+              root: "/PRIVATE_ROOT",
+              bearerHash: "b".repeat(64),
+              sessionPolicy: policy,
+              launchOrdinal: 0,
+            },
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await post("/runs/step", { storeKey: key, runId, gen: "g1", record: step({ step: 2, seq: 7, turnIndex: 1 }) }))
+        .status,
+    ).toBe(200);
+    const response = await post("/runs/original", { storeKey: key, runId, gen: "g1" });
+    expect(response.data).toMatchObject({
+      kind: "source",
+      evidence: {
+        step: { state: "recorded", step: 2, seq: 7, turnIndex: 1, inFlight: 1 },
+        producer: { state: "recorded", harness: "pi", ordinal: 0 },
+        appendAcknowledgement: "not-recorded",
+        physicalEnding: "not-assessed",
+      },
+    });
+    expect(JSON.stringify(response.data)).not.toMatch(/PRIVATE_ROOT|PRIVATE_BEARER/);
+  });
+  it("does not return private original evidence under changed ordinary metadata", async () => {
+    const key = storeKey(),
+      runId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    expect((await post("/runs/claim", claimBody(key, runId, "mcp:fixture:original"))).status).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, (_owner, state) => {
+      state.storage.sql.exec("UPDATE live_runs SET meta_json='{' WHERE run_id=?", runId);
+    });
+    expect((await post("/runs/original", { storeKey: key, runId, gen: "g1" })).data).toEqual({
+      kind: "unavailable",
+      reason: "corrupt",
+    });
+    expect(
+      (await post("/runs/original", { storeKey: key, runId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", gen: "g1" })).data,
+    ).toEqual({ kind: "unavailable", reason: "missing" });
+  });
+});
+
 describe("bounded run-history deletion", () => {
   it("leaves unrelated session pin revisions unchanged when deleting a missing run", async () => {
     const key = storeKey();
@@ -20001,5 +20540,199 @@ describe("deletion pin coverage", () => {
         (owner as unknown as { rangePins(): Record<string, unknown> }).rangePins(),
       ),
     ).toEqual({ [target]: [{ from: 0, to: 0 }] });
+  });
+});
+
+describe("original write stage traces", () => {
+  it.each(["live-state", "session-write", "session-rows", "throwing-sink", "throwing-sink-live-state"] as const)(
+    "traces %s without changing the stored result",
+    async (mode) => {
+      const sk = storeKey(),
+        id = "stage_trace",
+        thread = "mcp:fixture:write-trace",
+        key = "private:stage_trace:" + sk;
+      expect(
+        (
+          await post(
+            "/runs/claim",
+            claimBody(sk, id, thread, "g1", {
+              meta: {
+                userId: "slack:UALICE",
+                channelId: "slack:C1",
+                threadKey: thread,
+                session: {
+                  key,
+                  threadSession: contextThreadSessionKey(thread),
+                  seedFrom: 0,
+                  request: 0,
+                  range: { from: 0 },
+                },
+              },
+            }),
+          )
+        ).status,
+      ).toBe(200);
+      const sent: Array<{ id: string | null; digest: string | null }> = [];
+      const client = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: sk,
+        fetch: (url, init) => {
+          const path = new URL(String(url)).pathname;
+          if (path === "/runs/live-state" || path === "/runs/session/write") {
+            const h = new Headers(init?.headers);
+            sent.push({
+              id: h.get("x-switchboard-storage-request-id"),
+              digest: h.get("x-switchboard-storage-request-digest"),
+            });
+          }
+          return fetchMemoryTest(String(url), init);
+        },
+      });
+      await client.claimSession(key, id, "g1");
+      const lines: string[] = [];
+      const logger = vi.spyOn(console, "log").mockImplementation((line) => {
+        lines.push(String(line));
+        if (mode.startsWith("throwing-sink") && String(line).includes("storage.write.progress"))
+          throw new Error("PRIVATE_SINK");
+      });
+      try {
+        if (mode.endsWith("live-state"))
+          expect(
+            await client.assignLiveState(id, "g1", {
+              state: "admitted",
+              expectedSeq: 0,
+              eventSeq: 1,
+              at: 1000,
+              bound: 2000,
+            }),
+          ).toMatchObject({ ok: true, liveStateSeq: 1 });
+        else if (mode === "session-rows")
+          expect(
+            await client.seed(
+              id,
+              "g1",
+              [{ idx: 0, message: { role: "user", content: [{ type: "text", text: "PRIVATE_PAYLOAD" }] } }],
+              key,
+            ),
+          ).toEqual({ ok: true });
+        else
+          expect(
+            await client.writeSessionSources(key, id, "g1", {
+              version: 1,
+              status: "unknown",
+              context: UNKNOWN_CONTEXT_DEPENDENCIES,
+            }),
+          ).toEqual({ ok: true });
+      } finally {
+        logger.mockRestore();
+      }
+      const trace = lines
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .filter((e) => e.event === "storage.write.progress");
+      expect(sent).toHaveLength(1);
+      expect(sent[0].digest).toMatch(/^[a-f0-9]{64}$/);
+      expect(trace).toContainEqual(
+        expect.objectContaining({
+          side: "worker",
+          stage: mode.endsWith("live-state") ? "assign-live-state-rpc" : "session-write-rpc",
+          outcome: "started",
+          requestId: sent[0].id,
+          requestDigest: sent[0].digest,
+        }),
+      );
+      expect(trace).toContainEqual(
+        expect.objectContaining({
+          side: "object",
+          stage: "entry",
+          outcome: "started",
+          requestId: sent[0].id,
+          requestDigest: sent[0].digest,
+          runId: id,
+          ownerGen: "g1",
+        }),
+      );
+      expect(trace).toContainEqual(
+        expect.objectContaining({ side: "object", stage: "transaction", outcome: "returned", ok: true }),
+      );
+      expect(trace).toContainEqual(
+        expect.objectContaining({ side: "object", stage: "result", outcome: "returned", ok: true }),
+      );
+      const receiver = mode.endsWith("live-state") ? env.RUNS.idFromName(sk) : env.SESSION_LOGS.idFromName(key);
+      expect(trace).toContainEqual(
+        expect.objectContaining({ objectId: receiver.toString(), stage: "validation", outcome: "completed" }),
+      );
+      expect(trace.filter((e) => e.side === "object").every((e) => /^[a-f0-9-]{36}$/.test(e.incarnationId))).toBe(true);
+      if (!mode.endsWith("live-state") && mode !== "session-rows")
+        expect(trace).toContainEqual(
+          expect.objectContaining({
+            side: "worker",
+            stage: "source-owner-read",
+            outcome: "started",
+            targetObjectId: env.RUNS.idFromName(sk).toString(),
+          }),
+        );
+      expect(trace.every((e) => JSON.stringify(e).length < 2048 && !Object.hasOwn(e, "acknowledged"))).toBe(true);
+      expect(JSON.stringify(trace)).not.toContain(key);
+      expect(JSON.stringify(trace)).not.toContain("PRIVATE_");
+      if (mode.endsWith("live-state"))
+        expect((await client.listLive())[0]).toMatchObject({ state: { liveStateSeq: 1 } });
+      else if (mode === "session-rows") expect((await client.readSessionTail(key, 65536)).transcript.turns).toBe(1);
+      else expect((await client.readSessionTail(key, 65536)).sources).toMatchObject({ version: 1, status: "unknown" });
+    },
+  );
+});
+
+describe("write trace failure propagation", () => {
+  it("preserves the original receiver error at both failed transactions", async () => {
+    const sk = storeKey(),
+      id = "trace_failure",
+      key = "private:trace_failure:" + sk;
+    expect((await post("/runs/claim", claimBody(sk, id, "mcp:fixture:trace-failure"))).status).toBe(200);
+    const history = env.RUNS.get(env.RUNS.idFromName(sk));
+    const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(key));
+    expect(await log.setOwner(id, "g1")).toEqual({ ok: true });
+    const lines: string[] = [];
+    const logger = vi.spyOn(console, "log").mockImplementation((line) => lines.push(String(line)));
+    try {
+      await runInDurableObject(history, async (owner: RunHistoryDO, state) => {
+        const original = new Error("PRIVATE_TRANSACTION_FAILURE");
+        const transaction = vi.spyOn(state.storage, "transactionSync").mockImplementation(() => {
+          throw original;
+        });
+        try {
+          await expect(
+            owner.assignLiveState(id, "g1", { state: "admitted", expectedSeq: 0, eventSeq: 1, at: 1, bound: 2 }),
+          ).rejects.toBe(original);
+        } finally {
+          transaction.mockRestore();
+        }
+      });
+      await runInDurableObject(log, async (owner: SessionLogDO, state) => {
+        const original = new Error("PRIVATE_TRANSACTION_FAILURE");
+        const transaction = vi.spyOn(state.storage, "transactionSync").mockImplementation(() => {
+          throw original;
+        });
+        try {
+          await expect(owner.write("g1", [], [], undefined, id)).rejects.toBe(original);
+        } finally {
+          transaction.mockRestore();
+        }
+      });
+    } finally {
+      logger.mockRestore();
+    }
+    const trace = lines
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line))
+      .filter((e) => e.event === "storage.write.progress");
+    for (const target of [history.id.toString(), log.id.toString()]) {
+      expect(trace).toContainEqual(
+        expect.objectContaining({ objectId: target, stage: "transaction", outcome: "failed", errorName: "Error" }),
+      );
+      expect(trace.filter((e) => e.objectId === target && e.outcome === "returned")).toEqual([]);
+    }
+    expect(JSON.stringify(trace)).not.toContain("PRIVATE_");
   });
 });

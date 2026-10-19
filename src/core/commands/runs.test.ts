@@ -129,6 +129,64 @@ const dispatchOnly: Caller = {
   actor: actor("service", "mcp:agent", set("dispatch"), set()),
 };
 
+describe("runs original evidence", () => {
+  it("authorizes only canonical metadata and never loads the broad live view", async () => {
+    const { registry, reg, store } = await setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    expect(
+      await ledger.claim({
+        runId: id,
+        threadKey: "mcp:X:original",
+        gen: "g1",
+        leaseMs: 30000,
+        startedAt: NOW,
+        system: "PRIVATE_PROMPT",
+        tools: [],
+        state: { privateValue: "PRIVATE_STATE" },
+        meta: {
+          userId: "access:alice",
+          channelId: "mcp:X",
+          channelVisibility: "machine",
+          threadKey: "mcp:X:original",
+          repo: "fixture/repo",
+        },
+      }),
+    ).toMatchObject({ ok: true });
+    const broad = vi.spyOn(ledger, "listLive").mockImplementation(async () => {
+      throw new Error("broad listing is forbidden");
+    });
+    const deps: RunsCommandDeps = { runs: async () => createRunsService({ registry: reg, store, ledger }) };
+    const request = { args: [id], options: { gen: "g1" } };
+    const output = value<{
+      runId: string;
+      availability: string;
+      physicalEnding: string;
+      appendAcknowledgement: string;
+    }>(await registry.invoke("runs.original", request, pinnedX, deps));
+    expect({
+      runId: output.runId,
+      availability: output.availability,
+      physicalEnding: output.physicalEnding,
+      appendAcknowledgement: output.appendAcknowledgement,
+    }).toEqual({
+      runId: id,
+      availability: "observed",
+      physicalEnding: "not-assessed",
+      appendAcknowledgement: "not-recorded",
+    });
+    expect(JSON.stringify(output)).not.toContain("PRIVATE_");
+    expect(await registry.invoke("runs.original", request, unpinned, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+    expect(ledger.live.get(id)?.state).toEqual({ privateValue: "PRIVATE_STATE" });
+    broad.mockRestore();
+    ledger.live.get(id)!.meta.threadKey = "worker:private";
+    expect(await registry.invoke("runs.original", request, cli, deps)).toMatchObject({ ok: false, error: "not_found" });
+  });
+});
+
 describe("runs claim observations", () => {
   it.each(["http", "transport", "invalid"] as const)("logs only closed read failure facts: %s", async (kind) => {
     const { registry } = await setup();
@@ -533,6 +591,7 @@ describe("runs.* registrations", () => {
       "runs.get",
       "runs.kill",
       "runs.list",
+      "runs.original",
       "runs.search",
       "runs.settlecheck",
       "runs.stop",
@@ -540,6 +599,7 @@ describe("runs.* registrations", () => {
     ]);
     for (const id of [
       "runs.list",
+      "runs.original",
       "runs.claims",
       "runs.get",
       "runs.events",
@@ -558,12 +618,12 @@ describe("runs.* registrations", () => {
     // The findings ledger reads finished records: it needs run history and says so; every other read is always on.
     expect(byId["runs.findings"].enabledWhen).toBeDefined();
     expect(byId["runs.claims"].enabledWhen).toBeDefined();
-    for (const id of Object.keys(byId).filter((id) => !["runs.findings", "runs.claims"].includes(id)))
+    for (const id of Object.keys(byId).filter((id) => !["runs.findings", "runs.claims", "runs.original"].includes(id)))
       expect(byId[id].enabledWhen, id).toBeUndefined();
     // The listings of run metadata are chat-shaped; what carries stored free text is not.
     for (const id of ["runs.list", "runs.unit", "runs.children", "runs.findings"])
       expect(byId[id].surfaces?.chat).toBeUndefined();
-    for (const id of ["runs.get", "runs.events", "runs.friction", "runs.search", "runs.claims"])
+    for (const id of ["runs.get", "runs.events", "runs.friction", "runs.search", "runs.claims", "runs.original"])
       expect(byId[id].surfaces?.chat).toBe(false);
   });
 

@@ -97,6 +97,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 | Command | What it does | Surfaces |
 |---|---|---|
 | `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--thread <string>] [--parent <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>] [--mine] [--read-user <string>] [--read-repo <string>]` | List runs (live and persisted, newest first) — metadata only, never message text. | every surface |
+| `runs original <id> --gen <string>` | Inspect bounded stored evidence for one current original. Does not repeat writes, settle a run, or prove process ending. | CLI · HTTP · MCP |
 | `runs claims [--after <string>] [--limit <integer>]` | List persisted unknown native claim observations. These are not current holds or commit receipts; missing observations do not prove absence. | CLI · HTTP · MCP |
 | `runs get <id> [--include <messages\|audience\|shutdown>]` | One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic; `--include shutdown` checks the current target without contacting its runtime. | CLI · HTTP · MCP |
 | `runs events <id> [--after-seq <integer>] [--limit <integer>]` | A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content. | CLI · HTTP · MCP |

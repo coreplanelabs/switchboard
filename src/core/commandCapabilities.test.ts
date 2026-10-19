@@ -70,6 +70,7 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "friction.propose": (c) => c.runHistory,
   "runs.findings": (c) => c.runHistory,
   "runs.claims": (c) => c.runLedger,
+  "runs.original": (c) => c.runLedger,
   "review.abridge": (c) => c.runHistory && c.readingDiffAbridge,
   "review.status": (c) => c.runHistory && c.readingDiffAbridge,
   "repo.list": (c) => c.residents,
@@ -151,7 +152,8 @@ describe("enabledWhen on the core catalogue — which capability each command ne
 
   it("runs claims needs a ledger, findings needs history, and live reads stay on", () => {
     for (const cmd of everyCommand().filter((c) => c.id.startsWith("runs."))) {
-      if (["runs.findings", "runs.claims"].includes(cmd.id)) expect(cmd.enabledWhen, cmd.id).toBeDefined();
+      if (["runs.findings", "runs.claims", "runs.original"].includes(cmd.id))
+        expect(cmd.enabledWhen, cmd.id).toBeDefined();
       else expect(cmd.enabledWhen, cmd.id).toBeUndefined();
     }
   });

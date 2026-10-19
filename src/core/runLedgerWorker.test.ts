@@ -22,6 +22,35 @@ import { appendThreadTurn } from "./runLedger/threadSession.js";
 // step write's order (transcript before record), fenced answers as results,
 // and the same error classes as the run store.
 
+describe("bounded original evidence client", () => {
+  const id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const reply = () => ({
+    kind: "source",
+    resource: { type: "run", id, userId: "access:alice", channelId: "mcp:fixture", channelVisibility: "machine" },
+    threadKey: "mcp:fixture:original",
+    evidence: { version: 1, runId: id, gen: "g1", availability: "unavailable", reason: "fenced" },
+  });
+  it("keeps an unavailable original separate from a completed or retried request", async () => {
+    const { ledger } = stubWorker(() => ({ status: 200, data: reply() }));
+    expect(await ledger.readOriginal({ runId: id, gen: "g1" })).toMatchObject({
+      kind: "source",
+      evidence: { runId: id, gen: "g1", availability: "unavailable", reason: "fenced" },
+    });
+  });
+  it.each(["foreign-run", "private-field"] as const)(
+    "rejects %s evidence before it reaches the operator",
+    async (mode) => {
+      const source = reply();
+      const data =
+        mode === "foreign-run"
+          ? { ...source, resource: { ...source.resource, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } }
+          : { ...source, evidence: { ...source.evidence, debug: "PRIVATE_STATE" } };
+      const { ledger } = stubWorker(() => ({ status: 200, data }));
+      await expect(ledger.readOriginal({ runId: id, gen: "g1" })).rejects.toBeInstanceOf(PermanentStoreError);
+    },
+  );
+});
+
 function stubWorker(
   answer: (path: string, body: Record<string, unknown>) => { status: number; data?: unknown } = () => ({
     status: 200,
