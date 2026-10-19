@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Secret } from "../../secrets.js";
 import type { SlackThreadMessage } from "./threadTurns.js";
 import { resetSlackNameCaches } from "./lookups.js";
 import { SlackConversationReader, CLASSIFY_CACHE_MS, type ReferenceClient } from "./references.js";
@@ -111,7 +112,7 @@ describe("SlackConversationReader.parseConversationUrl — this workspace's gram
       const reader = new SlackConversationReader(client);
       await reader.ready();
       expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
-        { event: "slack.reference.identity.unavailable", error: message },
+        { event: "slack.reference.identity.unavailable", reader: "listener", error: message },
       ]);
       expect(reader.botUserId).toBeUndefined();
       expect(reader.parseConversationUrl("https://team.example/archives/C_PUB/p1789439332061189")).toBeUndefined();
@@ -121,6 +122,28 @@ describe("SlackConversationReader.parseConversationUrl — this workspace's gram
         channelId: "slack:C_PUB",
         messageId: "1789439332.061189",
       });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("names the failed reader from credential provenance without exposing its identity", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const token of [undefined, new Secret("private-reader-token", "PRIVATE_READER_TOKEN")]) {
+        const { client } = fakeClient({});
+        client.auth.test = async () => {
+          throw new Error("network unavailable");
+        };
+        const reader = new SlackConversationReader(client, Date.now, { botUserId: "UBOT_PRIVATE", token });
+        await reader.ready();
+        expect(reader.botUserId).toBeUndefined();
+        expect(reader.parseConversationUrl("https://team.example/archives/C_PUB/p1789439332061189")).toBeUndefined();
+      }
+      expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        { event: "slack.reference.identity.unavailable", reader: "listener", error: "network unavailable" },
+        { event: "slack.reference.identity.unavailable", reader: "read-account", error: "network unavailable" },
+      ]);
     } finally {
       warn.mockRestore();
     }

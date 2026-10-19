@@ -176,6 +176,7 @@ export class SlackConversationReader implements ConversationReader {
         console.warn(
           JSON.stringify({
             event: "slack.reference.identity.unavailable",
+            reader: options.token ? "read-account" : "listener",
             error: redactAndCap(error instanceof Error ? error.message : String(error)),
           }),
         );
