@@ -130,8 +130,9 @@ describe("Green review metrics", () => {
     expect(page.findAll(".green-stat").map((tile) => [tile.find("dd").text(), tile.find("p").text()])).toEqual([
       ["90%", "18 / 20"],
       ["100%", "18 / 18"],
-      ["10%", "2 / 21"],
-      ["10%", "2 / 21"],
+      // The legacy row has no workspace (out of the loss total) and no outcome (no verdict share).
+      ["10%", "2 / 20"],
+      ["No data", "0 / 0"],
     ]);
     expect(page.text()).toContain("Outcome not recorded1");
     expect(page.text()).toContain("Unclassified system errors2");
