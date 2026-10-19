@@ -25,6 +25,7 @@ export default defineConfig({
       "coordinator.test.ts",
       "modelProxyForwarding.test.ts",
       "githubDoorForwarding.test.ts",
+      "dashboardFallback.test.ts",
     ],
   },
 });

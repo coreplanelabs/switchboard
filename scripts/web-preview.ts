@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { maintenanceResponse } from "../src/core/maintenance.js";
+import { maintenancePageResponse } from "../src/channels/maintenancePage.js";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
@@ -2944,21 +2945,27 @@ createServer((req, res) => {
     return;
   }
   if (url.pathname === "/maintenance") {
-    const reply = maintenanceResponse(new Request("http://localhost/maintenance"), {
-      version: 1,
-      episode: {
-        id: "12345678-1234-4234-8234-123456789abc",
-        phase: "active",
-        scopes: ["all"],
-        reason: "Resident maintenance is in progress.",
-        channel: "COPS",
-        timing: "now",
-        actor: "cli:local",
-        updatedAt: NOW,
-        notice: { status: "sent" },
-        thread: { channel: "COPS", ts: "1.0", url: "https://example.slack.com/archives/COPS/p1000000" },
-      },
-    })!;
+    const reply = url.searchParams.has("outage")
+      ? maintenancePageResponse(
+          new Request("http://localhost/"),
+          "Switchboard web pages are temporarily unavailable.",
+          "Switchboard is not responding. The service may be restarting. Reload this page to check again.",
+        )
+      : maintenanceResponse(new Request("http://localhost/maintenance"), {
+          version: 1,
+          episode: {
+            id: "12345678-1234-4234-8234-123456789abc",
+            phase: "active",
+            scopes: ["all"],
+            reason: "Resident maintenance is in progress.",
+            channel: "COPS",
+            timing: "now",
+            actor: "cli:local",
+            updatedAt: NOW,
+            notice: { status: "sent" },
+            thread: { channel: "COPS", ts: "1.0", url: "https://example.slack.com/archives/COPS/p1000000" },
+          },
+        })!;
     res.writeHead(reply.status, Object.fromEntries(reply.headers));
     void reply.text().then((body) => res.end(body));
     return;
