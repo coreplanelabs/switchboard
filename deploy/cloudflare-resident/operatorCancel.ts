@@ -6,7 +6,23 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const instant = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const build = z.string().regex(/^[a-f0-9]{40}(?:@\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z)?$/);
 const producerSchema = z.object({ build, workerVersion: uuid }).strict();
-const sourceSchema = producerSchema.extend({ resource: z.string().regex(/^repo:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/) });
+// Older permits recorded these fields before a separate resource-annotation
+// write. Preserve the original null or short build exactly; the current
+// producer still needs its complete identity.
+const sourceSchema = z
+  .object({
+    build: z
+      .string()
+      .regex(/^[a-f0-9]{7,40}(?:@\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z)?$/)
+      .nullable(),
+    workerVersion: uuid.nullable(),
+    resource: z
+      .string()
+      .max(63)
+      .regex(/^repo:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)
+      .nullable(),
+  })
+  .strict();
 const drainSchema = z
   .object({
     since: z.string().datetime(),
