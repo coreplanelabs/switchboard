@@ -1,5 +1,5 @@
-import { readRequesterName } from "./runRequester.js";
-import { namesOf } from "../core/names.js";
+import type { PersonProfile } from "../core/names.js";
+import { readRequesterProfile } from "./runRequester.js";
 import { mapLimit } from "../core/mapLimit.js";
 import { HOME_PRIVATE_READ_CONCURRENCY } from "../core/budgets.js";
 import { hasWorkViewScope, workReadPredicate, workViewScopeOf } from "./workViewScope.js";
@@ -260,6 +260,7 @@ export interface LiveViewDeps {
   people?: () => readonly ViewablePerson[];
   /** Current display label. This does not change the run's requester or authority. */
   requesterName?: (id: string) => Promise<string | undefined>;
+  requesterProfile?: (id: string) => Promise<PersonProfile | undefined>;
   /** Receives one entry per allowed page/events history read and per refused
    *  tokenless read. Default: console.log. */
   audit?: (entry: HistoryReadAudit) => void;
@@ -631,7 +632,7 @@ export function createLiveViewHandler(
                 ),
                 visibleTo,
               ),
-              deps.requesterName,
+              deps.requesterProfile ?? deps.requesterName,
             ),
             nodeSseSink(req, res),
             () => startSseHeartbeat(req, res),
@@ -651,13 +652,17 @@ export function createLiveViewHandler(
       }
       const live = index.listActive().filter((s) => !privateWorkerRun(s) && matchesPredicate(visibleTo, s));
       const render = async (page: IndexPage) => {
-        const labels = await namesOf(
-          (id) => readRequesterName(deps.requesterName, id),
-          page.rows.flatMap((row) => (row.userId ? [row.userId] : [])),
+        const ids = [...new Set(page.rows.flatMap((row) => (row.userId ? [row.userId] : [])))];
+        const profiles = new Map(
+          await Promise.all(
+            ids.map(
+              async (id) => [id, await readRequesterProfile(deps.requesterProfile ?? deps.requesterName, id)] as const,
+            ),
+          ),
         );
         const rows = page.rows.map((row) => {
-          const userName = row.userId ? labels.get(row.userId) : undefined;
-          return userName ? { ...row, userName } : row;
+          const userProfile = row.userId ? profiles.get(row.userId) : undefined;
+          return userProfile ? { ...row, userName: userProfile.name, userProfile } : row;
         });
         // A session holding `all` may view the dashboard as a person (record 0053): the picker
         // offers the installation's people as the source last computed them and the page's

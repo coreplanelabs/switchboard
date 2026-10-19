@@ -1,4 +1,4 @@
-import { requesterName } from "./runRequester.js";
+import { requesterProfile, readRequesterProfile } from "./runRequester.js";
 import { observeAdmission } from "../core/organization/admissionTrace.js";
 import { agentMaintenanceRefusal } from "../core/maintenance.js";
 import { createHash } from "node:crypto";
@@ -45,6 +45,7 @@ import type { PageSeed, ViewablePerson } from "./webSeed.js";
 import { readableRuns } from "./liveView/viewer.js";
 import { accessActor, resolveAccessActor, callerFor, callerIdFor } from "./commandHttp.js";
 import { isServiceToken } from "./accessAuth.js";
+import type { PersonProfile } from "../core/names.js";
 import type { PersonLookup } from "./requester.js";
 import { holdsAll } from "../core/authz/viewAs.js";
 import {
@@ -133,6 +134,7 @@ export interface BrowserHomeWiringOptions {
   people(): readonly ViewablePerson[];
   channelsOf(actorId: string): Promise<ReadonlySet<string> | "unknown">;
   requesterLabel?(id: string): Promise<string | undefined>;
+  requesterProfile?(id: string): Promise<PersonProfile | undefined>;
   /** Trusted provider email facts narrow personal discovery, without linking private streams. */
   personByEmail?: PersonLookup;
   emailOf?(actorId: string): Promise<string | undefined>;
@@ -189,6 +191,7 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     }
   }
   const viewerLabels = new WeakMap<Actor, string>();
+  const viewerProfiles = new WeakMap<Actor, PersonProfile>();
   const discoverySlackProofs = new Map<string, { proof: Promise<NativeOrganizationProof>; expiresAt?: number }>();
   function discoverySlackProof(identity: ExternalIdentity): Promise<NativeOrganizationProof> {
     const key = identityKey(identity);
@@ -657,6 +660,8 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
         }
         const label = viewerLabels.get(previous.actor);
         if (label) viewerLabels.set(fresh.actor, label);
+        const profile = viewerProfiles.get(previous.actor);
+        if (profile && previous.actor.id === fresh.actor.id) viewerProfiles.set(fresh.actor, profile);
         return attachScope(
           fresh,
           workViewScopeOf(previous.actor).mode === "everyone" ? "everyone" : "mine",
@@ -714,7 +719,12 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     const actual = await authentication.resolveBrowser(id, msg);
     if (actual.status !== "resolved") return;
     const viewAs = viewAsFromCookie(req.headers.cookie);
-    const viewed = await readProjection({ actor: actual.actor, authentication: actual.authentication }, viewAs);
+    const [viewed, profile] = await Promise.all([
+      readProjection({ actor: actual.actor, authentication: actual.authentication }, viewAs),
+      readRequesterProfile(profileOfRequester, actual.actor.id),
+    ]);
+    const ownProfile = profile ?? (credential.email ? { name: credential.email } : undefined);
+    if (ownProfile) viewerProfiles.set(viewed.actor, ownProfile);
     const selected = viewed.actor.viewingAs?.id;
     const label = selected ? options.people().find((person) => person.id === selected)?.name : credential.email;
     if (label) viewerLabels.set(viewed.actor, label);
@@ -903,6 +913,18 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     };
     options.page(req, res, status, actor, title, enriched);
   }
+  const profileOfRequester = (id: string) =>
+    requesterProfile(id, {
+      organization: org,
+      store: installationStore,
+      browserIssuer: native?.browserIssuer,
+      mcpIssuer: native?.mcpIssuer,
+      slackTeam,
+      name: (userId) => options.requesterLabel?.(userId) ?? Promise.resolve(undefined),
+      profile: options.requesterProfile,
+      tokens: options.auth().tokens,
+      personByEmail: options.personByEmail,
+    });
   return {
     initialize,
     refreshNativeSources,
@@ -939,17 +961,9 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     context,
     tokenPageActor,
     currentTokenPageActor,
-    requesterName: (id: string) =>
-      requesterName(id, {
-        organization: org,
-        store: installationStore,
-        browserIssuer: native?.browserIssuer,
-        mcpIssuer: native?.mcpIssuer,
-        slackTeam,
-        name: (userId) => options.requesterLabel?.(userId) ?? Promise.resolve(undefined),
-        tokens: options.auth().tokens,
-        personByEmail: options.personByEmail,
-      }),
+    requesterName: async (id: string) => (await profileOfRequester(id))?.name,
+    requesterProfile: profileOfRequester,
+    viewerProfile: (actor: Actor) => viewerProfiles.get(actor),
     attentionRecipients: owners,
     page: sendPage,
     emoji,

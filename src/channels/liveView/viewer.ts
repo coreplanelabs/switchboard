@@ -1,4 +1,5 @@
-import { readRequesterName } from "../runRequester.js";
+import type { PersonProfile } from "../../core/names.js";
+import { readRequesterProfile } from "../runRequester.js";
 import { RUN_VIEW_POLL_MS } from "../../core/budgets.js";
 import type { IndexRunIdentity } from "../../core/runRegistry/indexFeed.js";
 import { hasWorkViewScope, workReadPredicate } from "../workViewScope.js";
@@ -116,24 +117,28 @@ export function visibleIndexFeed(
  * name lookup cannot resurrect a row after its removal. */
 export function namedIndexFeed(
   subscribe: (onEvent: IndexSubscriber) => Unsubscribe,
-  name?: (id: string) => Promise<string | undefined>,
+  name?: (id: string) => Promise<string | PersonProfile | undefined>,
 ): (onEvent: IndexSubscriber) => Unsubscribe {
   if (!name) return subscribe;
   return (onEvent) => {
     let closed = false;
     let tail = Promise.resolve();
-    const names = new Map<string, Promise<string | undefined>>();
+    const names = new Map<string, Promise<PersonProfile | undefined>>();
     const unsubscribe = subscribe((event) => {
       if (closed) return;
       const id = event.type === "upsert" ? event.run.userId : undefined;
       // Start replay lookups together; each requester shares one bounded read.
-      if (id && !names.has(id)) names.set(id, readRequesterName(name, id));
+      if (id && !names.has(id)) names.set(id, readRequesterProfile(name, id));
       const label = id ? names.get(id) : undefined;
       tail = tail
         .then(async () => {
-          const userName = await label;
+          const userProfile = await label;
           if (closed) return;
-          onEvent(event.type === "upsert" && userName ? { ...event, run: { ...event.run, userName } } : event);
+          const run =
+            event.type === "upsert" && userProfile
+              ? { ...event.run, userName: userProfile.name, userProfile }
+              : undefined;
+          onEvent(run ? { type: "upsert", run } : event);
         })
         .catch(() => undefined);
     });

@@ -200,7 +200,7 @@ describe("tooltips", () => {
     expect(sourceTip(row({ userName: "alice" }))).toBe("via Slack · alice");
     expect(sourceTip(row())).toBe("via Slack · Unknown user");
     expect(sourceTip(row({ channelId: "cli:local", userId: "cli:alice" }))).toBe("via CLI · alice");
-    expect(sourceTip(row({ channelId: "weird" }))).toBe("via unknown · Unknown user");
+    expect(sourceTip(row({ channelId: "weird" }))).toBe("via Unknown · Unknown user");
   });
 });
 

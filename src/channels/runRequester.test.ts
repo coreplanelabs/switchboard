@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryOrganizationStore } from "../core/organization/memory.js";
 import type { ExternalIdentity } from "../core/identity/contract.js";
-import { requesterName, readRequesterName } from "./runRequester.js";
+import { requesterName, requesterProfile, readRequesterName } from "./runRequester.js";
 
 const browser: ExternalIdentity = { issuer: "https://team.example.test", tenant: null, subject: "account-1" };
 const slack: ExternalIdentity = { issuer: "https://slack.com", tenant: "T1", subject: "UALICE" };
@@ -35,6 +35,21 @@ async function fixture() {
 }
 
 describe("requesterName", () => {
+  it("uses one current profile across verified Slack, browser and ingress accounts", async () => {
+    const { options } = await fixture();
+    const profile = { name: "Alice Chen", avatarUrl: "https://avatars.slack-edge.com/alice.jpg" };
+    const current = {
+      ...options,
+      profile: async (id: string) => (id === "slack:UALICE" ? profile : undefined),
+      tokens: { a: { subject: "ingress", email: "alice@example.test" } },
+      personByEmail: async () => ({ id: "slack:UALICE", name: "Old name" }),
+    };
+    expect(await requesterProfile("slack:UALICE", current)).toEqual(profile);
+    expect(await requesterProfile("access:account-1", current)).toEqual(profile);
+    expect(await requesterProfile("mcp:ingress", current)).toEqual(profile);
+    expect(await requesterProfile("http:staging-operator", current)).toBeUndefined();
+    expect(await requesterProfile("access:unlinked", current)).toBeUndefined();
+  });
   it("gives linked browser and Slack identities the same profile label without changing attribution", async () => {
     const { options } = await fixture();
     expect(await requesterName("access:account-1", options)).toBe("Alice Chen");

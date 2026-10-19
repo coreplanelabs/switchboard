@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RequesterAvatar from "../../src/components/runs/RequesterAvatar.vue";
 import { onClickOutside } from "@vueuse/core";
 import { inject, ref } from "vue";
 import { SeedKey } from "../../src/lib/seed";
@@ -60,10 +61,19 @@ async function change(value: string) {
       :aria-expanded="open"
       @click="open = !open"
     >
-      <UIcon name="i-lucide-circle-user-round" /><span>{{
-        seed?.viewingAs?.name ?? seed?.viewingAs?.id ?? seed?.asUser?.name ?? seed?.asUser?.id ?? "Your account"
-      }}</span
-      ><UIcon name="i-lucide-chevron-down" />
+      <RequesterAvatar
+        v-if="seed?.signedInUser?.name"
+        :name="seed.signedInUser.name"
+        :url="seed.signedInUser.avatarUrl"
+      />
+      <UIcon v-else name="i-lucide-circle-user-round" />
+      <span class="green-user-label">
+        <span class="green-user-name">{{ seed?.signedInUser?.name ?? "Your account" }}</span>
+        <span v-if="seed?.viewingAs" class="green-user-read-target text-muted"
+          >Viewing {{ seed.viewingAs.name ?? seed.viewingAs.id }}</span
+        >
+      </span>
+      <UIcon name="i-lucide-chevron-down" />
     </button>
     <div v-if="open" class="green-user-panel" aria-label="Dashboard view">
       <p class="text-xs text-muted mb-2">Dashboard view</p>
@@ -108,6 +118,12 @@ async function change(value: string) {
   min-height: 40px;
   font-size: 12px;
   max-width: min(44vw, 190px);
+}
+.green-user-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
 }
 .green-user-trigger span {
   overflow: hidden;

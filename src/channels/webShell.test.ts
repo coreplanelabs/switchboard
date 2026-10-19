@@ -10,7 +10,7 @@ import {
   WEB_SEED_HEADERS,
   type ShellAssets,
 } from "./webShell.js";
-import { serializeSeed, SEED_ELEMENT_ID, type WebSeed } from "./webSeed.js";
+import { serializeSeed, SEED_ELEMENT_ID, type PageSeed, type WebSeed } from "./webSeed.js";
 import { FAVICON_BAD, FAVICON_DEFAULT, FAVICON_IDLE, FAVICON_LIVE, FAVICON_WARN } from "./favicon.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import type { Actor } from "../core/authz/types.js";
@@ -22,7 +22,7 @@ const withTitle = (title: string, over: Record<string, unknown>): WebSeed =>
   ({ ...over, title, capabilities: ALL_CAPABILITIES }) as unknown as WebSeed;
 
 describe("WEB_HTML_HEADERS", () => {
-  it("locks the page down: self-only scripts, no external assets, no framing, no caching", () => {
+  it("locks the page down: self-only scripts, approved images, no framing, no caching", () => {
     expect(WEB_HTML_HEADERS["content-type"]).toBe("text/html; charset=utf-8");
     const csp = WEB_HTML_HEADERS["content-security-policy"];
     expect(csp).toContain("default-src 'none'");
@@ -190,6 +190,32 @@ describe("makePageSender — the shell for a document request, the seed for the 
   const send = makePageSender(assets, ALL_CAPABILITIES);
   const pageSeed = { page: "runNotFound" as const, retentionDays: 30 };
   const viewingAs: Actor = { viewingAs: { id: "slack:UALICE", name: "alice" } } as unknown as Actor;
+
+  it("stamps the actual viewer profile and refuses a profile supplied by page data", () => {
+    const sender = makePageSender(assets, ALL_CAPABILITIES, {
+      viewerProfile: (actor) =>
+        actor.id === "access:owner"
+          ? { name: "Owner", avatarUrl: "https://avatars.slack-edge.com/owner.jpg" }
+          : undefined,
+    });
+    const actor = { id: "access:owner", viewingAs: { id: "slack:UIVY", name: "ivy" } } as unknown as Actor;
+    const response = capture();
+    sender(request("application/json"), response.res, 200, actor, "Run", {
+      ...pageSeed,
+      signedInUser: { id: "slack:UIVY", name: "ivy" },
+    } as PageSeed);
+    expect(JSON.parse(response.body).signedInUser).toEqual({
+      id: "access:owner",
+      name: "Owner",
+      avatarUrl: "https://avatars.slack-edge.com/owner.jpg",
+    });
+    const absent = capture();
+    sender(request("application/json"), absent.res, 200, undefined, "Run", {
+      ...pageSeed,
+      signedInUser: { id: "slack:UIVY", name: "ivy" },
+    } as PageSeed);
+    expect(JSON.parse(absent.body).signedInUser).toBeUndefined();
+  });
 
   it.each([
     "identities",

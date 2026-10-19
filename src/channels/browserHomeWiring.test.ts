@@ -77,7 +77,7 @@ async function fixture(
   native = false,
   emailOwners: Pick<
     Parameters<typeof createBrowserHomeWiring>[0],
-    "personByEmail" | "emailOf" | "onWorkViewResolved"
+    "personByEmail" | "emailOf" | "onWorkViewResolved" | "requesterProfile"
   > & { now?: () => number } = {},
   defaultGithub = false,
 ) {
@@ -259,6 +259,31 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
+  it("keeps the actual person's linked profile when another person's work is selected", async () => {
+    const profile = { name: "Alice", avatarUrl: "https://avatars.slack-edge.com/alice.jpg" };
+    const s = await fixture(true, true, undefined, undefined, undefined, false, {
+      requesterProfile: async (id) => (id === "slack:UALICE" ? profile : undefined),
+    });
+    s.people.push({ id: "access:bob", name: "Bob" });
+    await s.wiring.initialize();
+    const browser = s.wiring.native()!.browserIdentity(s.credential);
+    const created = await s.backing.directory.createPerson();
+    if (created.status !== "created") throw new Error("Missing test person");
+    for (const identity of [browser, { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" }]) {
+      await s.backing.directory.change({
+        action: "link",
+        identity,
+        personId: created.person.id,
+        expectedRevision: 0,
+        actor: identity,
+        proof: { method: "dual-authentication", version: 1 },
+      });
+    }
+    const context = await s.wiring.context(s.request("sb-view-as=access%3Abob"), s.credential);
+    expect(context?.actor.viewingAs?.id).toBe("access:bob");
+    expect(s.wiring.viewerProfile(context!.actor)).toEqual(profile);
+  });
+
   it("loads repository choices with the default GitHub client used by production", async () => {
     const repos = vi.spyOn(RestGithubApi.prototype, "listRepos").mockResolvedValue([
       { fullName: "sample/api", private: false, defaultBranch: "main", description: null },

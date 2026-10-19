@@ -84,14 +84,19 @@ const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cw
 // paints the smallest installation instead — Runs alone, no Scheduled tab, no
 // docs link — so both shapes of the header can be seen and screenshotted.
 const CAPABILITIES = process.env.SWITCHBOARD_PREVIEW_CAPABILITIES === "minimal" ? NO_CAPABILITIES : ALL_CAPABILITIES;
-const documentPage = makePageSender(assets.entry, CAPABILITIES);
+const PREVIEW_ACTOR: Actor = {
+  kind: "user",
+  id: "access:preview",
+  grants: { actions: "all", channels: "all", repos: "all" },
+};
+const documentPage = makePageSender(assets.entry, CAPABILITIES, { viewerProfile: () => ({ name: "Alice" }) });
 const emoji = process.env.SWITCHBOARD_PREVIEW_EMOJI_DIR
   ? createSlackEmojiCache({ store: new FileEmojiStore(process.env.SWITCHBOARD_PREVIEW_EMOJI_DIR) })
   : undefined;
 await emoji?.load();
 const sendPage: PageSender = (req, res, status, actor, title, seed) => {
   const enriched = { ...seed, ...(emoji ? { emoji: emoji.catalog() } : {}) };
-  documentPage(req, res, status, actor, title, enriched);
+  documentPage(req, res, status, actor ?? PREVIEW_ACTOR, title, enriched);
 };
 
 const row = (over: Partial<RunIndexRowSeed>): RunIndexRowSeed => ({
@@ -202,7 +207,7 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
   }),
   row({
     id: "hist-4",
-    label: 'review · acme/api · "please review https://github.com/acme/api/pull/42 — the retry-queue change"',
+    label: 'review · acme/api · "please review https://github.com/acme/api/pull/42 — the retry-queue change…"',
     finished: true,
     persisted: true,
     startedAt: NOW - 3 * 3_600_000,

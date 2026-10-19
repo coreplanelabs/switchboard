@@ -1,3 +1,4 @@
+import type { PersonProfile } from "../../core/names.js";
 // The cached, best-effort reads the adapter makes off the Slack Web API — the
 // channel's and the sender's display names, a user's email, the workspace URL —
 // and the permalink built from that URL. A failed read is never cached and
@@ -17,7 +18,7 @@ interface SlackUserRecord {
   deleted?: boolean;
   is_bot?: boolean;
   is_app_user?: boolean;
-  profile?: { display_name?: string; real_name?: string; email?: string };
+  profile?: { display_name?: string; real_name?: string; email?: string; image_48?: string };
 }
 
 export interface NameLookupClient {
@@ -107,7 +108,7 @@ export function resolvePersonByEmail(
 // cheap to re-resolve, so a simple FIFO bound suffices; no LRU is warranted.
 const NAME_CACHE_MAX = 1000;
 const channelNameCache = new Map<string, string>();
-const userNameCache = new Map<string, string>();
+const userProfileCache = new Map<string, PersonProfile>();
 
 function cachePut(cache: Map<string, string>, key: string, value: string): void {
   cache.set(key, value);
@@ -137,17 +138,27 @@ export async function resolveChannelName(client: NameLookupClient, channel: stri
 /** Resolve a user's display name (cached, best-effort): profile.display_name,
  *  then real_name, then the handle. Same failure/caching contract as
  *  `resolveChannelName`. Exported for tests. */
-export async function resolveUserName(client: NameLookupClient, user: string): Promise<string | undefined> {
-  const hit = userNameCache.get(user);
+export async function resolveUserProfile(client: NameLookupClient, user: string): Promise<PersonProfile | undefined> {
+  const hit = userProfileCache.get(user);
   if (hit !== undefined) return hit;
   try {
     const u = (await client.users.info({ user })).user;
-    const name = u?.profile?.display_name || u?.profile?.real_name || u?.real_name || u?.name;
-    if (name) cachePut(userNameCache, user, name);
-    return name || undefined;
+    const name = displayNameOf(u);
+    if (!name) return;
+    const photo = u?.profile?.image_48;
+    const avatarUrl = photo?.startsWith("https://avatars.slack-edge.com/") ? photo : undefined;
+    const profile: PersonProfile = { name, ...(avatarUrl ? { avatarUrl } : {}) };
+    userProfileCache.set(user, profile);
+    if (userProfileCache.size > NAME_CACHE_MAX) userProfileCache.delete(userProfileCache.keys().next().value!);
+    return profile;
   } catch {
+    console.warn(JSON.stringify({ event: "runs.requester_profile.degraded", reason: "failed" }));
     return undefined;
   }
+}
+
+export async function resolveUserName(client: NameLookupClient, user: string): Promise<string | undefined> {
+  return (await resolveUserProfile(client, user))?.name;
 }
 
 /** A user's email (`profile.email`), present only when the app holds
@@ -167,7 +178,7 @@ export async function resolveUserEmail(client: NameLookupClient, user: string): 
 /** Clear the name caches and the person-link cache — for tests, so cache-hit assertions start clean. */
 export function resetSlackNameCaches(): void {
   channelNameCache.clear();
-  userNameCache.clear();
+  userProfileCache.clear();
   personByEmailCache.clear();
   personByEmailInFlight.clear();
 }

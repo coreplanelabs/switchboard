@@ -35,6 +35,98 @@ afterEach(() => {
 });
 
 describe("RunRow", () => {
+  it("restores a shortened historical label from the retained request on focus", async () => {
+    fetchMock.mockResolvedValueOnce(
+      Response.json({
+        page: "run",
+        title: "Run",
+        mode: "history",
+        id: "run-1",
+        events: [{ type: "input", text: "Inspect every deployment and show the complete original request.", seq: 1 }],
+      }),
+    );
+    const w = mountRow(finished("completed", { label: 'review · acme/web · "Inspect every deployment…"' }));
+    expect(w.get(".snippet").text()).toBe("Inspect every deployment…");
+    await w.get(".snippet").trigger("pointerenter");
+    await w.get(".snippet").trigger("focus");
+    await vi.waitFor(() =>
+      expect(w.get(".snippet").text()).toBe("Inspect every deployment and show the complete original request."),
+    );
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual(["/runs/run-1"]);
+  });
+
+  it("restores the retained request when the whole historical label was shortened", async () => {
+    fetchMock.mockResolvedValueOnce(
+      Response.json({
+        page: "run",
+        title: "Run",
+        mode: "history",
+        id: "run-1",
+        events: [{ type: "input", text: "Inspect every deployment and show the complete original request.", seq: 1 }],
+      }),
+    );
+    const repo = "an-organization-with-a-long-valid-name/" + "repository-".repeat(9);
+    const label =
+      ("review · " + repo + ' · "Inspect every deployment and show the complete original request."').slice(0, 159) +
+      "…";
+    const w = mountRow(finished("completed", { label }));
+    await w.get(".snippet").trigger("focus");
+    await vi.waitFor(() =>
+      expect(w.get(".snippet").text()).toBe("Inspect every deployment and show the complete original request."),
+    );
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual(["/runs/run-1"]);
+  });
+
+  it("keeps the current read scope and rejects another run's historical prompt", async () => {
+    fetchMock.mockResolvedValueOnce(
+      Response.json({
+        page: "run",
+        title: "Run",
+        mode: "history",
+        id: "another-run",
+        events: [{ type: "input", text: "Another person's private request.", seq: 1 }],
+      }),
+    );
+    const w = mountRow(finished("completed", { label: 'review · acme/web · "Inspect every deployment…"' }));
+    await w.vm.$router.push("/runs?readUser=slack%3ABOB&readRepo=acme%2Fweb&t=foreign");
+    await w.get(".snippet").trigger("focus");
+    await vi.waitFor(() =>
+      expect(fetchMock.mock.calls[0]?.[0]).toBe("/runs/run-1?readUser=slack%3ABOB&readRepo=acme%2Fweb"),
+    );
+    await nextTick();
+    expect(w.get(".snippet").text()).toBe("Inspect every deployment…");
+  });
+
+  it("keeps a historical label when the retained request is unavailable", async () => {
+    fetchMock.mockResolvedValueOnce(Response.json({ page: "runNotFound", title: "Run not found" }, { status: 404 }));
+    const w = mountRow(finished("completed", { label: 'review · acme/web · "Inspect every deployment…"' }));
+    await w.get(".snippet").trigger("focus");
+    await vi.waitFor(() => expect(fetchMock.mock.calls[0]?.[0]).toBe("/runs/run-1"));
+    await nextTick();
+    expect(w.get(".snippet").text()).toBe("Inspect every deployment…");
+  });
+  it("shows the requester beside the title and leaves non-PR context empty", () => {
+    const w = mountRow(row({ label: "Synthetic reset fixture", agent: "general", userName: "Staging operator" }));
+    expect(w.get(".primary .who .name").text()).toBe("Staging operator");
+    expect(w.get(".snippet").text()).toBe("Synthetic reset fixture");
+    expect(w.find(".scope").exists()).toBe(false);
+    expect(w.find(".repo").exists()).toBe(false);
+    expect(w.get(".facts").text()).toContain("4 events");
+  });
+  it("shows the profile photo without replacing run attribution", async () => {
+    const w = mountRow(
+      row({
+        userName: "Alice Chen",
+        userProfile: { name: "Alice Chen", avatarUrl: "https://avatars.slack-edge.com/test.jpg" },
+      }),
+    );
+    expect(w.get(".primary .who .name").text()).toBe("Alice Chen");
+    expect(w.get(".who img").attributes("src")).toBe("https://avatars.slack-edge.com/test.jpg");
+    expect(w.get(".who").attributes("data-user-id")).toBe("slack:UACME1");
+    await w.get(".who img").trigger("error");
+    expect(w.get(".who").text()).toBe("ACAlice Chen");
+  });
+
   it("keeps the full prompt until a generated title arrives in the feed", async () => {
     const prompt = "Check the release. Then inspect every deployment and explain the remaining work. ".repeat(6);
     const run = reactive(row({ prompt }));
@@ -48,7 +140,7 @@ describe("RunRow", () => {
   it("preserves the public agent label when structured metadata names an internal preset", () => {
     const w = mountRow(row({ label: "main · private conversation", agent: "orchestrator" }));
     expect(w.find(".agent").text()).toBe("main");
-    expect(w.find(".scope").text()).toBe("private conversation");
+    expect(w.find(".snippet").text()).toBe("private conversation");
   });
 
   it("shows a labelless remote run's agent and current work from structured metadata", () => {
@@ -79,30 +171,25 @@ describe("RunRow", () => {
     expect(mountRow(row()).find("li.run").attributes("data-persisted")).toBeUndefined();
   });
 
-  it("renders the label as agent chip (hue allow-listed) · repo tag (owner dimmed, then the name — it must read as a repository, not as another surface label; linked, slug on hover) · snippet", () => {
+  it("renders the agent chip and full title without non-PR repository context", () => {
     const w = mountRow(row());
     const agent = w.find(".agent");
     expect(agent.text()).toBe("coding");
     expect(agent.attributes("data-agent-hue")).toBe("coding");
-    const repo = w.find("a.repo");
-    expect(repo.text()).toBe("acme/web");
-    expect(repo.find(".owner").text()).toBe("acme/");
-    expect(repo.find(".owner").classes()).toContain("text-dimmed");
-    expect(repo.find(".name").text()).toBe("web");
-    expect(repo.attributes("href")).toBe("https://github.com/acme/web");
-    expect(repo.attributes("rel")).toBe("noopener noreferrer");
+    expect(w.find("a.repo").exists()).toBe(false);
     expect(w.find(".snippet").text()).toBe("fix the build");
     // hostile agent name → the neutral chip class, never a raw-name class
     const evil = mountRow(row({ label: 'evil"><b · x · "y"' }));
     expect(evil.find(".agent").exists()).toBe(false); // not agent-shaped → whole label as scope
-    expect(evil.find(".scope").text()).toBe('evil"><b · x · "y"');
+    expect(evil.find(".snippet").text()).toBe('evil"><b · x · "y"');
     const custom = mountRow(row({ label: "triage · acme/web" }));
     expect(custom.find(".agent").attributes("data-agent-hue")).toBe("other");
   });
 
-  it("a chat scope stays a scope (no repo link); a hostile repo-shaped label never links", () => {
+  it("omits chat scope metadata and never links a hostile repository label", () => {
     const chat = mountRow(row({ label: 'general · #dev · alice · "hi"' }));
-    expect(chat.find(".scope").text()).toBe("#dev · alice");
+    expect(chat.find(".snippet").text()).toBe("hi");
+    expect(chat.find(".scope").exists()).toBe(false);
     expect(chat.find("a.repo").exists()).toBe(false);
     const hostile = mountRow(row({ label: 'coding · javascript:alert(1)//x · "y"' }));
     expect(hostile.find("a.repo").exists()).toBe(false);
@@ -143,10 +230,10 @@ describe("RunRow", () => {
     ).toBe(false);
   });
 
-  it("shows a person's label in the metadata line and hides raw account ids", () => {
+  it("shows a person's label beside the title and hides raw account ids", () => {
     const named = mountRow(row({ userName: "Alice Chen" }));
-    expect(named.find(".metadata .who .name").text()).toBe("Alice Chen");
-    expect(named.find(".metadata a.repo").text()).toBe("acme/web");
+    expect(named.find(".primary .who .name").text()).toBe("Alice Chen");
+    expect(named.find(".metadata a.repo").exists()).toBe(false);
     expect(named.find(".primary .snippet").text()).toBe("fix the build");
     expect(mountRow(row()).find(".who .name").text()).toBe("Unknown user");
     expect(
@@ -161,6 +248,18 @@ describe("RunRow", () => {
     ).toBe("alice");
   });
 
+  it.each([
+    ["mcp", "MCP"],
+    ["http", "API (HTTP)"],
+    ["cli", "CLI"],
+    ["web", "Web"],
+    ["unknown", "Unknown"],
+  ])("shows the %s source icon with a visible text label", (kind, label) => {
+    const w = mountRow(row({ channelId: kind + ":default", userId: "http:staging-operator" }));
+    expect(w.get(".source").text()).toBe(label);
+    expect(w.find(".source svg").exists()).toBe(true);
+    expect(w.get(".who .name").text()).toBe("staging-operator");
+  });
   it("shows the Slack icon on the row with a source link and a descriptive accessible label", () => {
     const linked = mountRow(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "alice" }));
     const a = linked.find("a.source");
@@ -330,11 +429,11 @@ describe("RunRow", () => {
 
   it("a click on a tooltip cell (not a link or button) goes where the row goes", async () => {
     const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
-    const w = mountRow(row({ token: "tok-1" }));
+    const w = mountRow(row({ token: "tok-1", sourceUrl: "https://acme.slack.com/archives/C1/p1" }));
     await w.find(".elapsed").trigger("click");
     expect(nav).toHaveBeenCalledWith("/runs/run-1?t=tok-1");
     nav.mockClear();
-    await w.find("a.repo").trigger("click");
+    await w.find("a.source").trigger("click");
     expect(nav).not.toHaveBeenCalled();
   });
 
