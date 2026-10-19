@@ -12,7 +12,8 @@ import { MINUTE_MS, SECOND_MS } from "../src/core/budgets.js";
 import { RUN_STORE_KEY } from "../src/core/runStoreConstants.js";
 import { analyzeRunFriction } from "../src/core/runFriction.js";
 import type { RunRecord } from "../src/core/runRecord.js";
-import { MaintenanceService, WorkerMaintenanceStore } from "../src/core/maintenance.js";
+import { WorkerMaintenanceStore } from "../src/core/maintenance.js";
+import { withStagingResetMaintenance } from "../src/deploy/stagingResetMaintenance.js";
 import { importCredentialKey, sealCredential, openCredential } from "../src/mcp/sealed.js";
 import { loadProfileOnHost, readConfigForPush } from "../src/deploy/run.js";
 import { stagingProblems } from "../src/deploy/staging.js";
@@ -58,7 +59,7 @@ const origin = `https://${profile.workers.memory!.hostname}`;
 const residentOrigin = `https://${profile.workers.resident!.hostname}`;
 const residentAdmin = readFileSync(join(source, "RESIDENT_ADMIN_TOKEN"), "utf8").trim();
 const actor = `reset-controller:${process.env.GITHUB_ACTOR}`;
-const maintenance = new MaintenanceService({ store: new WorkerMaintenanceStore({ baseUrl: origin, token }) });
+const maintenanceStore = new WorkerMaintenanceStore({ baseUrl: origin, token });
 const commit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const evidence: unknown[] = [];
 const native = new ResetCloudflare(profile.account, process.env.CLOUDFLARE_API_TOKEN!);
@@ -154,6 +155,7 @@ async function waitForResidents() {
   throw new Error("staging residents did not finish their existing lifecycle work");
 }
 
+run(["--account", profile.account, "--plan", join(directory, "preflight-plan.json")]);
 let fixtureRegistration = (await readRegistrations())[0];
 let createdRegistration: string | undefined;
 if (!fixtureRegistration) {
@@ -191,255 +193,255 @@ for (const cycle of [1, 2]) {
     .passthrough()
     .parse(await post("/runs/live", { storeKey: RUN_STORE_KEY }));
   if (live.runs.length) throw new Error("staging reset waits for active work to finish");
-  const hold = await maintenance.start(
-    { scopes: ["all"], reason: "Isolated staging reset validation", channel: "staging-reset-fixture" },
-    actor,
-  );
-  if (!hold.episode || hold.episode.phase !== "active")
-    throw new Error("staging reset maintenance did not close access");
-  const id = randomUUID();
-  const thread = `http:reset-fixture:${id}`;
-  const gen = `reset-fixture-${id}`;
-  const session = `${thread}:general`;
-  const scopeKey = `user:http:reset-fixture-${id}`;
-  const model = config.defaults?.models?.general;
-  if (!model) throw new Error("staging fixture needs its configured General model reference");
-  const now = systemClock();
-  const event = {
-    type: "tool_call" as const,
-    tool: "read_file",
-    summary: "Synthetic reset fixture; no tool was executed",
-    seq: 1,
-  };
-  const record: RunRecord = {
-    id,
-    label: "Synthetic reset fixture",
-    agent: "general",
-    model,
-    channelId: "http:reset-fixture",
-    userId: "http:reset-fixture",
-    threadKey: thread,
-    channelVisibility: "machine",
-    startedAt: now - SECOND_MS,
-    finishedAt: now,
-    status: "completed",
-    eventCount: 1,
-    storedEventCount: 1,
-    truncated: false,
-    events: [event],
-    diagnosis: analyzeRunFriction([event]),
-  };
-  equal((await post("/runs/put", { storeKey: RUN_STORE_KEY, record })).ok, true, "history seed");
-  equal((await post("/runs/session/owner", { key: session, runId: id, gen })).ok, true, "session owner");
-  const rows = [
-    {
-      idx: 0,
-      part: 0,
-      json: JSON.stringify({ role: "assistant", part: { type: "text", text: "Synthetic reset fixture" } }),
-    },
-  ];
-  equal(
-    (await post("/runs/session/write", { key: session, runId: id, gen, rows, attachments: [] })).ok,
-    true,
-    "session seed",
-  );
-  equal((await post("/runs/transcript/owner", { runId: id, gen })).ok, true, "legacy transcript owner");
-  equal(
-    (await post("/runs/transcript/write", { runId: id, gen, rows, attachments: [] })).ok,
-    true,
-    "legacy transcript seed",
-  );
-  const memorySeed = await post("/write", {
-    scopeKey,
-    records: [
+  await withStagingResetMaintenance(maintenanceStore, actor, async ({ episodeId, apply }) => {
+    const id = randomUUID();
+    const thread = `http:reset-fixture:${id}`;
+    const gen = `reset-fixture-${id}`;
+    const session = `${thread}:general`;
+    const scopeKey = `user:http:reset-fixture-${id}`;
+    const model = config.defaults?.models?.general;
+    if (!model) throw new Error("staging fixture needs its configured General model reference");
+    const now = systemClock();
+    const event = {
+      type: "tool_call" as const,
+      tool: "read_file",
+      summary: "Synthetic reset fixture; no tool was executed",
+      seq: 1,
+    };
+    const record: RunRecord = {
+      id,
+      label: "Synthetic reset fixture",
+      agent: "general",
+      model,
+      channelId: "http:reset-fixture",
+      userId: "http:reset-fixture",
+      threadKey: thread,
+      channelVisibility: "machine",
+      startedAt: now - SECOND_MS,
+      finishedAt: now,
+      status: "completed",
+      eventCount: 1,
+      storedEventCount: 1,
+      truncated: false,
+      events: [event],
+      diagnosis: analyzeRunFriction([event]),
+    };
+    equal((await post("/runs/put", { storeKey: RUN_STORE_KEY, record })).ok, true, "history seed");
+    equal((await post("/runs/session/owner", { key: session, runId: id, gen })).ok, true, "session owner");
+    const rows = [
       {
-        kind: "fact",
-        text: "Reset fixture stores the value alpha.",
-        keywords: ["reset", "fixture"],
-        sourceThreadKey: thread,
-        sourceRunId: id,
+        idx: 0,
+        part: 0,
+        json: JSON.stringify({ role: "assistant", part: { type: "text", text: "Synthetic reset fixture" } }),
       },
-    ],
-  });
-  equal(memorySeed.inserted, 1, "learned memory seed");
-  const prior = await post("/config/get", { key: "reset-fixture" });
-  const document = { value: "alpha", repository: "acme/reset-fixture" };
-  equal(
-    (await post("/config/put", { key: "reset-fixture", expectedVersion: prior.version, document })).ok,
-    true,
-    "settings seed",
-  );
-  const sealed = await sealCredential(key, "org:reset-fixture", "synthetic credential", now);
-  equal((await post("/config/secrets/put", { sealed })).ok, true, "credential seed");
-  const personalToken = {
-    digest: createHash("sha256").update(`reset-fixture-${id}`).digest("hex"),
-    subject: `personal:${id}`,
-    userId: `access:${id}`,
-    email: "reset-fixture@example.invalid",
-    createdAt: now,
-    approval: {
-      version: 1,
-      issuer: "https://reset-fixture.invalid",
-      audience: "reset-fixture",
-      organization: config.organization,
-      subject: id,
-    },
-  };
-  equal((await post("/config/personal-tokens/put", { token: personalToken })).ok, true, "personal token seed");
-  equal(
-    (await post("/config/personal-tokens/get", { digest: personalToken.digest })).token,
-    personalToken,
-    "personal token seed read",
-  );
-  const identity = { issuer: "https://reset-fixture.invalid", tenant: null, subject: id };
-  const created = z
-    .object({ status: z.literal("created"), person: z.object({ id: z.string() }).passthrough() })
-    .passthrough()
-    .parse(
-      await post("/organization/directory", { installation: config.organization, command: { action: "createPerson" } }),
-    );
-  const linked = await post("/organization/directory", {
-    installation: config.organization,
-    command: {
-      action: "change",
-      change: {
-        action: "link",
-        identity,
-        personId: created.person.id,
-        expectedRevision: 0,
-        actor: identity,
-        proof: { method: "dual-authentication", version: 1 },
-      },
-    },
-  });
-  equal(linked.status, "changed", "identity seed");
-  const objectKeys = [
-    [profile.artifacts!.bucket, `runs/reset-fixture-${id}/out.txt`],
-    [`${profile.workers.resident!.script}-cache`, `backups/reset-fixture-${id}/data.sqsh`],
-  ];
-  for (const [bucket, object] of objectKeys) {
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${profile.account}/r2/buckets/${bucket}/objects/${object}`,
-      {
-        method: "PUT",
-        headers: { authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`, "content-type": "text/plain" },
-        body: "synthetic reset fixture",
-        redirect: "error",
-        signal: AbortSignal.timeout(MINUTE_MS),
-      },
-    );
-    if (!response.ok) throw new Error("staging R2 fixture write is unverified");
+    ];
     equal(
-      (await native.bucket(bucket)).objects.some((entry) => entry.key === object && entry.size === 23),
+      (await post("/runs/session/write", { key: session, runId: id, gen, rows, attachments: [] })).ok,
       true,
-      "R2 seed",
+      "session seed",
     );
-  }
-  const planPath = join(directory, `cycle-${cycle}-plan.json`);
-  const receipt = join(directory, `cycle-${cycle}-execution.jsonl`);
-  run(["--account", profile.account, "--plan", planPath]);
-  const planned = z
-    .object({ plan: z.object({ sha256: z.string() }).passthrough() })
-    .passthrough()
-    .parse(JSON.parse(readFileSync(planPath, "utf8")));
-  // The preview must not change any of the saved fixture values.
-  equal((await post("/runs/get", { storeKey: RUN_STORE_KEY, id })).record !== null, true, "preview history");
-  equal((await post("/config/get", { key: "reset-fixture" })).document, document, "preview settings");
-  run([
-    "--account",
-    profile.account,
-    "--plan",
-    planPath,
-    "--apply",
-    planned.plan.sha256,
-    "--maintenance",
-    hold.episode.id,
-    "--receipt",
-    receipt,
-  ]);
-  equal((await post("/runs/get", { storeKey: RUN_STORE_KEY, id })).record, null, "old run removal");
-  equal((await post("/runs/session/read", { key: session, from: 0, to: 2 })).rows, [], "old session removal");
-  equal((await post("/runs/transcript/read", { runId: id })).rows, [], "old transcript removal");
-  equal((await post("/list", { scopeKey, limit: 1 })).records, [], "learned memory removal");
-  for (const [bucket, object] of objectKeys)
+    equal((await post("/runs/transcript/owner", { runId: id, gen })).ok, true, "legacy transcript owner");
     equal(
-      (await native.bucket(bucket)).objects.some((entry) => entry.key === object),
-      false,
-      "old R2 object removal",
+      (await post("/runs/transcript/write", { runId: id, gen, rows, attachments: [] })).ok,
+      true,
+      "legacy transcript seed",
     );
-  equal((await post("/config/get", { key: "reset-fixture" })).document, document, "settings preservation");
-  const restoredCredential = await post("/config/secrets/get", { serverId: "org:reset-fixture" });
-  const parsedCredential = z
-    .object({ serverId: z.string(), keyId: z.string(), sealed: z.string(), updatedAt: z.number() })
-    .strict()
-    .parse(restoredCredential.sealed);
-  equal(await openCredential(key, parsedCredential), "synthetic credential", "usable credential preservation");
-  equal(
-    (await post("/config/personal-tokens/get", { digest: personalToken.digest })).token,
-    personalToken,
-    "personal token preservation",
-  );
-  const registration = (await readRegistrations()).find((record) => record.resource === fixtureRegistration.resource);
-  if (!registration) throw new Error("saved registration disappeared");
-  equal(
-    { commands: registration.commands, defaultRef: registration.defaultRef, noResident: registration.noResident },
-    {
-      commands: fixtureRegistration.commands,
-      defaultRef: fixtureRegistration.defaultRef,
-      noResident: fixtureRegistration.noResident,
-    },
-    "registration preservation",
-  );
-  const resolved = z
-    .object({ status: z.literal("bound"), binding: z.object({ personId: z.string() }).passthrough() })
-    .passthrough()
-    .parse(
-      await post("/organization/directory", {
-        installation: config.organization,
-        command: { action: "resolve", identity },
-      }),
+    const memorySeed = await post("/write", {
+      scopeKey,
+      records: [
+        {
+          kind: "fact",
+          text: "Reset fixture stores the value alpha.",
+          keywords: ["reset", "fixture"],
+          sourceThreadKey: thread,
+          sourceRunId: id,
+        },
+      ],
+    });
+    equal(memorySeed.inserted, 1, "learned memory seed");
+    const prior = await post("/config/get", { key: "reset-fixture" });
+    const document = { value: "alpha", repository: "acme/reset-fixture" };
+    equal(
+      (await post("/config/put", { key: "reset-fixture", expectedVersion: prior.version, document })).ok,
+      true,
+      "settings seed",
     );
-  equal(resolved.binding.personId, created.person.id, "identity preservation");
-  equal(
-    (await new WorkerMaintenanceStore({ baseUrl: origin, token }).read()).episode?.id,
-    hold.episode.id,
-    "maintenance preservation",
-  );
-  const journal = readFileSync(receipt, "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  equal(journal.at(-1).phase, "verified", "reset receipt");
-  const final = journal.at(-1);
-  const remoteKey = `runs/${process.env.GITHUB_RUN_ID}/${final.operation}/journal/${String(final.sequence).padStart(8, "0")}.sealed.json`;
-  const remote = JSON.parse(await durableJournal.read(remoteKey));
-  equal(
-    remote.serverId,
-    `installation-reset:${profile.account}:${final.operation}:${planned.plan.sha256}:journal:${final.sequence}`,
-    "remote journal identity",
-  );
-  const retained = JSON.parse(await openCredential(key, remote));
-  equal(retained.journal, readFileSync(receipt, "utf8"), "complete durable journal");
-  retainedJournals.push({ operation: final.operation, key: remoteKey });
-  evidence.push({
-    cycle,
-    operation: journal[0].operation,
-    planSha256: planned.plan.sha256,
-    preservation: journal.find((entry) => entry.phase === "preserved")?.detail,
-    journal: { bucket: durableJournal.bucket, key: remoteKey },
-    outcome: "passed",
-    syntheticDataCleared: ["run", "events", "session", "legacy transcript", "memory", "both R2 buckets"],
-    preserved: [
-      "settings",
-      "usable sealed credential",
-      "personal token",
-      "identity",
-      "repository registrations",
-      "maintenance",
-    ],
+    const sealed = await sealCredential(key, "org:reset-fixture", "synthetic credential", now);
+    equal((await post("/config/secrets/put", { sealed })).ok, true, "credential seed");
+    const personalToken = {
+      digest: createHash("sha256").update(`reset-fixture-${id}`).digest("hex"),
+      subject: `personal:${id}`,
+      userId: `access:${id}`,
+      email: "reset-fixture@example.invalid",
+      createdAt: now,
+      approval: {
+        version: 1,
+        issuer: "https://reset-fixture.invalid",
+        audience: "reset-fixture",
+        organization: config.organization,
+        subject: id,
+      },
+    };
+    equal((await post("/config/personal-tokens/put", { token: personalToken })).ok, true, "personal token seed");
+    equal(
+      (await post("/config/personal-tokens/get", { digest: personalToken.digest })).token,
+      personalToken,
+      "personal token seed read",
+    );
+    const identity = { issuer: "https://reset-fixture.invalid", tenant: null, subject: id };
+    const created = z
+      .object({ status: z.literal("created"), person: z.object({ id: z.string() }).passthrough() })
+      .passthrough()
+      .parse(
+        await post("/organization/directory", {
+          installation: config.organization,
+          command: { action: "createPerson" },
+        }),
+      );
+    const linked = await post("/organization/directory", {
+      installation: config.organization,
+      command: {
+        action: "change",
+        change: {
+          action: "link",
+          identity,
+          personId: created.person.id,
+          expectedRevision: 0,
+          actor: identity,
+          proof: { method: "dual-authentication", version: 1 },
+        },
+      },
+    });
+    equal(linked.status, "changed", "identity seed");
+    const objectKeys = [
+      [profile.artifacts!.bucket, `runs/reset-fixture-${id}/out.txt`],
+      [`${profile.workers.resident!.script}-cache`, `backups/reset-fixture-${id}/data.sqsh`],
+    ];
+    for (const [bucket, object] of objectKeys) {
+      const response = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${profile.account}/r2/buckets/${bucket}/objects/${object}`,
+        {
+          method: "PUT",
+          headers: { authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`, "content-type": "text/plain" },
+          body: "synthetic reset fixture",
+          redirect: "error",
+          signal: AbortSignal.timeout(MINUTE_MS),
+        },
+      );
+      if (!response.ok) throw new Error("staging R2 fixture write is unverified");
+      equal(
+        (await native.bucket(bucket)).objects.some((entry) => entry.key === object && entry.size === 23),
+        true,
+        "R2 seed",
+      );
+    }
+    const planPath = join(directory, `cycle-${cycle}-plan.json`);
+    const receipt = join(directory, `cycle-${cycle}-execution.jsonl`);
+    run(["--account", profile.account, "--plan", planPath]);
+    const planned = z
+      .object({ plan: z.object({ sha256: z.string() }).passthrough() })
+      .passthrough()
+      .parse(JSON.parse(readFileSync(planPath, "utf8")));
+    // The preview must not change any of the saved fixture values.
+    equal((await post("/runs/get", { storeKey: RUN_STORE_KEY, id })).record !== null, true, "preview history");
+    equal((await post("/config/get", { key: "reset-fixture" })).document, document, "preview settings");
+    apply(() =>
+      run([
+        "--account",
+        profile.account,
+        "--plan",
+        planPath,
+        "--apply",
+        planned.plan.sha256,
+        "--maintenance",
+        episodeId,
+        "--receipt",
+        receipt,
+      ]),
+    );
+    equal((await post("/runs/get", { storeKey: RUN_STORE_KEY, id })).record, null, "old run removal");
+    equal((await post("/runs/session/read", { key: session, from: 0, to: 2 })).rows, [], "old session removal");
+    equal((await post("/runs/transcript/read", { runId: id })).rows, [], "old transcript removal");
+    equal((await post("/list", { scopeKey, limit: 1 })).records, [], "learned memory removal");
+    for (const [bucket, object] of objectKeys)
+      equal(
+        (await native.bucket(bucket)).objects.some((entry) => entry.key === object),
+        false,
+        "old R2 object removal",
+      );
+    equal((await post("/config/get", { key: "reset-fixture" })).document, document, "settings preservation");
+    const restoredCredential = await post("/config/secrets/get", { serverId: "org:reset-fixture" });
+    const parsedCredential = z
+      .object({ serverId: z.string(), keyId: z.string(), sealed: z.string(), updatedAt: z.number() })
+      .strict()
+      .parse(restoredCredential.sealed);
+    equal(await openCredential(key, parsedCredential), "synthetic credential", "usable credential preservation");
+    equal(
+      (await post("/config/personal-tokens/get", { digest: personalToken.digest })).token,
+      personalToken,
+      "personal token preservation",
+    );
+    const registration = (await readRegistrations()).find((record) => record.resource === fixtureRegistration.resource);
+    if (!registration) throw new Error("saved registration disappeared");
+    equal(
+      { commands: registration.commands, defaultRef: registration.defaultRef, noResident: registration.noResident },
+      {
+        commands: fixtureRegistration.commands,
+        defaultRef: fixtureRegistration.defaultRef,
+        noResident: fixtureRegistration.noResident,
+      },
+      "registration preservation",
+    );
+    const resolved = z
+      .object({ status: z.literal("bound"), binding: z.object({ personId: z.string() }).passthrough() })
+      .passthrough()
+      .parse(
+        await post("/organization/directory", {
+          installation: config.organization,
+          command: { action: "resolve", identity },
+        }),
+      );
+    equal(resolved.binding.personId, created.person.id, "identity preservation");
+    equal(
+      (await new WorkerMaintenanceStore({ baseUrl: origin, token }).read()).episode?.id,
+      episodeId,
+      "maintenance preservation",
+    );
+    const journal = readFileSync(receipt, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    equal(journal.at(-1).phase, "verified", "reset receipt");
+    const final = journal.at(-1);
+    const remoteKey = `runs/${process.env.GITHUB_RUN_ID}/${final.operation}/journal/${String(final.sequence).padStart(8, "0")}.sealed.json`;
+    const remote = JSON.parse(await durableJournal.read(remoteKey));
+    equal(
+      remote.serverId,
+      `installation-reset:${profile.account}:${final.operation}:${planned.plan.sha256}:journal:${final.sequence}`,
+      "remote journal identity",
+    );
+    const retained = JSON.parse(await openCredential(key, remote));
+    equal(retained.journal, readFileSync(receipt, "utf8"), "complete durable journal");
+    retainedJournals.push({ operation: final.operation, key: remoteKey });
+    evidence.push({
+      cycle,
+      operation: journal[0].operation,
+      planSha256: planned.plan.sha256,
+      preservation: journal.find((entry) => entry.phase === "preserved")?.detail,
+      journal: { bucket: durableJournal.bucket, key: remoteKey },
+      outcome: "passed",
+      syntheticDataCleared: ["run", "events", "session", "legacy transcript", "memory", "both R2 buckets"],
+      preserved: [
+        "settings",
+        "usable sealed credential",
+        "personal token",
+        "identity",
+        "repository registrations",
+        "maintenance",
+      ],
+    });
+    save();
   });
-  save();
-  equal((await maintenance.end(hold.episode.id, actor)).episode?.phase, "ended", "maintenance release");
 }
 for (const retained of retainedJournals) {
   const remote = JSON.parse(await durableJournal.read(retained.key));

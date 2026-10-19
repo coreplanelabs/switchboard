@@ -60,3 +60,5 @@ npm run installation:reset -- --account <account-id> --inspect <encrypted-file> 
 The settings receiver's read-only `status` action reports the retained operation and phase. The reset does not remove an old hold, replay a deletion, change identities or reopen maintenance to make progress. Existing first-install checkpoint rules still apply to a partial creation.
 
 A later complete reset uses a fresh preview, operation ID and receipt. A previously verified settings transfer can be frozen for that new operation. The staging rehearsal must exercise two complete reset cycles and verify the original settings each time, then run the existing bounded product smoke against the final build. A local or source-only check does not establish that staging or production was reset.
+
+The staging rehearsal runs a read-only native preflight before it writes fixtures or opens maintenance. If a fixture or preview fails before apply starts, it ends only its own unchanged maintenance episode and propagates the failure. Once apply is attempted, a failure keeps maintenance active for reconciliation. Another operator's hold is never released by this cleanup.

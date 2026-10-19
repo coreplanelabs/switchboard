@@ -67,6 +67,7 @@ describe("reset Cloudflare boundary", () => {
           domains: [
             {
               hostname: worker.hostname,
+              service: worker.script,
               zone_name: worker.zone,
               zone_id: String(i + 1).repeat(32),
               enabled: true,
@@ -104,6 +105,32 @@ describe("reset Cloudflare boundary", () => {
     await expect(client.verifyRouting({ ...profile, account: "b".repeat(32) }, endpoints)).rejects.toThrow(
       "account differs",
     );
+  });
+  it("accepts a second owned Bot domain while retaining primary-host and ownership checks", async () => {
+    const profile = { ...TEST_PROFILE, account };
+    const endpoints = Object.fromEntries(
+      Object.values(profile.workers).map((worker) => [
+        worker.script,
+        {
+          domains: [
+            {
+              hostname: worker.hostname,
+              service: worker.script,
+              zone_name: profile.zone,
+              zone_id: "1".repeat(32),
+              enabled: true,
+              environment: "production",
+            },
+          ],
+        },
+      ]),
+    );
+    const bot = endpoints[profile.workers.bot.script];
+    bot.domains.push({ ...bot.domains[0], hostname: `git.${profile.workers.bot.hostname}` });
+    const client = new ResetCloudflare(account, "test-token", async () => page([]));
+    await expect(client.verifyRouting(profile, endpoints)).resolves.toBeUndefined();
+    bot.domains[1].service = "foreign-worker";
+    await expect(client.verifyRouting(profile, endpoints)).rejects.toThrow("routing ownership is unverified");
   });
   it("reads every bucket page including SDK backup keys and refuses an incomplete cursor", async () => {
     let malformed = false;
