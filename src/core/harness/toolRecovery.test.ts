@@ -2,6 +2,8 @@ import { createCheckExecution } from "../checkExecution.js";
 import { humanReview } from "../testing/humanReview.js";
 import { describe, expect, it } from "vitest";
 import { validateToolArguments, type Tool } from "@earendil-works/pi-ai";
+import { createBashTool } from "@earendil-works/pi-coding-agent";
+import { runToolCall } from "@earendil-works/pi-agent-core";
 import { ToolRecovery, ToolRecoveryStoppedError } from "./toolRecovery.js";
 import { authorizeToolCall, runRelayedTool, type LiveHarness } from "./pi/relay.js";
 import { RunBearerStore } from "../modelProxy/runBearers.js";
@@ -11,6 +13,7 @@ import { runCheckTool } from "../../tools/check.js";
 import type { RunnableTool } from "../../tools/runnableTool.js";
 import { UncertainStoreError } from "../storeFailure.js";
 import { PiBridge } from "./pi/bridge.js";
+import type { RunEvent } from "../runEvents.js";
 import { OpenCodeBridge } from "./opencode/bridge.js";
 import { GITHUB_READ_TOOLS, GITHUB_ISSUE_WRITE_TOOLS, githubFileTool } from "../../tools/github.js";
 import { InMemoryGithubApi, RestGithubApi } from "../../execution/githubApi.js";
@@ -175,6 +178,351 @@ describe("run-owned tool recovery", () => {
     );
     expect(JSON.stringify(result)).not.toContain("abcdefghijklmnopqrstuvwxyz");
   });
+
+  it.each(["executor-error", "changed-display"] as const)(
+    "holds missing native Pi process facts after SDK execution: %s",
+    async (mode) => {
+      const f = fixture();
+      const events: RunEvent[] = [];
+      const bridge = new PiBridge({
+        clock: () => 1000,
+        emit: (event) => void events.push(event),
+        recovery: f.recovery,
+      });
+      let dispatches = 0;
+      const tool = createBashTool(process.cwd(), {
+        exposeSessionEnvironment: false,
+        ...(mode === "executor-error"
+          ? {
+              operations: {
+                exec: async () => {
+                  dispatches++;
+                  throw new Error("native result lost after dispatch");
+                },
+              },
+            }
+          : {}),
+      });
+      const call = {
+        type: "toolCall" as const,
+        id: "native-pi",
+        name: "bash",
+        arguments: { command: "printf 'native completed'" },
+      };
+      bridge.observe({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.arguments });
+      const native = await runToolCall(call, {
+        tools: [tool],
+        context: { messages: [] },
+        assistantMessage: {
+          role: "assistant",
+          content: [call],
+          api: "openai-responses",
+          provider: "openai",
+          model: "test",
+          timestamp: 1000,
+          stopReason: "toolUse",
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+        },
+        beforeToolCall: async () => {
+          bridge.gateSaw(call.id);
+          return undefined;
+        },
+        ...(mode === "changed-display"
+          ? { afterToolCall: async () => ({ content: [{ type: "text" as const, text: "completed output" }] }) }
+          : {}),
+      });
+      expect(native.isError).toBe(mode === "executor-error");
+      expect(native.result.structuredContent).toBeUndefined();
+      if (mode === "executor-error") expect(dispatches).toBe(1);
+      bridge.observe({
+        type: "tool_execution_end",
+        toolCallId: call.id,
+        toolName: call.name,
+        result: native.result,
+        isError: native.isError,
+      });
+      await f.recovery.settled(false);
+      expect(events.find((event) => event.type === "tool_result")).toMatchObject({ callId: call.id, ok: false });
+      expect(f.bearers.consumeTurn("r")).toEqual({
+        ok: false,
+        reason: "tool_recovery",
+        stop: { tool: "bash", attempts: 1, reason: "outcome_unknown" },
+      });
+    },
+  );
+
+  it("preserves host-proved Pi lifecycle refusal without native process facts", async () => {
+    const f = fixture();
+    const events: RunEvent[] = [];
+    const bridge = new PiBridge({ clock: () => 1000, emit: (event) => void events.push(event), recovery: f.recovery });
+    f.harness.gateSaw = (id, closing) => bridge.gateSaw(id, closing);
+    f.harness.toolsBlocked = () => "the run is writing its final answer";
+    const input = { command: "printf 'not dispatched'" };
+    bridge.observe({ type: "tool_execution_start", toolCallId: "closed", toolName: "bash", args: input });
+    expect(await authorizeToolCall(f.harness, { toolCallId: "closed", tool: "bash", input })).toEqual({
+      allow: false,
+      reason: "the run is writing its final answer",
+    });
+    bridge.observe({
+      type: "tool_execution_end",
+      toolCallId: "closed",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "the run is writing its final answer" }] },
+      isError: true,
+    });
+    await f.recovery.settled(false);
+    expect(events.find((event) => event.type === "tool_result")).toMatchObject({ callId: "closed", ok: false });
+    expect(events.filter((event) => event.type === "run_note")).toEqual([]);
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+  });
+
+  it.each([false, true])(
+    "keeps host-proved Pi refusals in correction recovery before dispatch (abort marked: %s)",
+    async (abortMarked) => {
+      const f = fixture();
+      const events: RunEvent[] = [];
+      const bridge = new PiBridge({
+        clock: () => 1000,
+        emit: (event) => void events.push(event),
+        recovery: f.recovery,
+      });
+      f.harness.gateSaw = (id, closing, refused) => bridge.gateSaw(id, closing, refused);
+      const input = { command: "git push origin main" };
+      for (const id of ["denied-one", "denied-two"]) {
+        bridge.observe({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: input });
+        expect(await authorizeToolCall(f.harness, { toolCallId: id, tool: "bash", input })).toMatchObject({
+          allow: false,
+        });
+        if (abortMarked) bridge.markOpenCallsCut();
+        bridge.observe({
+          type: "tool_execution_end",
+          toolCallId: id,
+          toolName: "bash",
+          result: { content: [{ type: "text", text: "refused before dispatch" }] },
+          isError: true,
+        });
+      }
+      await f.recovery.settled(false);
+      expect(events.filter((event) => event.type === "tool_result").map(({ ok, cut }) => ({ ok, cut }))).toEqual([
+        { ok: false, cut: undefined },
+        { ok: false, cut: undefined },
+      ]);
+      expect(f.bearers.consumeTurn("r")).toEqual({
+        ok: false,
+        reason: "tool_recovery",
+        stop: { tool: "bash", attempts: 2, reason: "repeated_failure" },
+      });
+    },
+  );
+
+  it("keeps host-proved OpenCode refusals in correction recovery before dispatch", async () => {
+    const f = fixture();
+    const bridge = new OpenCodeBridge({
+      clock: () => 1000,
+      emit: () => {},
+      recovery: f.recovery,
+      rules: { identity: "read", checkout: "/work" },
+      relayedToolNames: new Set(),
+      seedLength: 0,
+      remainingMs: () => 60000,
+    });
+    for (const id of ["denied-one", "denied-two"]) {
+      const event = (type: string, data: Record<string, unknown>) =>
+        bridge.observe({
+          feed: "event",
+          at: 1000,
+          event: { id: id + type, type, data: { sessionID: "ses_c", id, ...data } },
+        });
+      event("session.tool.input.started", { name: "shell" });
+      event("session.tool.called", { input: { command: "git push origin main" } });
+      const answer = event("permission.asked", {
+        id: `permission-${id}`,
+        action: "shell",
+        resources: ["git push origin main"],
+        source: { type: "tool", messageID: "msg", id },
+      });
+      expect(answer.replies.map((reply) => reply.reply)).toEqual(["reject"]);
+      event("session.tool.failed", { executed: false, error: { type: "permission.rejected", message: "refused" } });
+    }
+    await f.recovery.settled(false);
+    expect(f.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "bash", attempts: 2, reason: "repeated_failure" },
+    });
+  });
+
+  it("preserves a host lifecycle refusal of an OpenCode shell without spending task recovery", async () => {
+    const f = fixture();
+    await f.recovery.record("prior-read", "read", { path: "/work/missing" }, { text: "file missing" });
+    const events: RunEvent[] = [];
+    const bridge = new OpenCodeBridge({
+      clock: () => 1000,
+      emit: (event) => void events.push(event),
+      recovery: f.recovery,
+      rules: f.harness.rules,
+      relayedToolNames: new Set(),
+      seedLength: 0,
+      remainingMs: () => 60000,
+    });
+    f.harness.gateSaw = (id, lifecycle) => bridge.gateSaw(id, lifecycle);
+    f.harness.toolsBlocked = () => "the run is writing its final answer";
+    const event = (type: string, data: Record<string, unknown>) =>
+      bridge.observe({
+        feed: "event",
+        at: 1000,
+        event: { id: type, type, data: { sessionID: "ses_c", id: "closed", ...data } },
+      });
+    const input = { command: "git status" };
+    event("session.tool.input.started", { name: "shell" });
+    event("session.tool.called", { input, executed: false });
+    expect(await authorizeToolCall(f.harness, { toolCallId: "closed", tool: "bash", input })).toEqual({
+      allow: false,
+      reason: "the run is writing its final answer",
+    });
+    event("session.tool.failed", { executed: false, error: { type: "tool.execution", message: "ending refusal" } });
+    await f.recovery.settled(false);
+    expect(
+      events.filter((event) => event.type === "tool_result").map(({ ok, exitCode }) => ({ ok, exitCode })),
+    ).toEqual([{ ok: false, exitCode: undefined }]);
+    expect(f.recovery.snapshot().failures.map(({ tool, count }) => ({ tool, count }))).toEqual([
+      { tool: "read", count: 1 },
+    ]);
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+  });
+
+  it("narrates native OpenCode catch-up status without live recovery and filters earlier results", async () => {
+    const observations = [];
+    for (const mode of ["catching-up", "earlier"] as const) {
+      const f = fixture();
+      const events: RunEvent[] = [];
+      const bridge = new OpenCodeBridge({
+        clock: () => 1000,
+        emit: (event) => void events.push(event),
+        recovery: f.recovery,
+        rules: f.harness.rules,
+        relayedToolNames: new Set(),
+        seedLength: 0,
+        remainingMs: () => 60000,
+      });
+      bridge.observing = mode;
+      const event = (type: string, data: Record<string, unknown>) =>
+        bridge.observe({
+          feed: "event",
+          at: 1000,
+          event: { id: type, type, data: { sessionID: "ses_c", id: "history", ...data } },
+        });
+      event("session.tool.input.started", { name: "shell" });
+      event("session.tool.called", { input: { command: "git status" }, executed: false });
+      event("session.tool.success", {
+        executed: false,
+        content: [{ type: "text", text: "exit 0: display only" }],
+        metadata: { status: "completed", truncated: false, exit: 2 },
+      });
+      await f.recovery.settled(false);
+      observations.push({
+        mode,
+        results: events.filter((event) => event.type === "tool_result").map(({ ok, exitCode }) => ({ ok, exitCode })),
+        admission: f.bearers.consumeTurn("r"),
+      });
+    }
+    expect(observations).toEqual([
+      { mode: "catching-up", results: [{ ok: false, exitCode: 2 }], admission: { ok: true, turn: 1 } },
+      { mode: "earlier", results: [], admission: { ok: true, turn: 1 } },
+    ]);
+  });
+
+  it.each([
+    { exitCode: 0, ok: true },
+    { exitCode: 2, ok: false },
+  ])(
+    "retains completed local OpenCode exit $exitCode without spending correction recovery",
+    async ({ exitCode, ok }) => {
+      const f = fixture();
+      const events: RunEvent[] = [];
+      const bridge = new OpenCodeBridge({
+        clock: () => 1000,
+        emit: (event) => void events.push(event),
+        recovery: f.recovery,
+        rules: { identity: "read", checkout: "/work" },
+        relayedToolNames: new Set(),
+        seedLength: 0,
+        remainingMs: () => 60000,
+      });
+      const event = (type: string, data: Record<string, unknown>) =>
+        bridge.observe({
+          feed: "event",
+          at: 1000,
+          event: { id: type, type, data: { sessionID: "ses_c", id: "completed", ...data } },
+        });
+      event("session.tool.input.started", { name: "shell" });
+      event("session.tool.called", { input: { command: "git status" }, executed: false });
+      const gate = event("permission.asked", {
+        id: "permission-completed",
+        action: "shell",
+        resources: ["git status"],
+        source: { type: "tool", messageID: "msg", id: "completed" },
+      });
+      expect(gate.replies.map((reply) => reply.reply)).toEqual(["once"]);
+      event("session.tool.success", {
+        executed: false,
+        content: [{ type: "text", text: "exit 99: printed example" }],
+        metadata: { status: "completed", truncated: false, exit: exitCode },
+      });
+      await f.recovery.settled(false);
+      expect(
+        events.filter((event) => event.type === "tool_result").map(({ ok, exitCode }) => ({ ok, exitCode })),
+      ).toEqual([{ ok, exitCode }]);
+      expect(f.recovery.snapshot()).toEqual({ version: 1, settled: [], failures: [] });
+      expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    },
+  );
+
+  it.each(["tool.execution", "tool.unknown"])(
+    "holds a failed local OpenCode shell without native status or a host gate decision: %s",
+    async (errorType) => {
+      const f = fixture();
+      const events: RunEvent[] = [];
+      const bridge = new OpenCodeBridge({
+        clock: () => 1000,
+        emit: (event) => void events.push(event),
+        recovery: f.recovery,
+        rules: { identity: "read", checkout: "/work" },
+        relayedToolNames: new Set(),
+        seedLength: 0,
+        remainingMs: () => 60000,
+      });
+      const event = (type: string, data: Record<string, unknown>) =>
+        bridge.observe({
+          feed: "event",
+          at: 1000,
+          event: { id: type, type, data: { sessionID: "ses_c", id: "unknown", ...data } },
+        });
+      event("session.tool.input.started", { name: "shell" });
+      event("session.tool.called", { input: { command: "git status" }, executed: false });
+      const observed = event("session.tool.failed", {
+        executed: false,
+        error: { type: errorType, message: "exit 0: printed output is not completion proof" },
+      });
+      await f.recovery.settled(false);
+      expect(observed.bypass).toBeUndefined();
+      expect(
+        events.filter((event) => event.type === "tool_result").map(({ ok, exitCode }) => ({ ok, exitCode })),
+      ).toEqual([{ ok: false, exitCode: undefined }]);
+      expect(f.bearers.consumeTurn("r")).toEqual({
+        ok: false,
+        reason: "tool_recovery",
+        stop: { tool: "bash", attempts: 1, reason: "outcome_unknown" },
+      });
+    },
+  );
 
   it.each(["source checkpoint", "current access"] as const)(
     "reports a refused GitHub %s as failure while keeping successful source text readable",
@@ -677,6 +1025,130 @@ describe("run-owned tool recovery", () => {
 });
 
 describe.each(["pi", "opencode"] as const)("native tool recovery — %s", (name) => {
+  async function shellFailure(text: string, kind: "legacy" | "command" | "unknown", cut = false) {
+    const f = fixture();
+    const events: RunEvent[] = [];
+    const pi = new PiBridge({ clock: () => 1000, emit: (event) => void events.push(event), recovery: f.recovery });
+    const openCode = new OpenCodeBridge({
+      clock: () => 1000,
+      emit: (event) => void events.push(event),
+      recovery: f.recovery,
+      rules: { identity: "read", checkout: "/work" },
+      relayedToolNames: new Set(),
+      seedLength: 0,
+      remainingMs: () => 60000,
+    });
+    for (const id of ["first", "second"]) {
+      if (name === "pi") {
+        pi.observe({
+          type: "tool_execution_start",
+          toolCallId: id,
+          toolName: "bash",
+          args: { command: "git status" },
+        });
+        pi.gateSaw(id);
+        if (cut) pi.markOpenCallsCut();
+        pi.observe({
+          type: "tool_execution_end",
+          toolCallId: id,
+          toolName: "bash",
+          isError: true,
+          result: {
+            content: [{ type: "text", text }],
+            ...(kind === "legacy" ? {} : { structuredContent: { exit_code: kind === "command" ? 2 : "2" } }),
+          },
+        });
+      } else {
+        const event = (type: string, data: Record<string, unknown>) =>
+          openCode.observe({
+            feed: "event",
+            at: 1000,
+            event: { id: id + type, type, data: { sessionID: "ses_c", id, ...data } },
+          });
+        event("session.tool.input.started", { name: "shell" });
+        event("session.tool.called", { input: { command: "git status" } });
+        event("permission.asked", {
+          id: `permission-${id}`,
+          sessionID: "ses_c",
+          action: "shell",
+          resources: ["git status"],
+          source: { type: "tool", messageID: "msg", id },
+        });
+        if (cut) openCode.markOpenCallsCut();
+        event(kind === "command" ? "session.tool.success" : "session.tool.failed", {
+          executed: false,
+          ...(kind === "command"
+            ? { content: [{ type: "text", text }], metadata: { status: "completed", truncated: false, exit: 2 } }
+            : { error: { type: "tool.execution", message: text } }),
+        });
+      }
+    }
+    await f.recovery.settled(false);
+    return {
+      results: events
+        .filter((event) => event.type === "tool_result")
+        .map(({ callId, ok, cut }) => ({ callId, ok, cut })),
+      codes: events.filter((event) => event.type === "tool_result").map((event) => event.exitCode),
+      admission: f.bearers.consumeTurn("r"),
+    };
+  }
+
+  it("keeps shell recovery and cuts independent of exit-shaped failure text", async () => {
+    for (const text of ["native tool failed", "exit 2: example output", "Command exited with code 2"])
+      expect(await shellFailure(text, "legacy")).toEqual({
+        results: [
+          { callId: "first", ok: false, cut: undefined },
+          { callId: "second", ok: false, cut: undefined },
+        ],
+        codes: [undefined, undefined],
+        admission: {
+          ok: false,
+          reason: "tool_recovery",
+          stop: { tool: "bash", attempts: 1, reason: "outcome_unknown" },
+        },
+      });
+  });
+
+  it("keeps typed command failures out of correction recovery regardless of output", async () => {
+    for (const text of ["native tool failed", "exit 2: example output", "Command exited with code 2"])
+      for (const abortMarked of [false, true])
+        expect(await shellFailure(text, "command", abortMarked)).toEqual({
+          results: [
+            { callId: "first", ok: false, cut: undefined },
+            { callId: "second", ok: false, cut: undefined },
+          ],
+          codes: [2, 2],
+          admission: { ok: true, turn: 1 },
+        });
+  });
+
+  it("holds unproved native command outcomes regardless of exit-shaped text", async () => {
+    for (const text of ["native tool failed", "exit 2: example output", "Command exited with code 2"])
+      expect(await shellFailure(text, "unknown")).toEqual({
+        results: [
+          { callId: "first", ok: false, cut: undefined },
+          { callId: "second", ok: false, cut: undefined },
+        ],
+        codes: [undefined, undefined],
+        admission: {
+          ok: false,
+          reason: "tool_recovery",
+          stop: { tool: "bash", attempts: 1, reason: "outcome_unknown" },
+        },
+      });
+  });
+
+  it("preserves the native cancellation cut regardless of exit-shaped text", async () => {
+    for (const text of ["native tool failed", "exit 2: example output", "Command exited with code 2"])
+      expect(await shellFailure(text, "legacy", true)).toEqual({
+        results: [
+          { callId: "first", ok: false, cut: true },
+          { callId: "second", ok: false, cut: true },
+        ],
+        codes: [undefined, undefined],
+        admission: { ok: true, turn: 1 },
+      });
+  });
   if (name === "pi")
     it("does not reclassify replayed lifecycle refusals after reconstruction", async () => {
       const saved = new ToolRecovery().snapshot();
@@ -790,7 +1262,10 @@ describe.each(["pi", "opencode"] as const)("native tool recovery — %s", (name)
           type: "tool_execution_end",
           toolCallId: id,
           toolName: tool,
-          result: { content: [{ type: "text", text }] },
+          result: {
+            content: [{ type: "text", text }],
+            ...(tool === "bash" ? { structuredContent: { exit_code: 1 } } : {}),
+          },
           isError: true,
         });
       } else {
@@ -805,9 +1280,14 @@ describe.each(["pi", "opencode"] as const)("native tool recovery — %s", (name)
               data: { sessionID: "ses_c", id, assistantMessageID: "msg", ...data },
             },
           });
-        event("session.tool.input.started", { name: tool });
+        event("session.tool.input.started", { name: tool === "bash" ? "shell" : tool });
         event("session.tool.called", { input });
-        event("session.tool.failed", { error: { message: text } });
+        event(tool === "bash" ? "session.tool.success" : "session.tool.failed", {
+          executed: false,
+          ...(tool === "bash"
+            ? { content: [{ type: "text", text }], metadata: { status: "completed", truncated: false, exit: 1 } }
+            : { error: { type: "tool.execution", message: text } }),
+        });
       }
     };
     call("red1", "bash", { command: "npm test" }, "exit 1: test failed");

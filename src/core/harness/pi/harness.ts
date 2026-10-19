@@ -808,7 +808,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           Math.min(remainingMs?.() ?? deadline - now(), (loopEndsIn?.() ?? 0) + RUN_DEADLINE_RESERVE_MS),
       };
     },
-    gateSaw: (callId, closing) => bridge.gateSaw(callId, closing),
+    gateSaw: (callId, closing, refused) => bridge.gateSaw(callId, closing, refused),
     toolsBlocked,
     takeCompactionFailure: () => {
       const failure = compactionFailure;

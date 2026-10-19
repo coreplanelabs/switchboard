@@ -939,7 +939,12 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
         source: { type: "tool", messageID: at.assistantMessageID, id: "c0" },
       }),
       feedEvent("permission.replied", { sessionID: "ses_run-c", requestID: "per_c0", reply: "once" }),
-      feedEvent("session.tool.success", { ...at, content: [{ type: "text", text: "hi" }], executed: true }),
+      feedEvent("session.tool.success", {
+        ...at,
+        content: [{ type: "text", text: "hi" }],
+        executed: false,
+        metadata: { status: "completed", truncated: false, exit: 0 },
+      }),
     ];
     const driver = openCodeDriver({ reattach: { feedAfter } });
     const rowFacts = rowFor(driver, { logOffset: feedByteLength(TAILER_READY_NOTES) });
@@ -1577,16 +1582,16 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       o.events
         .filter((e) => e.type === "tool_call" || e.type === "tool_result")
         .map((e) => `${e.type}:${e.callId}${e.type === "tool_result" ? `:${e.ok}:${e.cut === true}` : ""}`);
-    // The loop's own record: the call, then its late outcome — the fake's late success, landing after the
+    // The loop's own record: the call, then its unconfirmed late outcome, landing after the
     // write-up's execution started — marked `cut` by the interrupt that ended its step (harness.md item 13).
-    expect(toolEvents()).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
+    expect(toolEvents()).toEqual(["tool_call:c1", "tool_result:c1:false:true"]);
     // The post-turn replays the script under the same call id, under a step of its own: judged as its own, and
     // no earlier tail is left to set aside — the loop read it.
     expect(await session.followUp(postTurn)).toBe("never");
     expect(notes(o.events).filter((n) => n.kind === "settle_set_aside")).toEqual([]);
     expect(toolEvents()).toEqual([
       "tool_call:c1",
-      "tool_result:c1:true:true",
+      "tool_result:c1:false:true",
       "tool_call:c1",
       "tool_result:c1:true:false",
     ]);
@@ -1798,7 +1803,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     ).toEqual([
       "the interrupted execution ended (session.execution.interrupted) while the loop read in its own mode — before the interrupt's answer, or after the write-up's own start; set aside — the end the loop-end cut owed, not the write-up's settle",
     ]);
-    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:false:true"]);
     expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
     await session.end();
   });
@@ -1821,7 +1826,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     ).toEqual([
       "the interrupted execution ended (session.execution.interrupted) while the loop read in its own mode — before the interrupt's answer, or after the write-up's own start; set aside — the end the loop-end cut owed, not the write-up's settle",
     ]);
-    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:false:true"]);
     expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
     await session.end();
   });
@@ -2006,7 +2011,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .map((n) => n.summary),
     ).toEqual(["an OpenCode step failed: Step interrupted", windDownFailureNote(FAILED_MODEL_CALL_ERROR)]);
     expect(notes(o.events).filter((n) => n.kind === "wrap_up")).toEqual([]);
-    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:false:true"]);
     await session.end();
   });
 
@@ -2064,11 +2069,11 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     const session = await o.opened;
     expect(session.answer).toBe(timeBudgetAnswer("never", 10));
     expect(o.events.find((e) => e.type === "tool_result" && e.callId === "c1")).toMatchObject({
-      ok: true,
+      ok: false,
       cut: true,
       output: "slept",
     });
-    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:false:true"]);
     expect(notes(o.events).filter((n) => n.kind === "settle_set_aside")).toEqual([]);
     expect(notes(o.events).filter((n) => n.kind === "harness_error")).toEqual([]);
     expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);

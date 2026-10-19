@@ -463,7 +463,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
             type: "tool_execution_end",
             toolCallId: call.id,
             toolName: call.name,
-            result: { content: answer.content },
+            result: answer,
             isError: answer.isError,
           },
           { type: "message_end", message: toolResult },
@@ -501,7 +501,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
     entry: LiveHarness | undefined,
     ask: ToolCallAsk,
     signal: AbortSignal,
-  ): Promise<RelayedToolAnswer> {
+  ): Promise<RelayedToolAnswer & { structuredContent?: { exit_code: number } }> {
     if (!entry) return { content: text(`the run ${s.runId} is not registered on the harness`), isError: true };
     // A broken harness runs its own tool without the gate's verdict: the bridge
     // must catch the call that ended unvetted and fail the run closed.
@@ -543,16 +543,26 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
 }
 
 /** pi's own workspace tools, over the run's executor as pi would run them in
- *  the container: a shell command as it is (the executors' `exit N:` first
- *  line is what the bridge reads a failure from), a file read, a whole-file
+ *  the container: the test executor's command result, a file read, a whole-file
  *  write, an edit as a first-occurrence replace, and the three listings as
  *  their shell commands. */
-async function runBuiltin(executor: Executor, ask: ToolCallAsk, signal: AbortSignal): Promise<RelayedToolAnswer> {
+async function runBuiltin(
+  executor: Executor,
+  ask: ToolCallAsk,
+  signal: AbortSignal,
+): Promise<RelayedToolAnswer & { structuredContent?: { exit_code: number } }> {
   const input = isRecord(ask.input) ? ask.input : {};
   const str = (k: string) => String(input[k] ?? "");
   const exec = async (command: string) => {
     const out = await executor.exec(command, { signal });
-    return { content: text(out), isError: /^exit \d+:/.test(out) };
+    // This fixture adapter translates Executor.exec's legacy result contract.
+    // The production bridge receives native SDK facts and never parses it.
+    const exit = /^exit (\d+):/.exec(out);
+    return {
+      content: text(out),
+      isError: exit !== null,
+      ...(ask.tool === "bash" ? { structuredContent: { exit_code: exit ? Number(exit[1]) : 0 } } : {}),
+    };
   };
   try {
     switch (ask.tool) {

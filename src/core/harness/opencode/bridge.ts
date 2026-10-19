@@ -81,7 +81,7 @@ import {
   reattachTransport,
   WORD_ALIVE_REATTACH_NOTE,
 } from "../reattach.js";
-import { describePiToolCall, piBashExit } from "../pi/bridge.js";
+import { describePiToolCall } from "../pi/bridge.js";
 import { PiMirror } from "../pi/mirror.js";
 import { PiRpcTransport } from "../pi/transport.js";
 import {
@@ -1395,30 +1395,54 @@ export class OpenCodeBridge {
     const open = this.openTools.get(callId);
     open?.cancel.abort();
     this.openTools.delete(callId);
-    // A tool failing `aborted` under a cut interrupt in flight or landed is the
-    // interrupt's own doing (the measured shape of an ask pending at it: the
-    // tool fails `aborted`, `executed: false`), cut whether or not the mark
-    // has been set yet — the answer may land after the tail. An answer of
-    // `idle` or a refusal cannot unmark it: a tool aborted with nothing
-    // interrupted would be the server contradicting itself, and the mark
-    // stands on the conservative side (a teardown), by timing as every cut
-    // mark is until the live probe says what the binary makes of the abort.
+    // The host's interrupt can own an aborted tool end even before its reply
+    // lands. This is only a cut candidate: native completion or exact host
+    // no-dispatch proof below can settle the result. An interrupt reply alone
+    // cannot establish that phase.
     const aborted = !ok && errorTypeOf(data.error) === "aborted";
-    const cut = this.cutCalls.delete(callId) || (aborted && this.cutInterrupt);
+    const marked = this.cutCalls.delete(callId) || (aborted && this.cutInterrupt);
     const tool = open?.tool ?? openCodeToolNameWord(this.toolNames.get(callId) ?? "tool");
     const text = ok ? contentText(data.content) : errorMessage(data.error) || contentText(data.content);
+    const name = this.toolNames.get(callId);
+    // The frozen host roster can prove that a tool was unavailable. An SDK
+    // error label alone cannot prove a refusal preceded native dispatch.
+    const unavailable =
+      name !== undefined &&
+      !openCodeBuiltinToolsFor(this.deps.rules.identity).includes(name) &&
+      !this.deps.relayedToolNames.has(name);
+    const refusalOwner =
+      unavailable || this.answered.get(callId) === "reject" || this.answered.get(callId) === "lifecycle";
+    const notDispatched = !ok && refusalOwner && data.metadata === undefined;
     // A relayed tool that fails in its text is a failure too, as pi reads it.
-    const failedInText = this.deps.textFailing?.has(tool) === true && toolTextFailed(text);
-    const exit = tool === "bash" ? piBashExit(text, !ok) : { failed: !ok || failedInText };
+    const failedInText = tool !== "bash" && this.deps.textFailing?.has(tool) === true && toolTextFailed(text);
+    const exit =
+      tool === "bash"
+        ? openCodeBashOutcome(data, ok, name === "shell" && !this.deps.relayedToolNames.has("shell"), refusalOwner)
+        : { failed: !ok || failedInText };
     const settledOk = !exit.failed;
+    // Native completion and exact host no-dispatch proof settle an abort race.
+    // A marked unknown result retains the cut; no Boolean or display text clears it.
+    const cut = marked && !exit.commandCompleted && !notDispatched;
     if (
       open &&
       !cut &&
       this.answered.get(callId) !== "lifecycle" &&
       this.observing !== "catching-up" &&
-      (settledOk || exit.exitCode === undefined)
+      (settledOk || !exit.commandCompleted)
     )
-      void this.deps.recovery?.record(callId, tool, open.input, settledOk ? undefined : { text });
+      void this.deps.recovery?.record(
+        callId,
+        tool,
+        open.input,
+        settledOk
+          ? undefined
+          : { text, ...(exit.unconfirmed ? { detail: { code: "outcome_unknown", recovery: "stop" } as const } : {}) },
+      );
+    if (exit.unconfirmed && !cut)
+      this.note(
+        "tool_refused",
+        `The bash result for call ${redactAndCap(callId, 80)} could not be verified. The original operation remains held.`,
+      );
     this.emit({
       type: "tool_result",
       tool,
@@ -1460,18 +1484,16 @@ export class OpenCodeBridge {
     // success for a call the bot rejected (the reject landing is a failure the
     // server raises with the bot's feedback; a success means the tool ran
     // against it). On OpenCode the model's shell can forge either. The run
-    // fails closed on the first one. But a call that RAN with no ask (a real
-    // effect, `executed: true`) is the bypass; a call the identity hid, which
-    // OpenCode failed with no ask because the tool was never there
-    // (`executed: false` — the model reached for a tool the deny rules removed),
-    // is a refusal the record shows, not a bypass: nothing ran, the walls held.
-    const executed = data.executed === true;
+    // fails closed on the first one. A local tool's success can carry
+    // `executed: false`: that flag names provider execution, not tool dispatch.
+    // Missing native process facts already retain the unknown-outcome hold;
+    // without a gate decision they prove neither no dispatch nor a bypass.
     const decision = this.answered.get(callId);
-    if (decision === undefined && !executed) {
-      // What the facts prove: no ask, nothing ran. The deny rules are named
-      // only when the tool is in fact absent from the identity's own tools;
-      // any other failure before execution — a tool erroring before it runs —
-      // is said as that, never dressed as a refusal the gate made.
+    if (decision === undefined && exit.unconfirmed && !ok) return;
+    if (decision === undefined && !ok) {
+      // The deny rules are named only for a tool absent from this identity's
+      // own tools. A different failure has no execution-phase proof; do not
+      // dress it as a refusal the gate made or as proof of a bypass.
       const name = this.toolNames.get(callId);
       const own = openCodeBuiltinToolsFor(this.deps.rules.identity);
       const absent = name !== undefined && !own.includes(name);
@@ -1494,7 +1516,7 @@ export class OpenCodeBridge {
       else
         this.note(
           "harness_error",
-          `OpenCode settled ${tool} (call ${callId}) before it ran, with no ask the bot answered${text ? `: ${redactAndCap(text, 200)}` : ""}`,
+          `OpenCode failed ${tool} (call ${callId}) with no gate decision; its execution state is unknown${text ? `: ${redactAndCap(text, 200)}` : ""}`,
         );
     } else if (decision === undefined) {
       this.bypass(out, `OpenCode ran ${tool} (call ${callId}) with no ask the bot answered — a call with no ask`);
@@ -2018,6 +2040,33 @@ export function projectStore(messages: readonly OpenCodeMessage[], seedLength: n
 
 function errorMessage(error: unknown): string {
   return isRecord(error) && typeof error.message === "string" ? error.message : "";
+}
+
+/** OpenCode 2.0.24 ShellTool returns normally for nonzero process exits.
+ * Its output codec supplies completion facts. The event's `executed` flag
+ * means provider execution; local ShellTool completion sets it to false. */
+function openCodeBashOutcome(
+  data: Record<string, unknown>,
+  toolSucceeded: boolean,
+  nativeShell: boolean,
+  notDispatched: boolean,
+): { failed: boolean; exitCode?: number; commandCompleted?: true; unconfirmed?: true } {
+  if (!toolSucceeded && notDispatched && data.metadata === undefined) return { failed: true };
+  const metadata = isRecord(data.metadata) ? data.metadata : undefined;
+  if (
+    !nativeShell ||
+    data.executed !== false ||
+    metadata?.status !== "completed" ||
+    typeof metadata.truncated !== "boolean" ||
+    (metadata.timeout !== undefined && metadata.timeout !== false) ||
+    metadata.signal !== undefined ||
+    typeof metadata.exit !== "number" ||
+    !Number.isInteger(metadata.exit) ||
+    metadata.exit < 0 ||
+    metadata.exit > 255
+  )
+    return { failed: true, unconfirmed: true };
+  return { failed: !toolSucceeded || metadata.exit !== 0, exitCode: metadata.exit, commandCompleted: true };
 }
 function statusOf(error: unknown): number | undefined {
   return isRecord(error) && typeof error.status === "number" ? error.status : undefined;

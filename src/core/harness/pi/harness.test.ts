@@ -10,6 +10,8 @@ import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { ALLOWANCES, bearerExpiresAt, loopClock, MINUTE_MS, PROVIDER_RETRY_BACKOFFS_MS } from "../../budgets.js";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { createBashTool } from "@earendil-works/pi-coding-agent";
+import { runToolCall } from "@earendil-works/pi-agent-core";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Secret } from "../../../secrets.js";
 import { ToolRecovery } from "../toolRecovery.js";
@@ -256,7 +258,7 @@ const bashTurn = (
       type: "tool_execution_end",
       toolCallId: id,
       toolName: "bash",
-      result: { content: [{ type: "text", text: result }] },
+      result: { content: [{ type: "text", text: result }], structuredContent: { exit_code: 0 } },
       isError: false,
     },
     {
@@ -1707,6 +1709,118 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const steers = w.container.commands().filter((c) => c.type === "steer");
     expect(steers.map((s) => s.message)).toEqual([wrapUpInstruction(2)]);
     expect(w.events.filter((e) => e.type === "run_note" && e.kind === "wrap_up")).toHaveLength(1);
+  });
+
+  it("keeps the tool-free write-up after an owned cut returns the pinned Pi SDK abort result", async () => {
+    const signal = new AbortController();
+    let abortedDuringUpdate = false;
+    const call = {
+      type: "toolCall" as const,
+      id: "owned-cut",
+      name: "bash",
+      arguments: { command: "printf 'ready'; sleep 30", timeout: 2 },
+    };
+    const native = await runToolCall(call, {
+      tools: [createBashTool(process.cwd(), { exposeSessionEnvironment: false })],
+      context: { messages: [] },
+      signal: signal.signal,
+      onUpdate: async () => {
+        abortedDuringUpdate = true;
+        signal.abort();
+      },
+      assistantMessage: {
+        role: "assistant",
+        content: [call],
+        api: "openai-responses",
+        provider: "openai",
+        model: "test",
+        timestamp: 1000,
+        stopReason: "toolUse",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      },
+    }).finally(() => signal.abort());
+    expect(native.isError).toBe(true);
+    expect(native.result.structuredContent).toBeUndefined();
+    expect(abortedDuringUpdate).toBe(true);
+    expect(signal.signal.aborted).toBe(true);
+
+    const clock = { now: NOW };
+    const w = world({ clock, agent: { maxMinutes: 20 } });
+    const recovery = new ToolRecovery();
+    w.run.toolContext.recovery = recovery;
+    w.bearers.bindRecovery("run-7", recovery);
+    const emit = w.run.onEvent;
+    w.run.onEvent = (event) => {
+      emit?.(event);
+      if (event.type === "tool_call" && event.callId === call.id) clock.now = NOW + 13 * MINUTE_MS;
+    };
+    scriptedPi(w.container, (_n, c) => {
+      c.emit(
+        { type: "message_end", message: assistant([call]) },
+        { type: "tool_execution_start", toolCallId: call.id, toolName: "bash", args: call.arguments },
+      );
+      expect(
+        authorizeToolCall(w.registry.get("run-7")!, { toolCallId: call.id, tool: "bash", input: call.arguments }),
+      ).toEqual({ allow: true });
+    });
+    const stdin = w.container.onStdin!;
+    let refusal: unknown;
+    w.container.onStdin = (line, c) => {
+      const command = JSON.parse(line);
+      if (command.type !== "abort") return stdin(line, c);
+      c.emit(
+        { id: command.id, type: "response", command: "abort", success: true },
+        {
+          type: "tool_execution_end",
+          toolCallId: call.id,
+          toolName: "bash",
+          result: native.result,
+          isError: native.isError,
+        },
+      );
+      const input = { command: "printf 'must not run'" };
+      refusal = authorizeToolCall(w.registry.get("run-7")!, { toolCallId: "after-cut", tool: "bash", input });
+      c.emit(
+        { type: "tool_execution_start", toolCallId: "after-cut", toolName: "bash", args: input },
+        {
+          type: "tool_execution_end",
+          toolCallId: "after-cut",
+          toolName: "bash",
+          result: { content: [{ type: "text", text: "host refused the write-up tool" }] },
+          isError: true,
+        },
+      );
+      setImmediate(() => finalTurn(c, "The command was cut; its result is unverified."));
+    };
+    expect(await w.start()).toBe(
+      "⚠️ _Hit the 20-minute budget before finishing — findings so far:_\n\nThe command was cut; its result is unverified.",
+    );
+    expect(refusal).toMatchObject({ allow: false });
+    expect(w.bearers.marksOf("run-7")).toEqual({ loopEnded: true });
+    expect(
+      w.events
+        .filter((event) => event.type === "tool_result")
+        .map(({ callId, ok, exitCode, cut }) => ({ callId, ok, exitCode, cut })),
+    ).toEqual([
+      { callId: "owned-cut", ok: false, exitCode: undefined, cut: true },
+      { callId: "after-cut", ok: false, exitCode: undefined, cut: undefined },
+    ]);
+    expect(w.bearers.consumeTurn("run-7")).toEqual({ ok: true, turn: 1 });
+    expect(w.events.filter((event) => event.type === "run_note" && event.kind === "tool_cut")).toMatchObject([
+      { kind: "tool_cut", summary: expect.stringContaining("the loop's end cut the command in flight") },
+    ]);
+    expect(
+      w.events.filter(
+        (event) => event.type === "run_note" && event.summary.includes("The original operation remains held"),
+      ),
+    ).toEqual([]);
   });
 
   it("at the loop's end the write-up is steered with the loop's words, every tool is refused meanwhile, the answer carries the budget label, the lease event names the start, the end and the cut, and the bearer expires a minute past the lease", async () => {
@@ -3869,7 +3983,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
           type: "tool_execution_end",
           toolCallId: "c9",
           toolName: "bash",
-          result: { content: [{ type: "text", text: "done" }] },
+          result: { content: [{ type: "text", text: "done" }], structuredContent: { exit_code: 0 } },
           isError: false,
         },
       );

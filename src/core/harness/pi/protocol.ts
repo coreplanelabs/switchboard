@@ -60,8 +60,8 @@ export async function* jsonlLines(stream: Readable): AsyncIterable<string> {
  *  `tool_execution_start` and ended with an error result in pi's own words —
  *  so a `tool_execution_end` the hook never preceded is either one of these,
  *  and nothing ran, or a call that ran unvetted. The reason for the first
- *  case, `undefined` for a call pi ran however it ended. Pinned to pi's texts
- *  the way the bridge reads bash's `Command exited with code N` trailer. */
+ *  case, `undefined` for a call pi ran however it ended. These exact SDK
+ *  pre-execution refusals are separate from structured command outcomes. */
 export function piAnsweredWithoutRunning(event: PiEvent): string | undefined {
   if (event.type !== "tool_execution_end" || event.isError !== true) return undefined;
   const tool = typeof event.toolName === "string" ? event.toolName : "";

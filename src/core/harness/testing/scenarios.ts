@@ -1014,7 +1014,7 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       turns: [call("c1", "bash", { command: "sleep 900" }), text("findings so far: the sleep was cut")],
       hangToolCall: 1,
     },
-    check: (run, driver) => {
+    check: (run) => {
       assert.equal(answered(run), timeBudgetAnswer("findings so far: the sleep was cut", CONFORMANCE_MAX_MINUTES));
       assert.deepEqual(
         notes(run)
@@ -1034,13 +1034,9 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       const cut = toolResults(run).find((r) => r.callId === "c1");
       assert.ok(cut !== undefined, "the cut call has no result on the record");
       assert.equal(cut.cut, true, "the cut call's result is not marked cut: the release would read it as settled");
-      // pi's abort fails the tool it cuts (`aborted`, measured on its double);
-      // OpenCode's interrupt leaves the tool its own late outcome — the fake's
-      // recorded shape is a late success after the next execution's start;
-      // whether the pinned binary fails it `aborted` instead is the live
-      // probe's to say — and the cut mark, not the outcome, is what the
-      // release reads.
-      if (driver.harness === "pi") assert.equal(cut.ok, false, "pi's aborted tool is not on the record as a failure");
+      // This row supplies an owned abort with no native completion facts.
+      // A tool Boolean cannot turn that unverified result into success.
+      assert.equal(cut.ok, false, "the unproved abort is not recorded as a failed result");
       const lease = run.events.find((e) => e.type === "lease");
       assert.ok(lease && lease.type === "lease", "no lease event");
       const last = Math.max(...run.events.map((e) => e.at ?? 0));

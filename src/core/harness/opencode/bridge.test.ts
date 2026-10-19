@@ -27,6 +27,7 @@ import { OPENCODE_EVENT_DISPOSITION, openCodeDispositionCounts, openCodeDisposit
 import { openCodeReplacedCallNote } from "./session.js";
 import { openCodeRunPaths } from "./process.js";
 import { feedByteLength, openCodeDriver, silentPromptRecords, TAILER_READY_NOTES } from "./testing/driver.js";
+import { ToolRecovery } from "../toolRecovery.js";
 import { loopClock, MINUTE_MS } from "../../budgets.js";
 import { CONFORMANCE_MAX_MINUTES, FAILED_MODEL_CALL_ERROR } from "../testing/scenarios.js";
 import {
@@ -92,11 +93,12 @@ describe("relayed read delegation budget", () => {
   });
 });
 
-function harness(opts: { identity?: "write" | "read" | "none"; relayed?: string[] } = {}) {
+function harness(opts: { identity?: "write" | "read" | "none"; relayed?: string[]; recovery?: ToolRecovery } = {}) {
   const events: RunEvent[] = [];
   const steps: StepReport[] = [];
   const progress: string[] = [];
   const bridge = new OpenCodeBridge({
+    recovery: opts.recovery,
     emit: (e) => void events.push(e),
     onProgress: (n) => void progress.push(n),
     clock: () => NOW,
@@ -329,9 +331,9 @@ const settled = (type: "session.tool.success" | "session.tool.failed", callId: s
     assistantMessageID: "msg_a0",
     id: callId,
     ...(type === "session.tool.success"
-      ? { content: [{ type: "text", text: "ran" }] }
+      ? { content: [{ type: "text", text: "ran" }], metadata: { status: "completed", truncated: false, exit: 0 } }
       : { error: { type: "permission.rejected", message: "rejected" } }),
-    executed: false,
+    executed: type === "session.tool.success",
   });
 
 describe("the gate's honest cannot, the compaction row, the budget stop, the unknown kind", () => {
@@ -570,6 +572,175 @@ const called = (callId: string) =>
   });
 
 describe("tool argument retention", () => {
+  it.each([
+    { outcome: "completed zero", exitCode: 0, ok: true, cut: undefined },
+    { outcome: "completed nonzero", exitCode: 2, ok: false, cut: undefined },
+    { outcome: "host refusal", exitCode: undefined, ok: false, cut: undefined },
+    { outcome: "unknown abort", exitCode: undefined, ok: false, cut: true },
+  ])("an abort mark preserves the native phase for $outcome", async ({ outcome, exitCode, ok, cut }) => {
+    const recovery = new ToolRecovery();
+    const { bridge, events } = harness({ recovery });
+    bridge.observe(inputStarted("race", "shell"));
+    bridge.observe(called("race"));
+    const gate = bridge.observe(
+      asked("permission-race", "race", "shell", outcome === "host refusal" ? "git push origin main" : "echo example"),
+    );
+    expect(gate.replies.map((reply) => reply.reply)).toEqual([outcome === "host refusal" ? "reject" : "once"]);
+    bridge.markOpenCallsCut();
+    bridge.observe(
+      ev(exitCode === undefined ? "session.tool.failed" : "session.tool.success", {
+        sessionID: "ses_c",
+        id: "race",
+        executed: false,
+        ...(exitCode === undefined
+          ? { error: { type: "aborted", message: "native result has no process facts" } }
+          : {
+              metadata: { status: "completed", truncated: false, exit: exitCode },
+              content: [{ type: "text", text: "Command aborted" }],
+            }),
+      }),
+    );
+    await recovery.settled(false);
+    expect(
+      events.filter((event) => event.type === "tool_result").map(({ ok, exitCode, cut }) => ({ ok, exitCode, cut })),
+    ).toEqual([{ ok, exitCode, cut }]);
+    expect(recovery.stopped).toBeUndefined();
+    expect(recovery.snapshot().failures.map(({ tool, count }) => ({ tool, count }))).toEqual(
+      outcome === "host refusal" ? [{ tool: "bash", count: 1 }] : [],
+    );
+  });
+
+  it("keeps successful shell output as text even when it looks like an exit status", () => {
+    const { bridge, events } = harness();
+    for (const [id, text] of [
+      ["prefix", "exit 2: example output"],
+      ["trailer", "Command exited with code 2"],
+    ]) {
+      bridge.observe(inputStarted(id, "shell"));
+      bridge.observe(called(id));
+      bridge.observe(asked(`permission-${id}`, id, "shell", "echo example"));
+      bridge.observe(
+        ev("session.tool.success", {
+          sessionID: "ses_c",
+          assistantMessageID: "msg_a0",
+          id,
+          content: [{ type: "text", text }],
+          executed: false,
+          metadata: { status: "completed", truncated: false, exit: 0 },
+        }),
+      );
+    }
+    expect(
+      events
+        .filter((event) => event.type === "tool_result")
+        .map(({ callId, ok, exitCode, output }) => ({ callId, ok, exitCode, output })),
+    ).toEqual([
+      { callId: "prefix", ok: true, exitCode: 0, output: "exit 2: example output" },
+      { callId: "trailer", ok: true, exitCode: 0, output: "Command exited with code 2" },
+    ]);
+  });
+
+  it("records nonzero native shell exit even when the tool event succeeds", () => {
+    const { bridge, events } = harness();
+    bridge.observe(inputStarted("native-exit", "shell"));
+    bridge.observe(called("native-exit"));
+    bridge.observe(asked("permission-native-exit", "native-exit", "shell", "echo example"));
+    bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        id: "native-exit",
+        executed: false,
+        content: [{ type: "text", text: "exit 2: failed" }],
+        metadata: { status: "completed", truncated: false, exit: 2 },
+      }),
+    );
+    expect(events.find((event) => event.type === "tool_result")).toMatchObject({
+      callId: "native-exit",
+      ok: false,
+      exitCode: 2,
+      output: "exit 2: failed",
+    });
+  });
+
+  it("holds incomplete or unproved shell producer facts instead of guessing an exit", async () => {
+    for (const [relayed, metadata, providerExecuted = false, nativeName = "shell"] of [
+      [false, undefined, false],
+      [false, undefined, true],
+      [false, { status: "completed", truncated: false }],
+      [false, { status: "completed", truncated: false, exit: 0.5 }],
+      [false, { status: "completed", truncated: false, exit: -1 }],
+      [false, { status: "completed", truncated: false, exit: 256 }],
+      [false, { status: "completed", truncated: "false", exit: 0 }],
+      [false, { status: "completed", exit: 0 }],
+      [false, { status: "completed", truncated: false, exit: 0 }, false, "bash"],
+      [false, { status: "completed", truncated: false, exit: "0" }],
+      [false, { status: "completed", truncated: false, exit: 0, timeout: true }],
+      [false, { status: "completed", truncated: false, exit: 137, signal: "SIGKILL" }],
+      [false, { status: "running", truncated: false, shellID: "job-7" }],
+      [true, { status: "completed", truncated: false, exit: 0 }],
+      [false, { status: "completed", truncated: false, exit: 0 }, true],
+    ] as const) {
+      const recovery = new ToolRecovery();
+      const { bridge, events } = harness({ relayed: relayed ? ["shell"] : [], recovery });
+      bridge.observe(inputStarted("held", nativeName));
+      bridge.observe(called("held"));
+      bridge.observe(asked("permission-held", "held", "shell", "echo example"));
+      bridge.observe(
+        ev("session.tool.success", {
+          sessionID: "ses_c",
+          id: "held",
+          executed: providerExecuted,
+          content: [{ type: "text", text: "exit 0: example" }],
+          metadata,
+        }),
+      );
+      await recovery.settled(false);
+      expect(recovery.stopped).toEqual({ tool: "bash", attempts: 1, reason: "outcome_unknown" });
+      expect(
+        events.filter((event) => event.type === "tool_result").map(({ ok, exitCode }) => ({ ok, exitCode })),
+      ).toEqual([{ ok: false, exitCode: undefined }]);
+      expect(notes(events).map(({ kind, summary }) => ({ kind, summary }))).toEqual([
+        {
+          kind: "tool_refused",
+          summary: "The bash result for call held could not be verified. The original operation remains held.",
+        },
+      ]);
+    }
+  });
+
+  it("correlates a held shell with a bounded redacted call-ID copy", () => {
+    for (const [callId, display] of [
+      ["held-call", "held-call"],
+      [`sk-${"s".repeat(24)}`, "«redacted-api-key»"],
+      [`call-${"x".repeat(120)}`, `call-${"x".repeat(75)}…`],
+    ]) {
+      const { bridge, events } = harness();
+      bridge.observe(inputStarted(callId, "shell"));
+      bridge.observe(called(callId));
+      bridge.observe(asked(`permission-${callId}`, callId, "shell", "echo example"));
+      bridge.observe(
+        ev("session.tool.success", {
+          sessionID: "ses_c",
+          id: callId,
+          executed: false,
+          metadata: { private: "private-status-value" },
+          content: [{ type: "text", text: "private-output-value" }],
+        }),
+      );
+      expect(notes(events).map(({ kind, summary }) => ({ kind, summary }))).toEqual([
+        {
+          kind: "tool_refused",
+          summary: `The bash result for call ${display} could not be verified. The original operation remains held.`,
+        },
+      ]);
+      expect(
+        events
+          .filter((event) => event.type === "tool_result")
+          .map(({ callId, ok, exitCode }) => ({ callId, ok, exitCode })),
+      ).toEqual([{ callId, ok: false, exitCode: undefined }]);
+    }
+  });
+
   it("retains observed malformed string arguments without treating them as a permission projection", () => {
     const { bridge, events } = harness();
     bridge.observe(inputStarted("c-malformed", "edit"));
@@ -762,7 +933,7 @@ describe("tool argument retention", () => {
 });
 
 describe("a pre-execution settlement is narrated by what the facts prove (F2), and a call open when the container is replaced is settled on the record", () => {
-  it("a tool the identity's deny rules removed — absent from its own tools — settled with no ask is a tool_refused note naming the deny rules; a tool that is on the roster but errors before it runs is a harness_error, never dressed as a refusal", () => {
+  it("a tool the identity's deny rules removed is named as a refusal; an unproved failure with no gate decision is reported as unknown", () => {
     // Under identity read, `write` is not one of the run's own tools: OpenCode
     // failed it with no ask because the tool was never there — the deny rules.
     const removed = harness({ identity: "read" });
@@ -774,14 +945,14 @@ describe("a pre-execution settlement is narrated by what the facts prove (F2), a
     expect(notes(removed.events).some((n) => n.kind === "harness_error")).toBe(false);
 
     // `read` IS on the run's own tools under identity read: a settlement with no
-    // ask and nothing run is some other pre-execution failure, said as that —
-    // never the deny rules, which did not remove `read`.
+    // ask has no execution-phase proof. It is reported as unknown, never as
+    // the deny rules, which did not remove `read`.
     const errored = harness({ identity: "read" });
     errored.bridge.observe(inputStarted("c2", "read"));
     errored.bridge.observe(called("c2"));
     errored.bridge.observe(settled("session.tool.failed", "c2"));
     const errNote = notes(errored.events).find((n) => n.kind === "harness_error");
-    expect(errNote?.summary).toMatch(/before it ran, with no ask/);
+    expect(errNote?.summary).toMatch(/with no gate decision; its execution state is unknown/);
     expect(notes(errored.events).some((n) => n.kind === "tool_refused")).toBe(false);
   });
 
@@ -792,7 +963,15 @@ describe("a pre-execution settlement is narrated by what the facts prove (F2), a
     const aliased = harness({ identity: "write" });
     aliased.bridge.observe(inputStarted("c3", "bash"));
     aliased.bridge.observe(called("c3"));
-    aliased.bridge.observe(settled("session.tool.failed", "c3"));
+    aliased.bridge.observe(
+      ev("session.tool.failed", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_a0",
+        id: "c3",
+        executed: false,
+        error: { type: "tool.unknown", message: "Unknown tool: bash" },
+      }),
+    );
     const refusedNote = notes(aliased.events).find((n) => n.kind === "tool_refused");
     expect(refusedNote?.summary).toMatch(/this session has no tool named bash/);
     expect(refusedNote?.summary).toMatch(/holds it as OpenCode's `shell`/);
@@ -1052,7 +1231,14 @@ describe("the loop — a reply that cannot be posted, and the narration's timing
       /withdrew the ask for bash \(call c2\) before the gate's reply \(once\) landed/,
     );
     expect(withdrawn[0].summary).toMatch(/the gate refused bash \(call c1\) in the same step/);
-    expect(notes(r.events).filter((n) => n.kind === "tool_refused")).toHaveLength(1);
+    expect(
+      notes(r.events)
+        .filter((n) => n.kind === "tool_refused")
+        .map((n) => n.summary),
+    ).toEqual([
+      expect.stringMatching(/main/),
+      "The bash result for call c2 could not be verified. The original operation remains held.",
+    ]);
     // The cascade step's aborted failure is not a harness_error: it is the server's expected end.
     expect(
       notes(r.events).filter(
@@ -1677,7 +1863,8 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
         assistantMessageID: "msg_lost",
         id: "c-lost",
         content: [{ type: "text", text: "hi" }],
-        executed: true,
+        executed: false,
+        metadata: { status: "completed", truncated: false, exit: 0 },
       }),
     );
     expect(settled.bypass).toBeUndefined();
@@ -1801,6 +1988,7 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
         sessionID: "ses_c",
         assistantMessageID: "msg_x",
         id: "c-loop",
+        executed: false,
         error: { name: "PermissionDeniedError", message: "refused" },
       }),
     );
@@ -1882,7 +2070,8 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
         assistantMessageID: "msg_z",
         id: "c-dir3",
         content: [{ type: "text", text: "listed" }],
-        executed: true,
+        executed: false,
+        metadata: { status: "completed", truncated: false, exit: 0 },
       }),
     );
     expect(settled.bypass).toBeUndefined();

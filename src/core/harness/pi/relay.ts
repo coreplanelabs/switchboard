@@ -61,9 +61,9 @@ export interface LiveHarness {
   /** The span the bridge opened for a call still running, so a relayed tool's work hangs under it. */
   toolSpan: (callId: string) => Span | undefined;
   /** The gate saw this call — the extension asked for it, whatever the
-   *  answer. The bridge keeps the ids, so a call that ends without one is
+   *  answer and any refusal before dispatch. A call that ends without one is
    *  known to have run unvetted (or to have been answered by pi itself). */
-  gateSaw: (callId: string, lifecycleRefused?: boolean) => void;
+  gateSaw: (callId: string, lifecycleRefused?: boolean, refusedBeforeDispatch?: boolean) => void;
   /** The reason every tool is refused right now — the write-up — or nothing. */
   toolsBlocked: () => string | undefined;
   /** The observed native check call's cancellation and originating turn's
@@ -345,6 +345,7 @@ export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): Autho
   harness.gateSaw(ask.toolCallId, !recoveryStopped && ending !== undefined);
   const blocked = recoveryStopped ? "tool recovery is exhausted" : ending;
   const refuse = (reason: string): AuthorizeAnswer => {
+    harness.gateSaw(ask.toolCallId, !recoveryStopped && ending !== undefined, true);
     harness.emit({
       type: "run_note",
       kind: "tool_refused",

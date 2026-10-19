@@ -1388,7 +1388,7 @@ export function parseExitPrefix(output: string): { failed: boolean; exitCode?: n
  *  the model can read the reason and go on. The record must call that result
  *  what the model reads it as: `ok:false`. The pi bridge derives `ok` for such
  *  a tool through this one reader (the native loop did too, before record
- *  0032's series deleted it); bash keeps `parseExitPrefix`; a tool relaying
+ *  0032's series deleted it); native bash uses its SDK process facts; a tool relaying
  *  content it did not write is never read this way. Ordinary output that
  *  merely contains the word later on is a success. */
 export function toolTextFailed(output: string): boolean {

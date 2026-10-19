@@ -984,13 +984,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
   const pendingToolCalls = new Set<string>();
   let incompleteToolEffects = false;
+  /** A cut retains workspace custody synchronously, even if display history
+   * drops it. The ending also folds remaining calls into this same state;
+   * release requests teardown rather than pairing (harness.md item 13). */
+  let commandInFlight = false;
   const observeToolEffect = (event: RunEvent) => {
     if (event.type === "tool_call" && event.tool !== "update_status" && event.callId)
       pendingToolCalls.add(event.callId);
     if (event.type === "tool_result") {
       // A settled error is a known result. Only a cut or typed refusal leaves
       // the effect unverified; failed searches can be recovered in the run.
-      if (event.cut) incompleteToolEffects = true;
+      if (event.cut) {
+        incompleteToolEffects = true;
+        commandInFlight = true;
+      }
       if (event.callId) pendingToolCalls.delete(event.callId);
     }
     if (
@@ -1629,15 +1636,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let runFailed = false; // the runner threw → terminal status `failed`
   /** The runner threw the gate's bypass: what ran in the workspace was never vetted, so its release tears it down whatever the record shows in flight. */
   let gateBypassed = false;
-  /** Whether the run's ending may have left a command running in its workspace
-   *  — a call the ending's abort or interrupt cut (its result marked `cut`), or
-   *  open when the run failed, was interrupted or hard-stopped (`callsInFlight`
-   *  under the run's status) — read off the record once the harness session has
-   *  ended (its end settles what it cut, marked) and before the record is
-   *  sealed, said on the record as a `workspace_torn_down` note naming the
-   *  calls, and handed to the release, which tears the workspace down for it
-   *  rather than pair it (harness.md item 13). */
-  let commandInFlight = false;
   /** The registry's retained backlog, copied at the call (a shallow copy of the
    *  event references, `snapshotOf`). */
   const recordEvents = () => registry.snapshot(run.id, run.token)?.events ?? [];
@@ -1705,13 +1703,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         // publication lane must drain before teardown judges the record.
         await events.drain();
         const calls = callsInFlight(recordEvents(), statusNow());
-        commandInFlight = calls.length > 0;
+        commandInFlight ||= calls.length > 0;
         if (commandInFlight && harnessEndState === "ending")
           events.publish({
             type: "run_note",
             kind: "workspace_torn_down",
             summary: redactAndCap(
-              `a command may still be running in the workspace, so it is torn down rather than paired: ${calls.map((c) => c.summary).join("; ")}`,
+              `a command may still be running in the workspace, so it is torn down rather than paired: ${calls.length ? calls.map((c) => c.summary).join("; ") : "a cut command is no longer in retained display history"}`,
               ENDING_NOTE_MAX,
             ),
             at: clock(),
@@ -1893,6 +1891,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (run.control.destructive) return;
     if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined || commandInFlight || gateBypassed) return;
     await events.drain();
+    if (commandInFlight) return;
     retainPublicationReceipts();
     if (!workspaceObserved) await observeWorkspaceNow();
     const target =
@@ -2046,10 +2045,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  turn, work-left-behind note and PR post-step; a review's head settle,
    *  verdict turn and review post-step — is skipped: a hard stop observed
    *  nothing and posts nothing, and a relaunch that ended the run has no tree
-   *  to look at and no verdict to post. Re-latch at every boundary, since a
+   *  to look at and no verdict to post. A retained cut or unsettled call cannot
+   *  admit another task turn or publication. Re-latch at every boundary, since a
    *  soft pre-review stop can land while the preceding tail step awaits. */
   const tailSkipped = (): boolean =>
-    run.control.requested === "hard" || relaunchEndedRun || latchReviewStoppedBeforeStart();
+    run.control.requested === "hard" || relaunchEndedRun || latchReviewStoppedBeforeStart() || commandInFlight;
   const originalPublicationOwner = async () => {
     if (!ledgerRun?.tracked() || !deps.runLedger) return undefined;
     const rows = (await deps.runLedger.readLiveRuns()).filter((row) => row.runId === run.id);
@@ -4369,7 +4369,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
-        preReviewStopped: latchReviewStoppedBeforeStart,
+        preReviewStopped: tailSkipped,
         // What the run did about a moved head: the re-review's note is an
         // acknowledgement (`verbose`), the card's word is `debug` material
         // (routing-and-config item 28). The verdict that follows is the reply
@@ -4613,7 +4613,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
         logKey: msg.threadKey,
       });
-      if (turnTarget) {
+      if (turnTarget && !tailSkipped()) {
         descriptionTurnRan = true;
         await root.span("run.description_turn", (span) =>
           runDescriptionTurn({
@@ -4635,7 +4635,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           }),
         );
         // Re-read, not narrowed: a hard stop may have landed during the turn.
-        if (!run.control.hardSignal.aborted) await observeWorkspaceNow();
+        if (!tailSkipped()) await observeWorkspaceNow();
       }
     }
     // A clean first checkpoint leaves the description turn available, and

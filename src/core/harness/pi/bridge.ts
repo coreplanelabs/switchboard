@@ -15,7 +15,6 @@ import { isDeepStrictEqual } from "node:util";
 import { formatDuration } from "../../time/formatDuration.js";
 import {
   COMMAND_CAP,
-  parseExitPrefix,
   toolTextFailed,
   prepareToolResult,
   prepareToolInput,
@@ -265,14 +264,25 @@ export function piResultText(result: unknown): string {
     .join("\n");
 }
 
-/** pi's bash tool says a nonzero exit in its result text's last line; the
- *  native executors say it as an `exit N:` first line. Both read as the code. */
-export function piBashExit(text: string, isError: boolean): { failed: boolean; exitCode?: number } {
-  const trailer = /Command exited with code (\d+)\s*$/.exec(text);
-  if (trailer) return { failed: true, exitCode: Number(trailer[1]) };
-  const prefixed = parseExitPrefix(text);
-  if (prefixed.failed) return prefixed;
-  return isError ? { failed: true } : { failed: false, exitCode: 0 };
+interface BashExit {
+  failed: boolean;
+  exitCode?: number;
+  commandCompleted?: true;
+  unconfirmed?: "status_type" | "result_missing" | "exit_type" | "exit_range" | "status_mismatch";
+}
+
+/** Only the SDK's structured command result proves completion. A Boolean
+ * tool outcome cannot settle a command whose process result is missing. */
+export function piBashExit(isError: unknown, structuredContent?: unknown): BashExit {
+  if (typeof isError !== "boolean") return { failed: true, unconfirmed: "status_type" };
+  if (structuredContent !== undefined) {
+    const code = isRecord(structuredContent) ? structuredContent.exit_code : undefined;
+    if (typeof code !== "number") return { failed: true, unconfirmed: "exit_type" };
+    if (!Number.isInteger(code) || code < 0 || code > 255) return { failed: true, unconfirmed: "exit_range" };
+    if (isError !== (code !== 0)) return { failed: true, unconfirmed: "status_mismatch" };
+    return { failed: isError, exitCode: code, commandCompleted: true };
+  }
+  return { failed: true, unconfirmed: "result_missing" };
 }
 
 export class PiBridge {
@@ -301,15 +311,13 @@ export class PiBridge {
       input?: unknown;
     }
   >();
-  /** The open calls an abort was sent for (`markOpenCallsCut`): their failed
-   *  end, when pi answers it, is the abort's cut and not a settle — the result
-   *  is marked `cut`, and the workspace's release reads the command as one that
-   *  may run on; a clean end in the abort's window is the command's own exit. */
+  /** Calls marked by the host's abort. Native completion or host refusal
+   * settles the result; an unproved result retains the owning cut. */
   private readonly cutCalls = new Set<string>();
   /** The calls the gate saw — the extension asked `/harness/authorize` for
-   *  them (`gateSaw`) — not yet ended. True marks a lifecycle refusal, which
-   *  must retain the existing ending rather than spend task recovery. */
-  private readonly vetted = new Map<string, boolean>();
+   *  them (`gateSaw`) — not yet ended. A refusal proves no dispatch. True
+   *  marks a lifecycle refusal, which retains the existing ending. */
+  private readonly vetted = new Map<string, boolean | "refused">();
   /** Whether a call starting now is judged against the gate when it ends.
    *  The harness turns it off while catching up on a re-attach: those calls
    *  were vetted by the bot generation that died, and this one never heard. */
@@ -346,11 +354,16 @@ export class PiBridge {
     this.modelCallOpen = false;
   }
 
-  /** The gate saw this call: the extension's `tool_call` hook asked the bot
-   *  for it, whatever the answer. Called from the authorize route, before pi
-   *  runs the tool — so it always precedes the call's `tool_execution_end`. */
-  gateSaw(callId: string, lifecycleRefused = false): void {
-    this.vetted.set(callId, lifecycleRefused || this.vetted.get(callId) === true);
+  /** The authorize route records admission, then any refusal before dispatch.
+   * Only this host-owned decision can prove that no command was dispatched. */
+  gateSaw(callId: string, lifecycleRefused = false, refusedBeforeDispatch = false): void {
+    const prior = this.vetted.get(callId);
+    // A late refusal update cannot recreate a call the SDK already settled.
+    if (refusedBeforeDispatch && prior === undefined) return;
+    this.vetted.set(
+      callId,
+      lifecycleRefused || prior === true ? true : refusedBeforeDispatch || prior === "refused" ? "refused" : false,
+    );
   }
 
   /** The run's answer as it stands: the last text-only assistant message, else a held bookkeeping text. */
@@ -597,31 +610,60 @@ export class PiBridge {
     const tool = open?.tool ?? str(event.toolName);
     const isError = event.isError === true;
     const text = piResultText(event.result);
+    const structuredResult = isRecord(event.result) ? event.result.structuredContent : undefined;
+    // This host-owned marker proves a refusal before dispatch.
+    // The SDK's error flag or explanation cannot supply that proof.
+    const gate = this.vetted.get(callId);
+    const notDispatched = (gate === true || gate === "refused") && isError && structuredResult === undefined;
     // A relayed tool that declares `failsInText` answers `error: …` in text
     // instead of raising pi's isError: the record calls that a failure too, as
     // the native loop does (toolTextFailed).
-    const exit =
+    const exit: BashExit =
       tool === "bash"
-        ? piBashExit(text, isError)
+        ? notDispatched
+          ? { failed: true }
+          : piBashExit(event.isError, structuredResult)
         : { failed: isError || (this.deps.textFailing?.has(tool) === true && toolTextFailed(text)) };
     const ok = !exit.failed;
     // The mark is set when the abort is SENT (`markOpenCallsCut`); pi handles
-    // it a moment later, and a tool that finished in that window ends clean —
-    // the command exited, and its result is a settle, not a cut (harness.md
-    // item 13: a `cut` result is a command that may run on). Only a marked
-    // call's failed end is the abort's.
-    const cut = marked && !ok;
+    // it a moment later. Native completion proves a settle, even with a
+    // nonzero exit; host refusal proves no dispatch. Neither is a cut.
+    // A marked end without either proof may leave effects running (harness.md
+    // item 13), so the original cut lifecycle retains it.
+    const cut = marked && !ok && !notDispatched && !exit.commandCompleted;
     // Native command exits are task evidence. Call IDs deduplicate relay
     // receipts while also covering SDK refusals that never reached the relay.
     // Replay has no live gate classification; only this generation owns fresh failures.
+    // An owned cut retains unverified effects through `cut`, not task recovery,
+    // so its existing tool-free write-up can report what remains unknown.
     if (
       open &&
       (open.judged || this.vetted.has(callId)) &&
       !cut &&
       this.vetted.get(callId) !== true &&
-      (ok || exit.exitCode === undefined)
+      (ok || !exit.commandCompleted)
     )
-      void this.deps.recovery?.record(callId, tool, open.input, ok ? undefined : { text });
+      void this.deps.recovery?.record(
+        callId,
+        tool,
+        open.input,
+        ok
+          ? undefined
+          : { text, ...(exit.unconfirmed ? { detail: { code: "outcome_unknown", recovery: "stop" } as const } : {}) },
+      );
+    if (exit.unconfirmed && !cut) {
+      const displayCallId = this.deps.secretValues?.some((secret) => secret && callId.includes(secret))
+        ? "unavailable"
+        : redactAndCap(callId, 80);
+      const shape = (value: unknown) => (value === null ? "null" : Array.isArray(value) ? "array" : typeof value);
+      const structured = structuredResult;
+      const code = isRecord(structured) ? structured.exit_code : undefined;
+      const status = typeof event.isError === "boolean" ? event.isError : shape(event.isError);
+      this.note(
+        "tool_refused",
+        `The bash result for call ${displayCallId} could not be verified (isError=${status}, structuredContent=${shape(structured)}, exit_code=${shape(code)}, reason=${exit.unconfirmed}). The original operation remains held.`,
+      );
+    }
     this.emit({
       type: "tool_result",
       tool,
