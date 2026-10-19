@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:http";
+import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { HarnessRegistry, type LiveHarness } from "../core/harness/pi/relay.js";
@@ -454,5 +454,54 @@ describe("createHarnessRoutesHandler — the node adapter", () => {
       "[harness] 503 tools — held (run_resuming) run=run-9",
       "[harness] 202 tool — held (run_resuming) run=run-9",
     ]);
+  });
+
+  it.each([
+    {
+      kind: "held",
+      authorization: "Bearer sbr_run-9.abc",
+      status: 202,
+      body: { pending: true, reason: "run_resuming" },
+    },
+    { kind: "refused", authorization: "", status: 401, body: { error: "missing_bearer" } },
+  ])("discards a $kind upload before completing its response without parsing or running the tool", async (expected) => {
+    const takeover = fakeTakeover({ settled: true, pending: ["run-9"] });
+    const { deps } = world(takeover.facts);
+    let reachedDoor!: () => void;
+    const held = new Promise<void>((resolve) => {
+      reachedDoor = resolve;
+    });
+    let responseFinished = false;
+    const handler = createHarnessRoutesHandler({ ...deps, log: () => reachedDoor() });
+    server = createServer((req, res) => {
+      res.once("finish", () => {
+        responseFinished = true;
+      });
+      handler(req, res);
+    });
+    await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+    const client = request({
+      hostname: "127.0.0.1",
+      port: (server.address() as AddressInfo).port,
+      path: HARNESS_TOOL_PATH,
+      method: "POST",
+      headers: { authorization: expected.authorization, "content-type": "application/json" },
+    });
+    const answer = new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+      client.once("error", reject);
+      client.once("response", async (response) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of response) chunks.push(Buffer.from(chunk));
+        resolve({ status: response.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString()) });
+      });
+    });
+    client.write("{not json");
+    await held;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const finishedBeforeUpload = responseFinished;
+    client.end(" and never parsed}");
+    expect(await answer).toEqual({ status: expected.status, body: expected.body });
+    expect(finishedBeforeUpload).toBe(false);
+    expect(responseFinished).toBe(true);
   });
 });
