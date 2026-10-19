@@ -253,11 +253,14 @@ function runner(
   );
   plan.checks.cleanTree = false;
   const logs: string[] = [];
+  let clock = 0;
   const app = { value: { version: 3, image: "registry.example/bot:old" } } as const;
   const deps: SandboxGateDeps = {
     env: { RESIDENT_READ_TOKEN: "fixture" },
-    now: () => 0,
-    sleep: async () => {},
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms;
+    },
     readAppState: async () => app,
     readListedAppState: async () => app,
     readHealth: async (url) =>
@@ -437,6 +440,77 @@ describe("runDeployPlan config publication", () => {
     expect(processes.calls).toEqual(["upload:memory", "upload:bot"]);
     expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({ kind: "ran", ok: true });
     expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+  });
+
+  it("waits for the original singleton to finish starting before any config write or upload", async () => {
+    const h = installedRunner();
+    const ready = h.deps.readInstances;
+    let reads = 0;
+    h.deps.readInstances = async (...args) => {
+      if (++reads <= 2) {
+        expect(processes.calls).toEqual([]);
+        expect(h.store.calls).toEqual([]);
+        return { value: [{ name: "singleton", state: "inactive", version: null }] };
+      }
+      return ready(...args);
+    };
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({ kind: "ran", ok: true });
+    expect(h.deps.now()).toBe(2_000);
+    expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+    expect(processes.calls).toEqual(["upload:memory", "upload:bot"]);
+    expect(h.logs.filter((line) => line.includes("config: waiting for the original singleton"))).toHaveLength(1);
+  });
+
+  it("keeps an unresolved singleton startup bounded and performs no config write or upload", async () => {
+    const h = installedRunner();
+    h.deps.readInstances = async () => ({ value: [{ name: "singleton", state: "inactive", version: null }] });
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toEqual({
+      kind: "refused",
+      problems: ["config source application and serving instance do not agree"],
+    });
+    expect(h.deps.now()).toBe(60_000);
+    expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+    expect(h.store.calls).toEqual([]);
+    expect(processes.calls).toEqual([]);
+  });
+
+  it("cancellation during singleton startup stops without a publication or upload", async () => {
+    const h = installedRunner();
+    const control = new AbortController();
+    h.deps.signal = control.signal;
+    h.deps.readInstances = async () => ({ value: [{ name: "singleton", state: "inactive", version: null }] });
+    h.deps.sleep = async () => {
+      control.abort();
+    };
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toEqual({ kind: "refused", problems: ["deployment cancelled"] });
+    expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+    expect(h.store.calls).toEqual([]);
+    expect(processes.calls).toEqual([]);
+  });
+
+  it("bounds a pending source inventory read before any publication or upload", async () => {
+    const h = installedRunner();
+    vi.useFakeTimers();
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    h.deps.readInstances = async (_dir, _app, _config, signal) =>
+      new Promise((resolve) => {
+        signal?.addEventListener("abort", () => resolve({ error: "source inventory interrupted" }), { once: true });
+        entered();
+      });
+    const pending = runDeployPlan(h.plan, h.io, h.deps);
+    try {
+      await started;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await pending).toEqual({ kind: "refused", problems: ["config source read budget exhausted"] });
+      expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+      expect(h.store.calls).toEqual([]);
+      expect(processes.calls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuses an unloaded successor even when its config bytes are identical", async () => {

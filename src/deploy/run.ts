@@ -7,7 +7,7 @@ import {
   type ServedConfigConsumer,
   type ConfigConsumerIdentity,
 } from "../configConsumer.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { createRequire } from "node:module";
 import {
@@ -2144,6 +2144,24 @@ async function deployStepTraced(
                 ? `[deploy:all] resident: application read unavailable (HTTP ${residentAfter.diagnostic?.httpStatus}); waiting within the readiness deadline`
                 : "[deploy:all] resident: waiting for the selected container application target to register",
             );
+            if ("value" in residentAfter) {
+              const imageHash = (image: string | null | undefined) =>
+                image ? createHash("sha256").update(image).digest("hex") : null;
+              io.log(
+                JSON.stringify({
+                  event: "resident.application.wait",
+                  application: step.residentContainerApp,
+                  sourceCommit: expectedCommit,
+                  beforeVersion: residentBefore.value.version,
+                  observedVersion: residentAfter.value.version,
+                  versionAdvanced: residentAfter.value.version > residentBefore.value.version,
+                  imageMatches: intendedImage ? residentAfter.value.image === intendedImage : null,
+                  beforeImageSha256: imageHash(residentBefore.value.image),
+                  observedImageSha256: imageHash(residentAfter.value.image),
+                  selectedImageSha256: imageHash(intendedImage),
+                }),
+              );
+            }
             lastTargetWaitLog = deps.now();
             lastTargetWaitStatus = status ?? undefined;
           }
@@ -3004,14 +3022,64 @@ async function runSelectedDeployPlan(
       const bot = plan.steps.find((step) => step.name === "bot");
       if (!bot || bot.liveGate?.kind !== "bot")
         return { kind: "refused", problems: ["config input source needs an actual bot application binding"] };
-      const [sourceHealth, sourceApp, sourceInstances] = await Promise.all([
-        deps.readHealth(bot.liveGate.healthUrl),
-        deps.readAppState(bot.dir, bot.liveGate.containerApp),
-        deps.readInstances(bot.dir, bot.liveGate.containerApp),
-      ]);
+      const gate = bot.liveGate;
+      const sourceDeadline = deps.now() + Math.min(plan.waitMaxMs, LIVE_GATE_DEADLINE_MS);
+      const readSource = async () => {
+        const remaining = Math.max(1, sourceDeadline - deps.now());
+        const timeout = new AbortController();
+        const timer = setTimeout(() => timeout.abort(), remaining);
+        const signal = deps.signal ? AbortSignal.any([deps.signal, timeout.signal]) : timeout.signal;
+        try {
+          const values = await Promise.all([
+            deps.readHealth(gate.healthUrl, undefined, remaining, signal),
+            deps.readAppState(bot.dir, gate.containerApp, undefined, signal),
+            deps.readInstances(bot.dir, gate.containerApp, undefined, signal),
+          ]);
+          return { values, expired: timeout.signal.aborted || deps.now() > sourceDeadline };
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      let sourceRead = await readSource();
       if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
-      const observed = configSourceObservation(sourceHealth, sourceApp, sourceInstances);
+      if (sourceRead.expired) return { kind: "refused", problems: ["config source read budget exhausted"] };
+      let [sourceHealth, sourceApp, sourceInstances] = sourceRead.values;
+      let observed = configSourceObservation(sourceHealth, sourceApp, sourceInstances);
       const original = plan.config.originalSource;
+      let lastSourceWait = -Infinity;
+      // An interrupted rollout can leave the singleton temporarily unassigned.
+      // Observe only that transition. A pinned original witness, running
+      // contradiction, malformed source or failed read keeps its refusal.
+      while (
+        !original &&
+        !observed.ok &&
+        observed.problem === "config source application and serving instance do not agree" &&
+        "value" in sourceApp &&
+        Number.isSafeInteger(sourceApp.value.version) &&
+        sourceApp.value.version >= 0 &&
+        sourceApp.value.image &&
+        "value" in sourceInstances &&
+        sourceInstances.value.length === 1 &&
+        sourceInstances.value[0].name === "singleton" &&
+        sourceInstances.value[0].state === "inactive" &&
+        sourceInstances.value[0].version === null &&
+        deps.now() < sourceDeadline
+      ) {
+        if (deps.now() - lastSourceWait >= MINUTE_MS) {
+          io.log(
+            "[deploy:all] config: waiting for the original singleton to finish starting; no configuration or Worker has been changed",
+          );
+          lastSourceWait = deps.now();
+        }
+        await deps.sleep(Math.min(plan.pollMs, sourceDeadline - deps.now()), deps.signal);
+        if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
+        if (deps.now() >= sourceDeadline) break;
+        sourceRead = await readSource();
+        if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
+        if (sourceRead.expired) return { kind: "refused", problems: ["config source read budget exhausted"] };
+        [sourceHealth, sourceApp, sourceInstances] = sourceRead.values;
+        observed = configSourceObservation(sourceHealth, sourceApp, sourceInstances);
+      }
       const input = observed.ok
         ? observed.source
         : original && originalConfigSourceObservation(original, sourceApp, sourceInstances)

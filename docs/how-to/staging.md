@@ -27,6 +27,32 @@ npm run staging:deploy -- --only bot
 
 `--check` reads and validates inputs without upload. The runner requires the explicit staging account, full topology, build-mode images, matching state/execution endpoints and separate storage names. It freezes the profile and config outside the checkout before invoking the existing `deploy plan` and `deploy all`. The existing runner checks credentials, clean tree, preservation and live readiness. `--force` is refused, and inherited shell or checkout-file force overrides are disabled. The bot preflight uses the selected profile’s native application name. Account and endpoint checks cannot prove Slack/GitHub credential scope: prove those separately during provisioning.
 
+### Recover an interrupted Resident upload
+
+A cancelled job can finish uploading its Worker and container image before its controller ends. A later deployment must keep that fence until the original target is verified. Do not treat job cancellation or fence expiry as proof that upload failed.
+
+The supported recovery command reads the original terminal workflow and its retained deployment artifact. It checks the staging account, source commit, sole active Worker version, application image and exact fence acquisition. Each observation also reads the named application directly and requires its ID, version and image to agree with the application list. Missing or conflicting direct evidence refuses recovery before a control or prevents a success result after reopening. Preview makes no runtime change:
+
+```bash
+export GITHUB_REPOSITORY=<owner/repository>
+npm run staging:deploy -- --recover-resident --run <original-run-id> --receipt /private/path/recovery.json
+```
+
+After checking the preview, select its exact hash:
+
+```bash
+npm run staging:deploy -- --recover-resident --run <original-run-id> --receipt /private/path/recovery.json --apply <preview-hash>
+```
+
+Use the existing `CLOUDFLARE_API_TOKEN`, `RESIDENT_READ_TOKEN`, `RESIDENT_DRAIN_TOKEN` and GitHub CLI authentication for staging. The command reconciles the existing uploaded image, rechecks native evidence, then asks the existing guarded route to restore access. It never uploads, restarts a review or clears work records. A changed target, active work, missing artifact or retained staging maintenance refuses recovery. The command supports ordinary acquisition fences with a complete image-change receipt; other states remain held.
+
+The private `.apply.jsonl` journal records intent before each runtime call. An existing journal refuses another apply, including after a lost reply. Inspect that original operation rather than deleting its journal and retrying. Success requires a separate registry read showing access open and all reconciled images current.
+
+The staging workflow uses this procedure before a retried deployment when the immediately prior job run left a fence. It uses the trusted controller checkout, preserves the existing deployment lock and performs no recovery when access is already open. An unverified recovery stops the retry before another Worker uploads. A fence from another workflow requires its original run ID and this explicit recovery command.
+
+A cancelled Bot upload can continue starting on Cloudflare after its job ends. Before changing configuration or uploading another Worker, the deployment runner waits within its existing budget when the sole `singleton` is temporarily inactive without a native version. It then requires the normal agreement between the installed process, application and running container. A pinned original source, known running contradiction, failed read or budget expiry keeps the refusal. The wait does not restart the Bot or repeat an upload.
+
+
 ## Selected recovery under maintenance
 
 Resident stores unfinished requests to block unsafe deployment. A separately qualified staging operator can accept a finite fixture risk while preserving the original request record and its unknown result. This uses the [selected maintenance contract](../reference/specs/release-and-deploy.md#selected-staging-maintenance) and [staging risk decision](../decisions/0086-deploy-fence-separates-execution-from-workspace-retention.md). A normal deployment does not infer that the request ended.
