@@ -1,6 +1,13 @@
 import type { FetchLike } from "./client.js";
 import { MCP_PROTOCOL_VERSION } from "./client.js";
-import { McpError, type McpCallOptions, type McpCallResult, type McpClient, type McpToolInfo } from "./types.js";
+import {
+  McpCallOutcomeUnknownError,
+  McpError,
+  type McpCallOptions,
+  type McpCallResult,
+  type McpClient,
+  type McpToolInfo,
+} from "./types.js";
 
 // The second McpClient implementation (AGENTS.md invariant 2) and the test
 // doubles: `InMemoryMcpClient` serves a fixed tool table with handlers, and
@@ -43,7 +50,11 @@ export class InMemoryMcpClient implements McpClient {
     const tool = this.tools.find((t) => t.name === name);
     if (!tool) return { content: [{ type: "text", text: `unknown tool ${name}` }], isError: true };
     if (!tool.handler) return { content: [{ type: "text", text: `${name} ok` }] };
-    return tool.handler(args);
+    try {
+      return await tool.handler(args);
+    } catch (err) {
+      throw new McpCallOutcomeUnknownError(err);
+    }
   }
 }
 

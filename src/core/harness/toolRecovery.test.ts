@@ -15,6 +15,8 @@ import { OpenCodeBridge } from "./opencode/bridge.js";
 import { GITHUB_READ_TOOLS, GITHUB_ISSUE_WRITE_TOOLS, githubFileTool } from "../../tools/github.js";
 import { InMemoryGithubApi, RestGithubApi } from "../../execution/githubApi.js";
 import { githubReadWithContext } from "../dispatch/githubReadContext.js";
+import { StreamableHttpMcpClient } from "../../mcp/client.js";
+import { bridgeMcpTools, newRunBudget } from "../../mcp/bridge.js";
 
 function fixture(tools: RunnableTool[] = [submitVerdictTool], previous?: unknown) {
   const saved: unknown[] = [];
@@ -62,6 +64,118 @@ const badVerdict = {
 };
 
 describe("run-owned tool recovery", () => {
+  it.each([
+    "wrong id",
+    "wrong version",
+    "invalid error",
+    "invalid result",
+    "transport",
+    "http",
+    "read only",
+    "read hint action",
+    "initialize",
+    "initialize transport",
+    "reinitialize",
+    "rpc error",
+    "tool error",
+    "empty",
+  ] as const)("preserves MCP call phase and recovery for %s", async (outcome) => {
+    const methods: string[] = [];
+    const client = new StreamableHttpMcpClient({
+      url: "https://mcp.example/mcp",
+      fetch: async (_url, init) => {
+        const request = JSON.parse(String(init?.body));
+        methods.push(request.method);
+        if (request.method === "initialize" && outcome === "initialize transport")
+          throw new Error("initialization failed");
+        if (request.method === "initialize")
+          return Response.json(
+            {
+              jsonrpc: "2.0",
+              id: request.id,
+              result:
+                outcome === "initialize" ||
+                (outcome === "reinitialize" && methods.filter((method) => method === "initialize").length === 2)
+                  ? null
+                  : {},
+            },
+            { headers: { "mcp-session-id": "original" } },
+          );
+        if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+        if (outcome === "reinitialize") return new Response(null, { status: 404 });
+        if (outcome === "transport") throw new Error("lost response: Bearer abcdefghijklmnopqrstuvwxyz");
+        if (outcome === "http") return new Response(null, { status: 503 });
+        if (outcome === "rpc error")
+          return Response.json({ jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "invalid input" } });
+        if (outcome === "invalid error")
+          return Response.json({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { code: "invalid", message: "private error" },
+          });
+        return Response.json({
+          jsonrpc: outcome === "wrong version" ? "1.0" : "2.0",
+          id: outcome === "wrong id" ? request.id + 1 : request.id,
+          result:
+            outcome === "empty"
+              ? { content: [] }
+              : outcome === "tool error"
+                ? { content: [{ type: "text", text: "refused" }], isError: true }
+                : {},
+        });
+      },
+    });
+    let sourceChecks = 0;
+    const tools = bridgeMcpTools(
+      { id: "user:test", name: "test", url: "https://mcp.example/mcp", agents: ["general"] },
+      client,
+      [
+        {
+          name: "write",
+          inputSchema: { type: "object" },
+          annotations: { readOnlyHint: outcome === "read only" || outcome === "read hint action" },
+          ...(outcome === "read hint action" ? { _meta: { sourceAction: { version: "unsupported" } } } : {}),
+        },
+      ],
+      { budget: newRunBudget(), currentSource: async () => outcome !== "read hint action" || ++sourceChecks === 1 },
+    );
+    const f = fixture(tools);
+    const result = await f.call("first", tools[0].name, {});
+    expect(result).toMatchObject({
+      isError: outcome !== "empty",
+      content: [{ type: "text", text: expect.any(String) }],
+    });
+    const held = [
+      "wrong id",
+      "wrong version",
+      "invalid error",
+      "invalid result",
+      "transport",
+      "http",
+      "read hint action",
+    ].includes(outcome);
+    if (held) {
+      expect(f.bearers.consumeTurn("r")).toEqual({
+        ok: false,
+        reason: "tool_recovery",
+        stop: { tool: tools[0].name, attempts: 1, reason: "outcome_unknown" },
+      });
+      expect((await f.call("second", tools[0].name, {})).isError).toBe(true);
+    } else {
+      expect(f.bearers.consumeTurn("r")).toMatchObject({ ok: true });
+      if (outcome === "empty") expect(JSON.stringify(result)).toContain("(empty result)");
+      if (outcome === "rpc error") expect(JSON.stringify(result)).toContain("invalid input");
+    }
+    expect(methods).toEqual(
+      outcome === "initialize" || outcome === "initialize transport"
+        ? ["initialize"]
+        : outcome === "reinitialize"
+          ? ["initialize", "notifications/initialized", "tools/call", "initialize"]
+          : ["initialize", "notifications/initialized", "tools/call"],
+    );
+    expect(JSON.stringify(result)).not.toContain("abcdefghijklmnopqrstuvwxyz");
+  });
+
   it.each(["source checkpoint", "current access"] as const)(
     "reports a refused GitHub %s as failure while keeping successful source text readable",
     async (failure) => {

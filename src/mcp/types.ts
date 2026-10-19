@@ -56,6 +56,8 @@ export type McpContentPart = { type: "text"; text: string } | { type: string; [k
 
 export interface McpClient {
   listTools(opts?: { signal?: AbortSignal }): Promise<McpToolInfo[]>;
+  /** A sent call without a valid outcome throws McpCallOutcomeUnknownError.
+   * Initialization failures and matched JSON-RPC errors keep their own type. */
   callTool(name: string, args: Record<string, unknown>, opts?: McpCallOptions): Promise<McpCallResult>;
   /** Original session identity for durable operations. A stateless server cannot offer one. */
   sourceSession?(opts?: { signal?: AbortSignal }): Promise<string | undefined>;
@@ -79,11 +81,43 @@ export type McpClientFactory = (server: McpServerSpec) => McpClient;
  *  (bad handshake, over-cap body). `code` is the JSON-RPC code when there was
  *  one; the client's own faults use the string codes. */
 export class McpError extends Error {
+  readonly protocolReason?: McpProtocolReason;
   constructor(
     public readonly code: number | "transport" | "protocol" | "too_large" | "timeout",
     message: string,
+    options?: ErrorOptions & { protocolReason?: McpProtocolReason },
   ) {
-    super(message);
+    super(message, options);
+    this.protocolReason = options?.protocolReason;
     this.name = "McpError";
+  }
+}
+
+/** Closed protocol reasons; remote text never supplies a diagnostic code. */
+export type McpProtocolReason =
+  | "source_session"
+  | "sse_frames"
+  | "batch_frames"
+  | "json_body"
+  | "response_object"
+  | "jsonrpc_version"
+  | "request_id"
+  | "response_outcome"
+  | "error_object"
+  | "result_object"
+  | "content"
+  | "content_part"
+  | "is_error"
+  | "structured_content";
+
+/** Only a tools/call that may have executed can carry this uncertainty. */
+export class McpCallOutcomeUnknownError extends McpError {
+  constructor(cause: unknown) {
+    super(
+      cause instanceof McpError ? cause.code : "transport",
+      cause instanceof McpError ? cause.message : "MCP tools/call response is unavailable",
+      { cause, ...(cause instanceof McpError ? { protocolReason: cause.protocolReason } : {}) },
+    );
+    this.name = "McpCallOutcomeUnknownError";
   }
 }

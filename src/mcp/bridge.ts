@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { wrapUntrusted } from "../core/commandRegistry.js";
 import type { RunnableTool } from "../tools/runnableTool.js";
-import { McpError, type McpCallResult, type McpClient, type McpServerSpec, type McpToolInfo } from "./types.js";
+import {
+  McpCallOutcomeUnknownError,
+  McpError,
+  type McpCallResult,
+  type McpClient,
+  type McpServerSpec,
+  type McpToolInfo,
+} from "./types.js";
+import { redactAndCap } from "../core/redact.js";
 import { classifyError } from "../core/trace/classify.js";
 import type { Span } from "../core/trace/types.js";
 import { sourceReadContract } from "./sourceReadProtocol.js";
@@ -144,11 +152,16 @@ export function bridgeMcpTools(
           try {
             result = await client.callTool(t.name, input ?? {}, { signal: ctx.signal });
           } catch (err) {
-            if (!(await current())) {
+            const unknownEffect = tool.sideEffectFree !== true && err instanceof McpCallOutcomeUnknownError;
+            if (unknownEffect) ctx.reportToolFailure?.({ code: "outcome_unknown", recovery: "stop" });
+            const sourceCurrent = await current();
+            if (!sourceCurrent && !unknownEffect) {
               span?.end("error", { ok: false, bytes: 0 });
               return "Source unavailable: the original source access changed.";
             }
-            const message = err instanceof McpError ? err.message : err instanceof Error ? err.message : String(err);
+            const message = sourceCurrent
+              ? redactAndCap(err instanceof Error ? err.message : String(err), 1000)
+              : "the original source access changed; the call outcome is unknown";
             const failed = classifyError(
               new Error(`MCP ${server.name}/${t.name} failed: ${message}`, { cause: err }),
               mcpClass(err),
@@ -220,7 +233,7 @@ function mcpClass(err: unknown): { kind: "timeout" | "transport" | "http" | "oth
   if (!(err instanceof McpError)) return { kind: "other" };
   if (err.code === "timeout") return { kind: "timeout" };
   if (err.code === "transport" || err.code === "protocol" || err.code === "too_large") {
-    return { kind: "transport", code: err.code };
+    return { kind: "transport", code: err.protocolReason ? `protocol.${err.protocolReason}` : err.code };
   }
   return { kind: "http", code: String(err.code) };
 }

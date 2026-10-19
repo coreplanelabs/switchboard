@@ -17,6 +17,7 @@ import { McpError, type McpServerSpec } from "./types.js";
 import { createTracer } from "../core/trace/tracer.js";
 import { classificationOf } from "../core/trace/classify.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
+import { StreamableHttpMcpClient } from "./client.js";
 
 const server: McpServerSpec = { name: "linear", url: "https://mcp.linear.app/mcp", agents: ["general"] };
 const executor: Executor = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
@@ -57,6 +58,32 @@ describe("mcpToolName", () => {
 });
 
 describe("bridgeMcpTools", () => {
+  it("records a bounded protocol reason in the call span without private reply fields", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 1000 }).start("request", { sinks: [log] });
+    const client = new StreamableHttpMcpClient({
+      url: "https://mcp.example/mcp",
+      fetch: async (_url, init) => {
+        const request = JSON.parse(String(init?.body));
+        if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: request.method === "initialize" ? {} : { content: "private reply" },
+        });
+      },
+    });
+    const [tool] = bridgeMcpTools(server, client, [{ name: "write", inputSchema: {} }], { budget: newRunBudget() });
+    const error = await tool.run({}, { ...ctx(), span: root }).catch((error: unknown) => error);
+    expect(error).toMatchObject({
+      message: "MCP linear/write failed: MCP reply failed validation (content)",
+      cause: { protocolReason: "content" },
+    });
+    expect(log.ends.map(({ errorKind, errorCode, errorMessage }) => ({ errorKind, errorCode, errorMessage }))).toEqual([
+      { errorKind: "transport", errorCode: "protocol.content", errorMessage: undefined },
+    ]);
+    expect(JSON.stringify(log.ends)).not.toContain("private reply");
+  });
   it("descriptions are prefixed untrusted and clipped; a non-object inputSchema becomes an empty object schema", () => {
     const client = new InMemoryMcpClient([
       {
@@ -150,7 +177,7 @@ describe("bridgeMcpTools", () => {
     await expect(bad.run({}, ctx())).rejects.toThrow(
       /linear\/bad reported an error[\s\S]*<<<UNTRUSTED\nnope\nUNTRUSTED>>>/,
     );
-    await expect(boom.run({}, ctx())).rejects.toThrow("MCP linear/boom failed: socket hang up");
+    await expect(boom.run({}, ctx())).rejects.toThrow("MCP linear/boom failed: MCP tools/call response is unavailable");
   });
 
   // Feature: docs/reference/specs/tracing.md; docs/reference/specs/mcp-tools.md item 10 — under a tool

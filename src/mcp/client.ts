@@ -1,4 +1,12 @@
-import { McpError, type McpCallOptions, type McpCallResult, type McpClient, type McpToolInfo } from "./types.js";
+import {
+  McpCallOutcomeUnknownError,
+  McpError,
+  type McpCallOptions,
+  type McpCallResult,
+  type McpClient,
+  type McpProtocolReason,
+  type McpToolInfo,
+} from "./types.js";
 
 // Streamable-HTTP MCP client (docs/reference/specs/mcp-tools.md items 2–4). JSON-RPC 2.0
 // over POST; the server answers with JSON or an SSE stream (we take the frame
@@ -95,20 +103,24 @@ export class StreamableHttpMcpClient implements McpClient {
       : this.request("tools/call", { name, arguments: args }, opts?.signal));
     // Missing or malformed protocol data is not an empty successful tool call.
     // Keep unknown non-text parts opaque, but validate the fields we consume.
+    const invalid = (reason: McpProtocolReason): never => {
+      throw new McpCallOutcomeUnknownError(protocolError(reason));
+    };
+    if (!record(result)) return invalid("result_object");
+    if (!Array.isArray(result.content)) return invalid("content");
     if (
-      !record(result) ||
-      !Array.isArray(result.content) ||
       !result.content.every(
         (part) =>
           record(part) &&
           typeof part.type === "string" &&
           part.type.length > 0 &&
           (part.type !== "text" || typeof part.text === "string"),
-      ) ||
-      (Object.hasOwn(result, "isError") && typeof result.isError !== "boolean") ||
-      (Object.hasOwn(result, "structuredContent") && !record(result.structuredContent))
+      )
     )
-      throw new McpError("protocol", "tools/call returned an invalid result");
+      return invalid("content_part");
+    if (Object.hasOwn(result, "isError") && typeof result.isError !== "boolean") return invalid("is_error");
+    if (Object.hasOwn(result, "structuredContent") && !record(result.structuredContent))
+      return invalid("structured_content");
     const content = result.content as McpCallResult["content"];
     return {
       content,
@@ -175,13 +187,23 @@ export class StreamableHttpMcpClient implements McpClient {
     signal?: AbortSignal,
     o?: { initializing?: boolean; sourceSession?: string },
   ): Promise<unknown> {
+    if (signal?.aborted) throw new McpError("timeout", "the run was aborted");
     const id = this.nextId++;
-    const res = await this.post({ jsonrpc: "2.0", id, method, params }, signal, o);
-    const session = res.headers.get("mcp-session-id");
-    if (o?.sourceSession && session && session !== o.sourceSession)
-      throw new McpError("protocol", "The source returned a different session");
-    if (session && o?.initializing) this.sessionId = session;
-    const message = await this.readResponse(res, id, signal);
+    let message: JsonRpcResponse;
+    try {
+      const res = await this.post({ jsonrpc: "2.0", id, method, params }, signal, o);
+      const session = res.headers.get("mcp-session-id");
+      if (o?.sourceSession && session && session !== o.sourceSession)
+        throw new McpError("protocol", "The source returned a different session", { protocolReason: "source_session" });
+      if (session && o?.initializing) this.sessionId = session;
+      message = await this.readResponse(res, id, signal);
+    } catch (err) {
+      // A 404 retains the protocol's existing session recovery rule. Every
+      // other lost tools/call reply can follow a completed remote effect.
+      if (method === "tools/call" && !(err instanceof HttpStatusError && err.status === 404))
+        throw new McpCallOutcomeUnknownError(err);
+      throw err;
+    }
     if (message.error) {
       const code = typeof message.error.code === "number" ? message.error.code : "protocol";
       throw new McpError(code, `${method}: ${String(message.error.message ?? "error")}`);
@@ -211,8 +233,9 @@ export class StreamableHttpMcpClient implements McpClient {
         signal: combineSignals(AbortSignal.timeout(this.timeoutMs), signal),
       });
     } catch (err) {
-      if (isTimeout(err)) throw new McpError("timeout", `MCP server did not answer within ${this.timeoutMs} ms`);
-      throw new McpError("transport", `MCP transport failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (isTimeout(err))
+        throw new McpError("timeout", `MCP server did not answer within ${this.timeoutMs} ms`, { cause: err });
+      throw new McpError("transport", "MCP transport failed", { cause: err });
     }
     if (!res.ok && res.status !== 202) {
       // Drain nothing: the body may be attacker-sized; the status is the fact.
@@ -230,24 +253,24 @@ export class StreamableHttpMcpClient implements McpClient {
       text = await readCapped(res, this.maxResponseBytes, signal);
     } catch (err) {
       if (err instanceof McpError) throw err;
-      if (isTimeout(err)) throw new McpError("timeout", `MCP server did not answer within ${this.timeoutMs} ms`);
-      throw new McpError("transport", `MCP response body failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (isTimeout(err))
+        throw new McpError("timeout", `MCP server did not answer within ${this.timeoutMs} ms`, { cause: err });
+      throw new McpError("transport", "MCP response body failed", { cause: err });
     }
     const type = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
     if (type === "text/event-stream") {
       const matches = sseDataFrames(text)
         .map(tryParse)
         .filter((value) => record(value) && value.id === id);
-      if (matches.length !== 1) throw new McpError("protocol", "SSE response did not carry one frame for the request");
+      if (matches.length !== 1) throw protocolError("sse_frames");
       return responseOf(matches[0], id);
     }
     const parsed = tryParse(text);
-    if (!parsed || typeof parsed !== "object") throw new McpError("protocol", "response was not JSON-RPC");
+    if (parsed === undefined) throw protocolError("json_body");
     // Some servers answer a batch array; take our id.
     if (Array.isArray(parsed)) {
       const matches = parsed.filter((value) => record(value) && value.id === id);
-      if (matches.length !== 1)
-        throw new McpError("protocol", "batch response did not carry one frame for the request");
+      if (matches.length !== 1) throw protocolError("batch_frames");
       return responseOf(matches[0], id);
     }
     return responseOf(parsed, id);
@@ -260,16 +283,20 @@ const record = (value: unknown): value is Record<string, unknown> =>
 /** Validate correlation and the response envelope before extracting any result.
  * Notifications and display defaults cannot stand in for the requested reply. */
 function responseOf(value: unknown, id: number): JsonRpcResponse {
+  if (!record(value)) throw protocolError("response_object");
+  if (value.jsonrpc !== "2.0") throw protocolError("jsonrpc_version");
+  if (value.id !== id) throw protocolError("request_id");
+  if (Object.hasOwn(value, "result") === Object.hasOwn(value, "error")) throw protocolError("response_outcome");
   if (
-    !record(value) ||
-    value.jsonrpc !== "2.0" ||
-    value.id !== id ||
-    Object.hasOwn(value, "result") === Object.hasOwn(value, "error") ||
-    (Object.hasOwn(value, "error") &&
-      (!record(value.error) || !Number.isInteger(value.error.code) || typeof value.error.message !== "string"))
+    Object.hasOwn(value, "error") &&
+    (!record(value.error) || !Number.isInteger(value.error.code) || typeof value.error.message !== "string")
   )
-    throw new McpError("protocol", "response was not a matching JSON-RPC response");
+    throw protocolError("error_object");
   return value as JsonRpcResponse;
+}
+
+function protocolError(reason: McpProtocolReason): McpError {
+  return new McpError("protocol", `MCP reply failed validation (${reason})`, { protocolReason: reason });
 }
 
 class HttpStatusError extends McpError {
