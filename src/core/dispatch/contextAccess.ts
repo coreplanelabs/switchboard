@@ -448,6 +448,7 @@ function buildContextAccess(
           return denied("context_invalid");
       }
       if (dependencies.executionGithub?.length) {
+        const readResults = new Map<string, Promise<unknown>>();
         const historical = dependencies.executionGithub.filter((ref) => ref.runId !== executionConsumer?.runId);
         for (const ref of historical) {
           if ((await deps.runLedger.readLiveRuns()).some((row) => row.runId === ref.runId))
@@ -505,6 +506,7 @@ function buildContextAccess(
             input,
             githubCapabilityFor(deps, actor()),
             source.agent,
+            readResults,
           );
           if (!access.ok) return { ...denied("execution_github_access_unproved"), githubAccess: access.githubAccess };
           if ((await deps.runLedger.readLiveRuns()).some((row) => row.runId === ref.runId))
@@ -549,7 +551,13 @@ function buildContextAccess(
             if (!receipt) return denied("execution_receipt_missing");
             const original = await recordedGithubRead(retained.messages, receipt);
             if (!original) return denied("execution_call_result_unproved");
-            const access = await currentGithubReadCapability(receipt, original, github, current.meta.agent!);
+            const access = await currentGithubReadCapability(
+              receipt,
+              original,
+              github,
+              current.meta.agent!,
+              readResults,
+            );
             if (!access.ok) return { ...denied("execution_github_access_unproved"), githubAccess: access.githubAccess };
           }
           const final = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === current.runId);

@@ -10,7 +10,7 @@ import type { CoordinatorInstance, CoordinatorUnit } from "../coordinator/contra
 import { privateWorkerThreadKey, InMemoryPrivateWorkerLog } from "../privateWorkerLog.js";
 import { rehostPrivateWorkerIO } from "../../channels/privateWorker.js";
 import type { UnitContext } from "./unitContext.js";
-import { InMemoryGithubApi } from "../../execution/githubApi.js";
+import { GithubApiError, InMemoryGithubApi } from "../../execution/githubApi.js";
 import { githubRepositoryDependencies, memoryScopeDependencies } from "../references/contextDependencies.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ALL_GRANTS } from "../authz/grants.js";
@@ -854,6 +854,118 @@ describe("message-bound context access", () => {
       check: "execution_call_result_unproved",
     });
   });
+  it.each(["active", "finished"])(
+    "validates repeated source reads within one remote-read allowance and rechecks later access (%s)",
+    async (owner) => {
+      const f = setup();
+      const meta: LiveRunRow["meta"] = {
+        agent: "review",
+        profile: { machine: "repo-resident", identity: "read", minutes: 25 },
+        readonly: true,
+        userId: msg.userId,
+        channelId: msg.channelId,
+        threadKey: msg.threadKey,
+        repo: "acme/api",
+        pr: 7,
+        session: { key: "session", seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
+      };
+      const admissionHash = (await executionAdmissionHash(meta))!;
+      const runId = owner === "active" ? "review" : origin.runId;
+      const input = { repo: "acme/api", path: "src/x.ts" };
+      const receipts: SourceResultReceipt[] = await Promise.all(
+        ["read-1", "read-2"].map(async (callId) => ({
+          version: 2 as const,
+          runId,
+          callId,
+          tool: "github_file",
+          repos: ["acme/api"],
+          admissionHash,
+          inputHash: await sourceHash(input),
+          resultHash: await sourceHash("original source"),
+        })),
+      );
+      const messages: ChatMessage[] = receipts.flatMap((receipt) => [
+        {
+          role: "assistant" as const,
+          content: [{ type: "tool_use" as const, id: receipt.callId, name: receipt.tool, input }],
+        },
+        {
+          role: "user" as const,
+          content: [{ type: "tool_result" as const, toolUseId: receipt.callId, content: "original source" }],
+          sourceResults: [receipt],
+        },
+      ]);
+      const context: ContextDependencies = {
+        ...clean,
+        version: 2,
+        executionGithub: receipts.map((receipt) => ({
+          runId,
+          callId: receipt.callId,
+          resultHash: receipt.resultHash,
+          admissionHash,
+        })),
+      };
+      if (owner === "active") {
+        f.live.push({
+          runId,
+          threadKey: msg.threadKey,
+          ownerGen: "gen",
+          leaseUntil: 1_000,
+          startedAt: 0,
+          phase: "live",
+          stop: null,
+          meta,
+          card: null,
+          system: "",
+          tools: [],
+          state: { sourceResults: receipts },
+        });
+      } else {
+        Object.assign(f.record, {
+          agent: "review",
+          status: "completed",
+          runtimeShutdownConfirmed: true,
+          contextDependencies: context,
+          session: meta.session,
+        });
+      }
+      f.deps.runLedger.readSession = async () => ({ complete: true, messages, turns: 4, compactions: [] });
+      const github = new InMemoryGithubApi({ "acme/api": { private: true, files: { "src/x.ts": "current source" } } });
+      const originalRead = github.readFile.bind(github);
+      let readsRemaining = 1;
+      github.readFile = async (...args) => {
+        if (readsRemaining-- <= 0) throw new GithubApiError(429, "remote read allowance exhausted");
+        return originalRead(...args);
+      };
+      f.deps.githubApi = github;
+      f.deps.config.canUseRepo = () => true;
+      const access =
+        owner === "active"
+          ? contextAccessForExecution(f.deps, {
+              msg,
+              io: f.io,
+              executionConsumer: { runId, gen: "gen", admissionHash },
+            })
+          : f.access;
+      expect(await access.validateDependencies(context)).toEqual({ ok: true });
+
+      github.readFile = async () => {
+        throw new GithubApiError(403, "access revoked");
+      };
+      expect(await access.validateDependencies(context)).toMatchObject({
+        ok: false,
+        check: "execution_github_access_unproved",
+        githubAccess: { operation: "readFile", stage: "tool-read" },
+      });
+
+      github.readFile = originalRead;
+      messages[3]!.content = [{ type: "tool_result", toolUseId: "read-2", content: "altered source" }];
+      expect(await access.validateDependencies(context)).toMatchObject({
+        ok: false,
+        check: "execution_call_result_unproved",
+      });
+    },
+  );
   it("reuses a finished review's verified GitHub evidence under current read access", async () => {
     const f = setup();
     const input = { repo: "acme/api", path: "src/x.ts" };
