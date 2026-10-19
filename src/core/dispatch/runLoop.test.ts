@@ -5055,6 +5055,68 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     },
   );
 
+  it.each(["working", "throwing"] as const)(
+    "persists checkpoint faults with safe correlated telemetry when its observer is %s",
+    async (observer) => {
+      const logs = vi.spyOn(console, "warn").mockImplementation(() => {
+        if (observer === "throwing") throw new Error("PRIVATE_LOGGER_EXCEPTION");
+      });
+      try {
+        const fault = {
+          phase: "follow_up" as const,
+          state: "pending" as const,
+          remainingMs: 42,
+          opening: { name: "HarnessOperationEndedError", message: "PRIVATE_CHECKPOINT_DETAIL" },
+          recovery: { name: "Error", message: "PRIVATE_RECOVERY_DETAIL" },
+        };
+        const opening = new Error("checkpoint observation failed");
+        const ending = new HarnessEndingUnconfirmedError("run-l", opening, opening);
+        const s = endingIn(async (_deps, run) => {
+          run.onEvent?.({
+            type: "run_note",
+            kind: "harness_error",
+            summary: "Checkpoint ending is unconfirmed.",
+            checkpointFailure: fault,
+          });
+          throw ending;
+        });
+        await expect(runLoop(s.deps, s.ctx)).rejects.toBe(opening);
+        s.ending.drain(undefined);
+        await s.writer.settled();
+        const record = (await s.store.get("run-l"))!;
+        expect(record.events).toContainEqual(
+          expect.objectContaining({ type: "run_note", kind: "harness_error", checkpointFailure: fault }),
+        );
+        expect(record.status).toBe("failed");
+        const receipts = logs.mock.calls
+          .map(([line]) => String(line))
+          .filter((line) => line.startsWith('{"event":"harness_checkpoint_failure"'))
+          .map((line) => JSON.parse(line));
+        expect(receipts).toEqual([
+          {
+            event: "harness_checkpoint_failure",
+            runId: "run-l",
+            traceId: s.ctx.root.traceId,
+            agent: s.ctx.agent.name,
+            phase: "follow_up",
+            state: "pending",
+            remainingMs: 42,
+            openingFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+            recoveryFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+          },
+        ]);
+        expect(JSON.stringify(logs.mock.calls)).not.toContain("PRIVATE_");
+        expect(JSON.stringify(record.events)).not.toContain("PRIVATE_LOGGER_EXCEPTION");
+        if (observer === "throwing")
+          expect(record.events).toContainEqual(
+            expect.objectContaining({ summary: "Checkpoint failure telemetry could not be written." }),
+          );
+      } finally {
+        logs.mockRestore();
+      }
+    },
+  );
+
   it("a failed run leaves its reason on the record: the loop's throw is published as a `run_failed` run_note before the finish, so the run page says why", async () => {
     const s = setup(new Error("harness container: read failed — runtime-replaced"));
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
@@ -9798,6 +9860,111 @@ describe("the pi harness — the review preset", () => {
       head: HEAD,
       verdict: "approve",
     });
+  });
+
+  it("publishes a late verdict after the loop refuses its first submission without starting an optional checkpoint", async () => {
+    const clock = { now: NOW };
+    const container = new FakeHarnessContainer();
+    const registry = new HarnessRegistry();
+    const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+    let prompts = 0;
+    const gates: boolean[] = [];
+    container.onStdin = async (line, c) => {
+      const cmd = JSON.parse(line);
+      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+      if (cmd.type === "steer") c.emit({ type: "response", command: "steer", success: true });
+      if (cmd.type === "compact")
+        c.emit({
+          id: cmd.id,
+          type: "response",
+          command: "compact",
+          success: false,
+          error: "fixture checkpoint refused",
+        });
+      if (cmd.type !== "prompt") return;
+      const first = prompts++ === 0;
+      const live = registry.get("run-l")!;
+      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+      if (first) {
+        await scriptedHistoryRead(c, live, "history");
+        clock.now = NOW + 9 * 60_000 + 1;
+        c.emit({ type: "turn_start" });
+        await new Promise<void>((resolve) => setImmediate(() => setImmediate(resolve)));
+      } else clock.now = NOW + 13.5 * 60_000;
+      const id = first ? "late-first-verdict" : "accepted-verdict";
+      const call = assistant([{ type: "toolCall", id, name: "submit_verdict", arguments: VERDICT }]);
+      c.emit(
+        { type: "message_end", message: call },
+        { type: "tool_execution_start", toolCallId: id, toolName: "submit_verdict", args: VERDICT },
+      );
+      const gate = await authorizeToolCall(live, { toolCallId: id, tool: "submit_verdict", input: VERDICT });
+      gates.push(gate.allow);
+      const result = gate.allow
+        ? await runRelayedTool(live, { toolCallId: id, tool: "submit_verdict", input: VERDICT })
+        : { content: [{ type: "text", text: gate.reason }], isError: true };
+      c.emit(
+        { type: "tool_execution_end", toolCallId: id, toolName: "submit_verdict", result, isError: result.isError },
+        { type: "turn_end", message: call, toolResults: [] },
+      );
+      if (first) clock.now = NOW + 11 * 60_000;
+      const done = assistant(
+        [{ type: "text", text: first ? "The review found one nit." : "Verdict recorded." }],
+        "stop",
+      );
+      c.emit({ type: "message_end", message: done }, { type: "agent_settled" });
+    };
+    const s = setup("", {
+      agent: "review",
+      yaml: REVIEW_PI_YAML,
+      harness: {
+        harnesses: roster(),
+        registry,
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+        pollMs: 1,
+        tickMs: 1,
+        sleep: () => new Promise<void>((resolve) => setImmediate(resolve)),
+      },
+      ...prThread,
+      executor: {
+        ...prThread.executor,
+        execResult: async () => ({
+          stdout: `/srv/wt/pr-42\n${HEAD}\n${"b".repeat(40)}\n`,
+          stderr: "",
+          exitCode: 0,
+          truncated: false,
+        }),
+      },
+      review: {
+        head: HEAD,
+        post: async (target, body) => {
+          posts.push({ target, body });
+          return { state: "accepted" };
+        },
+      },
+    });
+    seedReviewHistory(s.deps, () => HEAD);
+    const ctx = await trackedCodingContext(s, {
+      ...s.ctx,
+      clock: () => clock.now,
+      agent: { ...s.ctx.agent, maxMinutes: 15 },
+      profile: { ...s.ctx.profile, minutes: 15 },
+      admissionDeadlineAt: NOW + 15 * 60_000,
+      messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(250_000) }] }],
+    });
+    const out = answered(await runLoop(s.deps, ctx));
+    expect(gates).toEqual([false, true]);
+    expect(out.verdict?.verdict).toBe("approve");
+    expect(posts).toEqual([
+      { target: { repo: "o/r", number: 42, commitId: HEAD }, body: expect.stringMatching(/^LGTM:/) },
+    ]);
+    expect(container.commands().filter((cmd) => cmd.type === "compact")).toEqual([]);
+    expect(container.killed).toEqual([4242]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    s.ending.drain(true);
+    await s.writer.settled();
+    expect((await s.store.get("run-l"))?.reviewPost).toMatchObject({ posted: true, head: HEAD });
   });
 
   it("keeps deferred input across a replacement checkpoint pause and successor reclaim", async () => {

@@ -885,6 +885,103 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   });
 
   it.each(["initial", "follow-up"] as const)(
+    "keeps the completed %s answer and cleanup reserve instead of starting a late checkpoint",
+    async (stage) => {
+      const w = world({ agent: { name: "review", maxMinutes: 15 } });
+      w.run.deadlineAt = NOW + 15 * MINUTE_MS;
+      if (stage === "initial")
+        w.run.messages = [{ role: "user", content: [{ type: "text", text: "x".repeat(250_000) }] }];
+      scriptedPi(w.container, (n, c) => {
+        echoPrompt(c);
+        if (stage === "initial" || n > 0)
+          w.clock.now =
+            stage === "initial"
+              ? w.events.find((event) => event.type === "lease")!.loopEndsAt - 30_000
+              : NOW + 15 * MINUTE_MS - 30_000;
+        finalTurn(c, n === 0 ? "Completed review." : "Verdict recorded.");
+      });
+      const normal = w.container.onStdin!;
+      w.container.onStdin = (line, c) => {
+        if (JSON.parse(line).type === "compact") {
+          w.clock.now = w.run.deadlineAt!;
+          c.failOnceDrained = new HarnessContainerError("log", "original deadline reached");
+          return;
+        }
+        normal(line, c);
+      };
+      const session = await w.open();
+      try {
+        expect(session.answer).toBe("Completed review.");
+        if (stage === "follow-up") {
+          w.clock.now = NOW + 12 * MINUTE_MS;
+          expect(
+            await session.followUp({
+              text: "x".repeat(250_000),
+              maxTurns: 4,
+              maxMinutes: 3,
+              toolContext: { executor },
+            }),
+          ).toBe("Verdict recorded.");
+        }
+        await session.end();
+        expect(w.container.killed).toEqual([4242]);
+        expect(w.container.removed).toEqual([paths.dir]);
+        expect(w.container.commands().filter((command) => command.type === "compact")).toEqual([]);
+      } finally {
+        await session.end().catch(() => {});
+      }
+    },
+  );
+
+  it.each(["initial", "follow-up"] as const)(
+    "retains the %s checkpoint faults without exposing a bearer",
+    async (stage) => {
+      const w = world();
+      if (stage === "initial")
+        w.run.messages = [{ role: "user", content: [{ type: "text", text: "x".repeat(250_000) }] }];
+      scriptedPi(w.container, (_n, c) => {
+        echoPrompt(c);
+        finalTurn(c, "Completed review.");
+      });
+      const opening = new HarnessContainerControlResetError("log", `Bearer ${w.bearer}`);
+      Object.defineProperty(opening, "cause", { value: new Error(`Bearer ${w.bearer}`) });
+      const normal = w.container.onStdin!;
+      w.container.onStdin = (line, c) => {
+        if (JSON.parse(line).type !== "compact") return normal(line, c);
+        c.failOnceDrained = opening;
+      };
+      const session = await w.open();
+      expect(session.answer).toBe("Completed review.");
+      if (stage === "follow-up")
+        expect(
+          await session.followUp({ text: "x".repeat(250_000), maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+        ).toBe("Completed review.");
+      await expect(session.end()).rejects.toMatchObject({
+        openingError: opening,
+        endingError: expect.objectContaining({
+          message:
+            "the resident's control plane reset under the run 8 times with no progress; the run cannot continue safely",
+          cause: opening,
+        }),
+      });
+      expect(w.events).toContainEqual(
+        expect.objectContaining({
+          type: "run_note",
+          kind: "harness_error",
+          checkpointFailure: expect.objectContaining({
+            phase: stage === "initial" ? "initial" : "follow_up",
+            opening: expect.objectContaining({ name: "HarnessContainerControlResetError" }),
+            recovery: expect.objectContaining({ name: "Error" }),
+          }),
+        }),
+      );
+      expect(JSON.stringify(w.events)).not.toContain(w.bearer);
+      expect(w.container.killed).toEqual([]);
+      expect(w.registry.get("run-7")?.runId).toBe("run-7");
+    },
+  );
+
+  it.each(["initial", "follow-up"] as const)(
     "keeps the completed %s answer when a reset leaves compact delivery unknown without replaying it",
     async (stage) => {
       const w: ReturnType<typeof world> = world({

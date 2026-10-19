@@ -713,6 +713,14 @@ export type RunEvent =
       providerFailure?: ProviderFailureDetails & { cause: ProviderFailureCause };
       /** Bounded Pi evidence on a harness error, independent of provider classification. */
       modelFailure?: ModelFailureDiagnostic;
+      /** Redacted checkpoint faults; neither an ending receipt nor retry authority. */
+      checkpointFailure?: {
+        phase: "initial" | "follow_up";
+        state: "pending" | "cancelling" | "settled" | "unavailable";
+        remainingMs: number;
+        opening: import("./exceptionDiagnostic.js").ExceptionDiagnostic;
+        recovery?: import("./exceptionDiagnostic.js").ExceptionDiagnostic;
+      };
       /** Bounded request origin, independent of private exception prose; null means unavailable. */
       failureContext?: import("./requestFailure.js").FailureContext | null;
       /** Redacted request-bound storage diagnosis; never a mutation receipt. */

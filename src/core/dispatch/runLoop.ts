@@ -1124,6 +1124,35 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   };
   const publishEvent = (e: RunEvent, startsRunBudget: boolean) => {
     registry.publish(run.id, e); // feed the external live-view stream
+    if (e.type === "run_note" && e.checkpointFailure) {
+      // Protected run history retains the redacted faults. Broad telemetry
+      // uses fingerprints so private exception text cannot enter service logs.
+      try {
+        const { phase, state, remainingMs, opening, recovery } = e.checkpointFailure;
+        console.warn(
+          JSON.stringify({
+            event: "harness_checkpoint_failure",
+            runId: run.id,
+            traceId: root.traceId,
+            agent: agent.name,
+            phase,
+            state,
+            remainingMs,
+            openingFingerprint: createHash("sha256").update(JSON.stringify(opening)).digest("hex"),
+            ...(recovery
+              ? { recoveryFingerprint: createHash("sha256").update(JSON.stringify(recovery)).digest("hex") }
+              : {}),
+          }),
+        );
+      } catch {
+        events.publish({
+          type: "run_note",
+          kind: "harness_error",
+          summary: "Checkpoint failure telemetry could not be written.",
+          at: clock(),
+        });
+      }
+    }
     if (e.type === "run_note" && e.modelFailure) {
       // Error prose can quote private request text. Broad logs carry only
       // closed observations and a fingerprint; the protected run keeps details.
