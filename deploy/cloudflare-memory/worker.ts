@@ -1,3 +1,4 @@
+import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import { WriteReceipts } from "./writeReceipts.js";
 import {
   emptyWriteComponents,
@@ -17286,7 +17287,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     // One `state.fetch` root per authenticated, routed request (docs/reference/specs/
     // tracing.md item 22), adopting the bot's trace context — never before the
     // bearer checked out, so a refusal, an unknown path or the unauthenticated
@@ -17305,6 +17306,11 @@ export default {
         operation: url.pathname,
         requestId: storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
       });
+    observeWorkerRequest(
+      request,
+      { service: "memory", route: url.pathname, traceId: root.traceId, build: BUILD },
+      ctx?.tracing,
+    );
     try {
       const res = await handleRequest(request, env, admission);
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });

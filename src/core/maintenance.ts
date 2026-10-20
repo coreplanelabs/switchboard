@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { maintenancePageResponse, maintenancePageRoute } from "../channels/maintenancePage.js";
 import { systemClock } from "./trace/clock.js";
+import { tracedFetch } from "./trace/tracedFetch.js";
+import { internalHostsOf } from "./trace/internalHosts.js";
 import { SECOND_MS } from "./budgets.js";
 import { stateWorkerOf, type SecretReader, type StateWorkerBlocks } from "./stateWorkerRef.js";
 
@@ -58,12 +60,17 @@ export class InMemoryMaintenanceStore implements MaintenanceStore {
 export class WorkerMaintenanceStore implements MaintenanceStore {
   constructor(private readonly options: { baseUrl: string; token: string; fetch?: typeof fetch }) {}
   private async post(path: string, body: object): Promise<Record<string, unknown>> {
-    const response = await (this.options.fetch ?? fetch)(`${this.options.baseUrl.replace(/\/+$/, "")}${path}`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${this.options.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ key: "maintenance", ...body }),
-      signal: AbortSignal.timeout(10 * SECOND_MS),
-    });
+    const response = await tracedFetch(
+      undefined,
+      `${this.options.baseUrl.replace(/\/+$/, "")}${path}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${this.options.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ key: "maintenance", ...body }),
+        signal: AbortSignal.timeout(10 * SECOND_MS),
+      },
+      { route: path, fetchImpl: this.options.fetch ?? fetch, hosts: internalHostsOf([this.options.baseUrl]) },
+    );
     if (response.status === 409) throw new MaintenanceConflict("Maintenance changed. Read status before retrying.");
     if (!response.ok) throw new Error(`Maintenance store HTTP ${response.status}.`);
     return (await response.json()) as Record<string, unknown>;

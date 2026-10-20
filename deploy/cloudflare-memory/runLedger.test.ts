@@ -6032,6 +6032,60 @@ describe("exact owner evidence for resident preservation", () => {
 const BASE = "https://memory.test";
 const AUTH = { authorization: "Bearer test-token", "content-type": "application/json" };
 
+describe("Worker failure correlation", () => {
+  it("records the original request before body consumption and preserves a Cloudflare-boundary failure", async () => {
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    const body = JSON.stringify({ storeKey: "runs:correlation", ids: ["original"] });
+    const requestId = "11111111-1111-4111-a111-111111111111";
+    const request = new Request("https://memory.test/runs/deleted?secret=PRIVATE_QUERY", {
+      method: "POST",
+      headers: { ...AUTH, "content-length": String(body.length), "x-switchboard-storage-request-id": requestId },
+      body,
+    });
+    let atBody: unknown[] = [];
+    const text = request.text.bind(request);
+    vi.spyOn(request, "text").mockImplementation(() => {
+      atBody = logs
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .filter((row) => row.event === "cloudflare.request.received");
+      return text();
+    });
+    try {
+      const response = await memoryWorker.fetch(request, {
+        ...env,
+        RUNS: {
+          ...env.RUNS,
+          idFromName: env.RUNS.idFromName.bind(env.RUNS),
+          get: () => {
+            throw new Error("internal error; reference = " + "a".repeat(24));
+          },
+        } as typeof env.RUNS,
+      });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "storage request failed" });
+      expect(atBody).toEqual([
+        {
+          event: "cloudflare.request.received",
+          service: "memory",
+          route: "/runs/deleted",
+          requestId,
+          traceId: expect.stringMatching(/^[a-f0-9]{32}$/),
+          build: { commit: "unknown" },
+        },
+      ]);
+      expect(logs.join("\n")).not.toContain("PRIVATE_QUERY");
+      expect(JSON.parse(response.headers.get("x-switchboard-storage-failure")!).failure).toMatchObject({
+        stage: "request",
+        errorKind: "error",
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+});
+
 let n = 0;
 const storeKey = () => `runs:ledger-${Date.now()}-${n++}`;
 

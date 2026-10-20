@@ -1,3 +1,4 @@
+import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import {
   readCancellationPreparation,
   cancellationFailure,
@@ -1481,6 +1482,7 @@ export default {
         backupTransfer: backupTransferMode(env as unknown as Record<string, unknown>).mode,
       });
     }
+    observeWorkerRequest(request, { service: "sandbox", route: "sandbox.fetch", build: BUILD }, ctx?.tracing);
     if (request.method !== "POST") return json({ error: "POST only" }, 405);
 
     const url = new URL(request.url);

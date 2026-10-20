@@ -33,6 +33,28 @@ import {
 // hand edit.
 
 describe("templateView", () => {
+  it("renders full invocation logs without enabling unqualified native traces", () => {
+    for (const [kind, dir] of [
+      ["bot", "cloudflare"],
+      ["memory", "cloudflare-memory"],
+      ["resident", "cloudflare-resident"],
+      ["sandbox", "cloudflare-sandbox"],
+    ] as const) {
+      const template = readFileSync(new URL(`../../deploy/${dir}/${TEMPLATE_FILE}`, import.meta.url), "utf8");
+      const rendered = renderTemplate(template, templateView(TEST_PROFILE, kind, TEST_PUBLISHED_IMAGES)!);
+      if (!rendered.ok) throw new Error(rendered.problems.join("; "));
+      expect({ kind, observability: JSON.parse(stripJsonc(rendered.text)).observability }).toEqual({
+        kind,
+        observability: {
+          enabled: true,
+          head_sampling_rate: 1,
+          redact_query_string: true,
+          logs: { enabled: true, head_sampling_rate: 1, invocation_logs: true },
+          traces: kind === "bot" ? { enabled: true, head_sampling_rate: 1 } : { enabled: false },
+        },
+      });
+    }
+  });
   it("renders the selected maintenance policy only for its staging Resident", () => {
     const view = templateView(TEST_MAINTENANCE_PROFILE, "resident", TEST_PUBLISHED_IMAGES)!;
     const actual = renderTemplate('{"vars":{"RESIDENT_MAINTENANCE_POLICY":"{{residentMaintenancePolicy}}"}}', view);
@@ -654,7 +676,11 @@ describe("Memory request trace configuration", () => {
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) throw new Error(rendered.problems.join("\n"));
     const config = JSON.parse(stripJsonc(rendered.text));
-    expect(config.observability).toEqual({ enabled: true, redact_query_string: true, traces: { enabled: false } });
+    expect(config.observability).toMatchObject({
+      enabled: true,
+      redact_query_string: true,
+      traces: { enabled: false },
+    });
     expect(config.durable_objects.bindings).toContainEqual({ name: "RUNS", class_name: "RunHistoryDO" });
     expect(config.durable_objects.bindings).toContainEqual({ name: "MEMORY", class_name: "MemoryDO" });
   });

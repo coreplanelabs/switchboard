@@ -767,8 +767,10 @@ async function main(): Promise<void> {
     return;
   }
   if (parsed.kind !== "ask") {
+    // Request diagnostics belong on stderr; stdout is the command result.
+    globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
     const out = await runCli(commands, parsed, CLI_CALLER);
-    if (out.stdout) console.log(out.stdout);
+    if (out.stdout) process.stdout.write(`${out.stdout}\n`);
     if (out.stderr) console.error(out.stderr);
     process.exit(out.exitCode);
   }

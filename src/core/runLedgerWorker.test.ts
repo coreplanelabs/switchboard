@@ -242,12 +242,14 @@ describe("storage client acknowledgment observations", () => {
         expect(await ledger.heartbeat(id, "g1", 30000)).toMatchObject({ ok: true });
         expect(calls).toBe(2);
         expect(warnings.map((line) => JSON.parse(line))).toEqual([
+          { event: "cloudflare.correlation.unavailable", service: "client", stage: "operator-log" },
           {
             event: "storage.request.progress_telemetry_failed",
             side: "client",
             operation: "/runs/state",
             stage: "acknowledgement",
           },
+          { event: "cloudflare.correlation.unavailable", service: "client", stage: "operator-log" },
           {
             event: "storage.request.progress_telemetry_failed",
             side: "client",

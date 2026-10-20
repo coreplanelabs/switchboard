@@ -10,7 +10,13 @@
   // bot config (memory.worker.baseUrl) has a stable URL.
   "workers_dev": false,
   "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
-  "observability": { "enabled": true, "redact_query_string": true, "traces": { "enabled": false } },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": true },
+    "traces": { "enabled": false }
+  },
   "durable_objects": {
     // One MemoryDO per scopeKey (the DO name IS the scope key, e.g.
     // "org:<organization>") — the scope partition is the object boundary, so a

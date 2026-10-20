@@ -52,7 +52,13 @@
     "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}"
     // {{/if}}
   },
-  "observability": { "enabled": true, "traces": { "enabled": true } },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": true },
+    "traces": { "enabled": true, "head_sampling_rate": 1 }
+  },
   "containers": [
     {
       "class_name": "SwitchboardServer",

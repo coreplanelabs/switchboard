@@ -3,6 +3,7 @@ import { classificationOf, classifyError } from "./classify.js";
 import { internalHosts, type InternalHosts } from "./internalHosts.js";
 import { formatTraceparent } from "./traceparent.js";
 import type { Span } from "./types.js";
+import { observeWorkerSend } from "./workerCorrelation.js";
 
 // One outbound HTTP call as a span (docs/reference/specs/tracing.md item 21): `http.client`
 // under the caller's span, log-only, ending at the response headers — the body
@@ -11,7 +12,7 @@ import type { Span } from "./types.js";
 // a query string or a body. `traceparent` goes on the request only when the
 // host is one of ours (`internalHosts`), so no trace id ever leaves for GitHub,
 // Slack, a model provider or an MCP server. Without a parent span there is no
-// trace to carry: the call is a plain fetch.
+// traceparent; an internal request still has a diagnostic request ID and send log.
 
 export interface TracedFetchOptions {
   /** The route as the caller names it — a literal from a closed table, never the URL's path. */
@@ -29,15 +30,18 @@ const HOST_MAX = 64;
 
 export async function tracedFetch(
   parent: Span | undefined,
-  input: string,
+  input: string | URL,
   init: RequestInit | undefined,
   opts: TracedFetchOptions,
 ): Promise<Response> {
   const impl = opts.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
-  if (!parent) return impl(input, init);
   const hosts = opts.hosts ?? internalHosts();
   const url = safeUrl(input);
   const host = url?.host ?? "";
+  const internal = !!host && hosts.has(host);
+  const headers = new Headers(init?.headers);
+  if (internal) observeWorkerSend(headers, opts.route, host, parent?.traceId);
+  if (!parent) return impl(input, internal ? { ...init, headers: Object.fromEntries(headers) } : init);
   const method = (init?.method ?? "GET").toUpperCase();
   const attrs: SpanAttrs = {
     ...(host && host.length <= HOST_MAX ? { host } : {}),
@@ -47,8 +51,7 @@ export async function tracedFetch(
   return parent.span(
     opts.name ?? "http.client",
     async (span) => {
-      const headers = new Headers(init?.headers);
-      if (host && hosts.has(host)) headers.set("traceparent", formatTraceparent(span.traceId, span.id));
+      if (internal) headers.set("traceparent", formatTraceparent(span.traceId, span.id));
       let res: Response;
       try {
         res = await impl(input, { ...init, headers });
@@ -69,9 +72,9 @@ export async function tracedFetch(
   );
 }
 
-function safeUrl(input: string): URL | undefined {
+function safeUrl(input: string | URL): URL | undefined {
   try {
-    return new URL(input);
+    return new URL(String(input));
   } catch {
     return undefined;
   }

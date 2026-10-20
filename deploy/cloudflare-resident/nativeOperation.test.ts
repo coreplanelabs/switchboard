@@ -1,3 +1,4 @@
+import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import { prepareStorageRequest } from "../../src/core/storeResponse.js";
 import { storageTransport } from "../../src/core/storageTransport.js";
 import {
@@ -1556,6 +1557,8 @@ function httpFixture(
     validNativeOperationKey,
     RUN_ID_PATTERN,
     STREAMED_ROUTES: new Set(),
+    observeWorkerRequest,
+    BUILD: { commit: "unknown" },
     startAdoptedRoot: () => undefined,
     tracer: {},
     traceSinks: [],

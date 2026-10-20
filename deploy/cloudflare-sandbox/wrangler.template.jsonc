@@ -13,7 +13,13 @@
   // installation's zone so the bot config has a stable URL.
   "workers_dev": false,
   "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
-  "observability": { "enabled": true },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": true },
+    "traces": { "enabled": false }
+  },
   "vars": {
     // {{#if urls.stateWorkerUrl}}
     "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}",

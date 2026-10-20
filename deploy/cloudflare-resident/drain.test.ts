@@ -1,3 +1,4 @@
+import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import { captureException } from "../../src/core/runStateWriteDiagnostic.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { NativeOperationJournal, nativeOperationOriginSchema } from "./nativeOperation.js";
@@ -360,6 +361,8 @@ describe("global deploy admission evidence", () => {
         STREAMED_ROUTES: new Set(),
         tracer: {},
         traceSinks: [],
+        observeWorkerRequest,
+        BUILD: { commit: "unknown" },
         startAdoptedRoot: () => ({ end: () => {} }),
         catchAllErr: () => ({ error: "request failed" }),
         DRAIN_KEY: "drain",
