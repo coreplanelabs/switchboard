@@ -1,3 +1,4 @@
+import { githubActivityInputAccess } from "./channels/githubActivityAccess.js";
 import { logOwnerFailure } from "./core/organization/ownerFailure.js";
 import { storageFailureNote, type StorageFailureNotice } from "./core/storageFailureDiagnostic.js";
 import { createRunStop } from "./execution/runStop.js";
@@ -268,7 +269,7 @@ import { RestGithubApi } from "./execution/githubApi.js";
 import { resolveGithubIdentity } from "./execution/githubApp.js";
 import { bindingOf } from "./execution/authorBinding.js";
 import { dispatchIdentityRewrite } from "./execution/identityRewrite.js";
-import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
+import { DEPLOY_RESTART_NOTICE, setShutdownNotice, githubCapabilityFor } from "./core/dispatch/run.js";
 import { DecisionRecordAllocator, durableDecisionRecordReservation } from "./core/decisionRecordReservation.js";
 import { channelVisibilityOf, writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { createSteerSender, defaultAdmission, steerRun } from "./core/dispatch/admission.js";
@@ -758,6 +759,14 @@ export async function runBot(): Promise<void> {
     // The identity rewrite (record 0062): the run's commits carry only the
     // allowed identities before the bot opens or edits a pull request.
     identityRewrite: dispatchIdentityRewrite(config),
+    revalidateSourceInput: (source, consumer) =>
+      githubActivityInputAccess(
+        source,
+        githubCapabilityFor(deps, consumer.actor, {
+          requesterId: consumer.msg.userId,
+          verifiedDirectAudience: consumer.verifiedDirectAudience,
+        }),
+      ),
   };
   // The main agent can hand one ordinary fix request to the existing Ship
   // runner. Only dispatch supplies requester, message and run identity; a

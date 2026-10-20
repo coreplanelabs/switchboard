@@ -14,6 +14,7 @@ type ProofHold =
   | "root-unproved"
   | "decision-unproved"
   | "input-unproved"
+  | "access-unproved"
   | "source-changed"
   | "root-changed"
   | "unavailable";
@@ -80,13 +81,17 @@ function rootProof(value: unknown, reference: SourceInputReference) {
  * to an archive. Source events
  * are immutable; job progress is not part of their identity. Recheck their
  * body and the root's selected task/decision after asynchronous hashing.
- * This does not check accessHash, current permission, destination audience,
- * native admission or retention. It cannot authorize model use or inbox ACK. */
+ * Optional current access checks run before the final canonical reread. Without
+ * that callback this does not check accessHash, current permission or the
+ * destination audience. This reader never proves native admission or retention.
+ * Its result alone cannot authorize model use or inbox ACK. */
 export async function readSourceInputProof(
   value: unknown,
   deps: {
     ledger: Pick<RunLedger, "readSourceEvent" | "listLive">;
     runStore?: Pick<RunStore, "get">;
+    /** Check current adapter access before the final canonical source/task reread. */
+    checkAccess?: (record: unknown, task: ReturnType<typeof sourceRunTask>) => Promise<boolean>;
   },
 ): Promise<SourceInputProof> {
   const reference = sourceInputReferenceOf(value);
@@ -138,6 +143,8 @@ export async function readSourceInputProof(
         return held("decision-unproved");
     }
     if ((await sourceHash(sourceSnapshot(message))) !== reference.inputHash) return held("input-unproved");
+    if (deps.checkAccess && !(await deps.checkAccess(sourceSnapshot(source), structuredClone(root.task))))
+      return held("access-unproved");
     const currentSource = await readSource(reference.receipt.key);
     if (!currentSource || body(sourceSnapshot(currentSource)) !== body(source)) return held("source-changed");
     const currentRoot = await readRoot();

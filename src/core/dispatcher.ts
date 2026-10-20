@@ -365,6 +365,15 @@ export interface CoreDeps
   mcp: McpToolSource;
   /** Canonical context storage and current source authorization. */
   handoffAccessForRun?: HandoffAccessFactory;
+  /** Current adapter access for canonical source evidence, never native input acknowledgment. */
+  revalidateSourceInput?(
+    source: {
+      record: unknown;
+      task: ReturnType<typeof import("./dispatch/orchestratorDecisions.js").sourceRunTask>;
+      accessHash: string;
+    },
+    consumer: { actor: Actor; msg: IncomingMessage; verifiedDirectAudience: boolean },
+  ): Promise<boolean>;
   revalidateNativeMediaSource?(
     dependency: import("./references/contextDependencies.js").NativeMediaDependency,
     consumer: { actor: Actor; msg: IncomingMessage; io: ChannelIO },

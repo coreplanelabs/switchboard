@@ -124,6 +124,41 @@ function archived(root: LiveRunRow): RunRecord {
 }
 
 describe("canonical source input proof", () => {
+  it.each([false, true])("checks current access inside canonical notice/fold=%s validation", async (fold) => {
+    const f = await fixture(fold);
+    const seen: unknown[] = [];
+    const checkAccess = async (record: unknown, task: unknown) => {
+      seen.push({ record, task });
+      return false;
+    };
+    expect(await readSourceInputProof(f.reference, { ledger: f.ledger, runStore: f.store, checkAccess })).toEqual({
+      kind: "held",
+      reason: "access-unproved",
+    });
+    expect(seen).toEqual([{ record: f.record, task }]);
+    expect(
+      await readSourceInputProof(f.reference, {
+        ledger: f.ledger,
+        runStore: f.store,
+        checkAccess: async () => true,
+      }),
+    ).toEqual({ kind: "consistent", message: f.message, task });
+  });
+
+  it("rechecks the original task after a current access check waits", async () => {
+    const f = await fixture();
+    expect(
+      await readSourceInputProof(f.reference, {
+        ledger: f.ledger,
+        runStore: f.store,
+        checkAccess: async () => {
+          f.root.meta.pr = 8;
+          return true;
+        },
+      }),
+    ).toEqual({ kind: "held", reason: "root-changed" });
+  });
+
   it.each([false, true])(
     "reads notice/fold=%s from an archive only with acknowledged original task data",
     async (fold) => {

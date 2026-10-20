@@ -15,6 +15,7 @@ export type SourceCheckStage =
   | "admitted-context"
   | "dependencies"
   | "native-media"
+  | "source-inputs"
   | "github-execution"
   | "unit-status"
   | "memory"

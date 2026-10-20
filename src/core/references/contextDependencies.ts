@@ -20,7 +20,7 @@ export interface ContextOrigin {
 export interface ContextDependencies {
   version: 1 | 2 | 3 | 4;
   nativeMediaSources?: readonly NativeMediaDependency[];
-  /** Exact source notices and folds retained through derived context. Access remains unqualified. */
+  /** Exact source notices and folds retained through derived context. Each use rechecks current access. */
   sourceInputs?: readonly SourceInputReference[];
   status: "known" | "unknown" | "revoked";
   revision: number;
