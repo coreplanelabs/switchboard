@@ -210,7 +210,7 @@ describe("the admin op and the read view", () => {
     expect(method("debugStopContainer")).toMatch(/await this\.stop\(\);/);
   });
 
-  it("debugRecreateContainer refuses a mid-flight or down resident by name, otherwise destroys through recreateContainer and starts the restore", () => {
+  it("debugRecreateContainer refuses a mid-flight or ordinary down resident, otherwise starts the checked recreate", () => {
     const body = method("debugRecreateContainer");
     const checked = method("debugRecreateContainerChecked");
     expect(body).toMatch(/recreate-refused/);
