@@ -119,7 +119,7 @@ function live(
         .start("run.agent")
     : undefined;
   const openSpan = agentSpan?.start("tool.update_status");
-  const seen: string[] = [];
+  const seen: Array<{ callId: string; lifecycleRefused: boolean; refusedBeforeDispatch: boolean }> = [];
   const harness: LiveHarness = {
     runId: "run-7",
     tools: [echo, throwing, seeing],
@@ -133,7 +133,8 @@ function live(
     },
     emit: (e) => void events.push(e),
     toolSpan: (callId) => (callId === "c1" ? openSpan : undefined),
-    gateSaw: (callId) => void seen.push(callId),
+    gateSaw: (callId, lifecycleRefused = false, refusedBeforeDispatch = false) =>
+      void seen.push({ callId, lifecycleRefused, refusedBeforeDispatch }),
     toolsBlocked: () => opts.blocked,
   };
   return { harness, events, progress, sink, openSpan, seen };
@@ -501,10 +502,19 @@ describe("authorizeToolCall — the gate", () => {
     authorizeToolCall(open.harness, { toolCallId: "a", tool: "update_status", input: {} });
     authorizeToolCall(open.harness, { toolCallId: "b", tool: "bash", input: { command: "git push origin main" } });
     authorizeToolCall(open.harness, { toolCallId: "c", tool: "submit_verdict", input: {} });
-    expect(open.seen).toEqual(["a", "b", "c"]);
+    expect(open.seen).toEqual([
+      { callId: "a", lifecycleRefused: false, refusedBeforeDispatch: false },
+      { callId: "b", lifecycleRefused: false, refusedBeforeDispatch: false },
+      { callId: "b", lifecycleRefused: false, refusedBeforeDispatch: true },
+      { callId: "c", lifecycleRefused: false, refusedBeforeDispatch: false },
+      { callId: "c", lifecycleRefused: false, refusedBeforeDispatch: true },
+    ]);
     const blocked = live({ blocked: "write up" });
     authorizeToolCall(blocked.harness, { toolCallId: "d", tool: "read", input: { path: "x" } });
-    expect(blocked.seen).toEqual(["d"]);
+    expect(blocked.seen).toEqual([
+      { callId: "d", lifecycleRefused: true, refusedBeforeDispatch: false },
+      { callId: "d", lifecycleRefused: true, refusedBeforeDispatch: true },
+    ]);
   });
 });
 

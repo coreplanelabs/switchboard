@@ -4672,6 +4672,132 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(s.releases).toEqual(["torn-down"]);
   });
 
+  it.each([
+    "cut",
+    "cut evicted",
+    "cut during verdict",
+    "cut during verdict evicted",
+    "cut while settling head",
+    "settled success",
+    "settled refusal",
+  ] as const)("a tool-free write-up with a %s keeps only eligible later tool turns", async (outcome) => {
+    const head = "a".repeat(40);
+    const tails: string[][] = [];
+    const posts: string[] = [];
+    const answer = "The initial write-up: the command result is unverified.";
+    const cut = outcome.startsWith("cut");
+    const initialCut = outcome === "cut" || outcome === "cut evicted";
+    let activeRun: HarnessRun | undefined;
+    let cutEmitted = false;
+    const observationsAfterCut: string[] = [];
+    const s = endingIn(
+      async (_deps, run) => {
+        activeRun = run;
+        openToolCall(run);
+        if (outcome === "settled refusal")
+          run.onEvent?.({ type: "run_note", kind: "tool_refused", summary: "a task request was refused" });
+        run.onEvent?.({
+          type: "tool_result",
+          tool: "bash",
+          callId: "c-open",
+          ok: outcome === "settled success",
+          summary: "command result",
+          ...(initialCut ? { cut: true as const } : {}),
+        });
+        cutEmitted = initialCut;
+        if (outcome === "cut evicted")
+          for (let i = 0; i < 20; i++) run.onEvent?.({ type: "assistant", text: `Later narration ${i}` });
+        return {
+          answer,
+          remainingMs: () => 60000,
+          followUp: async (turn) => {
+            tails.push([...(turn.tools ?? [])]);
+            turn.toolContext.onVerdict?.({ verdict: "approve", summary: "Checked", head, findings: [] });
+            if (outcome.startsWith("cut during verdict")) {
+              openToolCall(run);
+              abortOpenCall(run);
+              cutEmitted = true;
+              if (outcome.endsWith("evicted"))
+                for (let i = 0; i < 20; i++) run.onEvent?.({ type: "assistant", text: `Later narration ${i}` });
+            }
+            return "The prepared verdict was submitted";
+          },
+          end: async () => {},
+        };
+      },
+      {
+        agent: "review",
+        repoCtx: { repo: "o/r", pr: 42, ref: "work", baseRef: "main", headSha: head },
+        binding: { ref: "work", sha: head, workspace: "/srv/wt/pr-42" },
+        executor: {
+          exec: async (command) => {
+            if (cutEmitted) observationsAfterCut.push(command);
+            return head;
+          },
+          execResult: async () => ({ exitCode: 0, stdout: head, stderr: "", truncated: false }),
+        },
+        ...(outcome.endsWith("evicted") ? { backlogLimit: 4 } : {}),
+        review: {
+          head,
+          post: async (_target, body) => {
+            posts.push(body);
+            return { state: "accepted" };
+          },
+        },
+      },
+    );
+    if (outcome === "cut while settling head") {
+      const next = "b".repeat(40);
+      s.deps.fetchPrHead = async () => {
+        openToolCall(activeRun!);
+        abortOpenCall(activeRun!);
+        cutEmitted = true;
+        return next;
+      };
+      s.deps.fetchPrCommits = async ({ sha }) => ({
+        commits: [{ sha: head, message: "initial" }, ...(sha === next ? [{ sha: next, message: "next change" }] : [])],
+        files: ["src/x.ts"],
+        filesTruncated: false,
+      });
+    }
+    const ctx = await trackedReviewContext(s);
+    let delayedCutProjections = 0;
+    const delayProjection =
+      outcome === "cut" || outcome.startsWith("cut during verdict") || outcome === "cut while settling head";
+    if (delayProjection) {
+      expect(
+        s.registry.commitLiveState("run-l", {
+          ok: true,
+          liveState: { state: "working", since: NOW, bound: NOW + 60000, detail: "model turn" },
+          liveStateSeq: 0,
+        }),
+      ).toBe(true);
+      const assign = ctx.ledgerRun!.assignLiveState.bind(ctx.ledgerRun);
+      ctx.ledgerRun!.assignLiveState = async (assignment) => {
+        if (assignment.sourceEvents?.some((event) => event.type === "tool_result" && event.cut)) {
+          delayedCutProjections++;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        return assign(assignment);
+      };
+    }
+    const out = answered(await runLoop(s.deps, ctx));
+    if (delayProjection) expect(delayedCutProjections).toBe(1);
+    expect(out.answer).toBe(answer);
+    expect(tails.map((tools) => tools.includes("submit_verdict"))).toEqual(
+      initialCut || outcome === "cut while settling head" ? [] : [true],
+    );
+    expect(posts.map((body) => body.startsWith("LGTM:"))).toEqual(cut ? [] : [true]);
+    expect(observationsAfterCut).toEqual([]);
+    if (outcome.endsWith("evicted"))
+      expect(s.registry.snapshotById("run-l")!.events.some((event) => event.type === "tool_result" && event.cut)).toBe(
+        false,
+      );
+    s.ending.drain(true);
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(cut ? ["torn-down"] : ["paired"]);
+  });
+
   it("a clean completion with a relayed tool's call unpaired on the record — it ran in the bot, nothing in the workspace: the workspace is paired, released if idle, and nothing is said", async () => {
     const s = endingIn(async (_deps, run) => {
       openRelayedCall(run);
@@ -5658,137 +5784,165 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
   });
 
-  it("a coding child's final description turn checkpoints dirty work before release", async () => {
-    const HEAD = "e1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
-    const BRANCH = "unit-work";
-    const DESCRIPTION: PrDescription = {
-      title: "fix(ship): preserve final-turn work",
-      tldr: "Preserves work from the final description turn. The workspace can be released safely.",
-      why: "The final turn can use workspace tools after the first completion checkpoint.",
-      pointers: [
-        { label: "Final checkpoint", text: "Runs after the last turn.", anchor: { path: "src/a", from: 1, to: 2 } },
-      ],
-      feedbackWanted: "The checkpoint placement.",
-      verified: "Unit test.",
-      decisions: [],
-      risk: "none",
-      validation: { criteria: [{ criterion: "final turn", proof: "green" }] },
-    };
-    let dirty = false;
-    let unpushed = false;
-    const checkpointHead = "c".repeat(40);
-    let localHead = HEAD;
-    let remoteHead = HEAD;
-    const commands: string[] = [];
-    const published: Array<Parameters<NonNullable<Executor["publishBranch"]>>[0]> = [];
-    const bindings = new GitBindings();
-    bindings.register("run-l", { repo: "o/r", ref: BRANCH }, undefined, async () => true);
-    const inner = new InMemoryRunLedger(() => NOW);
-    const ledger = createLedgerWriteThrough({
-      ledger: inner,
-      gen: "gen-T",
-      fallback: { put: async () => {}, abandoned: () => {} },
-      warn: () => {},
-    });
-    const tracked = await ledger.open({
-      runId: "run-l",
-      threadKey: THREAD,
-      startedAt: NOW,
-      meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
-      card: null,
-      system: "test",
-      tools: [],
-      seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
-    });
-    if (tracked.kind !== "tracked") throw new Error("untracked test");
-    const finalTurn = watched(piHarness);
-    finalTurn.harness.open = async () => {
-      const claim = await bindings.beginBranch("run-l", {
-        ref: `refs/heads/${BRANCH}`,
-        old: "a".repeat(40),
-        next: HEAD,
-      });
-      if (!claim || !(await claim.finish("accepted"))) throw new Error("initial accepted push was not recorded");
-      return {
-        answer: "the contract handoff is complete",
-        followUp: async (turn) => {
-          expect(turn.tools).toContain("bash");
-          dirty = true;
-          turn.toolContext.onPrDescription?.(DESCRIPTION);
-          return "description submitted";
-        },
-        remainingMs: () => 20 * 60_000,
-        end: async () => {},
+  it.each([false, true])(
+    "a coding child's final description turn checkpoints dirty work before release (lookup cut: %s)",
+    async (cutDuringLookup) => {
+      const HEAD = "e1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+      const BRANCH = "unit-work";
+      const DESCRIPTION: PrDescription = {
+        title: "fix(ship): preserve final-turn work",
+        tldr: "Preserves work from the final description turn. The workspace can be released safely.",
+        why: "The final turn can use workspace tools after the first completion checkpoint.",
+        pointers: [
+          { label: "Final checkpoint", text: "Runs after the last turn.", anchor: { path: "src/a", from: 1, to: 2 } },
+        ],
+        feedbackWanted: "The checkpoint placement.",
+        verified: "Unit test.",
+        decisions: [],
+        risk: "none",
+        validation: { criteria: [{ criterion: "final turn", proof: "green" }] },
       };
-    };
-    const s = setup("unused", {
-      agent: "coding",
-      coding: true,
-      repoCtx: { repo: "o/r", ref: BRANCH, baseRef: "main" } as RepoContext,
-      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
-      coordinator: WIP_COORDINATOR,
-      harness: {
-        harnesses: roster(finalTurn.harness),
-        registry: new HarnessRegistry(),
-        harnessUrl: "https://bot.example.com",
-        containerFor: () => new FakeHarnessContainer(),
-      },
-      executor: {
-        exec: async (cmd: string) => {
-          commands.push(cmd);
-          if (/rev-parse --abbrev-ref HEAD|symbolic-ref --quiet --short HEAD/.test(cmd)) return `${BRANCH}\n`;
-          if (/rev-parse HEAD/.test(cmd)) return `${localHead}\n`;
-          if (/rev-parse @\{u\}/.test(cmd)) return `${HEAD}\n`;
-          if (/ls-remote --exit-code origin/.test(cmd)) return `${remoteHead}\trefs/heads/${BRANCH}\n`;
-          if (/remote get-url origin/.test(cmd)) return "https://github.com/o/r.git";
-          if (/status --porcelain/.test(cmd)) return dirty ? " M src/work.ts\n" : "";
-          if (/rev-list --count/.test(cmd)) return unpushed ? "1\n" : "0\n";
-          if (/git(?: -C '[^']+')? commit -m/.test(cmd)) {
-            dirty = false;
-            unpushed = true;
-            localHead = checkpointHead;
+      let dirty = false;
+      let descriptionTurns = 0;
+      let activeRun: HarnessRun | undefined;
+      let cutEmitted = false;
+      const commandsAfterCut: string[] = [];
+      let unpushed = false;
+      const checkpointHead = "c".repeat(40);
+      let localHead = HEAD;
+      let remoteHead = HEAD;
+      const commands: string[] = [];
+      const published: Array<Parameters<NonNullable<Executor["publishBranch"]>>[0]> = [];
+      const bindings = new GitBindings();
+      bindings.register("run-l", { repo: "o/r", ref: BRANCH }, undefined, async () => true);
+      const inner = new InMemoryRunLedger(() => NOW);
+      const ledger = createLedgerWriteThrough({
+        ledger: inner,
+        gen: "gen-T",
+        fallback: { put: async () => {}, abandoned: () => {} },
+        warn: () => {},
+      });
+      const tracked = await ledger.open({
+        runId: "run-l",
+        threadKey: THREAD,
+        startedAt: NOW,
+        meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+        card: null,
+        system: "test",
+        tools: [],
+        seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
+      });
+      if (tracked.kind !== "tracked") throw new Error("untracked test");
+      const finalTurn = watched(piHarness);
+      finalTurn.harness.open = async (_deps, run) => {
+        activeRun = run;
+        const claim = await bindings.beginBranch("run-l", {
+          ref: `refs/heads/${BRANCH}`,
+          old: "a".repeat(40),
+          next: HEAD,
+        });
+        if (!claim || !(await claim.finish("accepted"))) throw new Error("initial accepted push was not recorded");
+        return {
+          answer: "the contract handoff is complete",
+          followUp: async (turn) => {
+            descriptionTurns++;
+            expect(turn.tools).toContain("bash");
+            dirty = true;
+            turn.toolContext.onPrDescription?.(DESCRIPTION);
+            return "description submitted";
+          },
+          remainingMs: () => 20 * 60_000,
+          end: async () => {},
+        };
+      };
+      const s = setup("unused", {
+        agent: "coding",
+        coding: true,
+        repoCtx: { repo: "o/r", ref: BRANCH, baseRef: "main" } as RepoContext,
+        binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+        coordinator: WIP_COORDINATOR,
+        harness: {
+          harnesses: roster(finalTurn.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+        executor: {
+          exec: async (cmd: string) => {
+            commands.push(cmd);
+            if (cutEmitted) commandsAfterCut.push(cmd);
+            if (/rev-parse --abbrev-ref HEAD|symbolic-ref --quiet --short HEAD/.test(cmd)) return `${BRANCH}\n`;
+            if (/rev-parse HEAD/.test(cmd)) return `${localHead}\n`;
+            if (/rev-parse @\{u\}/.test(cmd)) return `${HEAD}\n`;
+            if (/ls-remote --exit-code origin/.test(cmd)) return `${remoteHead}\trefs/heads/${BRANCH}\n`;
+            if (/remote get-url origin/.test(cmd)) return "https://github.com/o/r.git";
+            if (/status --porcelain/.test(cmd)) return dirty ? " M src/work.ts\n" : "";
+            if (/rev-list --count/.test(cmd)) return unpushed ? "1\n" : "0\n";
+            if (/git(?: -C '[^']+')? commit -m/.test(cmd)) {
+              dirty = false;
+              unpushed = true;
+              localHead = checkpointHead;
+              return "";
+            }
             return "";
-          }
-          return "";
+          },
+          publishBranch: async (args: Parameters<NonNullable<Executor["publishBranch"]>>[0]) => {
+            published.push(args);
+            const claim = await bindings.beginBranch("run-l", {
+              ref: `refs/heads/${BRANCH}`,
+              old: args.old ?? "",
+              next: args.next,
+            });
+            if (!claim || !(await claim.finish("accepted"))) throw new Error("checkpoint push was not recorded");
+            unpushed = false;
+            remoteHead = args.next;
+            return "To https://git.bot.test/git/o/r";
+          },
         },
-        publishBranch: async (args: Parameters<NonNullable<Executor["publishBranch"]>>[0]) => {
-          published.push(args);
-          const claim = await bindings.beginBranch("run-l", {
-            ref: `refs/heads/${BRANCH}`,
-            old: args.old ?? "",
-            next: args.next,
-          });
-          if (!claim || !(await claim.finish("accepted"))) throw new Error("checkpoint push was not recorded");
-          unpushed = false;
-          remoteHead = args.next;
-          return "To https://git.bot.test/git/o/r";
-        },
-      },
-    });
-    s.deps.githubBindings = bindings;
-    const bearers = new RunBearerStore({ clock: () => NOW });
-    s.deps.runBearers = bearers;
-    mintFor(bearers, s);
-    s.deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/o/r/pull/700" }));
+      });
+      s.deps.githubBindings = bindings;
+      const bearers = new RunBearerStore({ clock: () => NOW });
+      s.deps.runBearers = bearers;
+      mintFor(bearers, s);
+      s.deps.findOpenPrByHead = vi.fn(async () => {
+        if (cutDuringLookup) {
+          openToolCall(activeRun!);
+          abortOpenCall(activeRun!);
+          cutEmitted = true;
+        }
+        return { number: 700, htmlUrl: "https://github.com/o/r/pull/700" };
+      });
 
-    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: tracked.run }));
-    expect(out.answer).toContain(`Published \`${BRANCH}\` at \`${checkpointHead}\``);
-    expect(commands).toContain("git -C '/srv/wt/u1' add -A");
-    expect(published).toHaveLength(1);
-    expect(published[0]).toMatchObject({ repo: "o/r", branch: BRANCH, old: HEAD, next: checkpointHead });
-    expect(out.prNote).toBeUndefined();
-    expect(JSON.stringify(s.closes)).not.toContain("discarded at the run's end");
-    await out.releaseWorkspace();
-    s.ending.drain(undefined);
-    await s.writer.settled();
-    const rec = inner.finished.get("run-l");
-    if (!rec) throw new Error("tracked record missing");
-    expect(rec).toMatchObject({
-      headSha: checkpointHead,
-      pushed: [{ ref: BRANCH, sha: checkpointHead, by: "salvage" }],
-    });
-    expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
-  });
+      const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: tracked.run }));
+      expect(descriptionTurns).toBe(cutDuringLookup ? 0 : 1);
+      if (cutDuringLookup) {
+        expect(out.answer).toContain("the contract handoff is complete");
+        expect(published).toEqual([]);
+        expect(commandsAfterCut).toEqual([]);
+        await out.releaseWorkspace();
+        s.ending.drain(undefined);
+        await s.writer.settled();
+        expect(s.releases).toEqual(["torn-down"]);
+        return;
+      }
+      expect(out.answer).toContain(`Published \`${BRANCH}\` at \`${checkpointHead}\``);
+      expect(commands).toContain("git -C '/srv/wt/u1' add -A");
+      expect(published).toHaveLength(1);
+      expect(published[0]).toMatchObject({ repo: "o/r", branch: BRANCH, old: HEAD, next: checkpointHead });
+      expect(out.prNote).toBeUndefined();
+      expect(JSON.stringify(s.closes)).not.toContain("discarded at the run's end");
+      await out.releaseWorkspace();
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      const rec = inner.finished.get("run-l");
+      if (!rec) throw new Error("tracked record missing");
+      expect(rec).toMatchObject({
+        headSha: checkpointHead,
+        pushed: [{ ref: BRANCH, sha: checkpointHead, by: "salvage" }],
+      });
+      expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
+    },
+  );
 
   it("a coding child that ends with an unpushed commit checkpoints it before release and its card never says discarded", async () => {
     const HEAD = "d1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
@@ -7213,7 +7367,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
           type: "tool_execution_end",
           toolCallId: "c1",
           toolName: "bash",
-          result: { content: [{ type: "text", text: "ok" }] },
+          result: { content: [{ type: "text", text: "ok" }], structuredContent: { exit_code: 0 } },
           isError: false,
         },
         { type: "turn_end", message: call, toolResults: [] },

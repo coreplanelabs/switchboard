@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import type { Model } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { PI_EVENT_HOME } from "../../../load/piRpc.js";
 import type { RunEvent } from "../../runEvents.js";
+import { ToolRecovery } from "../toolRecovery.js";
 import {
   authenticateProxyProviderFailure,
   authenticateProxyUnknownTerminal,
@@ -29,7 +31,14 @@ import type { PiEvent } from "./protocol.js";
 
 const NOW = 1_700_000_000_000;
 
-function harness(opts: { withSpans?: boolean; clock?: () => number; textFailing?: ReadonlySet<string> } = {}) {
+function harness(
+  opts: {
+    withSpans?: boolean;
+    clock?: () => number;
+    textFailing?: ReadonlySet<string>;
+    recovery?: ToolRecovery;
+  } = {},
+) {
   const events: RunEvent[] = [];
   const notes: string[] = [];
   const sink = recordingSink();
@@ -41,6 +50,7 @@ function harness(opts: { withSpans?: boolean; clock?: () => number; textFailing?
     onProgress: (n) => void notes.push(n),
     agentSpan,
     clock,
+    ...(opts.recovery ? { recovery: opts.recovery } : {}),
     ...(opts.textFailing ? { textFailing: opts.textFailing } : {}),
   });
   return { bridge, events, notes, sink, agentSpan };
@@ -70,7 +80,7 @@ const piStream: PiEvent[] = [
     type: "tool_execution_end",
     toolCallId: "call_0",
     toolName: "bash",
-    result: { content: [{ type: "text", text: RESULT }], details: {} },
+    result: { content: [{ type: "text", text: RESULT }], details: {}, structuredContent: { exit_code: 0 } },
     isError: false,
   },
   {
@@ -188,13 +198,207 @@ describe("the bridge speaks the loop's vocabulary — the same turn, the same ev
       type: "tool_execution_end",
       toolCallId: "c",
       toolName: "bash",
-      result: { content: [{ type: "text", text: "boom\n\nCommand exited with code 2" }] },
+      result: {
+        content: [{ type: "text", text: "boom\n\nCommand exited with code 2" }],
+        structuredContent: { exit_code: 2 },
+      },
       isError: true,
     });
     expect(events[1]).toMatchObject({ type: "tool_result", tool: "bash", ok: false, exitCode: 2, callId: "c" });
-    expect(piBashExit("exit 3:\nx", true)).toEqual({ failed: true, exitCode: 3 });
-    expect(piBashExit("fine", false)).toEqual({ failed: false, exitCode: 0 });
-    expect(piBashExit("no code line", true)).toEqual({ failed: true });
+    expect(piBashExit(true, { exit_code: 3 })).toEqual({ failed: true, exitCode: 3, commandCompleted: true });
+    expect(piBashExit(false)).toEqual({ failed: true, unconfirmed: "result_missing" });
+    expect(piBashExit(true)).toEqual({ failed: true, unconfirmed: "result_missing" });
+  });
+
+  it("keeps successful bash output as text even when it looks like an exit status", async () => {
+    const { bridge, events } = harness();
+    const structured = await createBashTool(process.cwd(), { exposeSessionEnvironment: false }).execute("structured", {
+      command: "printf '%s' 'Command exited with code 2'",
+    });
+    for (const [id, text] of [
+      ["prefix", "exit 2: example output"],
+      ["structured", "Command exited with code 2"],
+    ]) {
+      bridge.observe({
+        type: "tool_execution_start",
+        toolCallId: id,
+        toolName: "bash",
+        args: { command: "echo example" },
+      });
+      bridge.gateSaw(id);
+      bridge.markOpenCallsCut();
+      bridge.observe({
+        type: "tool_execution_end",
+        toolCallId: id,
+        toolName: "bash",
+        result:
+          id === "structured" ? structured : { content: [{ type: "text", text }], structuredContent: { exit_code: 0 } },
+        isError: id === "structured" ? structured.isError === true : false,
+      });
+    }
+    expect(
+      events
+        .filter((event) => event.type === "tool_result")
+        .map(({ callId, ok, exitCode, cut, output }) => ({ callId, ok, exitCode, cut, output })),
+    ).toEqual([
+      { callId: "prefix", ok: true, exitCode: 0, cut: undefined, output: "exit 2: example output" },
+      { callId: "structured", ok: true, exitCode: 0, cut: undefined, output: "Command exited with code 2" },
+    ]);
+  });
+
+  it("uses the structured bash exit code and keeps genuine failures and cancellation", () => {
+    const { bridge, events } = harness();
+    bridge.observe({
+      type: "tool_execution_start",
+      toolCallId: "failed",
+      toolName: "bash",
+      args: { command: "false" },
+    });
+    bridge.gateSaw("failed");
+    bridge.observe({
+      type: "tool_execution_end",
+      toolCallId: "failed",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "Command exited with code 99" }], structuredContent: { exit_code: 2 } },
+      isError: true,
+    });
+    bridge.observe({
+      type: "tool_execution_start",
+      toolCallId: "cancelled",
+      toolName: "bash",
+      args: { command: "sleep 9" },
+    });
+    bridge.gateSaw("cancelled");
+    bridge.markOpenCallsCut();
+    bridge.observe({
+      type: "tool_execution_end",
+      toolCallId: "cancelled",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "Command aborted" }] },
+      isError: true,
+    });
+    expect(
+      events
+        .filter((event) => event.type === "tool_result")
+        .map(({ callId, ok, exitCode, cut }) => ({ callId, ok, exitCode, cut })),
+    ).toEqual([
+      { callId: "failed", ok: false, exitCode: 2, cut: undefined },
+      { callId: "cancelled", ok: false, exitCode: undefined, cut: true },
+    ]);
+  });
+
+  it.each([
+    [{ exit_code: "0" }, false],
+    [{}, false],
+    [{ exit_code: 2 }, false],
+    [{ exit_code: 0 }, true],
+    [{ exit_code: 0 }, undefined],
+    [undefined, undefined],
+  ])("holds malformed or contradictory structured bash outcomes: %j, error=%s", async (structuredContent, isError) => {
+    const recovery = new ToolRecovery();
+    const { bridge, events } = harness({ recovery });
+    bridge.observe({
+      type: "tool_execution_start",
+      toolCallId: "unproved",
+      toolName: "bash",
+      args: { command: "echo result" },
+    });
+    bridge.gateSaw("unproved");
+    bridge.observe({
+      type: "tool_execution_end",
+      toolCallId: "unproved",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "Command exited with code 0" }], structuredContent },
+      isError,
+    });
+    await recovery.settled();
+    expect(
+      events
+        .filter((event) => event.type === "tool_result")
+        .map(({ callId, ok, exitCode }) => ({ callId, ok, exitCode })),
+    ).toEqual([{ callId: "unproved", ok: false, exitCode: undefined }]);
+    expect(events.filter((event) => event.type === "run_note").map(({ kind, summary }) => ({ kind, summary }))).toEqual(
+      [
+        {
+          kind: "tool_refused",
+          summary: expect.stringMatching(
+            /^The bash result for call unproved could not be verified \(.*\)\. The original operation remains held\.$/,
+          ),
+        },
+      ],
+    );
+    expect(recovery.stopped).toEqual({ tool: "bash", attempts: 1, reason: "outcome_unknown" });
+  });
+
+  it("records bounded safe call and status shapes for a held bash result", async () => {
+    for (const [callId, displayed] of [
+      ["call-proof-7", "call-proof-7"],
+      [`sk-${"s".repeat(24)}`, "«redacted-api-key»"],
+      [`call-${"x".repeat(120)}`, `call-${"x".repeat(75)}…`],
+      ["custom-run-bearer", "unavailable"],
+    ]) {
+      const events: RunEvent[] = [];
+      const recovery = new ToolRecovery();
+      const bridge = new PiBridge({
+        emit: (event) => void events.push(event),
+        clock: () => NOW,
+        recovery,
+        secretValues: ["custom-run-bearer"],
+      });
+      bridge.observe({
+        type: "tool_execution_start",
+        toolCallId: callId,
+        toolName: "bash",
+        args: { command: "echo example" },
+      });
+      bridge.gateSaw(callId);
+      bridge.observe({
+        type: "tool_execution_end",
+        toolCallId: callId,
+        toolName: "bash",
+        isError: "status-body-secret",
+        result: {
+          content: [{ type: "text", text: "native result unavailable" }],
+          structuredContent: { exit_code: { private: "status-body-secret" } },
+        },
+      });
+      await recovery.settled(false);
+      expect(events.find((event) => event.type === "tool_result")).toMatchObject({ callId, ok: false });
+      expect(
+        events.filter((event) => event.type === "run_note").map(({ kind, summary }) => ({ kind, summary })),
+      ).toEqual([
+        {
+          kind: "tool_refused",
+          summary: `The bash result for call ${displayed} could not be verified (isError=string, structuredContent=object, exit_code=object, reason=status_type). The original operation remains held.`,
+        },
+      ]);
+      expect(recovery.stopped).toEqual({ tool: "bash", attempts: 1, reason: "outcome_unknown" });
+    }
+  });
+
+  it("does not reopen a settled call when its host refusal arrives late", async () => {
+    const recovery = new ToolRecovery();
+    const { bridge, events } = harness({ recovery });
+    bridge.observe({
+      type: "tool_execution_start",
+      toolCallId: "late",
+      toolName: "bash",
+      args: { command: "echo example" },
+    });
+    bridge.gateSaw("late");
+    expect(bridge.hasPendingTools()).toBe(true);
+    bridge.observe({
+      type: "tool_execution_end",
+      toolCallId: "late",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "unknown native result" }] },
+      isError: true,
+    });
+    bridge.gateSaw("late", false, true);
+    await recovery.settled(false);
+    expect(bridge.hasPendingTools()).toBe(false);
+    expect(events.find((event) => event.type === "tool_result")).toMatchObject({ callId: "late", ok: false });
+    expect(recovery.stopped).toEqual({ tool: "bash", attempts: 1, reason: "outcome_unknown" });
   });
 
   it("a non-bash tool's failure is not ok with no exit code; the call's one line names its target the native way", () => {
@@ -268,10 +472,9 @@ describe("the bridge's spans — one tool.<name> per call under run.agent, ended
   });
 
   // harness.md item 13: `markOpenCallsCut` marks the calls open when the abort
-  // is SENT; pi handles it a moment later, and a tool that finishes in that
-  // window ends clean. Its result is a settle — the command exited — and the
-  // mark is spent on nothing; only an end that failed carries `cut`.
-  it("a call an abort was sent for ends marked `cut` when pi ends it as a failure, and unmarked — a settle, `ok` — when the tool exited clean in the window before pi handled the abort", () => {
+  // is SENT. Native completion settles the call, including a nonzero exit;
+  // a marked result without completion proof remains the owning cut.
+  it("an abort mark cuts an unproved result; confirmed native exits settle", () => {
     const { bridge, events } = harness();
     bridge.observe({
       type: "tool_execution_start",
@@ -284,10 +487,13 @@ describe("the bridge's spans — one tool.<name> per call under run.agent, ended
       type: "tool_execution_end",
       toolCallId: "c1",
       toolName: "bash",
-      result: { content: [{ type: "text", text: "Command exited with code 143" }] },
+      result: {
+        content: [{ type: "text", text: "Command exited with code 143" }],
+      },
       isError: true,
     });
-    expect(events.at(-1)).toMatchObject({ type: "tool_result", callId: "c1", ok: false, exitCode: 143, cut: true });
+    expect(events.at(-1)).toMatchObject({ type: "tool_result", callId: "c1", ok: false, cut: true });
+    expect(events.at(-1)).not.toHaveProperty("exitCode");
 
     bridge.observe({ type: "tool_execution_start", toolCallId: "c2", toolName: "bash", args: { command: "make" } });
     bridge.markOpenCallsCut();
@@ -295,12 +501,31 @@ describe("the bridge's spans — one tool.<name> per call under run.agent, ended
       type: "tool_execution_end",
       toolCallId: "c2",
       toolName: "bash",
-      result: { content: [{ type: "text", text: "built" }] },
+      result: { content: [{ type: "text", text: "built" }], structuredContent: { exit_code: 0 } },
       isError: false,
     });
     const clean = events.at(-1);
     expect(clean).toMatchObject({ type: "tool_result", callId: "c2", ok: true, exitCode: 0 });
     expect(clean !== undefined && "cut" in clean).toBe(false);
+
+    for (const exitCode of [2, 143]) {
+      bridge.observe({
+        type: "tool_execution_start",
+        toolCallId: `completed-${exitCode}`,
+        toolName: "bash",
+        args: { command: "false" },
+      });
+      bridge.markOpenCallsCut();
+      bridge.observe({
+        type: "tool_execution_end",
+        toolCallId: `completed-${exitCode}`,
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "Command aborted" }], structuredContent: { exit_code: exitCode } },
+        isError: true,
+      });
+      expect(events.at(-1)).toMatchObject({ type: "tool_result", ok: false, exitCode });
+      expect(events.at(-1)).not.toHaveProperty("cut");
+    }
     // The mark is spent either way: a later end for a call marked once is never read as cut.
     expect(bridge.callOpen("c1")).toBe(false);
     expect(bridge.callOpen("c2")).toBe(false);
@@ -324,7 +549,11 @@ describe("the gate's coverage — every call that ran was vetted", () => {
     type: "tool_execution_end",
     toolCallId: id,
     toolName: tool,
-    result: { content: [{ type: "text", text }], details: {} },
+    result: {
+      content: [{ type: "text", text }],
+      details: {},
+      ...(tool === "bash" && !isError ? { structuredContent: { exit_code: 0 } } : {}),
+    },
     isError,
   });
   const validation =
@@ -394,7 +623,7 @@ describe("the gate's coverage — every call that ran was vetted", () => {
     bridge.gateSaw("c1");
     bridge.observe(start("c1", "bash", { command: "npm test" }));
     expect(bridge.observe(end("c1", "bash", "ok")).gateBypassed).toBeUndefined();
-    // The gate refused it: pi ends the call with the reason; the gate saw it, so nothing is reported.
+    // The gate saw this refusal. Missing native facts still hold it without reporting a gate bypass.
     bridge.gateSaw("c2");
     bridge.observe(start("c2", "bash", { command: "git push origin main" }));
     expect(bridge.observe(end("c2", "bash", "repo:use — push to `main`", true)).gateBypassed).toBeUndefined();
@@ -406,7 +635,7 @@ describe("the gate's coverage — every call that ran was vetted", () => {
     expect(bridge.observe(end("c4", "bash", unavailable, true)).gateBypassed).toBeUndefined();
     bridge.observe(start("c5", "bash", { command: "rm -rf /" }));
     expect(bridge.observe(end("c5", "bash", "")).gateBypassed).toEqual({ callId: "c5", tool: "bash" });
-    expect(events.filter((e) => e.type === "run_note")).toEqual([
+    expect(events.filter((e) => e.type === "run_note" && e.kind === "harness_error")).toEqual([
       {
         type: "run_note",
         kind: "harness_error",

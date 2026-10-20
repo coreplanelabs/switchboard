@@ -591,9 +591,27 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
       (e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note" && e.kind === "tool_refused",
     );
     expect(refused.some((n) => /main/.test(n.summary))).toBe(true);
+    // The native flag means provider execution. A locally completed ShellTool
+    // sets it false and supplies the process result in its own metadata.
+    const feedText = await readFeed(run);
+    const nativeSuccesses = feedText.split("\n").flatMap((line) => {
+      const record = parseFeedRecord(line);
+      if (record?.feed !== "event" || record.event.type !== "session.tool.success") return [];
+      const data = record.event.data as { id?: string; executed?: boolean; metadata?: unknown };
+      return [{ id: data.id, executed: data.executed, metadata: data.metadata }];
+    });
+    expect(nativeSuccesses).toContainEqual({
+      id: "call_ok",
+      executed: false,
+      metadata: expect.objectContaining({ status: "completed", truncated: false, exit: 0 }),
+    });
     const toolResults = events.filter((e): e is Extract<RunEvent, { type: "tool_result" }> => e.type === "tool_result");
-    expect(toolResults.some((r) => r.tool === "bash" && r.ok)).toBe(true); // echo hi ran
-    expect(toolResults.some((r) => r.tool === "bash" && !r.ok)).toBe(true); // git push refused
+    expect(
+      toolResults.filter((r) => r.tool === "bash").map(({ callId, ok, exitCode }) => ({ callId, ok, exitCode })),
+    ).toEqual([
+      { callId: "call_ok", ok: true, exitCode: 0 },
+      { callId: "call_push", ok: false, exitCode: undefined },
+    ]);
     // The record clause's naming notes: every event the real server streamed
     // for these calls — the `shell` tool's own `shell.created`/`shell.exited`
     // among them — has a disposition that is not a `harness_error`. A kind the
@@ -620,7 +638,6 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     // The id-join receipt: read the feed and prove the key the gate's bypass
     // detection rests on — `permission.asked.source.id` equals the matching
     // `session.tool.called.id` — holds on the real binary.
-    const feedText = await readFeed(run);
     const askSourceIds = new Set<string>();
     const calledIds = new Set<string>();
     for (const line of feedText.split("\n")) {

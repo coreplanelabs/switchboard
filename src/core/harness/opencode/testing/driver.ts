@@ -207,6 +207,10 @@ function toolAsk(name: string, input: Record<string, unknown>): { name: string; 
   }
 }
 
+/** The pinned ShellTool reports a completed zero exit in its success metadata. */
+const completedShellMetadata = (name: string) =>
+  name === "shell" ? { executed: false, metadata: { status: "completed", truncated: false, exit: 0 } } : {};
+
 /** The result text an allowed OpenCode-own tool answers with. */
 function ownToolResultText(name: string, input: Record<string, unknown>): string {
   if (name === "bash") return `ran: ${String(input.command ?? "")}`;
@@ -950,6 +954,7 @@ class ScriptedServe {
         id: callId,
         content: outcome.content,
         executed: true,
+        ...completedShellMetadata(call.name),
       });
     else
       this.emitEvent("session.tool.failed", {
@@ -1569,10 +1574,9 @@ class ScriptedServe {
    *  transition causes, one permissions and one messages, after it. A hung
    *  model call (`hangModelCall`) produced no tool, so no tool event rides
    *  this tail; a hung tool call (`hangToolCall`) owes its allowed tool's late
-   *  success, which lands only after the NEXT execution's start
-   *  (`settleAfterStart`) — the success and its timing an assumption, not a
-   *  measurement (the running tool's late outcome under the interrupt is
-   *  unmeasured; the pending ask's failing `aborted` is). With `lateTailNoise`, a tailer note, an event kind
+   *  result, which lands only after the NEXT execution's start
+   *  (`settleAfterStart`). This fixture supplies no confirmed native process
+   *  status; the running tool's late outcome remains unmeasured. With `lateTailNoise`, a tailer note, an event kind
    *  no table names and a compaction of the earlier execution ride the tail
    *  too. Every record names the session; none is the next prompt's execution. */
   private emitLateTail(): void {
@@ -1606,7 +1610,7 @@ class ScriptedServe {
           assistantMessageID: hungMessageID,
           id: callId,
           content: [{ type: "text", text: "slept" }],
-          executed: true,
+          executed: false,
         });
       // In the tail itself (`hungToolSettlesInTail`), before the execution's
       // end; else after the next execution's start.
@@ -2050,7 +2054,7 @@ class ScriptedServe {
       name,
       state:
         status === "completed"
-          ? { status, input, content: body as unknown[] }
+          ? { status, input, content: body as unknown[], ...completedShellMetadata(name) }
           : status === "running"
             ? // A call in flight when the container was replaced: the store holds it
               // still running, so the rebuilt record projects an assistant turn with
@@ -2129,6 +2133,7 @@ class ScriptedServe {
         id: callId,
         content,
         executed: true,
+        ...completedShellMetadata(ask.name),
       });
       return this.toolContent(callId, ask.name, input, "completed", content);
     }
@@ -2206,6 +2211,7 @@ class ScriptedServe {
         id: callId,
         content,
         executed: true,
+        ...completedShellMetadata(ask.name),
       });
       return this.toolContent(callId, ask.name, input, "completed", content);
     }
@@ -2290,6 +2296,7 @@ class ScriptedServe {
           id: callId,
           content: [{ type: "text", text: "slept" }],
           executed: true,
+          ...completedShellMetadata(ask.name),
         });
         if (this.cutLandsOnNextStep) {
           // The execution moves on: the next step — the model call after the
@@ -2400,6 +2407,7 @@ class ScriptedServe {
           id: callId,
           content,
           executed: true,
+          ...completedShellMetadata(ask.name),
         });
       return this.toolContent(callId, ask.name, input, "completed", content);
     }
