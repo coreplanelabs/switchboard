@@ -31,6 +31,7 @@ import {
   seedDoorRemote,
   seedRetryDecision,
   seededSandboxNote,
+  workspaceFallbackCause,
   readyEnvironmentCommand,
   readyEnvironmentOutcome,
   type ReadyEnvironmentRequirement,
@@ -1220,7 +1221,7 @@ async function selectExecutor(
       const selection: ExecutorSelection = {
         executor,
         backend: perThreadBackend(opts),
-        note: "repo registered without a resident — running in a per-thread sandbox",
+        note: "This repository has no shared workspace. This run uses a new workspace.",
         setup: { version: 1, requested, seeding: "fresh_no_snapshot", reason: "not_resident" },
       };
       // Executor repo/ref options do not prepare a checkout. Ordinary cold
@@ -1255,9 +1256,8 @@ async function selectExecutor(
         );
       const near = await nearOnboarded(resident, ctx.repo);
       note =
-        `repo not onboarded as a resident — running in a cold per-thread sandbox; ` +
-        `onboard it (\`repo onboard ${ctx.repo}\`) for a warm, deps-ready environment` +
-        (near ? ` (did you mean \`${near}\`?)` : "");
+        "This repository is not registered for a shared workspace. This run uses a new workspace." +
+        (near ? ` (Did you mean \`${near}\`?)` : "");
     }
     if (reason !== undefined) {
       // The seed (docs/reference/specs/execution.md item 26): the resident could
@@ -1316,7 +1316,7 @@ async function selectExecutor(
         );
       return {
         executor,
-        note: `${reason} — using fresh sandbox${outcome ? ` (${outcome.why})` : ""}`,
+        note: `This run uses a new workspace because ${workspaceFallbackCause(reason)}${outcome ? `; its saved copy could not be restored (${outcome.why})` : ""}`,
         backend: perThreadBackend(opts),
         setup: {
           version: 1,

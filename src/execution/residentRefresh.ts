@@ -197,6 +197,8 @@ export interface RefreshFailure {
   diskFull: boolean;
   runtimeUnreachable: boolean;
   busy: boolean;
+  /** A prior owned background operation is not evidence that the VM is broken. */
+  operationHeld?: boolean;
 }
 
 /** Root argv that kills every process the build user still owns and waits
@@ -340,8 +342,22 @@ export function classifyRefreshFailure(input: {
   message: string;
   freeKiB?: number | null;
   runtimeUnreachable?: { count: number };
+  operationHeld?: boolean;
 }): RefreshFailure {
   const { step, message } = input;
+  // The caller observed the resident's own journal refusal. Command output
+  // can contain the same words, so message text never grants this verdict.
+  if (input.operationHeld) {
+    return {
+      step,
+      interrupted: false,
+      diskFull: false,
+      runtimeUnreachable: false,
+      busy: false,
+      operationHeld: true,
+      reason: "refresh-held: an earlier operation is still active or its result is unknown",
+    };
+  }
   if (input.runtimeUnreachable) {
     return {
       step,
@@ -464,6 +480,16 @@ export function* selfAndCauses(err: unknown): Generator<unknown> {
   }
 }
 
+/** Only a named journal refusal or unknown native outcome can hold refresh.
+ *  Shell output with the same words is not evidence of an owned operation. */
+export function isBackgroundOperationHeld(error: unknown): boolean {
+  return [...selfAndCauses(error)].some(
+    (link) =>
+      (link as { name?: unknown })?.name === "BackgroundOperationHeldError" ||
+      (link as { name?: unknown })?.name === "OpaqueNativeOutcomeUnconfirmedError",
+  );
+}
+
 /** Is this one link of an error's cause chain the SDK's connect abort? By
  *  name first (the DOMException's `AbortError`), by the DOMException's message
  *  when a wrapper copied only that. Applied by the Worker to the SPAWN-phase
@@ -537,12 +563,11 @@ export function isRuntimeUnreachableReason(reason: string): boolean {
   return /^runtime-unreachable: /.test(reason);
 }
 
-/** What the wake path does with a failed restore. `down` is the rule: the
- *  SDK's restore cannot be cancelled, so a stalled or capped one may still be
- *  streaming into the disk, and a `down` resident's only exit is a rebuild
- *  that starts on an empty container — the stream must not land on it. The
- *  one exception is the failure that proves nothing is streaming: the runtime
- *  was replaced under the restore (a resident Worker deploy rolled the
+/** What the wake path does with a confirmed restore failure. The caller holds
+ *  an unknown or still-running native restore before reaching this helper.
+ *  `down` requires the Worker's separate workspace-stop permission: a rebuild
+ *  then starts on an empty container. An interrupted restore proves the old
+ *  disk is gone: the runtime was replaced (a resident Worker deploy rolled the
  *  container; `RUNTIME_REPLACEMENT_WORDING`), so the disk it wrote to is gone
  *  with it. That is `interrupted`, the same class a refresh step earns when a
  *  deploy kills it: not evidence about the repo, thrown to the engine whose
@@ -734,11 +759,11 @@ export function judgeRestoreProgress(input: {
   return { verdict: "wait" };
 }
 
-export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+export function withTimeout<T>(promise: Promise<T>, ms: number, what: string, timeoutError?: Error): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       promise.catch(() => {});
-      reject(new Error(`${what} timed out after ${ms}ms`));
+      reject(timeoutError ?? new Error(`${what} timed out after ${ms}ms`));
     }, ms);
     promise.then(
       (v) => {

@@ -977,9 +977,10 @@ describe("native operation journal", () => {
     const scopes = new NativeRunScopes(h.storage, h.native);
     await h.journal.bindScope(cleanup, await scopes.ensureOperator({ opOwner: "op:cleanup" }, async () => {}));
     const restarted = new NativeOperationJournal(h.storage);
-    await expect(restarted.begin(cleanup, "process", ["/workspace"])).rejects.toThrow(
-      "workspace path has an unresolved restore",
-    );
+    await expect(restarted.begin(cleanup, "process", ["/workspace"])).rejects.toMatchObject({
+      name: "BackgroundOperationHeldError",
+      message: "workspace path has an unresolved restore",
+    });
     expect(await restarted.begin(cleanup, "process", ["/workspace/mirror-neighbor"])).toEqual(expect.any(String));
     expect(h.rows.get(key)).toMatchObject({ native: { pending: { [h.attempt]: { restore: identity } } } });
   });
@@ -994,9 +995,10 @@ describe("native operation journal", () => {
       attempt: restore,
       target: "/workspace/deps/.scratch-55555555-5555-4555-8555-555555555555",
     };
-    await expect(h.journal.reserveArchive(key, restore, identity)).rejects.toThrow(
-      "workspace path has an unresolved mutation",
-    );
+    await expect(h.journal.reserveArchive(key, restore, identity)).rejects.toMatchObject({
+      name: "BackgroundOperationHeldError",
+      message: "workspace path has an unresolved mutation",
+    });
     expect(h.rows.get(key)).toMatchObject({
       native: {
         pending: { [mutation]: { kind: "process", mutationPaths: ["/workspace/deps"] }, [restore]: { kind: "opaque" } },
@@ -1033,9 +1035,29 @@ describe("native operation journal", () => {
 
   it("keeps unattributed opaque work as a veto on destructive workspace mutation", async () => {
     const h = await ownedOperator("opaque", false);
-    await expect(h.journal.begin(key, "process", ["/workspace/checkout"])).rejects.toThrow(
-      "workspace outcome is unknown",
-    );
+    await expect(h.journal.begin(key, "process", ["/workspace/checkout"])).rejects.toMatchObject({
+      name: "BackgroundOperationHeldError",
+      message: "workspace outcome is unknown",
+    });
+    expect(h.rows.get(key)).toMatchObject({ native: { pending: { [h.attempt]: { kind: "opaque" } } } });
+  });
+
+  it("holds another producer's cleanup while an opaque result remains unknown", async () => {
+    const h = await ownedOperator("opaque", false);
+    const cleanup = "native-operation:op:cleanup";
+    await h.journal.open(cleanup, { opOwner: "op:cleanup" }, undefined, {
+      ...(h.rows.get(key) as any).origin,
+      producer: "resident-call",
+      sourceId: "cleanup",
+      callId: "55555555-5555-4555-8555-555555555555",
+    });
+    const scopes = new NativeRunScopes(h.storage, h.native);
+    await h.journal.bindScope(cleanup, await scopes.ensureOperator({ opOwner: "op:cleanup" }, async () => {}));
+    await expect(h.journal.begin(cleanup, "process", ["/workspace/checkout"])).rejects.toMatchObject({
+      name: "BackgroundOperationHeldError",
+      message: "workspace outcome is unknown",
+    });
+    expect(h.rows.get(cleanup)).toMatchObject({ native: { pending: {} } });
     expect(h.rows.get(key)).toMatchObject({ native: { pending: { [h.attempt]: { kind: "opaque" } } } });
   });
 

@@ -29,6 +29,7 @@ import {
   withTimeout,
   isRuntimeUnreachableReason,
   isRuntimeUnreachableSignal,
+  isBackgroundOperationHeld,
   selfAndCauses,
   RUNTIME_UNREACHABLE_DOWN_AT,
   RUNTIME_UNREACHABLE_RECREATE_AT,
@@ -449,6 +450,46 @@ describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interrupti
   });
 });
 
+describe("classifyRefreshFailure (a prior background operation holds refresh)", () => {
+  it("recognizes the resident's named refusal through a step wrapper, never from text alone", () => {
+    const held = new Error("producer-held: an earlier operation is still active or its result is unknown");
+    held.name = "BackgroundOperationHeldError";
+    expect(isBackgroundOperationHeld(new Error("snapshot failed", { cause: held }))).toBe(true);
+    const unknown = new Error("archive admission is unconfirmed");
+    unknown.name = "OpaqueNativeOutcomeUnconfirmedError";
+    expect(isBackgroundOperationHeld(new Error("restore failed", { cause: unknown }))).toBe(true);
+    expect(isBackgroundOperationHeld(new Error(held.message))).toBe(false);
+  });
+  it("does not turn a held original operation into a disk or infrastructure fault", () => {
+    const failure = classifyRefreshFailure({
+      step: "measure",
+      message: "snapshot: producer-held: an earlier operation is still active or its result is unknown",
+      freeKiB: 1,
+      operationHeld: true,
+    });
+    expect(failure).toEqual({
+      step: "measure",
+      interrupted: false,
+      diskFull: false,
+      runtimeUnreachable: false,
+      busy: false,
+      operationHeld: true,
+      reason: "refresh-held: an earlier operation is still active or its result is unknown",
+    });
+  });
+
+  it("treats the same words in a repository command's output as that command's failure", () => {
+    const failure = classifyRefreshFailure({
+      step: "build",
+      message: "exit 1: producer-held: an earlier operation is still active or its result is unknown",
+    });
+    expect(failure.reason).toBe(
+      "build-failed: exit 1: producer-held: an earlier operation is still active or its result is unknown",
+    );
+    expect(failure.operationHeld).toBeUndefined();
+  });
+});
+
 describe("restoreFailureDisposition (a restore the runtime replacement interrupts is retried, never down)", () => {
   // The exact reason a production resident carried when a resident Worker
   // deploy rolled its container mid-restore: the wake path
@@ -689,6 +730,11 @@ describe("classifyRefreshFailure (a full container disk is `disk-full`, not GitH
 });
 
 describe("withTimeout (R2 snapshot/restore calls get an explicit budget)", () => {
+  it("uses the caller's unknown-outcome error for a timed-out opaque operation", async () => {
+    const pending = new Promise<never>(() => {});
+    const unknown = new Error("original upload outcome is unconfirmed");
+    await expect(withTimeout(pending, 5, "mirror backup", unknown)).rejects.toBe(unknown);
+  });
   it("passes a value through when the promise settles in time", async () => {
     await expect(withTimeout(Promise.resolve(42), 1_000, "mirror backup")).resolves.toBe(42);
   });

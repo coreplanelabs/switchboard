@@ -2482,9 +2482,9 @@ describe("owned background operation admission", () => {
     expect(Object.values(held[0].original.native.pending)).toHaveLength(1);
     h.rows.set("resident:state", "onboarding");
     h.native.launchError = undefined;
-    await expect(h.instance.runProvisioning("repo:acme/api")).rejects.toThrow(
-      "background producer has an original active or unknown operation",
-    );
+    await expect(h.instance.runProvisioning("repo:acme/api")).rejects.toMatchObject({
+      step: "producer-cleanup-pending",
+    });
     expect(h.native.scopeCalls.filter((call) => call.mode === "launch")).toHaveLength(1);
   });
 
@@ -2703,7 +2703,7 @@ describe("owned background operation admission", () => {
     const f = archiveFixture(h);
     h.native.archiveRunUnknown = true;
     await expect(f.restore()).rejects.toThrow("original archive result or cleanup is unconfirmed");
-    await expect(f.restore()).rejects.toThrow("background producer has an original active or unknown operation");
+    await expect(f.restore()).rejects.toMatchObject({ step: "producer-cleanup-pending" });
     expect(h.native.scopeCalls.filter((call) => call.mode === "archive-run")).toHaveLength(1);
     expect(h.native.scopeCalls.filter((call) => call.mode === "kill-attempt")).toHaveLength(1);
     const rows = (await new NativeOperationJournal(h.instance.ctx.storage).list()).operations;

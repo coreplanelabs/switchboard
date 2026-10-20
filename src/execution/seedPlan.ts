@@ -548,12 +548,31 @@ export function seedRetryDecision(input: {
   return { action: "cold", why: `${answer.reason.replace("seed-", "seed ")} (${answer.detail})` };
 }
 
-/** The card's one line for a seeded sandbox, after the reason the resident
- *  was not used: what it was seeded from, so a reader tells the three paths
- *  — resident, seeded, cold — apart from Slack alone. */
+/** Plain cause for a separate workspace. Operator reads retain the raw reason. */
+export function workspaceFallbackCause(reason: string): string {
+  if (
+    reason.startsWith("resident degraded (refresh-held:") ||
+    reason.startsWith(
+      "resident degraded (refresh-failed: background producer has an original active or unknown operation",
+    )
+  )
+    return (
+      "the shared workspace cannot refresh while an earlier operation is active or its result is unknown" +
+      (reason.includes(" after waiting for the resident's restore") ? "; this run already waited for restoration" : "")
+    );
+  if (/disk-(?:full|pressure)/.test(reason)) return `the shared workspace is short on disk space (${reason})`;
+  if (reason.startsWith("resident restoring")) return `the shared workspace is being restored (${reason})`;
+  if (reason.startsWith("resident unreachable")) return `the shared workspace did not respond (${reason})`;
+  if (reason.startsWith("resident attach failed")) return `the shared workspace could not prepare this run (${reason})`;
+  if (reason.startsWith("resident onboarding")) return `the shared workspace is being prepared (${reason})`;
+  if (reason.startsWith("resident degraded")) return `the shared workspace could not refresh (${reason})`;
+  return `the shared workspace is unavailable (${reason})`;
+}
+
+/** The card names the separate workspace and the commit it restored. */
 export function seededSandboxNote(
   reason: string,
   seeded: Pick<SeededSandbox, "slug" | "ref" | "sha" | "cached">,
 ): string {
-  return `${reason} — seeded sandbox · from resident snapshot${seeded.cached ? " (already seeded)" : ""} · ${seeded.slug} · ${seeded.ref}@${seeded.sha.slice(0, 7)}`;
+  return `This run uses a separate workspace restored from a saved copy${seeded.cached ? " (already prepared)" : ""} because ${workspaceFallbackCause(reason)} · ${seeded.slug} · ${seeded.ref}@${seeded.sha.slice(0, 7)}`;
 }

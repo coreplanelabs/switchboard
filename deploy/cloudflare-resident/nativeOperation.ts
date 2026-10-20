@@ -357,6 +357,14 @@ export function unstartedNativeThread(value: unknown, owner: WorkspaceOwner, thr
   );
 }
 
+/** A prior operation keeps its workspace paths until its original result is known. */
+export class BackgroundOperationHeldError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BackgroundOperationHeldError";
+  }
+}
+
 /** The existing DO journal owns admission and settlement; native status supplies evidence only. */
 export class NativeOperationJournal {
   constructor(private readonly storage: NativeOperationStorage) {}
@@ -746,12 +754,12 @@ export class NativeOperationJournal {
     for (const [key, value] of await this.unresolved(NATIVE_OPERATION_PREFIX, rows)) {
       const parsed = recordSchema.safeParse(value);
       if (!parsed.success || !(await this.archiveReceiptsMatch(key, parsed.data)))
-        throw new Error("workspace outcome is unknown");
+        throw new BackgroundOperationHeldError("workspace outcome is unknown");
       if ("opOwner" in parsed.data && key !== selected?.key) {
         for (const [id, saved] of Object.entries(parsed.data.native.restoreReceipts ?? {})) {
           const held = [saved.receipt.identity.target, restorePrivateDirectory(id, saved.receipt.identity.ref.id)];
           if (paths.some((path) => held.some((other) => pathsOverlap(path, other))))
-            throw new Error("workspace path has an unresolved restore");
+            throw new BackgroundOperationHeldError("workspace path has an unresolved restore");
         }
       }
       for (const [id, attempt] of Object.entries(parsed.data.native.pending)) {
@@ -759,14 +767,14 @@ export class NativeOperationJournal {
         if (attempt.restore) {
           const held = [attempt.restore.target, restorePrivateDirectory(id, attempt.restore.ref.id)];
           if (paths.some((path) => held.some((other) => pathsOverlap(path, other))))
-            throw new Error("workspace path has an unresolved restore");
-        } else if (attempt.kind === "opaque") throw new Error("workspace outcome is unknown");
+            throw new BackgroundOperationHeldError("workspace path has an unresolved restore");
+        } else if (attempt.kind === "opaque") throw new BackgroundOperationHeldError("workspace outcome is unknown");
         if (
           purpose === "restore" &&
           attempt.mutationPaths &&
           paths.some((path) => attempt.mutationPaths!.some((other) => pathsOverlap(path, other)))
         )
-          throw new Error("workspace path has an unresolved mutation");
+          throw new BackgroundOperationHeldError("workspace path has an unresolved mutation");
       }
     }
   }
