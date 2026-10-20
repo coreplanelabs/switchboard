@@ -7,7 +7,7 @@ import { PluginGroup } from "@opencode/protocol/groups/plugin";
 import { makeSessionGroup } from "@opencode/protocol/groups/session";
 import { Permission } from "@opencode/schema/permission";
 import { Schema } from "effect";
-import { HttpApiMiddleware } from "effect/unstable/httpapi";
+import { HttpApiMiddleware } from "effect/http-api";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {

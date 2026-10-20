@@ -226,23 +226,23 @@ RUN apt-get update \
 # the BUILD fails, not a run: the pi on PATH answers the pin, and its own help
 # names the RPC mode the harness drives. Dark until a deployment sets
 # `harness: { coding: pi }`: nothing here starts pi on its own.
-RUN npm install -g @earendil-works/pi-coding-agent@1.0.4 \
-  @earendil-works/pi-ai@1.0.4 @earendil-works/chord@1.0.4 @earendil-works/pi-agent-core@1.0.4 @earendil-works/pi-codemode@1.0.4 @earendil-works/pi-mcp@1.0.4 @earendil-works/pi-tui@1.0.4 @earendil-works/pi-telemetry@1.0.4 \
+RUN npm install -g @earendil-works/pi-coding-agent@1.2.0 \
+  @earendil-works/pi-ai@1.2.0 @earendil-works/chord@1.2.0 @earendil-works/pi-agent-core@1.2.0 @earendil-works/pi-codemode@1.2.0 @earendil-works/pi-mcp@1.2.0 @earendil-works/pi-tui@1.2.0 @earendil-works/pi-telemetry@1.2.0 \
   && npm cache clean --force \
-  && pi --version | grep -qx '1.0.4' \
+  && pi --version | grep -qx '1.2.0' \
   && pi --help | grep -q -- '--mode <mode>'
 
 # OpenCode, the second harness (docs/reference/specs/harness.md): `@opencode/cli`
 # at the EXACT pin held by src/deploy/imageOpenCodeHarness.test.ts, beside pi.
 # The wrapper's postinstall hard-links the platform binary into place, so it
 # is the one install script allowed by name; the grep proves the binary on
-# PATH prints the pin's version text (`opencode v2.0.24`, exactly); the npm
+# PATH prints the pin's version text (`opencode v2.0.27`, exactly); the npm
 # cache (a 200 MB tarball) is dropped in the same layer, and the proof runs
 # again as worker1 below. Dark until a deployment names it: nothing here
 # starts it on its own.
-RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.24 \
+RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.27 \
   && npm cache clean --force \
-  && opencode --version | grep -qx 'opencode v2.0.24'
+  && opencode --version | grep -qx 'opencode v2.0.27'
 
 # Agent commands never run as root (repo code runs unprivileged, one user per
 # thread — docs/reference/specs/resident-repos.md). The SDK's exec has no user/uid option
@@ -282,13 +282,13 @@ RUN su -s /bin/bash worker1 -c "playwright screenshot --viewport-size=640,480 'd
 # the same `su`, so the BUILD proves an unprivileged user finds the pin on PATH
 # and pi answers without a writable home (its config directory is the run's
 # own, named by PI_CODING_AGENT_DIR at start).
-RUN su -s /bin/bash worker1 -c "pi --version | grep -qx '1.0.4'"
+RUN su -s /bin/bash worker1 -c "pi --version | grep -qx '1.2.0'"
 
 # OpenCode once more, as worker1: a run's server is started as the thread's
 # user through the same `su`, so the BUILD proves an unprivileged user finds
 # the pin on PATH and the binary runs without a writable home (its roots are
 # the run's own, named by the XDG variables at start).
-RUN su -s /bin/bash worker1 -c "opencode --version | grep -qx 'opencode v2.0.24'"
+RUN su -s /bin/bash worker1 -c "opencode --version | grep -qx 'opencode v2.0.27'"
 
 # bun once more, as worker1: a thread's `bun install` runs as the thread's user
 # through the same `su`, whose PATH is /etc/environment's rather than this
