@@ -160,7 +160,7 @@ export interface PullSummary {
   author: string;
   updatedAt: string;
   head: { repo: string; repositoryId?: number | null; ref: string; sha: string };
-  base: { repo: string; repositoryId?: number; ref: string };
+  base: { repo: string; repositoryId?: number; ref: string; sha?: string };
   /** Validated PR-object facts; counts apply only when its SHA is the selected head. */
   headFacts?: {
     merged: boolean;
@@ -651,6 +651,7 @@ export class RestGithubApi implements GithubApi {
         sha,
       },
       base: {
+        ...(typeof base.sha === "string" && /^[a-f0-9]{40}$/.test(base.sha) ? { sha: base.sha } : {}),
         ...(baseRepositoryId !== undefined ? { repositoryId: baseRepositoryId } : {}),
         repo: typeof baseRepo.full_name === "string" ? baseRepo.full_name : "",
         ref: typeof base.ref === "string" ? base.ref : "",

@@ -1,4 +1,5 @@
 import type { ExecOptions, ExecResult, MoveOptions } from "./executor.js";
+import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
 import { shellQuote } from "./shellQuote.js";
 import { redactAndCap } from "../core/redact.js";
 
@@ -66,4 +67,41 @@ export async function advanceWorkspace(
   const head = (await command(`${git} rev-parse --verify HEAD`, "confirmed_head")).trim();
   if (head !== sha) throw new Error("workspace advance did not reach its requested head");
   return { sha: head };
+}
+
+/** Refresh only the resolved review base. The run's Git door credential stays
+ * in its existing environment; the controller never moves HEAD or rewrites origin. */
+export async function prepareReviewBase(
+  run: (command: string, opts?: ExecOptions) => Promise<ExecResult>,
+  head: string | undefined,
+  baseRef: string | undefined,
+  base: { baseRef: string; baseSha: string } | undefined,
+  opts?: MoveOptions,
+): Promise<void> {
+  if (!head || !/^[a-f0-9]{40}$/.test(head) || !baseRef)
+    throw new Error("review base preparation requires a pinned head and base ref");
+  if (!base || base.baseRef !== baseRef || !/^[a-f0-9]{40}$/.test(base.baseSha))
+    throw new Error("review base does not match the current pull request");
+  const git = gitInCheckout(opts?.checkout);
+  const ref = shellQuote(`refs/heads/${baseRef}`);
+  const tracking = shellQuote(`refs/remotes/origin/${baseRef}`);
+  const helper = `!f() { test -n "$GH_ENTERPRISE_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_ENTERPRISE_TOKEN"; }; f`;
+  const transport = `${git} -c credential.helper= -c credential.helper=${shellQuote(helper)}`;
+  const command = [
+    "set -eu",
+    `${git} check-ref-format ${ref}`,
+    `test "$(${git} rev-parse --verify HEAD)" = ${shellQuote(head)}`,
+    `review_remote="\${GIT_DOOR_REMOTE:-origin}"`,
+    `review_before=$(${transport} ls-remote --exit-code "$review_remote" ${ref})`,
+    `test "$review_before" = "$(printf '%s\\t%s' ${shellQuote(base.baseSha)} ${ref})"`,
+    `${transport} fetch --force --no-tags "$review_remote" ${shellQuote(`+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`)}`,
+    `review_base=$(${git} rev-parse --verify --end-of-options ${shellQuote(`refs/remotes/origin/${baseRef}^{commit}`)})`,
+    `test "$review_before" = "$(printf '%s\\t%s' "$review_base" ${ref})"`,
+    `test "$(${transport} ls-remote --exit-code "$review_remote" ${ref})" = "$review_before"`,
+    `test "$(${git} rev-parse --verify HEAD)" = ${shellQuote(head)}`,
+    `${git} merge-base ${tracking} ${shellQuote(head)} >/dev/null`,
+  ].join("\n");
+  if (opts?.signal?.aborted) throw new Error("review base preparation stopped");
+  await runWorkspaceCommand(run, command, "prepare_review_base", { ...opts, timeoutMs: BASH_TIMEOUT_MS });
+  if (opts?.signal?.aborted) throw new Error("review base preparation stopped");
 }

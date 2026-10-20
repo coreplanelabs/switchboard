@@ -343,6 +343,7 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
     },
     capabilities: capabilitiesFrom(config.config, process.env, processSecrets),
     githubCredentials: TEST_GITHUB_CREDENTIALS,
+    fetchPrBase: async () => ({ baseRef: "main", baseSha: "a".repeat(40) }),
     residentFleet: NO_FLEET,
     memory: new NullMemoryStore(),
     mcp: new NullMcpToolSource(),
@@ -6047,8 +6048,14 @@ function residentFetchStub(
     }
     if (path === "/run-deadline") return new Response(JSON.stringify({ deadlineAt: 0 }), { status: 200 });
     if (path === "/native/exec" || path === "/exec") {
+      const command = String(body?.command);
+      const git = attachedWorkspace === undefined ? "git" : `git -C ${shellQuote(attachedWorkspace)}`;
+      const preparingBase = command.startsWith(
+        `set -eu\n${git} check-ref-format 'refs/heads/main'\ntest "$(${git} rev-parse --verify HEAD)" = '${attachedSha}'\n`,
+      );
       if (
         handlers.exec === undefined &&
+        !preparingBase &&
         ![
           "git rev-parse HEAD",
           "git rev-parse --verify HEAD",
@@ -7172,7 +7179,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     vi.stubEnv("GH_TOKEN", "");
     const provider = capturingProvider();
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider); // no resident configured
-    const ctx = { repo: "acme/api", pr: 42, headSha: "e".repeat(40) };
+    const ctx = { repo: "acme/api", pr: 42, headSha: "e".repeat(40), baseRef: "main" };
     deps.resolveRepoContext = () => ctx;
     if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
@@ -7261,7 +7268,7 @@ describe("review post-step", () => {
     const executor = {
       exec: async (cmd: string) => {
         order.push(`exec:${cmd}`);
-        if (/git rev-parse(?: --verify)? HEAD/.test(cmd)) {
+        if (/^git rev-parse(?: --verify)? HEAD$/.test(cmd)) {
           const observed = heads.length > 1 ? heads.shift() : heads[0];
           return observed
             ? `${observed}\n`
@@ -7271,7 +7278,7 @@ describe("review post-step", () => {
       },
       execResult: async (cmd: string) => {
         order.push(`exec:${cmd}`);
-        if (!/git rev-parse(?: --verify)? HEAD/.test(cmd))
+        if (!/^git rev-parse(?: --verify)? HEAD$/.test(cmd))
           return { exitCode: 0, stdout: "", stderr: "", truncated: false };
         const observed = heads.length > 1 ? heads.shift() : heads[0];
         return { exitCode: observed ? 0 : 128, stdout: observed ? observed + "\n" : "", stderr: "", truncated: false };

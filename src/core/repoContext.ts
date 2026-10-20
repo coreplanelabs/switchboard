@@ -1479,6 +1479,26 @@ async function openPrHeadSha(pr: {
   return { reason: "unreachable" };
 }
 
+export type FetchPrBase = (pr: {
+  repo: string;
+  number: number;
+}) => Promise<{ baseRef: string; baseSha: string } | undefined>;
+
+/** Pin the current PR base through the read-only GitHub boundary. Missing
+ * facts refuse workspace preparation; they never select a default branch. */
+export const currentPrBase: FetchPrBase = async (pr) => {
+  const pull = await new RestGithubApi().getPullRequest(pr.repo, pr.number);
+  const baseRef = validRef(pull.base.ref);
+  const baseSha = pull.base.sha;
+  return pull.state === "open" &&
+    pull.base.repo.toLowerCase() === pr.repo.toLowerCase() &&
+    baseRef &&
+    baseSha &&
+    /^[a-f0-9]{40}$/.test(baseSha)
+    ? { baseRef, baseSha }
+    : undefined;
+};
+
 /** The PR's head SHA as GitHub reports it NOW (40-hex), or undefined when the
  *  fetch fails or the SHA is malformed. Never throws — the review post-step's
  *  head-moved note (agent-review.md item 10) degrades to silence on unknown. */

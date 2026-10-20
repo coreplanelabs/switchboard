@@ -808,7 +808,7 @@ describe("RestGithubApi — pull request reads", () => {
               user: { login: "ada" },
               updated_at: "2026-09-29T00:00:00Z",
               head: { ref: "fix/login", sha: "a".repeat(40), repo: { full_name: "acme/api" } },
-              base: { ref: "main", repo: { full_name: "acme/api" } },
+              base: { sha: "b".repeat(40), ref: "main", repo: { full_name: "acme/api" } },
             },
           }
         : undefined,
@@ -823,7 +823,7 @@ describe("RestGithubApi — pull request reads", () => {
       author: "ada",
       updatedAt: "2026-09-29T00:00:00Z",
       head: { repo: "acme/api", ref: "fix/login", sha: "a".repeat(40) },
-      base: { repo: "acme/api", ref: "main" },
+      base: { repo: "acme/api", ref: "main", sha: "b".repeat(40) },
       headFacts: { title: "Fix login", body: "Keep this context", merged: false },
     });
     expect(calls).toHaveLength(2);
