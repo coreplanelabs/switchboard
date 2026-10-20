@@ -7,6 +7,12 @@ import { loadProfileOnHost, readConfigForPush } from "../src/deploy/run.js";
 import { stagingProblems, waitForStagingMaintenanceRelease } from "../src/deploy/staging.js";
 import { systemClock } from "../src/core/trace/clock.js";
 
+if (process.argv[2] === "--recover-resident") {
+  process.argv.splice(2, 1);
+  await import("./staging-recover-resident.js");
+  process.exit(process.exitCode ?? 0);
+}
+
 if (process.argv[2] === "--continue-initialize") {
   process.argv.splice(2, 1);
   await import("./staging-continue.js");

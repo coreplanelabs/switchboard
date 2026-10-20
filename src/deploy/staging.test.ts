@@ -486,6 +486,56 @@ globalThis.fetch = async (url, init) => {
     });
   });
 
+  it("recovers a prior completed upload under the existing staging lock before retrying deployment", () => {
+    const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+    const steps = workflow.jobs.deploy.steps;
+    const recovery = steps.find(
+      (step: { name?: string }) => step.name === "recover the prior completed upload before a retry",
+    );
+    expect(recovery.working_directory ?? recovery["working-directory"]).toBe("controller");
+    expect(steps.indexOf(recovery)).toBeLessThan(steps.findIndex((step: { id?: string }) => step.id === "deploy"));
+    for (const attempt of [1, 2]) {
+      expect(
+        runInNewContext(recovery.if, {
+          github: { run_attempt: attempt, event_name: "pull_request_target" },
+          steps: { recheck: { outputs: { eligible: "true" } } },
+          inputs: { pr: "" },
+        }),
+      ).toBe(attempt === 2);
+    }
+    const directory = mkdtempSync(join(tmpdir(), "staging-recovery-workflow-"));
+    try {
+      const executed = spawnSync(
+        "bash",
+        [
+          "-e",
+          "-c",
+          `npm() {
+        printf '%s\\n' "$*" >> "$RUNNER_TEMP/calls";
+        if [[ "$*" != *"--apply"* ]]; then printf '%s' '{"hash":"selected-hash"}' > "$RUNNER_TEMP/resident-recovery.json"; fi
+      }
+      ${recovery.run}`,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, RUNNER_TEMP: directory, GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2" },
+        },
+      );
+      expect(executed.status, executed.stderr).toBe(0);
+      expect(readFileSync(join(directory, "calls"), "utf8").replaceAll(directory, "<private>")).toBe(
+        "run --silent staging:deploy -- --recover-resident --if-held --run 123 --attempt 1 --receipt <private>/resident-recovery.json\n" +
+          "run --silent staging:deploy -- --recover-resident --run 123 --attempt 1 --receipt <private>/resident-recovery.json --apply selected-hash\n",
+      );
+      expect(workflow.jobs.deploy.concurrency).toEqual({
+        group: "deploy-staging",
+        queue: "max",
+        "cancel-in-progress": false,
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("refuses cancelled deploys while preserving eligible skipped-validation paths and always-run receipts", () => {
     const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
     const permitted = new Set([

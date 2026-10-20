@@ -124,6 +124,7 @@ function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, li
     io,
     calls,
     plain,
+    lines,
     markUploaded: () => {
       uploaded = true;
     },
@@ -1147,6 +1148,19 @@ describe("resident application target", () => {
     expect(h.plain()).toContain(
       "[deploy:all] resident: waiting for the selected container application target to register",
     );
+    const diagnostic = h.lines
+      .map((line) => (line.startsWith("{") ? JSON.parse(line) : null))
+      .find((row) => row?.event === "resident.application.wait");
+    expect(diagnostic).toMatchObject({
+      event: "resident.application.wait",
+      application: "switchboard-resident-residentdo",
+      sourceCommit: HEAD,
+      beforeVersion: 17,
+      observedVersion: 17,
+      versionAdvanced: false,
+      imageMatches: false,
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("registry.example.test");
     expect(h.calls.find((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")?.args[2]).toEqual({
       imageTarget: {
         application: "switchboard-resident-residentdo",

@@ -267,6 +267,25 @@ jobs:
           smoke_args=(--model "${SMOKE_MODEL:-openai/gpt-6-luna}" --review-transport "${SMOKE_REVIEW_TRANSPORT:-http}" --review-effort "${SMOKE_REVIEW_EFFORT:-medium}")
           if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
           npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-setup.json" --check --check-reader "${smoke_args[@]}"
+      - name: recover the prior completed upload before a retry
+        if: github.run_attempt > 1 && (steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == ''))
+        working-directory: controller
+        env:
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+          SWITCHBOARD_STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          SWITCHBOARD_PRODUCTION_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_CLOUDFLARE_DEPLOY_TOKEN }}
+          RESIDENT_READ_TOKEN: ${{ secrets.STAGING_RESIDENT_READ_TOKEN }}
+          RESIDENT_DRAIN_TOKEN: ${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          preview="$RUNNER_TEMP/resident-recovery.json"
+          npm run --silent staging:deploy -- --recover-resident --if-held --run "$GITHUB_RUN_ID" --attempt "$((GITHUB_RUN_ATTEMPT - 1))" --receipt "$preview"
+          if [ -f "$preview" ]; then
+            selected=$(jq -er '.hash' "$preview")
+            npm run --silent staging:deploy -- --recover-resident --run "$GITHUB_RUN_ID" --attempt "$((GITHUB_RUN_ATTEMPT - 1))" --receipt "$preview" --apply "$selected"
+          fi
       - name: deploy the captured commit to staging
         id: deploy
         if: steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')
@@ -371,6 +390,8 @@ jobs:
             ${{ runner.temp }}/staging-setup.json
             ${{ runner.temp }}/staging-fleet.json
             ${{ runner.temp }}/staging-e2e.json
+            ${{ runner.temp }}/resident-recovery.json
+            ${{ runner.temp }}/resident-recovery.json.apply.jsonl
             ${{ runner.temp }}/reset-rehearsal/staging-reset-e2e.json
           if-no-files-found: ignore
 
