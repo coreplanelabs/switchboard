@@ -1,3 +1,4 @@
+import { sourceCheckError, type SourceCheckStage } from "./sourceCheckError.js";
 import { settingsForAgent } from "../../config/agents.js";
 import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { MemoryRecord } from "../memory/types.js";
@@ -788,14 +789,27 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
   const privateCard = privateRun;
   const latch = ctx.privateAudienceLatch ?? { revoked: false };
   const audience = ctx.audience ?? latch;
-  const traceCheck = (check: () => Promise<AudienceCheck>): Promise<AudienceCheck> =>
-    root.span("run.publication_context_check", async (span) => {
-      const result = await check();
-      span.setAttrs(audienceCheckAttrs(result));
-      return result;
+  const traceCheck = (
+    check: () => Promise<AudienceCheck>,
+    stage: SourceCheckStage = "publication-context",
+  ): Promise<AudienceCheck> =>
+    root.span<AudienceCheck>("run.publication_context_check", async (span) => {
+      try {
+        const result = await check();
+        span.setAttrs(audienceCheckAttrs(result));
+        return result;
+      } catch (cause) {
+        const error = sourceCheckError(stage, cause);
+        span.setAttrs({ ...error.diagnostic, outcome: error.refusal.check ?? error.refusal.code });
+        span.fail(error);
+        span.end("error");
+        return error.refusal;
+      }
     });
   const privateCheck = async (): Promise<AudienceCheck> =>
-    privateRun ? traceCheck(() => privateRunAudienceDecision(msg, io, latch, ctx.slackContext)) : { ok: true };
+    privateRun
+      ? traceCheck(() => privateRunAudienceDecision(msg, io, latch, ctx.slackContext), "private-audience")
+      : { ok: true };
   const fenced = new Error("reply ownership changed");
   const reply = async (text?: string): Promise<boolean> => {
     await run.control.waitForCancellation();

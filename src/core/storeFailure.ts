@@ -1,6 +1,20 @@
 import { stateWriteFailureOf, type StateWriteFailure } from "./runStateWriteDiagnostic.js";
 import type { StorageRequestContext } from "./storageRequestContext.js";
 
+/** Terminal read evidence is attached to the original error, never inferred from prose. */
+const readFailures = new WeakMap<object, { attempts: number; stop: "attempts-exhausted" | "deadline" | "permanent" }>();
+export function noteStoreReadFailure(
+  error: unknown,
+  attempts: number,
+  stop: "attempts-exhausted" | "deadline" | "permanent",
+): void {
+  if (error !== null && typeof error === "object") readFailures.set(error, { attempts, stop });
+}
+export function storeReadFailureOf(error: unknown) {
+  const value = error !== null && typeof error === "object" ? readFailures.get(error) : undefined;
+  return value && { ...value };
+}
+
 /** The `/runs/*` route answered 404: the Worker does not have this route yet. Never retried. */
 export class RouteMissingError extends Error {
   readonly name = "RouteMissingError";

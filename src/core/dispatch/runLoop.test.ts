@@ -1,3 +1,4 @@
+import { WorkerRunLedger } from "../runLedgerWorker.js";
 import { withOrganizationPrivateAudience } from "./privateDestination.js";
 import { markPrivateConversation } from "./privateConversation.js";
 import { bindConversationRead } from "./conversationRead.js";
@@ -693,6 +694,80 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(context.githubRepos).toEqual(["acme/private"]);
   });
 
+  it("retains an exhausted source read on the run and refuses the next model call", async () => {
+    const decisions: boolean[] = [];
+    let failed = false;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "fixture",
+      storeKey: "runs:default",
+      fetch: async () => Response.json({ error: "PRIVATE_SOURCE_BYTES" }, { status: 503 }),
+    });
+    const harness = watched(piHarness);
+    harness.harness.open = async () => {
+      decisions.push(await bearers.sourceGuardFor(s.run.id).check());
+      failed = true;
+      decisions.push(await bearers.sourceGuardFor(s.run.id).check());
+      return { answer: "Guard checked.", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    s.deps.runBearers = bearers;
+    mintFor(bearers, s);
+    const trace = startRequestRoot({ clock: () => NOW }, { channel: "slack", receivedAt: NOW });
+    trace.bindRun(s.run.id, (event) => s.registry.publish(s.run.id, event));
+    await runLoop(s.deps, {
+      ...s.ctx,
+      root: trace.root,
+      admittedContextCheck: () =>
+        revalidateAdmittedContext(
+          () => ({ version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] }),
+          async () => {
+            if (failed) await wire.sessionTail("private-session-key");
+            return { ok: true };
+          },
+        ),
+    });
+    expect(decisions).toEqual([true, false]);
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = (await s.store.get(s.run.id))!;
+    const spans = record.events.filter((event) => event.type === "span_end" && event.name === "run.model_source_check");
+    expect(spans).toMatchObject([
+      { status: "ok", attrs: { outcome: "allowed" } },
+      {
+        status: "error",
+        attrs: {
+          errorKind: "infra",
+          errorCode: "source_check_failed",
+          sourceCheckStage: "admitted-context",
+          sourceErrorClass: "TransientStoreError",
+          storageOperation: "/runs/session/tail",
+          storagePhase: "http",
+          httpStatus: 503,
+          sourceReadAttempts: 3,
+          sourceReadStop: "attempts-exhausted",
+          outcome: "context_exception",
+        },
+      },
+    ]);
+    expect(
+      record.events.filter((event) => event.type === "span_end" && event.name === "run.publication_context_check"),
+    ).toMatchObject([
+      { status: "error", attrs: { outcome: "context_validation_exception", sourceReadStop: "attempts-exhausted" } },
+    ]);
+    expect(JSON.stringify(spans)).not.toContain("PRIVATE_SOURCE_BYTES");
+    expect(JSON.stringify(spans)).not.toContain("private-session-key");
+  });
+
   it.each(["Error", "TypeError", "string"] as const)(
     "retains the failed model source check without copying private exception text: %s",
     async (failureClass) => {
@@ -736,7 +811,10 @@ describe("runLoop — the model turn and everything that rides on it", () => {
           .spansSoFar()
           .filter((span) => span.name === "run.model_source_check")
           .map((span) => span.attrs),
-      ).toEqual([{ outcome: "allowed" }, { outcome: "history_exception", errorCode: failureClass }]);
+      ).toMatchObject([
+        { outcome: "allowed" },
+        { outcome: "history_exception", sourceCheckStage: "history", sourceErrorClass: failureClass },
+      ]);
       expect(JSON.stringify(trace.spansSoFar())).not.toContain("PRIVATE_SOURCE_BYTES");
       expect(JSON.stringify(trace.spansSoFar())).not.toContain("PRIVATE_SOURCE_NAME");
       s.ending.drain(true);
@@ -746,7 +824,16 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         record.events
           .filter((event) => event.type === "span_end" && event.name === "run.model_source_check")
           .map((event) => (event.type === "span_end" ? event.attrs : undefined)),
-      ).toEqual([{ outcome: "allowed" }, { outcome: "history_exception", errorCode: failureClass }]);
+      ).toMatchObject([
+        { outcome: "allowed" },
+        {
+          outcome: "history_exception",
+          sourceCheckStage: "history",
+          sourceErrorClass: failureClass,
+          errorKind: "infra",
+          errorCode: "source_check_failed",
+        },
+      ]);
     },
   );
 

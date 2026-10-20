@@ -1,3 +1,4 @@
+import { noteStoreReadFailure } from "./storeFailure.js";
 import {
   writeReceiptReadOf,
   writeReceiptSelectorSchema,
@@ -545,8 +546,14 @@ export class WorkerRunLedger implements RunLedger {
       try {
         return await this.post(path, body, false, "read", payload, undefined, signal);
       } catch (error) {
-        if (!(error instanceof TransientStoreError) || signal.aborted || attempt >= STORE_RETRY_BACKOFFS_MS.length)
+        if (!(error instanceof TransientStoreError) || signal.aborted || attempt >= STORE_RETRY_BACKOFFS_MS.length) {
+          noteStoreReadFailure(
+            error,
+            attempt + 1,
+            !(error instanceof TransientStoreError) ? "permanent" : signal.aborted ? "deadline" : "attempts-exhausted",
+          );
           throw error;
+        }
         // Only observational reads can repeat; an uncertain write may already have committed.
         await new Promise<void>((resolve) => {
           const done = () => {
@@ -557,7 +564,10 @@ export class WorkerRunLedger implements RunLedger {
           const timer = setTimeout(done, STORE_RETRY_BACKOFFS_MS[attempt]);
           signal.addEventListener("abort", done, { once: true });
         });
-        if (signal.aborted) throw error;
+        if (signal.aborted) {
+          noteStoreReadFailure(error, attempt + 1, "deadline");
+          throw error;
+        }
       }
     }
   }

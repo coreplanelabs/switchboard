@@ -31,6 +31,44 @@ const msg: IncomingMessage = {
 };
 
 describe("private audience publication gate", () => {
+  it("propagates a failed saved-source check and keeps the audience revoked", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const cause = new TypeError("PRIVATE_SOURCE_BYTES");
+      const io: ChannelIO = {
+        reply: async () => {},
+        history: async () => [],
+        status: async () => ({ update: async () => {}, done: async () => {} }),
+        directAudience: () => msg.directAudience,
+        verifyDirectAudience: async () => ({ ok: true }),
+      };
+      const latch = {
+        revoked: false,
+        revalidateSources: () =>
+          revalidateSourcesDecision([testSlackReceipt(msg)], async () => {
+            throw cause;
+          }),
+      };
+      await expect(privateRunAudienceDecision(msg, io, latch)).rejects.toMatchObject({
+        name: "SourceCheckError",
+        stage: "slack-revalidation",
+        cause,
+      });
+      expect(await privateRunAudienceDecision(msg, io, latch)).toEqual({ ok: false, code: "slack-source-unverified" });
+      expect(log.mock.calls.map(([line]) => JSON.parse(line))).toMatchObject([
+        {
+          event: "source_check.failed",
+          sourceCheckStage: "slack-revalidation",
+          sourceErrorClass: "TypeError",
+          kind: "infra",
+          code: "source_check_failed",
+        },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("keeps the failed context check across private publication rechecks", async () => {
     const io: ChannelIO = {
       reply: async () => {},

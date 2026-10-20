@@ -1,3 +1,4 @@
+import { sourceCheckError } from "./sourceCheckError.js";
 import {
   audienceRefusalText,
   type AudienceCheck,
@@ -93,8 +94,8 @@ export async function revalidateSourcesDecision(
         if (!valid) return { ok: false, code: "slack-source-unverified" } as const;
       }
       return { ok: true } as const;
-    } catch {
-      return { ok: false, code: "slack-source-unverified" } as const;
+    } catch (error) {
+      throw sourceCheckError("slack-revalidation", error);
     }
   };
   try {
@@ -123,8 +124,14 @@ export async function savedSlackSourcesStillValid(latch: PrivateAudienceLatch): 
       latch.check = checked.check;
       latch.githubAccess = githubAccessDiagnosticOf(checked.githubAccess);
     }
-  } catch {
-    // Failed source checks never restore an earlier result's authority.
+  } catch (cause) {
+    const error = sourceCheckError("saved-slack-sources", cause);
+    latch.revoked = true;
+    if (latch.code === undefined) {
+      latch.code = error.refusal.code;
+      latch.check = error.refusal.check;
+    }
+    throw error;
   }
   latch.revoked = true;
   latch.code ??= "slack-source-unverified";
@@ -190,8 +197,8 @@ export async function privateAudienceDecision(msg: IncomingMessage, io: ChannelI
     )
       return { ok: false, code: "direct-address-mismatch" };
     return await io.verifyDirectAudience(audience);
-  } catch {
-    return { ok: false, code: "direct-audience-unavailable" };
+  } catch (error) {
+    throw sourceCheckError("private-audience", error);
   }
 }
 

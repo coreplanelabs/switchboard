@@ -18728,7 +18728,12 @@ describe("saved source-event jobs in SQLite", () => {
     "identifies an unreadable retained job only after its claim transaction commits: %s",
     async (stored) => {
       const key = storeKey();
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const claimWarnings: unknown[][] = [];
+      const originalWarn = console.warn;
+      const warn = vi.spyOn(console, "warn").mockImplementation((...args) => {
+        if (typeof args[0] === "string" && args[0].startsWith("[source-events/claim]")) claimWarnings.push(args);
+        else originalWarn(...args);
+      });
       try {
         await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
           const now = Date.now();
@@ -18742,14 +18747,16 @@ describe("saved source-event jobs in SQLite", () => {
             throw new Error("claim wake refused");
           };
           try {
+            // A different object's alarm can report while this transaction yields.
+            queueMicrotask(() => console.warn("[plane/push] unrelated fixture delivery warning"));
             await expect(owner.claimSourceEvents(request, now)).rejects.toThrow("claim wake refused");
-            expect(warn.mock.calls).toEqual([]);
+            expect(claimWarnings).toEqual([]);
           } finally {
             state.storage.setAlarm = setAlarm;
           }
           const batch = await owner.claimSourceEvents(request, now);
           expect(batch).toMatchObject({ kind: "claimed", held: 1, claims: [{ receipt: known.receipt }] });
-          expect(warn.mock.calls).toEqual([
+          expect(claimWarnings).toEqual([
             ["[source-events/claim] held", { eventKey: held.receipt.key, reason: "unreadable-job" }],
           ]);
           expect(
@@ -20302,19 +20309,19 @@ describe("claim observation authorization before SQL paging", () => {
   )(
     "identifies an unreadable observation with a bounded key: ordinary=%s key=%s",
     async (ordinaryOnly, key, stored, loggedKey, warningThrows) => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {
-        if (warningThrows) throw new Error("PRIVATE_SINK_FAILURE");
-      });
-      try {
-        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey())), async (owner: RunHistoryDO, state) => {
-          state.storage.sql.exec(
-            "INSERT INTO claim_observations (observation_key, channel_id, user_id, channel_visibility, json) VALUES (?, ?, ?, ?, ?)",
-            key,
-            "mcp:X",
-            "private-user",
-            "machine",
-            stored,
-          );
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey())), async (owner: RunHistoryDO, state) => {
+        state.storage.sql.exec(
+          "INSERT INTO claim_observations (observation_key, channel_id, user_id, channel_visibility, json) VALUES (?, ?, ?, ?, ?)",
+          key,
+          "mcp:X",
+          "private-user",
+          "machine",
+          stored,
+        );
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+          if (warningThrows) throw new Error("PRIVATE_SINK_FAILURE");
+        });
+        try {
           expect(() =>
             owner.listClaimObservations({
               visibleTo: { kind: "all" },
@@ -20327,10 +20334,10 @@ describe("claim observation authorization before SQL paging", () => {
           expect(
             state.storage.sql.exec("SELECT json FROM claim_observations WHERE observation_key = ?", key).one(),
           ).toEqual({ json: stored });
-        });
-      } finally {
-        warn.mockRestore();
-      }
+        } finally {
+          warn.mockRestore();
+        }
+      });
     },
   );
   it("keeps the first record and excludes private or unauthorized rows before the page limit", async () => {
