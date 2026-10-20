@@ -26,7 +26,13 @@ export interface ResidentAdminClient {
   onboard(body: Record<string, unknown>): Promise<ResidentAdminResponse>;
   offboard(resource: string, dryRun: boolean): Promise<ResidentAdminResponse>;
   reconfigure(body: Record<string, unknown>): Promise<ResidentAdminResponse>;
-  rebuild(resource: string, dryRun: boolean, full?: boolean, resident?: number): Promise<ResidentAdminResponse>;
+  rebuild(
+    resource: string,
+    dryRun: boolean,
+    full?: boolean,
+    resident?: number,
+    discardUnknownNative?: { key: string; recordHash: string },
+  ): Promise<ResidentAdminResponse>;
   residents(): Promise<ResidentAdminResponse>;
   /** Read the selected resident's workload count and the records behind it. */
   workload(resource: string, resident?: number): Promise<ResidentAdminResponse>;
@@ -141,11 +147,16 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
       onboard: (body) => call(body.noResident === true ? "/register" : "/onboard", "POST", body),
       offboard: (resource, dryRun) => call("/offboard", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
       reconfigure: (body) => call(body.warmReplicas === undefined ? "/reconfigure" : "/replicas", "POST", body),
-      rebuild: (resource, dryRun, full, resident) =>
+      rebuild: (resource, dryRun, full, resident, discardUnknownNative) =>
         call(
           resident !== undefined ? (full ? "/replica-reset" : "/replica-rebuild") : full ? "/reset" : "/rebuild",
           "POST",
-          { resource, ...(dryRun ? { dryRun: true } : {}), ...(resident === undefined ? {} : { resident }) },
+          {
+            resource,
+            ...(dryRun ? { dryRun: true } : {}),
+            ...(resident === undefined ? {} : { resident }),
+            ...(discardUnknownNative ? { discardUnknownNative } : {}),
+          },
         ),
       residents: () => call("/residents", "GET"),
       workload: (resource, resident) =>

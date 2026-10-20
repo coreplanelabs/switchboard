@@ -961,6 +961,43 @@ describe("repo offboard / rebuild (--dry-run)", () => {
 });
 
 describe("repo rebuild --full", () => {
+  it("sends one exact emergency native selector only with a full reset", async () => {
+    const target = { key: "native-operation:op:archive", recordHash: "a".repeat(64) };
+    const client = mockClient({
+      rebuild: ok({
+        wouldRemove: { threadBindings: 0, backupObjects: 0, r2Objects: 0 },
+        reprovision: { defaultRef: "main" },
+      }),
+    });
+    const commands = bind({ admin: client });
+    expect(
+      (
+        await say(
+          commands,
+          `repo rebuild acme/api --full --dry-run --discard-native-key ${target.key} --discard-native-record-hash ${target.recordHash}`,
+          admin,
+        )
+      ).text,
+    ).toContain("Nothing was changed.");
+    expect(client.rebuild).toHaveBeenCalledWith("repo:acme/api", true, true, undefined, target);
+    const rejected = await commands.invoke(
+      "repo.rebuild",
+      { args: ["acme/api"], options: { discardNativeKey: target.key, discardNativeRecordHash: target.recordHash } },
+      admin,
+    );
+    expect(rejected).toMatchObject({ ok: false });
+    const selectedReplica = await commands.invoke(
+      "repo.rebuild",
+      {
+        args: ["acme/api"],
+        options: { full: true, resident: 1, discardNativeKey: target.key, discardNativeRecordHash: target.recordHash },
+      },
+      admin,
+    );
+    expect(selectedReplica).toMatchObject({ ok: false });
+    expect(client.rebuild).toHaveBeenCalledTimes(1);
+  });
+
   it("distinguishes a completed teardown from unverified provisioning and refuses an incomplete success receipt", async () => {
     const partial = bind({
       admin: mockClient({

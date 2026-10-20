@@ -1,4 +1,4 @@
-import { NativeOperationJournal, nativeOperationRecordSchema } from "./nativeOperation.js";
+import { NativeOperationJournal, nativeOperationRecordSchema, validNativeOperationKey } from "./nativeOperation.js";
 import { selectedResidentMember } from "../../src/execution/residentMembers";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -234,9 +234,11 @@ describe("full rebuild backup cleanup", () => {
       }).outputText;
       const Resident = runInNewContext(`${compiled}\nResident`, {
         NativeOperationJournal,
+        NATIVE_OPERATION_PREFIX: "native-operation:",
         nativeOperationRecordSchema,
         SNAPSHOT_KEY: "snapshot",
         RESOURCE_KEY: "resource",
+        NATIVE_EMERGENCY_DISCARD_PREFIX: "native-emergency-discard:",
         CLEANUP_PENDING_KEY: "cleanup",
         RESIDENT_ID_KEY: "resident:instanceId",
         RESIDENT_RETIRED_KEY: "member-retired",
@@ -369,6 +371,7 @@ describe("archive teardown exclusion", () => {
       }).outputText;
       const Resident = runInNewContext(`${compiled}\nResident`, {
         NativeOperationJournal,
+        NATIVE_OPERATION_PREFIX: "native-operation:",
         nativeOperationRecordSchema,
         CLEANUP_PENDING_KEY: "cleanup",
         RESOURCE_KEY: "resource",
@@ -396,6 +399,171 @@ describe("archive teardown exclusion", () => {
       expect(rows.get("native-operation:op:archive")).toEqual(original);
     },
   );
+
+  it("discards one exact unknown restore only after confirmed runtime destruction", async () => {
+    const ref = {
+      version: 1,
+      kind: "operation",
+      id: "33333333-3333-4333-8333-333333333333",
+      boot: "11111111-1111-4111-8111-111111111111",
+      owner: { opOwner: "op:archive" },
+    };
+    const attempt = "55555555-5555-4555-8555-555555555555";
+    const key = "native-operation:op:archive";
+    const rows = new Map<string, unknown>([
+      ["resource", resource],
+      [
+        key,
+        {
+          opOwner: "op:archive",
+          native: {
+            version: 1,
+            closed: true,
+            scope: ref,
+            pending: {
+              [attempt]: {
+                kind: "opaque",
+                restore: {
+                  version: 1,
+                  ref,
+                  attempt,
+                  backupId: "44444444-4444-4444-8444-444444444444",
+                  target: "/workspace/mirror",
+                  sizeBytes: 3,
+                  etag: "a".repeat(32),
+                },
+              },
+            },
+          },
+        },
+      ],
+    ]);
+    const initialRows = new Map(rows);
+    const storageRows = {
+      get: async (name: string) => rows.get(name),
+      put: async (name: string, value: unknown) => {
+        rows.set(name, value);
+      },
+      list: async ({ prefix, limit, startAfter }: { prefix?: string; limit?: number; startAfter?: string } = {}) =>
+        new Map(
+          [...rows]
+            .filter(([name]) => (!prefix || name.startsWith(prefix)) && (!startAfter || name > startAfter))
+            .slice(0, limit ?? Number.MAX_SAFE_INTEGER),
+        ),
+      delete: async (names: string | string[]) => {
+        for (const name of Array.isArray(names) ? names : [names]) rows.delete(name);
+      },
+      deleteAlarm: async () => {},
+    };
+    const storage = {
+      ...storageRows,
+      transaction: async <T>(action: (rows: typeof storageRows) => Promise<T>) => action(storageRows),
+    };
+    const listed = await new NativeOperationJournal(storage).list();
+    const recordHash = listed.operations[0]!.recordHash;
+    const compiled = ts.transpileModule(`class Resident { ${methodOf(source, "teardown")} }`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const Resident = runInNewContext(`${compiled}\nResident`, {
+      NativeOperationJournal,
+      NATIVE_OPERATION_PREFIX: "native-operation:",
+      nativeOperationRecordSchema,
+      CLEANUP_PENDING_KEY: "cleanup",
+      RESOURCE_KEY: "resource",
+      NATIVE_EMERGENCY_DISCARD_PREFIX: "native-emergency-discard:",
+      DESTROY_UNCONFIRMED_KEY: "destroy-unconfirmed",
+      PROVISIONING_CALLBACK: "provision",
+      PROVISION_RUN_CALLBACK: "deadline",
+      SNAPSHOT_KEY: "snapshot",
+      RESIDENT_ID_KEY: "residentId",
+      RESIDENT_RETIRED_KEY: "retired",
+      errMsg: (error: Error) => error.message,
+    });
+    const effects: string[] = [];
+    let destroyFails = true;
+    let cleanupFails = false;
+    let lateRecordWrite = false;
+    const resident = new Resident();
+    resident.ctx = { storage };
+    resident.env = { BACKUP_BUCKET: {} };
+    resident.destroyConfirmed = async () => {
+      effects.push("destroy");
+      if (destroyFails) throw new Error("runtime destruction unconfirmed");
+    };
+    resident.deleteSchedules = () => {};
+    resident.recordedBackupIds = async () => [];
+    resident.allDepsBackups = async () => [];
+    resident.deleteBackupObjects = async () => 0;
+    resident.dropDepsBackups = async () => {
+      if (cleanupFails) throw new Error("backup cleanup unavailable");
+      if (lateRecordWrite) {
+        const current = structuredClone(rows.get(key)) as { native: { threadKey?: string } };
+        current.native.threadKey = "late-restore-reply";
+        rows.set(key, current);
+      }
+      return 0;
+    };
+    resident.setResidentState = async () => {};
+    resident.swapIncarnation = () => {};
+
+    await expect(resident.teardown({ key, recordHash: "0".repeat(64) })).rejects.toThrow(
+      "exact closed native restore changed or another hold remains",
+    );
+    expect(effects).toEqual([]);
+    await expect(resident.teardown({ key, recordHash })).rejects.toThrow("runtime destruction unconfirmed");
+    expect(rows.has(key)).toBe(true);
+    expect([...rows.values()]).toContainEqual(
+      expect.objectContaining({ key, recordHash, originalOperationOutcome: "unknown", state: "prepared" }),
+    );
+    destroyFails = false;
+    effects.length = 0;
+    await expect(resident.teardown({ key, recordHash })).rejects.toThrow("earlier destruction is unconfirmed");
+    expect(effects).toEqual([]);
+
+    // Start a separate fixture to exercise confirmed destruction and interrupted backup cleanup.
+    rows.clear();
+    for (const [name, value] of initialRows) rows.set(name, value);
+    destroyFails = false;
+    cleanupFails = true;
+    expect(await resident.teardown({ key, recordHash })).toMatchObject({
+      containerStopped: true,
+      storageCleared: false,
+      errors: ["deps backup deletion failed: backup cleanup unavailable"],
+    });
+    expect(effects).toEqual(["destroy"]);
+    expect(rows.has(key)).toBe(true);
+    cleanupFails = false;
+    expect(await resident.teardown({ key, recordHash })).toMatchObject({
+      containerStopped: true,
+      storageCleared: true,
+      discardedUnknownNative: { key, recordHash },
+      errors: [],
+    });
+    expect(effects).toEqual(["destroy"]);
+    expect(rows.has(key)).toBe(false);
+    expect([...rows.values()]).toContainEqual(
+      expect.objectContaining({ key, recordHash, originalOperationOutcome: "unknown", state: "runtime-destroyed" }),
+    );
+    // A later prefix-cleanup retry has no native row, but keeps its confirmed audit and pending target.
+    expect(await resident.teardown({ key, recordHash })).toMatchObject({
+      containerStopped: true,
+      storageCleared: true,
+      discardedUnknownNative: { key, recordHash },
+      errors: [],
+    });
+    expect(effects).toEqual(["destroy"]);
+
+    // A late original reply during awaited backup cleanup must keep its changed record.
+    rows.clear();
+    for (const [name, value] of initialRows) rows.set(name, value);
+    effects.length = 0;
+    lateRecordWrite = true;
+    await expect(resident.teardown({ key, recordHash })).rejects.toThrow(
+      "original native record changed after backup cleanup",
+    );
+    expect(rows.get(key)).toMatchObject({ native: { threadKey: "late-restore-reply" } });
+    expect(effects).toEqual(["destroy"]);
+  });
 });
 
 function fixture(
@@ -406,6 +574,7 @@ function fixture(
     cleanupFails?: boolean;
     prefixFails?: boolean;
     residentId?: string;
+    nativeRows?: Map<string, unknown>;
   } = {},
 ) {
   const compiled = ts.transpileModule(
@@ -415,6 +584,9 @@ function fixture(
     },
   ).outputText;
   const Resident = runInNewContext(`${compiled}\nResident`, {
+    NativeOperationJournal,
+    NATIVE_OPERATION_PREFIX: "native-operation:",
+    NATIVE_EMERGENCY_DISCARD_PREFIX: "native-emergency-discard:",
     RESOURCE_KEY: "resource",
     RESIDENT_ID_KEY: "residentId",
     CLEANUP_PENDING_KEY: "cleanup",
@@ -449,7 +621,9 @@ function fixture(
   resident.ctx = {
     storage: {
       get: async (key: string) =>
-        key === "resource" ? resource : key === "residentId" ? options.residentId : undefined,
+        key === "resource" ? resource : key === "residentId" ? options.residentId : options.nativeRows?.get(key),
+      list: async ({ prefix }: { prefix?: string } = {}) =>
+        new Map([...(options.nativeRows ?? new Map())].filter(([key]) => !prefix || key.startsWith(prefix))),
       delete: async () => {},
     },
   };
@@ -489,6 +663,21 @@ function fixture(
 }
 
 describe("full resident reset", () => {
+  it("shows the exact unknown native record in the deletion preview", async () => {
+    const key = "native-operation:op:archive";
+    const { resident, state } = fixture({ nativeRows: new Map([[key, { originalOutcome: "unknown" }]]) });
+    const result = await resident.reset(resource, "release", 300000, true);
+    expect(result).toMatchObject({
+      dryRun: true,
+      wouldRemove: {
+        threadBindings: 1,
+        backupObjects: 6,
+        unverifiedNativeOperations: [{ key, recordHash: expect.stringMatching(/^[a-f0-9]{64}$/) }],
+      },
+    });
+    expect(state.container).toBe("running");
+  });
+
   it("keeps the selected replica address after full teardown clears its stored state", async () => {
     const { resident, state, initializations } = fixture({ residentId: "resident-secondary" });
     expect(await resident.reset(resource, "release", 300000, false)).toMatchObject({ state: "onboarding" });
@@ -581,6 +770,34 @@ describe("full resident reset", () => {
       provisioned: false,
       held: false,
     });
+  });
+
+  it("does not discard a selected restore while another original owner is active", async () => {
+    const { resident, state } = fixture();
+    resident.registeredRunsBeyondOps = async () => 1;
+    expect(
+      await resident.reset(resource, "release", 300000, false, {
+        key: "native-operation:op:archive",
+        recordHash: "a".repeat(64),
+      }),
+    ).toEqual({ status: 409, error: "reset-refused: another original run or operation remains active" });
+    expect(state.container).toBe("running");
+    expect(state.native).toBe("unknown");
+  });
+
+  it("does not destroy a new resident when the exact disposal already completed", async () => {
+    const { resident, state } = fixture();
+    const originalGet = resident.ctx.storage.get;
+    resident.ctx.storage.get = async (key: string) =>
+      key === `native-emergency-discard:${"a".repeat(64)}` ? { state: "runtime-destroyed" } : originalGet(key);
+    expect(
+      await resident.reset(resource, "release", 300000, false, {
+        key: "native-operation:op:archive",
+        recordHash: "a".repeat(64),
+      }),
+    ).toEqual({ status: 409, error: "reset-refused: exact native disposal already completed; nothing repeated" });
+    expect(state.container).toBe("running");
+    expect(state.native).toBe("unknown");
   });
 
   it("refuses an active engine cycle and a concurrent reset", async () => {
@@ -692,6 +909,7 @@ describe("full resident reset", () => {
     const { resident, state } = fixture({ destroyFails: true });
     const endpoint = runInNewContext(`${compiled}\nhandleReset`, {
       selectedResidentMember,
+      validNativeOperationKey,
       parseResource: (value: string) => ({ resource: value }),
       registryStub: () => ({ getRepository: async () => record }),
       residentStub: () => resident,
@@ -705,6 +923,9 @@ describe("full resident reset", () => {
       reprovision: { defaultRef: "release", provisioningTimeoutMs: 300000 },
       originalOperationOutcome: "unknown",
     });
+    const invalid = await endpoint({}, { resource, discardUnknownNative: { key: "native-operation:op:archive" } });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: "one exact native key and record hash are required" });
     await expect(endpoint({}, { resource })).rejects.toThrow("resident-destroy-unconfirmed");
     expect(record).toEqual({
       resource: "repo:acme/api",

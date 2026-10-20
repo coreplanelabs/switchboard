@@ -51,6 +51,7 @@ import {
   type CheckOperation,
 } from "../../src/execution/checkOperation.js";
 import {
+  NATIVE_OPERATION_PREFIX,
   NativeOperationJournal,
   nativeOperationOriginSchema,
   nativeOperationRecordSchema,
@@ -3575,6 +3576,8 @@ const RUNTIME_UNREACHABLE_KEY = "resident:runtimeUnreachable";
 const DESTROY_UNCONFIRMED_KEY = "resident:destroyUnconfirmed";
 /** The selected resource remains held until backup and prefix cleanup finish. */
 const CLEANUP_PENDING_KEY = "resident:cleanupPending";
+/** Retain the exact unknown-effect record after an explicitly selected full reset. */
+const NATIVE_EMERGENCY_DISCARD_PREFIX = "native-emergency-discard:";
 const RECREATE_ADMISSION_KEY = "resident:recreateAdmission";
 /** The row under RUNTIME_UNREACHABLE_KEY: the count and both instants, so the
  *  fleet watch sees how long the runtime has been silent. Cleared by any exec
@@ -14059,7 +14062,7 @@ export class ResidentDO extends Sandbox<Env> {
   /** Execution deadlines bound legacy registrations only. A binding with a
    *  durable run identity stays protected until its files pass the shared
    *  preservation decision and the binding is released. */
-  private async registeredRunsBeyondOps(): Promise<number> {
+  private async registeredRunsBeyondOps(excludeNativeKey?: string): Promise<number> {
     const regs = await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX });
     const bindings = await this.liveBindings();
     const cutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
@@ -14074,10 +14077,11 @@ export class ResidentDO extends Sandbox<Env> {
     let n = [...native].some(
       ([key, value]) =>
         !(
-          op?.active &&
-          !op.allocated &&
-          key === `native-operation:${op.owner}` &&
-          unstartedNativeOperator(value, op.owner)
+          key === excludeNativeKey ||
+          (op?.active &&
+            !op.allocated &&
+            key === `native-operation:${op.owner}` &&
+            unstartedNativeOperator(value, op.owner))
         ),
     )
       ? 1
@@ -15617,14 +15621,43 @@ export class ResidentDO extends Sandbox<Env> {
   /** Explicit full reset keeps the registry settings, but discards every
    * resident fact after confirmed destruction. A retained operation's result
    * remains unknown; resetting the runtime is not its completion receipt. */
-  async reset(resource: string, defaultRef: string, provisioningTimeoutMs: number, dryRun: boolean) {
+  async reset(
+    resource: string,
+    defaultRef: string,
+    provisioningTimeoutMs: number,
+    dryRun: boolean,
+    discardUnknownNative?: { key: string; recordHash: string },
+  ) {
+    if (discardUnknownNative && !dryRun) {
+      const audit = await this.ctx.storage.get<{ state?: unknown }>(
+        `${NATIVE_EMERGENCY_DISCARD_PREFIX}${discardUnknownNative.recordHash}`,
+      );
+      if (
+        audit?.state === "runtime-destroyed" &&
+        !(await this.ctx.storage.get(discardUnknownNative.key)) &&
+        !(await this.ctx.storage.get(CLEANUP_PENDING_KEY))
+      )
+        return { status: 409, error: "reset-refused: exact native disposal already completed; nothing repeated" };
+    }
     const residentId = await this.residentIdentity();
+    const unknownNative = dryRun ? await new NativeOperationJournal(this.ctx.storage).unresolved() : new Map();
+    const nativeHashes = unknownNative.size
+      ? await new NativeOperationJournal(this.ctx.storage).fingerprints(NATIVE_OPERATION_PREFIX)
+      : {};
     const plan = {
       resource,
       dryRun,
       wouldRemove: {
         ...(await this.teardownPlan()),
         r2Objects: await countR2Prefix(this.env.BACKUP_BUCKET, r2Prefix(residentId)),
+        ...(unknownNative.size
+          ? {
+              unverifiedNativeOperations: [...unknownNative.keys()].map((key) => ({
+                key,
+                recordHash: nativeHashes[key],
+              })),
+            }
+          : {}),
       },
       keeps: { registryRecord: true as const },
       reprovision: { defaultRef, provisioningTimeoutMs },
@@ -15638,7 +15671,9 @@ export class ResidentDO extends Sandbox<Env> {
       const active =
         this.inFlightCount() + this.refreshAdmissionsInFlight + this.adminWorkInFlight + (this.hydration ? 1 : 0);
       if (active > 0) return { status: 409, error: `reset-refused: ${active} request(s) still in flight` };
-      const removed = await this.teardown();
+      if (discardUnknownNative && (await this.registeredRunsBeyondOps(discardUnknownNative.key)) > 0)
+        return { status: 409, error: "reset-refused: another original run or operation remains active" };
+      const removed = await this.teardown(discardUnknownNative);
       if (removed.errors.length > 0)
         return { ...removed, status: 503, error: `reset-incomplete: ${removed.errors.join("; ")}` };
       try {
@@ -15660,11 +15695,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  or state. Then delete the R2 objects behind the SDK backup handles,
    *  which live outside the resident prefix and must be removed before the
    *  handles in DO storage. The Worker deletes resident-prefix objects. */
-  async teardown(): Promise<{
+  async teardown(discardUnknownNative?: { key: string; recordHash: string }): Promise<{
     schedulesCancelled: boolean;
     containerStopped: boolean;
     storageCleared: boolean;
     backupObjectsDeleted: number;
+    discardedUnknownNative?: { key: string; recordHash: string };
     errors: string[];
   }> {
     const errors: string[] = [];
@@ -15672,7 +15708,45 @@ export class ResidentDO extends Sandbox<Env> {
     const resource =
       (await this.ctx.storage.get<string>(CLEANUP_PENDING_KEY)) ?? (await this.ctx.storage.get<string>(RESOURCE_KEY));
     if (typeof resource !== "string") throw new Error("resident-cleanup-target-unavailable");
-    for (const value of (await new NativeOperationJournal(this.ctx.storage).unresolved()).values()) {
+    const journal = new NativeOperationJournal(this.ctx.storage);
+    const unresolved = await journal.unresolved();
+    const auditKey = discardUnknownNative
+      ? `${NATIVE_EMERGENCY_DISCARD_PREFIX}${discardUnknownNative.recordHash}`
+      : undefined;
+    const old = auditKey
+      ? await this.ctx.storage.get<{
+          resource: string;
+          key: string;
+          recordHash: string;
+          original: unknown;
+          originalOperationOutcome: string;
+          state: string;
+        }>(auditKey)
+      : undefined;
+    const resumeWithoutRecord =
+      discardUnknownNative &&
+      !unresolved.has(discardUnknownNative.key) &&
+      unresolved.size === 0 &&
+      old?.state === "runtime-destroyed";
+    if (discardUnknownNative) {
+      const selected = unresolved.get(discardUnknownNative.key);
+      const parsed = nativeOperationRecordSchema.safeParse(selected);
+      const hashes = await journal.fingerprints(NATIVE_OPERATION_PREFIX);
+      if (
+        !resumeWithoutRecord &&
+        (unresolved.size !== 1 ||
+          !parsed.success ||
+          !("opOwner" in parsed.data) ||
+          parsed.data.native.closed !== true ||
+          !parsed.data.native.scope ||
+          !Object.values(parsed.data.native.pending).some((attempt) => attempt.restore) ||
+          Object.values(parsed.data.native.pending).some((attempt) => !attempt.restore) ||
+          hashes[discardUnknownNative.key] !== discardUnknownNative.recordHash)
+      )
+        throw new Error("resident-cleanup-refused: exact closed native restore changed or another hold remains");
+    }
+    for (const [key, value] of unresolved) {
+      if (discardUnknownNative?.key === key) continue;
       const parsed = nativeOperationRecordSchema.safeParse(value);
       if (
         !parsed.success ||
@@ -15681,8 +15755,55 @@ export class ResidentDO extends Sandbox<Env> {
       )
         throw new Error("resident-cleanup-refused: original archive restore is unresolved");
     }
-    await this.ctx.storage.put(CLEANUP_PENDING_KEY, resource);
-    await this.destroyConfirmed();
+    let priorAuditState: string | undefined;
+    if (auditKey) {
+      if (
+        old &&
+        (old.resource !== resource ||
+          old.key !== discardUnknownNative!.key ||
+          old.recordHash !== discardUnknownNative!.recordHash ||
+          old.original === undefined ||
+          old.originalOperationOutcome !== "unknown" ||
+          !["prepared", "runtime-destroyed"].includes(old.state))
+      )
+        throw new Error("resident-cleanup-refused: emergency disposal audit changed");
+      priorAuditState = old?.state;
+      if (!old)
+        await this.ctx.storage.put(auditKey, {
+          resource,
+          key: discardUnknownNative!.key,
+          recordHash: discardUnknownNative!.recordHash,
+          original: unresolved.get(discardUnknownNative!.key),
+          originalOperationOutcome: "unknown",
+          state: "prepared",
+        });
+    }
+    if (priorAuditState === "runtime-destroyed") {
+      if (
+        (await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== resource ||
+        (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) ||
+        this.ctx.container?.running === true
+      )
+        throw new Error("resident-cleanup-refused: confirmed destruction cannot be reused");
+    } else {
+      if (priorAuditState === "prepared")
+        throw new Error("resident-cleanup-refused: earlier destruction is unconfirmed");
+      await this.ctx.storage.put(CLEANUP_PENDING_KEY, resource);
+      await this.destroyConfirmed();
+    }
+    if (auditKey && !resumeWithoutRecord) {
+      const hashes = await journal.fingerprints(NATIVE_OPERATION_PREFIX);
+      if (hashes[discardUnknownNative!.key] !== discardUnknownNative!.recordHash)
+        throw new Error("resident-cleanup-refused: original native record changed after destruction");
+      await this.ctx.storage.put(auditKey, {
+        resource,
+        key: discardUnknownNative!.key,
+        recordHash: discardUnknownNative!.recordHash,
+        original: unresolved.get(discardUnknownNative!.key),
+        originalOperationOutcome: "unknown",
+        state: "runtime-destroyed",
+      });
+    }
     const containerStopped = true;
     this.deleteSchedules(PROVISIONING_CALLBACK);
     this.deleteSchedules(PROVISION_RUN_CALLBACK);
@@ -15707,6 +15828,16 @@ export class ResidentDO extends Sandbox<Env> {
       await this.setResidentState("down", `full-rebuild-cleanup-incomplete: ${errors.join("; ")}`);
       return { schedulesCancelled: true, containerStopped, storageCleared: false, backupObjectsDeleted, errors };
     }
+    if (discardUnknownNative && !resumeWithoutRecord) {
+      // A late original restore reply may change this row during the awaited
+      // backup deletion. Compare and remove it in one storage transaction.
+      await this.ctx.storage.transaction(async (rows) => {
+        const hashes = await journal.fingerprints(NATIVE_OPERATION_PREFIX, rows);
+        if (hashes[discardUnknownNative.key] !== discardUnknownNative.recordHash)
+          throw new Error("resident-cleanup-refused: original native record changed after backup cleanup");
+        await rows.delete(discardUnknownNative.key);
+      });
+    }
     // Retired DO: clear the alarm the Container base may have armed for its
     // schedules, then delete every stored key — ours and the SDK's (its runtime
     // identity among them) — so nothing ever wakes this object again. Keys, not
@@ -15718,10 +15849,21 @@ export class ResidentDO extends Sandbox<Env> {
     this.swapIncarnation(); // retired object, retired memos
     await this.ctx.storage.deleteAlarm();
     const keys = [...(await this.ctx.storage.list()).keys()].filter(
-      (key) => key !== CLEANUP_PENDING_KEY && key !== RESIDENT_ID_KEY && key !== RESIDENT_RETIRED_KEY,
+      (key) =>
+        key !== CLEANUP_PENDING_KEY &&
+        key !== RESIDENT_ID_KEY &&
+        key !== RESIDENT_RETIRED_KEY &&
+        !key.startsWith(NATIVE_EMERGENCY_DISCARD_PREFIX),
     );
     for (let i = 0; i < keys.length; i += 128) await this.ctx.storage.delete(keys.slice(i, i + 128));
-    return { schedulesCancelled: true, containerStopped, storageCleared: true, backupObjectsDeleted, errors };
+    return {
+      schedulesCancelled: true,
+      containerStopped,
+      storageCleared: true,
+      backupObjectsDeleted,
+      ...(discardUnknownNative ? { discardedUnknownNative: discardUnknownNative } : {}),
+      errors,
+    };
   }
 
   /** Metadata and deterministic R2 reads confirm cleanup; no runtime wakes. */
@@ -16865,6 +17007,18 @@ async function handleReset(env: Env, body: Record<string, unknown>): Promise<Res
   if ("error" in resource) return json({ error: resource.error }, 400);
   if (body.dryRun !== undefined && typeof body.dryRun !== "boolean")
     return json({ error: "dryRun must be a boolean" }, 400);
+  const discard = body.discardUnknownNative;
+  if (
+    discard !== undefined &&
+    (!discard ||
+      typeof discard !== "object" ||
+      Array.isArray(discard) ||
+      Object.keys(discard).sort().join(",") !== "key,recordHash" ||
+      !validNativeOperationKey((discard as { key?: unknown }).key) ||
+      typeof (discard as { recordHash?: unknown }).recordHash !== "string" ||
+      !/^[a-f0-9]{64}$/.test((discard as { recordHash: string }).recordHash))
+  )
+    return json({ error: "one exact native key and record hash are required" }, 400);
   const record = await registryStub(env).getRepository(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
   if (record.noResident === true || record.offboarding)
@@ -16879,6 +17033,7 @@ async function handleReset(env: Env, body: Record<string, unknown>): Promise<Res
     record.defaultRef,
     record.provisioningTimeoutMs,
     dryRun,
+    discard as { key: string; recordHash: string } | undefined,
   );
   return json(result, "error" in result ? result.status : dryRun ? 200 : 202);
 }

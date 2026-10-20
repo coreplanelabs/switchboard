@@ -113,15 +113,29 @@ describe("makeResidentAdminClient (real fetch client)", () => {
       { status: 200, body: { dryRun: true } },
       { status: 404, body: { error: "not found" } },
       { reject: "connection lost" },
+      { status: 200, body: { discardedUnknownNative: { key: "native-operation:op:archive" } } },
     );
     const client = makeResidentAdminClient("https://resident.example", "test-token");
     expect(await client.rebuild("repo:acme/api", true, true)).toEqual({ status: 200, data: { dryRun: true } });
     expect(await client.rebuild("repo:acme/api", false, true)).toEqual({ status: 404, data: { error: "not found" } });
     await expect(client.rebuild("repo:acme/api", false, true)).rejects.toThrow("connection lost");
+    expect(
+      await client.rebuild("repo:acme/api", false, true, undefined, {
+        key: "native-operation:op:archive",
+        recordHash: "a".repeat(64),
+      }),
+    ).toMatchObject({ status: 200, data: { discardedUnknownNative: { key: "native-operation:op:archive" } } });
     expect(calls.map((c) => ({ route: route(c), body: JSON.parse(String(c.init.body)) }))).toEqual([
       { route: "/reset", body: { resource: "repo:acme/api", dryRun: true } },
       { route: "/reset", body: { resource: "repo:acme/api" } },
       { route: "/reset", body: { resource: "repo:acme/api" } },
+      {
+        route: "/reset",
+        body: {
+          resource: "repo:acme/api",
+          discardUnknownNative: { key: "native-operation:op:archive", recordHash: "a".repeat(64) },
+        },
+      },
     ]);
   });
 
