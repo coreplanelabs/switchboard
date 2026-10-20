@@ -40,6 +40,66 @@ export function newStorageRequestId(): string | undefined {
     return undefined;
   }
 }
+type ObservedStorageOperation = "/runs/state" | "/runs/heartbeat";
+type StorageRequestProgress =
+  | { stage: "received"; operation: ObservedStorageOperation; requestId?: string }
+  | { stage: "decoded"; request: StoreRequestWitness }
+  | {
+      stage: "acknowledgement";
+      request: StoreRequestWitness;
+      httpStatus: number;
+      result: import("./runLedger/types.js").FenceResult;
+    };
+
+/** Positive observation only: absence is not queue, reply-loss or replay proof. */
+export function reportStorageRequestProgress(progress: StorageRequestProgress): void {
+  const side = progress.stage === "acknowledgement" ? "client" : "worker";
+  let operation: ObservedStorageOperation | undefined;
+  try {
+    const request = progress.stage === "received" ? undefined : progress.request;
+    const candidate = progress.stage === "received" ? progress.operation : request!.operation;
+    if (candidate !== "/runs/state" && candidate !== "/runs/heartbeat") return;
+    operation = candidate;
+    if (progress.stage === "acknowledgement" && progress.httpStatus !== 200 && progress.httpStatus !== 409) return;
+    const requestId = storageRequestIdOf(progress.stage === "received" ? progress.requestId : request?.requestId);
+    const requestDigest = storageRequestDigestOf(request?.digest);
+    const context = request?.context;
+    const encoded = JSON.stringify({
+      event: "storage.request.progress",
+      side,
+      stage: progress.stage,
+      operation,
+      ...(requestId ? { requestId } : {}),
+      ...(requestDigest ? { requestDigest } : {}),
+      ...(context?.scope === "runs" && context.runIds.length === 1
+        ? { runId: context.runIds[0], ...(context.ownerGen ? { ownerGen: context.ownerGen } : {}) }
+        : {}),
+      ...(progress.stage === "acknowledgement"
+        ? {
+            httpStatus: progress.httpStatus,
+            outcome: progress.result.ok ? "accepted" : "refused",
+            ...(!progress.result.ok ? { reason: progress.result.reason } : {}),
+          }
+        : {}),
+    });
+    if (new TextEncoder().encode(encoded).length > 1024) throw new RangeError("Storage progress exceeds its log bound");
+    console.log(encoded);
+  } catch {
+    try {
+      console.warn(
+        JSON.stringify({
+          event: "storage.request.progress_telemetry_failed",
+          side,
+          operation: operation ?? "unknown",
+          stage: progress.stage,
+        }),
+      );
+    } catch {
+      // Failed observation cannot change the original storage result or start recovery.
+    }
+  }
+}
+
 const phases = [
   "transport",
   "http",

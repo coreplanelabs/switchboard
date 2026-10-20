@@ -15862,6 +15862,192 @@ describe("state-write holds across Durable Object RPC", () => {
       }
     },
   );
+  it.each(["state", "heartbeat"] as const)(
+    "observes %s HTTP receipt before reading the body and binds the computed digest before RPC",
+    async (operation) => {
+      const key = "runs:request-observations:" + operation;
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      const body = JSON.stringify({
+        storeKey: key,
+        runId: id,
+        gen,
+        ...(operation === "state" ? { state } : { leaseMs: 30000 }),
+      });
+      const requestId = "11111111-1111-4111-8111-111111111111";
+      const req = new Request("https://memory.test/runs/" + operation, {
+        method: "POST",
+        body,
+        headers: {
+          ...AUTH,
+          "content-length": String(new TextEncoder().encode(body).length),
+          "x-switchboard-storage-request-id": requestId,
+          "x-switchboard-storage-request-digest": "f".repeat(64),
+        },
+      });
+      const entered = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
+      const read = req.text.bind(req);
+      vi.spyOn(req, "text").mockImplementation(async () => {
+        entered.resolve();
+        await release.promise;
+        return read();
+      });
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      const progress = () =>
+        logs
+          .filter((line) => line.startsWith("{"))
+          .map((line) => JSON.parse(line))
+          .filter((row) => row.event === "storage.request.progress");
+      const pending = memoryWorker.fetch(req, env);
+      try {
+        await entered.promise;
+        expect(progress()).toEqual([
+          {
+            event: "storage.request.progress",
+            side: "worker",
+            stage: "received",
+            operation: "/runs/" + operation,
+            requestId,
+          },
+        ]);
+        release.resolve();
+        const response = await pending;
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ ok: true });
+        const hash = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(JSON.stringify({ operation: "/runs/" + operation, payload: body })),
+        );
+        const digest = Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        expect(progress()).toEqual([
+          {
+            event: "storage.request.progress",
+            side: "worker",
+            stage: "received",
+            operation: "/runs/" + operation,
+            requestId,
+          },
+          {
+            event: "storage.request.progress",
+            side: "worker",
+            stage: "decoded",
+            operation: "/runs/" + operation,
+            requestId,
+            requestDigest: digest,
+            runId: id,
+            ownerGen: gen,
+          },
+        ]);
+        const structured = logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+        expect(structured.findIndex((row) => row.stage === "decoded")).toBeLessThan(
+          structured.findIndex((row) => row.event === "storage.rpc.progress" && row.outcome === "started"),
+        );
+        expect(JSON.stringify(progress())).not.toMatch(/fixture system|sessionPolicy|storeKey/);
+      } finally {
+        release.resolve();
+        const response = await pending;
+        if (!response.bodyUsed) await response.text();
+        log.mockRestore();
+      }
+    },
+  );
+  it.each(["missing-id", "invalid-id", "malformed-body", "unauthorized"] as const)(
+    "keeps %s HTTP observation evidence qualified",
+    async (scenario) => {
+      const key = "runs:qualified-ingress:" + scenario;
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      const body =
+        scenario === "malformed-body"
+          ? "PRIVATE_BROKEN_BODY"
+          : JSON.stringify({ storeKey: key, runId: id, gen, state });
+      const headers = new Headers({ ...AUTH, "content-length": String(new TextEncoder().encode(body).length) });
+      if (scenario === "invalid-id") headers.set("x-switchboard-storage-request-id", "PRIVATE_INVALID_ID");
+      if (scenario === "unauthorized") headers.set("authorization", "Bearer PRIVATE_WRONG_TOKEN");
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      try {
+        const response = await memoryWorker.fetch(
+          new Request("https://memory.test/runs/state", { method: "POST", body, headers }),
+          env,
+        );
+        expect(response.status).toBe(scenario === "unauthorized" ? 401 : scenario === "malformed-body" ? 400 : 200);
+        const result = await response.json();
+        if (response.status === 200) expect(result).toEqual({ ok: true });
+        else expect(result).toHaveProperty("error");
+        const rows = logs
+          .filter((line) => line.startsWith("{"))
+          .map((line) => JSON.parse(line))
+          .filter((row) => row.event === "storage.request.progress");
+        expect(rows.map((row) => row.stage)).toEqual(
+          scenario === "unauthorized" ? [] : scenario === "malformed-body" ? ["received"] : ["received", "decoded"],
+        );
+        if (scenario !== "unauthorized")
+          expect(rows[0]).toEqual({
+            event: "storage.request.progress",
+            side: "worker",
+            stage: "received",
+            operation: "/runs/state",
+          });
+        expect(JSON.stringify(rows)).not.toContain("PRIVATE");
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+  it.each([false, true])(
+    "preserves the state mutation when request progress and fallback sinks fail=%s",
+    async (fallbackFails) => {
+      const key = "runs:ingress-sink:" + fallbackFails;
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      const warnings: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation(() => {
+        throw new Error("private sink failure");
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation((line) => {
+        warnings.push(String(line));
+        if (fallbackFails) throw new Error("private fallback failure");
+      });
+      try {
+        const response = await memoryWorker.fetch(request(key), env);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ ok: true });
+        expect(
+          await runInDurableObject(stub, (_owner, ctx) =>
+            JSON.parse(
+              ctx.storage.sql.exec<{ state_json: string }>("SELECT state_json FROM live_runs WHERE run_id=?", id).one()
+                .state_json,
+            ),
+          ),
+        ).toEqual(state);
+        expect(
+          warnings
+            .filter((line) => line.startsWith("{"))
+            .map((line) => JSON.parse(line))
+            .filter((row) => row.event === "storage.request.progress_telemetry_failed"),
+        ).toEqual([
+          {
+            event: "storage.request.progress_telemetry_failed",
+            side: "worker",
+            operation: "/runs/state",
+            stage: "received",
+          },
+          {
+            event: "storage.request.progress_telemetry_failed",
+            side: "worker",
+            operation: "/runs/state",
+            stage: "decoded",
+          },
+        ]);
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+      }
+    },
+  );
   it("joins deletion and batch-query failure records to the original client request", async () => {
     const key = "runs:correlated-deletion";
     const stub = env.RUNS.get(env.RUNS.idFromName(key));

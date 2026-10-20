@@ -98,6 +98,7 @@ import { parseStoredJson } from "../../src/core/storedJson.ts";
 import {
   STORAGE_FAILURE_DIAGNOSTIC_HEADER,
   STORAGE_REQUEST_ID_HEADER,
+  reportStorageRequestProgress,
   STORAGE_REQUEST_DIGEST_HEADER,
   storageRequestDigestOf,
   storageFailureNotice,
@@ -15789,6 +15790,7 @@ async function handleLedger(
       ? await storeRequestWitness(pathname, originalBody, b, requestId)
       : undefined;
   let rpcWitness = stateWitness;
+  let decodedObserved = false;
   const observeRpc = async <T>(
     stage: "promotion-preflight" | "state-read" | "state-rpc" | "heartbeat-rpc" | "append-rpc" | "step-rpc",
     attempt: number,
@@ -15801,6 +15803,10 @@ async function handleLedger(
       return call();
     try {
       rpcWitness ??= await storeRequestWitness(pathname, originalBody, b, requestId);
+      if (!decodedObserved) {
+        reportStorageRequestProgress({ stage: "decoded", request: rpcWitness });
+        decodedObserved = true;
+      }
     } catch (error) {
       logStorageTelemetryFailure(pathname, "request-witness", error);
       return call();
@@ -17259,6 +17265,12 @@ export default {
       traceparent: request.headers.get("traceparent"),
       attrs: { route: url.pathname },
     });
+    if (request.method === "POST" && (url.pathname === "/runs/state" || url.pathname === "/runs/heartbeat"))
+      reportStorageRequestProgress({
+        stage: "received",
+        operation: url.pathname,
+        requestId: storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
+      });
     try {
       const res = await handleRequest(request, env, admission);
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });

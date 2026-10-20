@@ -194,3 +194,14 @@ The existing admission request root records optional refresh loss once, with adm
 Thrown MCP and HTTP admission failures record admissionExceptionKind from the same closed classification. Unclassified exceptions use unclassified-exception. This field has no raw exception name, message, stack or arbitrary code.
 
 | A successful complete epoch scan records only the count of sources excluded by scope across all catalogue pages. | `[unit]` `src/channels/homeAccessEpoch.test.ts::complete Home access epoch::counts out-of-scope sources across epoch catalogue pages` |
+
+
+## Storage request observations
+
+Native Memory tracing and application storage records serve different purposes. Native tracing supplies provider RPC and storage spans; application records prove receipt, computed request identity and client acceptance for state and heartbeat. The Memory template keeps native traces disabled and enables query-string redaction. Native spans can still contain URL paths, SQL text and KV keys or prefixes. The release owner must check Worker-wide privacy, retained caller/callee joins and volume before a separate live trace enablement change. Sampling, missing records and zero-duration non-I/O spans cannot establish queueing, absence or reply loss. See the [design record](../../plans/storage-request-observations.md).
+
+| Criterion | Proof |
+|---|---|
+| A failed span sink and failed warning reporter preserve both success and the original thrown error, while other sinks still receive the span. | `[unit]` `src/core/trace/tracer.test.ts::createTracer::keeps success and the original error when a sink and its warning reporter both fail` |
+| The Memory configuration renderer keeps native tracing disabled, enables query-string redaction and retains its Durable Object bindings. | `[unit]` `src/deploy/wranglerTemplate.test.ts::Memory request trace configuration::keeps native tracing disabled with query redaction and preserves the Memory bindings` |
+| Deployed native tracing retains one same-request caller/callee pair and a client acceptance observation without private sentinel path/query/body/response/SQL/KV values. The release owner checks actual event volume against the approved deployment budget before enablement and live acceptance. | `[gap]` Release-owner procedure in the storage request observations design record; local configuration rendering is not provider acceptance. |

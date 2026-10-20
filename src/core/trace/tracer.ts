@@ -64,7 +64,14 @@ export interface TracerOptions {
 
 export function createTracer(opts: TracerOptions): Tracer {
   const context = opts.context ?? identityContext;
-  const warn = opts.warn ?? ((m: string) => console.warn(m));
+  const reportWarning = opts.warn ?? ((m: string) => console.warn(m));
+  const warn = (message: string): void => {
+    try {
+      reportWarning(message);
+    } catch {
+      // A failed diagnostic reporter must not replace the traced operation's result.
+    }
+  };
   const shared: Shared = { clock: opts.clock, context, warn };
   return {
     clock: opts.clock,

@@ -239,6 +239,7 @@ import { readStoreResponse, prepareStorageRequest, type StoreOperationKind } fro
 import {
   STORAGE_FAILURE_DIAGNOSTIC_HEADER,
   STORAGE_REQUEST_ID_HEADER,
+  reportStorageRequestProgress,
   storageFailureNotice,
   storageResponseMetadata,
   type StorageResponseMetadata,
@@ -562,14 +563,18 @@ export class WorkerRunLedger implements RunLedger {
   }
 
   private fenceResult(r: { status: number; data: Record<string, unknown>; request: StoreRequestWitness }): FenceResult {
+    let result: FenceResult;
     if (r.status === 409 && r.data.ok === false && (r.data.reason === "fenced" || r.data.reason === "unknown-run"))
-      return { ok: false, reason: r.data.reason };
-    if (r.status === 200 && r.data.ok === true) return { ok: true };
-    throw this.unknownAcknowledgement(
-      `run ledger ${r.request.operation}: invalid acknowledgement (HTTP ${r.status})`,
-      r.request,
-      r.status,
-    );
+      result = { ok: false, reason: r.data.reason };
+    else if (r.status === 200 && r.data.ok === true) result = { ok: true };
+    else
+      throw this.unknownAcknowledgement(
+        `run ledger ${r.request.operation}: invalid acknowledgement (HTTP ${r.status})`,
+        r.request,
+        r.status,
+      );
+    reportStorageRequestProgress({ stage: "acknowledgement", request: r.request, httpStatus: r.status, result });
+    return result;
   }
 
   private checkIds(runId: string, gen?: string): void {
