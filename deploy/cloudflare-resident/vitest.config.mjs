@@ -53,6 +53,7 @@ export default defineConfig({
       "stagedBuild.test.ts",
       "lifecycle.test.ts",
       "runtimeUnreachable.test.ts",
+      "interruptedDestroyRecovery.test.ts",
       "runtimeBusy.test.ts",
       "controlReset.test.ts",
       "notServiceable.test.ts",

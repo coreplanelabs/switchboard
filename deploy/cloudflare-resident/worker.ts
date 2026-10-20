@@ -15382,8 +15382,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  recovery for a resident whose runtime never answers, minutes where the
    *  rebuild is half an hour. Refused while the engine owns the state
    *  (onboarding/refreshing/restoring — two cycles must never race one disk)
-   *  and on a `down` resident, whose one exit is `/rebuild`. The restore runs
-   *  in the background through the ordinary wake path (`ensureHydrated`:
+   *  and on a `down` resident unless a prior destroy left its durable
+   *  uncertainty fence. The checked retry then confirms destruction before
+   *  the existing snapshot restore. Other `down` residents use `/rebuild`.
+   *  The restore runs in the background through the ordinary wake path (`ensureHydrated`:
    *  `restoring`, mirror, checkout, deps, `warm`, `lastRestore`); the caller
    *  polls `/debug info`. A failure the wake path did not record itself is
    *  recorded here, so the marker never strands `restoring`. */
@@ -15407,7 +15409,14 @@ export class ResidentDO extends Sandbox<Env> {
         error: `recreate-refused: the engine is mid-flight (state ${from.state}) — retry once it settles (warm/degraded)`,
       };
     }
-    if (from.state === "down") {
+    const destroyFenceStored = (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) === true;
+    const cleanupPending = (await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== undefined;
+    const retryUnconfirmedDestroy = from.state === "down" && destroyFenceStored && !cleanupPending;
+    if (from.state === "down" && !retryUnconfirmedDestroy) {
+      if (destroyFenceStored && cleanupPending)
+        console.warn(
+          `[resident-recreate-refused] ${JSON.stringify({ schema: 1, destroyFenceStored, cleanupPending })}`,
+        );
       return {
         recreated: false,
         status: 409,
@@ -15424,7 +15433,9 @@ export class ResidentDO extends Sandbox<Env> {
       return { recreated: false, status: 409, error: `recreate-refused: ${active} run(s) still in flight` };
     }
     await this.recreateContainer(
-      "runtime-unreachable: the container was recreated by an operator (recreate-container), snapshots kept — the restore from the snapshot is starting",
+      retryUnconfirmedDestroy
+        ? "resident-destroy-unconfirmed: the operator retried destruction and confirmed it; snapshots kept — the restore is starting"
+        : "runtime-unreachable: the container was recreated by an operator (recreate-container), snapshots kept — the restore from the snapshot is starting",
       false,
     );
     const restoreStartedAt = new Date(systemClock()).toISOString();
