@@ -28,6 +28,83 @@ function fixture() {
 }
 
 describe("sandbox lifecycle evidence", () => {
+  it("retains typed stale-process evidence before its message is flattened", () => {
+    const f = fixture();
+    const error = Object.assign(new Error("previous runtime incarnation"), {
+      name: "StaleProcessHandleError",
+      code: "STALE_PROCESS_HANDLE",
+      processId: "a030b6eb-42de-4c30-ad2b-e692327ca813",
+      pid: 188,
+      operation: "output",
+      context: { environment: { TOKEN: "private" } },
+    });
+    f.evidence.executionFailed(error);
+    expect(f.events).toEqual([
+      {
+        event: "sandbox.execution.lifecycle-failure",
+        sandboxId: "sandbox-123",
+        build: "commit-abc",
+        observationId: null,
+        observedAt: 1000,
+        errorName: "StaleProcessHandleError",
+        reason: "previous runtime incarnation",
+        errorCode: "STALE_PROCESS_HANDLE",
+        processId: "a030b6eb-42de-4c30-ad2b-e692327ca813",
+        pid: 188,
+        operation: "output",
+      },
+    ]);
+  });
+  it("joins the inspected runtime image and later stop through one observation identity", async () => {
+    const events: Record<string, unknown>[] = [];
+    const supervised: Promise<void>[] = [];
+    const stopped = deferred();
+    const evidence = new SandboxLifecycleEvidence({
+      now: () => 1000,
+      sandboxId: "sandbox-123",
+      build: "commit-abc",
+      newObservationId: () => "observation-1",
+      log: (event) => events.push(event),
+      reportLogFailure: () => {},
+      supervise: (promise) => supervised.push(promise),
+    });
+    evidence.watch(
+      {
+        running: true,
+        monitor: () => stopped.promise,
+        inspect: async () => ({
+          image: "registry.example/sandbox@sha256:" + "a".repeat(64),
+          labels: { token: "private" },
+        }),
+      },
+      "start",
+    );
+    stopped.reject(new Error("Runtime signalled the container to exit due to a new version rollout: 0"));
+    await Promise.all(supervised);
+    expect(events).toContainEqual({
+      event: "sandbox.container.observed",
+      sandboxId: "sandbox-123",
+      build: "commit-abc",
+      observationId: "observation-1",
+      inspectionStartedAt: 1000,
+      observedAt: 1000,
+      source: "start",
+      imageState: "observed",
+      image: "registry.example/sandbox@sha256:" + "a".repeat(64),
+    });
+    expect(events).toContainEqual({
+      event: "sandbox.container.stop-observed",
+      sandboxId: "sandbox-123",
+      build: "commit-abc",
+      observationId: "observation-1",
+      observedAt: 1000,
+      outcome: "error",
+      errorName: "Error",
+      reason: "Runtime signalled the container to exit due to a new version rollout: 0",
+    });
+    expect(JSON.stringify(events)).not.toContain("private");
+  });
+
   it.each(["wake", "start"] as const)("names the %s phase when the monitor cannot attach", (source) => {
     const f = fixture();
     f.evidence.watch(

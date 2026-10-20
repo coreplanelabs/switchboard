@@ -10,6 +10,7 @@ import {
   SmokeReaderError,
 } from "../src/deploy/agentSmoke.js";
 import { systemClock } from "../src/core/trace/clock.js";
+import { observeSandboxRunOnHost } from "../src/deploy/run.js";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -138,6 +139,7 @@ try {
       transport,
       expectedCommit: process.env.SMOKE_EXPECTED_COMMIT || undefined,
       thread: process.env.SMOKE_INGRESS_THREAD,
+      observeSandbox: (target) => observeSandboxRunOnHost(plan, target),
       onReceipt: async (receipt) => {
         await save(receipt);
         const progress = smokeProgress(receipt);

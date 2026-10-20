@@ -359,7 +359,13 @@ describe("wrangler and /exec parsers", () => {
       configuration: { image: NEW_IMAGE, vcpu: 2, memory: "8GiB", network: { mode: "private" } },
       health: { instances: { healthy: 7, scheduling: 0 } },
     };
-    expect(parseAppState(info)).toEqual({ version: 12, image: NEW_IMAGE });
+    expect(parseAppState(info)).toEqual({ id: "a030b6eb-42de-4c30-ad2b-e692327ca813", version: 12, image: NEW_IMAGE });
+    expect(parseAppState({ ...info, active_rollout_id: "b030b6eb-42de-4c30-ad2b-e692327ca813" })).toEqual({
+      id: "a030b6eb-42de-4c30-ad2b-e692327ca813",
+      version: 12,
+      image: NEW_IMAGE,
+      activeRolloutId: "b030b6eb-42de-4c30-ad2b-e692327ca813",
+    });
     expect(parseAppState({ version: "13" })).toEqual({ version: 13, image: null });
     expect(parseAppState({ version: 13, configuration: { image: 42 } })).toEqual({ version: 13, image: null });
     expect(parseAppState({ version: "v13", configuration: { image: NEW_IMAGE } })).toBeNull();

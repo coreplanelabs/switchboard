@@ -605,6 +605,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     return new ModelPolicyRefusedError(failure);
   };
   const bridge = new PiBridge({
+    loopRemainingMs: () => live.rules.loopEndsIn?.() ?? loopEnd - now(),
     recovery: run.toolContext.recovery,
     runId: run.runId,
     secretValues: [deps.bearer],

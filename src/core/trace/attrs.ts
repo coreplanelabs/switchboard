@@ -93,6 +93,8 @@ export interface AttrDomain {
   repoTargetRelation: "not_proposed" | "matched" | "overridden" | "unresolved";
   count: number;
   backend: Backend;
+  /** Selected physical Cloudflare name, separate from the conversation key. */
+  sandboxKey: string;
   // run.command
   command: string;
   // model.turn
@@ -141,6 +143,9 @@ export interface AttrDomain {
   serverMs: number;
   attempts: number;
   timeoutMs: number;
+  timeoutValue: number;
+  timeoutUnit: "seconds";
+  loopRemainingMs: number;
   budget: "full" | "clipped";
   token: "fresh" | "expiring" | "expired";
   // exec.*
@@ -223,6 +228,7 @@ const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "sourceReadStop",
   "restartOfRunId",
   "runId",
+  "sandboxKey",
   "outcome",
   "githubStage",
   "githubReason",
@@ -329,6 +335,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   repoTargetRelation: "string",
   count: "number",
   backend: "string",
+  sandboxKey: "string",
   command: "string",
   model: "string",
   tools: "number",
@@ -361,6 +368,9 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   serverMs: "number",
   attempts: "number",
   timeoutMs: "number",
+  timeoutValue: "number",
+  timeoutUnit: "string",
+  loopRemainingMs: "number",
   budget: "string",
   token: "string",
   tokenExpiresInMin: "number",

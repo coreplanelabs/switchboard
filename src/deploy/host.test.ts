@@ -6,7 +6,7 @@ import { PACKAGE_ROOT, PACKAGE_SOURCE_FILE, packageVersion } from "../packageRoo
 import { cliVersionOnHost, OPERATOR_ROOT, workAreaNpmCiArgs } from "./host.js";
 import { resolveOperatorRoot } from "./operatorRoot.js";
 import { createPagingObserver } from "./pagingDiagnostic.js";
-import { run, defaultSandboxGateDeps } from "./run.js";
+import { run, defaultSandboxGateDeps, observeSandboxRunOnHost } from "./run.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -22,6 +22,41 @@ afterAll(() => {
 });
 
 describe("deployment command cancellation", () => {
+  it("smoke observations read native versions from the Worker directory once", async () => {
+    const savedEnv = process.env;
+    const dir = mkdtempSync(join(tmpdir(), "smoke-provider-path-"));
+    const app = `fixture-${randomUUID()}`;
+    const application = "11111111-1111-4111-8111-111111111111";
+    try {
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const a=process.argv.slice(2);
+if(process.cwd()!==${JSON.stringify(join(OPERATOR_ROOT.workArea, "deploy/cloudflare-sandbox"))}) process.exit(98);
+if(a.includes('list')) console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'${application}'}]));
+else if(a.includes('info')) console.log(JSON.stringify({id:'${application}',version:84,active_rollout_id:'rollout-1',configuration:{image:'image-new'}}));
+else if(a.includes('instances')) console.log(JSON.stringify({instances:[{id:'${"a".repeat(64)}',name:'review:run-review',state:'running',version:83}],result_info:{next_page_token:null}}));
+else process.exit(99);`,
+        { mode: 0o755 },
+      );
+      process.env = { PATH: dir, FIXTURE_APP: app };
+      const evidence = await observeSandboxRunOnHost(
+        {
+          root: { path: OPERATOR_ROOT.root },
+          steps: [{ name: "sandbox", dir: "deploy/cloudflare-sandbox", liveGate: { containerApp: app } }],
+        },
+        { thread: "http:smoke:review", backend: "sandbox", sandboxKey: "review:run-review" },
+      );
+      expect(evidence).toMatchObject({
+        application: { id: application, version: 84, activeRolloutId: "rollout-1" },
+        instances: [{ id: "a".repeat(64), version: 83 }],
+        inventory: "complete",
+      });
+    } finally {
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("public inspection keeps auth credentials off disk while preserving supported header formats", async () => {
     const savedEnv = process.env;
     const fetcher = vi.spyOn(globalThis, "fetch");

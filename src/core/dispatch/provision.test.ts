@@ -1657,7 +1657,11 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
   it("a review forwards its logical thread, durable run ID and PR head without changing its Ship unit", async () => {
     const d = deps();
     attachState.attached = {
-      selection: { executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" } },
+      selection: {
+        backend: "sandbox",
+        sandboxKey: "review:review-run-1",
+        executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+      },
       release: async () => {},
     };
     const r = request(d, "agent:review acme/api#42", "review");
@@ -1677,6 +1681,10 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
       root: r.root,
     });
     expect(out.kind).toBe("attached");
+    expect(r.trace.spansSoFar().find((span) => span.name === "dispatch.workspace.attach")?.attrs).toMatchObject({
+      backend: "sandbox",
+      sandboxKey: "review:review-run-1",
+    });
     expect(attachState.rounds.at(-1)).toMatchObject({
       threadKey: r.message.threadKey,
       runId: "review-run-1",

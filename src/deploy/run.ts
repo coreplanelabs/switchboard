@@ -1,3 +1,4 @@
+import { observeSandboxRun, type SandboxRunTarget } from "./sandboxRunEvidence.js";
 import { residentAddress } from "../execution/residentMembers.js";
 import { observePublicInventory, type PublicInventoryObservation } from "./publicInventoryObservation.js";
 import {
@@ -21,7 +22,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { maintenanceProfileMaterial } from "./profile.js";
 import { residentEarlyHoldProblem } from "./residentEarlyHold.js";
 import { sameResidentImageTarget, type ResidentImageTarget } from "./residentMaintenance.js";
-import { DRAIN, MINUTE_MS, minutesToMs } from "../core/budgets.js";
+import { DRAIN, MINUTE_MS, minutesToMs, SANDBOX_OBSERVATION_TIMEOUT_MS } from "../core/budgets.js";
 import {
   DRAINED_GAVE_UP_SUFFIX,
   drainBeganLine,
@@ -1879,6 +1880,29 @@ export async function waitUntilSandboxLive(
     const instances = registered ? await deps.readInstances(step.dir, gate.containerApp, undefined, signal) : null;
     const afterInstances = stopped(true);
     if (afterInstances) return afterInstances;
+    io.log(
+      JSON.stringify({
+        event: "sandbox.rollout.observation",
+        observedAt: deps.now(),
+        commit: expectedCommit,
+        application:
+          app && "value" in app
+            ? {
+                id: app.value.id ?? null,
+                version: app.value.version,
+                activeRolloutId: app.value.activeRolloutId ?? null,
+              }
+            : null,
+        beforeVersion: "value" in rollout.before ? rollout.before.value.version : null,
+        probeThread: threadKey,
+        probeInstances:
+          instances && "value" in instances
+            ? instances.value
+                .filter((row) => row.name === threadKey)
+                .map((row) => ({ id: row.id ?? null, state: row.state, version: row.version }))
+            : null,
+      }),
+    );
     const elapsed = deps.now() - started;
     const d = decideSandboxLive({
       health,
@@ -3789,4 +3813,21 @@ export async function runBotRestart(
     );
     await deps.sleep(LIVE_GATE_POLL_MS);
   }
+}
+
+/** Native smoke observations use the same relative Worker path as deployment.
+ * The host reader alone resolves it under the operator work area. */
+export async function observeSandboxRunOnHost(plan: unknown, target: SandboxRunTarget) {
+  const deployment = plan as { steps?: { name?: string; dir?: string; liveGate?: { containerApp?: string } }[] };
+  const sandbox = deployment.steps?.find((step) => step.name === "sandbox");
+  if (sandbox?.dir !== "deploy/cloudflare-sandbox" || !sandbox.liveGate?.containerApp)
+    throw new Error("sandbox observation target unavailable");
+  const dir = sandbox.dir;
+  const app = sandbox.liveGate.containerApp;
+  const signal = AbortSignal.timeout(SANDBOX_OBSERVATION_TIMEOUT_MS);
+  return observeSandboxRun(target, {
+    now: systemClock,
+    readApp: () => defaultSandboxGateDeps.readAppState(dir, app, undefined, signal),
+    readInstances: () => defaultSandboxGateDeps.readInstances(dir, app, undefined, signal),
+  });
 }

@@ -39,6 +39,7 @@ export type Read<T> = { value: T } | { error: string };
 /** One row of `wrangler containers instances <app> --json`, reduced to what the gate reads:
  *  `name` is the Durable Object name (our thread key), `version` the instance's `app_version`. */
 export interface ContainerInstance {
+  id?: string;
   name: string | null;
   state: string;
   version: number | null;
@@ -47,6 +48,8 @@ export interface ContainerInstance {
 /** The container application as `wrangler containers info <id> --json` reports it: its `version`
  *  (bumped by every modification Cloudflare rolls out) and the image reference in `configuration.image`. */
 export interface AppState {
+  id?: string;
+  activeRolloutId?: string;
   version: number;
   image: string | null;
 }
@@ -308,7 +311,14 @@ export function parseAppState(info: unknown): AppState | null {
   const version = asVersion(info.version);
   if (version === null) return null;
   const image = isRecord(info.configuration) ? info.configuration.image : undefined;
-  return { version, image: typeof image === "string" ? image : null };
+  const nativeId = (value: unknown): value is string =>
+    typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+  return {
+    version,
+    image: typeof image === "string" ? image : null,
+    ...(nativeId(info.id) ? { id: info.id } : {}),
+    ...(nativeId(info.active_rollout_id) ? { activeRolloutId: info.active_rollout_id } : {}),
+  };
 }
 
 /** ANSI colour sequences (ESC `[` … `m`), built from the code point so the regex literal carries no control character. */
@@ -379,6 +389,7 @@ export function parseInstancesPage(
   if (!rows.every(isRecord)) return undefined;
   return {
     rows: (rows as Record<string, unknown>[]).map((r) => ({
+      ...(typeof r.id === "string" && /^[a-f0-9]{64}$/.test(r.id) ? { id: r.id } : {}),
       name: typeof r.name === "string" ? r.name : null,
       state: typeof r.state === "string" ? r.state : "unknown",
       version: asVersion(r.version),

@@ -9,6 +9,7 @@ import { InMemoryOrganizationStore } from "../core/organization/memory.js";
 import { OrganizationService } from "../core/organization/service.js";
 import { MCP_PROTOCOL_VERSION } from "../mcp/client.js";
 
+import { observeSandboxRun } from "./sandboxRunEvidence.js";
 import { commit, config, fixture, head } from "./testing/agentSmoke.js";
 
 /** Existing intake fixtures also serve the bounded read-only reader handshake. */
@@ -57,6 +58,163 @@ function withReaderProbe(fetch: typeof globalThis.fetch): typeof globalThis.fetc
 }
 
 describe("bounded agent smoke", () => {
+  it.each(["local", "unavailable"] as const)("retains an explicit %s mapping for the original run", async (mapping) => {
+    const original = fixture();
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "mapping",
+      transport: {
+        ...original.transport,
+        readRun: async (id) => {
+          const record = (await original.transport.readRun(id)) as {
+            events: { type: string; name?: string; attrs?: unknown }[];
+          };
+          return {
+            ...record,
+            events: record.events.flatMap((event) =>
+              event.name === "dispatch.workspace.attach"
+                ? mapping === "unavailable"
+                  ? []
+                  : [{ ...event, attrs: { backend: "local" } }]
+                : [event],
+            ),
+          };
+        },
+      },
+      observeSandbox: async (target) =>
+        observeSandboxRun(target, {
+          now: () => 1000,
+          readApp: async () => {
+            throw new Error("no native read");
+          },
+          readInstances: async () => {
+            throw new Error("no native read");
+          },
+        }),
+    });
+    expect(receipt.capabilityOutcome).toBe("passed");
+    expect(receipt.scenarios[2]?.sandbox?.ended).toMatchObject({
+      thread: "http:smoke:mapping-review",
+      backend: mapping === "local" ? "local" : null,
+      sandboxKey: null,
+      mapping: mapping === "local" ? "not-sandbox" : "unavailable",
+      inventory: "unavailable",
+      instances: [],
+    });
+  });
+  it.each(["http", "mcp"] as const)(
+    "matches %s Review observations to the recorded sandbox, not the conversation",
+    async (transport) => {
+      const receipt = await runAgentSmoke({
+        config: { ...config, model: "openai/gpt-6.1-sol", review: { ...config.review, transport, effort: "high" } },
+        expectedCommit: commit,
+        thread: "review-key",
+        transport: fixture().transport,
+        observeSandbox: async (target) =>
+          observeSandboxRun(target, {
+            now: () => 1000,
+            readApp: async () => ({ value: { version: 84, image: null } }),
+            readInstances: async () => ({
+              value: [
+                { id: "review-instance", name: "review:run-review", state: "running", version: 83 },
+                { id: "wrong-instance", name: `${transport}:smoke:review-key-review`, state: "running", version: 84 },
+              ],
+            }),
+          }),
+      });
+      expect(receipt.scenarios[2]?.sandbox?.ended).toMatchObject({
+        thread: `${transport}:smoke:review-key-review`,
+        sandboxKey: "review:run-review",
+        backend: "sandbox",
+        mapping: "recorded",
+        instances: [{ id: "review-instance", state: "running", version: 83 }],
+        inventory: "complete",
+      });
+    },
+  );
+  it("retains first and ended instance versions from the same original run", async () => {
+    const original = fixture();
+    let observations = 0;
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "transition",
+      transport: {
+        ...original.transport,
+        readRun: async (id, onRecord) => {
+          const record = (await original.transport.readRun(id)) as Record<string, unknown>;
+          if (record.agent === "explore") await onRecord?.({ ...record, finished: false });
+          return record;
+        },
+      },
+      observeSandbox: async (target) => ({
+        observedAt: 1000,
+        finishedAt: 1001,
+        ...target,
+        mapping: "recorded",
+        application: { id: "app-1", version: 84, image: "image-new", activeRolloutId: "rollout-1" },
+        instances: [{ id: "instance-1", state: "running", version: ++observations === 1 ? 83 : 84 }],
+        inventory: "complete",
+        matchingInstances: 1,
+        truncated: false,
+      }),
+    });
+    expect(receipt.scenarios[1]?.sandbox?.first?.instances).toEqual([
+      { id: "instance-1", state: "running", version: 83 },
+    ]);
+    expect(receipt.scenarios[1]?.sandbox?.ended?.instances).toEqual([
+      { id: "instance-1", state: "running", version: 84 },
+    ]);
+    expect(vi.mocked(original.transport.request).mock.calls.map(([scenario]) => scenario.id)).toEqual([
+      "answer",
+      "workspace",
+      "review",
+    ]);
+  });
+  it("retains exact-thread provider evidence without letting a failed observation change acceptance", async () => {
+    const original = fixture();
+    const observation = {
+      observedAt: 1000,
+      finishedAt: 1001,
+      application: null,
+      instances: [],
+      inventory: "unavailable" as const,
+      matchingInstances: 0,
+      truncated: false,
+    };
+    const threads: string[] = [];
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "evidence",
+      transport: original.transport,
+      observeSandbox: async (target) => {
+        threads.push(target.thread);
+        return { ...observation, ...target, mapping: "recorded" };
+      },
+    });
+    expect(receipt.capabilityOutcome).toBe("passed");
+    expect(receipt.scenarios[1]?.sandbox?.ended).toEqual({
+      ...observation,
+      thread: "http:smoke:evidence-workspace",
+      sandboxKey: "http:smoke:evidence-workspace",
+      backend: "sandbox",
+      mapping: "recorded",
+    });
+    expect(threads).toEqual(["http:smoke:evidence-workspace", "http:smoke:evidence-review"]);
+    const failed = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "failed-observer",
+      transport: fixture().transport,
+      observeSandbox: async () => {
+        throw new Error("Authorization: Bearer secret");
+      },
+    });
+    expect(failed.capabilityOutcome).toBe("passed");
+    expect(failed.scenarios[1]?.sandbox).toEqual({ observationError: "unavailable" });
+  });
   it("prints only safe phase and original identity fields while retaining detailed evidence in the receipt", async () => {
     const original = fixture();
     const receipt = await runAgentSmoke({

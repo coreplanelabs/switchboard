@@ -114,11 +114,55 @@ function harness(script: Scripted, env: Record<string, string> = { SANDBOX_TOKEN
   /** The runner's own lines, without the span log lines `deployStep` writes to the same output. */
   const plain = () => lines.filter((l) => !l.startsWith("{"));
   /** The span log lines, parsed (docs/reference/specs/tracing.md item 20). */
-  const spans = () => lines.filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as LogLine);
-  return { deps, io, calls, lines, count, plain, spans };
+  const spans = () =>
+    lines
+      .filter((l) => l.startsWith("{"))
+      .map((l) => JSON.parse(l) as LogLine)
+      .filter((line) => typeof line.span === "string");
+  const observations = () =>
+    lines
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line))
+      .filter((line) => line.event === "sandbox.rollout.observation");
+  return { deps, io, calls, lines, count, plain, spans, observations };
 }
 
 describe("waitUntilSandboxLive", () => {
+  it("retains a native rollout identity and exact probe versions while readiness stays independent", async () => {
+    const id = "a030b6eb-42de-4c30-ad2b-e692327ca813";
+    const rolloutId = "b030b6eb-42de-4c30-ad2b-e692327ca813";
+    const h = harness({
+      health: [serving(HEAD)],
+      appState: [
+        { value: { id, version: 12, image: null, activeRolloutId: rolloutId } },
+        { value: { id, version: 12, image: null } },
+      ],
+      instances: [
+        { value: [{ id: "a".repeat(64), name: KEY, state: "running", version: 11 }] },
+        { value: [{ id: "a".repeat(64), name: KEY, state: "running", version: 12 }] },
+      ],
+    });
+    expect(await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps)).toMatchObject({
+      live: true,
+      waitedMs: 15000,
+    });
+    expect(h.observations()).toMatchObject([
+      {
+        event: "sandbox.rollout.observation",
+        observedAt: 0,
+        application: { id, version: 12, activeRolloutId: rolloutId },
+        beforeVersion: 11,
+        probeInstances: [{ id: "a".repeat(64), state: "running", version: 11 }],
+      },
+      {
+        event: "sandbox.rollout.observation",
+        observedAt: 15000,
+        application: { id, version: 12, activeRolloutId: null },
+        beforeVersion: 11,
+        probeInstances: [{ id: "a".repeat(64), state: "running", version: 12 }],
+      },
+    ]);
+  });
   it("the existing readiness deadline waits for owned read cleanup and grants no late readiness", async () => {
     const h = harness({ health: [serving(HEAD)] });
     const deadline = new AbortController();
@@ -333,7 +377,7 @@ describe("waitUntilSandboxLive", () => {
     expect(h.calls[1].args.slice(0, 2)).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
     expect(h.calls[2].args.slice(0, 3)).toEqual(["https://switchboard-sandbox.example.test/exec", "tok-sandbox", KEY]);
     expect(h.calls[3].args.slice(0, 2)).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
-    expect(h.lines).toEqual([]);
+    expect(h.plain()).toEqual([]);
   });
 
   it("while the Worker still serves the old commit only /healthz is read — no probe, no wrangler — and each poll logs the reason", async () => {
@@ -343,7 +387,7 @@ describe("waitUntilSandboxLive", () => {
     expect(h.count("readHealth")).toBe(3);
     expect(h.count("probeExec")).toBe(1);
     expect(h.count("readAppState")).toBe(1);
-    expect(h.lines).toEqual([
+    expect(h.plain()).toEqual([
       "[deploy:all] sandbox: deployed, not live yet — Worker: serving commit 610682f, expected e6af1aa (old container still up) (0m 0s)",
       "[deploy:all] sandbox: deployed, not live yet — Worker: /healthz not answering with JSON (container restarting, or unreachable) (0m 15s)",
     ]);
@@ -370,7 +414,7 @@ describe("waitUntilSandboxLive", () => {
       "probeExec",
       "readInstances",
     ]);
-    expect(h.lines).toEqual([
+    expect(h.plain()).toEqual([
       "[deploy:all] sandbox: deployed, not live yet — rollout: application still at pre-deploy version 11 / image sha256:23e69f9e — the deploy's new version is not registered yet (0m 0s)",
       "[deploy:all] sandbox: deployed, not live yet — rollout: application still at pre-deploy version 11 / image sha256:23e69f9e — the deploy's new version is not registered yet (0m 15s)",
     ]);
@@ -391,7 +435,7 @@ describe("waitUntilSandboxLive", () => {
       "probeExec",
       "readInstances",
     ]);
-    expect(h.lines).toEqual([
+    expect(h.plain()).toEqual([
       "[deploy:all] sandbox: deployed, not live yet — rollout: wrangler containers info abc: no JSON in the output (0m 0s)",
     ]);
   });
@@ -408,7 +452,7 @@ describe("waitUntilSandboxLive", () => {
     const h = harness({ health: [serving(HEAD)], probe: [skewed, ok] });
     const r = await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps);
     expect(r).toEqual({ live: true, waitedMs: LIVE_GATE_POLL_MS, detail: LIVE_DETAIL });
-    expect(h.lines).toEqual([
+    expect(h.plain()).toEqual([
       "[deploy:all] sandbox: deployed, not live yet — probe: /exec failed — 'utils.getRuntimeMetadata' is not a function. — the probe's container may still run the previous image (0m 0s)",
     ]);
   });
@@ -434,7 +478,7 @@ describe("waitUntilSandboxLive", () => {
     const probes = h.calls.filter((c) => c.dep === "probeExec");
     expect(probes).toHaveLength(3);
     expect(new Set(probes.map((c) => c.args[2]))).toEqual(new Set([KEY]));
-    expect(h.lines).toEqual([
+    expect(h.plain()).toEqual([
       "[deploy:all] sandbox: deployed, not live yet — rollout in progress — 1 of 3 running instance(s) still on version 11, app version 12 (0m 0s)",
       "[deploy:all] sandbox: deployed, not live yet — probe: fleet busy — no free instance for the probe thread (max_instances reached) (0m 15s)",
     ]);
@@ -452,7 +496,7 @@ describe("waitUntilSandboxLive", () => {
         "probe: /exec failed with an EMPTY error — the probe's container may still run the previous image — still not live after 20 min (deadline 20 min)",
     });
     expect(h.count("readHealth")).toBe(LIVE_GATE_DEADLINE_MS / LIVE_GATE_POLL_MS);
-    expect(h.lines).toHaveLength(LIVE_GATE_DEADLINE_MS / LIVE_GATE_POLL_MS);
+    expect(h.plain()).toHaveLength(LIVE_GATE_DEADLINE_MS / LIVE_GATE_POLL_MS);
   });
 
   it("a rejected bearer fails at once — no 20-minute wait on a credential", async () => {
