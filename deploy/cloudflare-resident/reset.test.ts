@@ -507,8 +507,21 @@ describe("archive teardown exclusion", () => {
     resident.swapIncarnation = () => {};
 
     await expect(resident.teardown({ key, recordHash: "0".repeat(64) })).rejects.toThrow(
-      "exact closed native restore changed or another hold remains",
+      "exact closed native restore changed or another hold remains (holds=1, eligible=true, hashMatch=false)",
     );
+    rows.set("native-operation:op:other", structuredClone(rows.get(key)));
+    await expect(resident.teardown({ key, recordHash })).rejects.toThrow(
+      "exact closed native restore changed or another hold remains (holds=2, eligible=true, hashMatch=true)",
+    );
+    rows.delete("native-operation:op:other");
+    const ineligible = structuredClone(rows.get(key)) as { native: { closed: boolean } };
+    ineligible.native.closed = false;
+    rows.set(key, ineligible);
+    const ineligibleHash = (await new NativeOperationJournal(storage).list()).operations[0]!.recordHash;
+    await expect(resident.teardown({ key, recordHash: ineligibleHash })).rejects.toThrow(
+      "exact closed native restore changed or another hold remains (holds=1, eligible=false, hashMatch=true)",
+    );
+    rows.set(key, structuredClone(initialRows.get(key)));
     expect(effects).toEqual([]);
     await expect(resident.teardown({ key, recordHash })).rejects.toThrow("runtime destruction unconfirmed");
     expect(rows.has(key)).toBe(true);
