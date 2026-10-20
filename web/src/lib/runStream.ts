@@ -66,14 +66,19 @@ export function attachRunStream(opts: RunStreamOptions): RunStream {
     if (range) opts.model.noteElided(range);
   });
   es.addEventListener("recovery", (data) => {
-    let frame: { hold?: unknown } | null;
+    let frame: { hold?: unknown; pending?: unknown; producerUnconfirmed?: unknown } | null;
     try {
       frame = JSON.parse(data ?? "") as typeof frame;
     } catch {
       return;
     }
     if (frame && (frame.hold === null || frame.hold === "private_context"))
-      opts.handle({ type: "recovery_state", hold: frame.hold });
+      opts.handle({
+        type: "recovery_state",
+        hold: frame.hold,
+        pending: typeof frame.pending === "boolean" ? frame.pending : undefined,
+        producerUnconfirmed: typeof frame.producerUnconfirmed === "boolean" ? frame.producerUnconfirmed : undefined,
+      });
   });
   es.addEventListener("finished", (data) => {
     opts.onFinished?.(parseFinishedFrame(data));

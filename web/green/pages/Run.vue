@@ -180,10 +180,37 @@ const contextRecoveryHeld = computed(() => {
   }
   return seed?.mode === "live" && seed.recoveryHold === "private_context";
 });
+const recoveryPending = computed(() => {
+  if (isHistory || phase.value === "ended" || phase.value === "finished") return false;
+  return state.recoveryPending !== undefined
+    ? state.recoveryPending
+    : seed?.mode === "live" && seed.recoveryPending === true;
+});
+const producerUnconfirmed = computed(() => {
+  if (isHistory || phase.value === "ended" || phase.value === "finished") return false;
+  return state.producerUnconfirmed !== undefined
+    ? state.producerUnconfirmed
+    : seed?.mode === "live" && seed.producerUnconfirmed === true;
+});
+// A failure note can reach the event log even when the finish write does not.
+// It ends the model turn we can claim; it does not prove runtime shutdown.
+const failedEndingUnconfirmed = computed(() => {
+  if (isHistory || phase.value === "ended" || phase.value === "finished") return false;
+  for (let i = state.log.length - 1; i >= 0; i--) {
+    const item = state.log[i];
+    if (item.kind !== "note") continue;
+    if (item.noteKind === "resumed") return false;
+    if (item.noteKind === "run_failed") return true;
+  }
+  return false;
+});
 
 const headerText = computed(() => {
   if (stopError.value) return stopError.value;
   if (contextRecoveryHeld.value && phase.value !== "stopping") return "held · private context could not be verified";
+  if (recoveryPending.value && phase.value !== "stopping") return "recovery not confirmed";
+  if (producerUnconfirmed.value && phase.value !== "stopping") return "execution not confirmed";
+  if (failedEndingUnconfirmed.value && phase.value !== "stopping") return "execution not confirmed";
   if (phase.value === "connecting") return "connecting…";
   if (phase.value === "disconnected") return "disconnected";
   if (phase.value === "stopping") return "stopping";
@@ -193,7 +220,7 @@ const headerText = computed(() => {
   return runClock ? `running · ${formatDuration(runClock.elapsedMs(nowWall.value), "clock")}` : "running";
 });
 const pulseCls = computed(() =>
-  contextRecoveryHeld.value
+  contextRecoveryHeld.value || recoveryPending.value || producerUnconfirmed.value || failedEndingUnconfirmed.value
     ? "text-warn"
     : stopError.value || phase.value === "disconnected"
       ? "text-bad"
@@ -234,13 +261,14 @@ const timeline = computed(() => {
     });
   }
   if (!runClock) return null;
-  const tlPhase: TimelinePhase = contextRecoveryHeld.value
-    ? "held"
-    : phase.value === "ended"
-      ? "ended"
-      : phase.value === "finished"
-        ? "delivering"
-        : "live";
+  const tlPhase: TimelinePhase =
+    contextRecoveryHeld.value || recoveryPending.value || producerUnconfirmed.value || failedEndingUnconfirmed.value
+      ? "held"
+      : phase.value === "ended"
+        ? "ended"
+        : phase.value === "finished"
+          ? "delivering"
+          : "live";
   const totalMs =
     tlPhase === "held"
       ? Math.max(0, (state.lastAt ?? seed.serverNow) - start)
@@ -353,6 +381,9 @@ if (!isHistory) {
 const live = computed(
   () =>
     !contextRecoveryHeld.value &&
+    !recoveryPending.value &&
+    !producerUnconfirmed.value &&
+    !failedEndingUnconfirmed.value &&
     !isHistory &&
     phase.value !== "ended" &&
     phase.value !== "disconnected" &&

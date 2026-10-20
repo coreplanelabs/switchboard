@@ -97,6 +97,8 @@ export interface ArtifactsSeed {
  *  Registry URLs carry a capability; ledger URLs use the viewer decision. */
 export interface RunLiveSeed {
   recoveryHold?: "private_context";
+  recoveryPending?: true;
+  producerUnconfirmed?: true;
   runTitle?: string;
   page: "run";
   mode: "live";

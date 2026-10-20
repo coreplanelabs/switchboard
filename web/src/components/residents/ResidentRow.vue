@@ -10,6 +10,8 @@ import {
   runHref,
   safeSourceUrl,
   shortId,
+  statusDot,
+  statusPulse,
   statusWord,
   SURFACE_NAME,
   surfaceOf,
@@ -252,7 +254,13 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
             :data-thread="row.run ? undefined : row.binding?.threadKey"
           >
             <span class="pt-[0.3rem]">
-              <StatusDot v-if="row.run" tone="green" :label="statusWord(row.run)" :tip="dotTip(row.run)" pulse />
+              <StatusDot
+                v-if="row.run"
+                :tone="statusDot(row.run, now)"
+                :label="statusWord(row.run, now)"
+                :tip="dotTip(row.run, now)"
+                :pulse="statusPulse(row.run, now)"
+              />
               <StatusDot v-else tone="grey" label="idle" tip="no run is using this tree" />
             </span>
 

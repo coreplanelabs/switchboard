@@ -81,7 +81,7 @@ describe("buildTimeline", () => {
       totalMs: 10_000,
       phase: "held",
     });
-    expect(vm.note).toBe("Timing is unavailable while this run is held. Runtime ending is unconfirmed.");
+    expect(vm.note).toBe("Timing is unavailable while execution is unconfirmed. Runtime ending is unconfirmed.");
     expect([vm.current, vm.openStep, vm.bar, vm.ranked, vm.cut]).toEqual(["", "", [], [], []]);
     expect(vm.debug).toMatchObject({
       phase: "held",

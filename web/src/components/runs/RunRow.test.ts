@@ -241,6 +241,16 @@ describe("RunRow", () => {
     expect(mountRow(row()).find('[data-tone="green"]').exists()).toBe(true);
   });
 
+  it("keeps an unconfirmed run visible without a green running pulse", () => {
+    for (const run of [row({ recoveryPending: true }), row({ producerUnconfirmed: true })]) {
+      const w = mountRow(run);
+      const dot = w.get('[role="img"]');
+      expect(dot.attributes("data-tone")).toBe("amber");
+      expect(dot.classes()).not.toContain("motion-safe:animate-pulse");
+      expect(w.find(".row").exists()).toBe(true);
+    }
+  });
+
   it("shows the stop badge while a stop is in flight, and as the outcome for a finished summary with no record status; the record's status wins", () => {
     expect(
       mountRow(row({ stop: { mode: "soft", state: "stopping" } }))

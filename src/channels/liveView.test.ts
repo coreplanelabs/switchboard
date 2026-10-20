@@ -524,15 +524,38 @@ describe("serveLedgerEvents", () => {
       serveLedgerEvents(view, async () => view, sink.sink, 2);
       view = { ...view, recoveryHold: "private_context", recoveryPending: true };
       await vi.advanceTimersByTimeAsync(6_000);
-      expect(sink.body().match(/event: recovery\ndata: \{"hold":"private_context"\}/g)).toHaveLength(1);
+      expect(
+        sink
+          .body()
+          .match(/event: recovery\ndata: \{"hold":"private_context","pending":true,"producerUnconfirmed":false\}/g),
+      ).toHaveLength(1);
       expect(sink.body()).not.toContain("id:");
       expect(sink.ended).toBe(false);
       serveLedgerEvents(view, async () => view, reconnect.sink, 2);
-      expect(reconnect.body()).toContain('event: recovery\ndata: {"hold":"private_context"}');
+      expect(reconnect.body()).toContain(
+        'event: recovery\ndata: {"hold":"private_context","pending":true,"producerUnconfirmed":false}',
+      );
       expect(reconnect.body()).not.toContain("event: end");
     } finally {
       sink.fireClose();
       reconnect.fireClose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("projects an unconfirmed producer and its later recovery without claiming a finish", async () => {
+    vi.useFakeTimers();
+    const sink = recordingSink();
+    let view: import("../core/runsService.js").RunRecordView = { ...live(), producerUnconfirmed: true };
+    try {
+      serveLedgerEvents(view, async () => view, sink.sink, 2);
+      expect(sink.body()).toContain('event: recovery\ndata: {"hold":null,"pending":false,"producerUnconfirmed":true}');
+      view = { ...view, producerUnconfirmed: undefined };
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(sink.body()).toContain('event: recovery\ndata: {"hold":null,"pending":false,"producerUnconfirmed":false}');
+      expect(sink.body()).not.toContain("event: finished");
+    } finally {
+      sink.fireClose();
       vi.useRealTimers();
     }
   });

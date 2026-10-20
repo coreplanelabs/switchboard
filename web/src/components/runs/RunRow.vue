@@ -27,6 +27,7 @@ import {
   sourceTip,
   statusDot,
   statusLabel,
+  statusPulse,
   statusWord,
   stopHref,
   stopLabel,
@@ -98,7 +99,7 @@ async function loadRetainedPrompt(): Promise<void> {
   if (input?.type === "input") retainedPrompt.value = { key, text: input.text.slice(0, RUN_PROMPT_MAX) };
 }
 const repo = computed(() => repoOf(props.run, parts.value.scope));
-const tone = computed(() => statusDot(props.run));
+const tone = computed(() => statusDot(props.run, props.now));
 const href = computed(() => runHref(props.run));
 const src = computed(() => surfaceOf(props.run));
 const who = computed(() => whoText(props.run) || "Unknown user");
@@ -263,7 +264,7 @@ function onRowClick(ev: MouseEvent): void {
       :class="[run.finished ? 'text-muted' : '', leaving ? 'opacity-85' : '', nestedUnder ? 'pl-10' : '']"
     >
       <span class="pointer-events-auto mt-1.5 flex items-center">
-        <StatusDot :tone="tone" :label="statusWord(run)" :tip="dotTip(run)" :pulse="!run.finished" />
+        <StatusDot :tone="tone" :label="statusWord(run, now)" :tip="dotTip(run, now)" :pulse="statusPulse(run, now)" />
       </span>
       <div class="row-main grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-2 sm:gap-x-4">
         <div class="primary min-w-0">
