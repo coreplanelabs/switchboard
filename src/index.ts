@@ -2683,12 +2683,14 @@ export async function runBot(): Promise<void> {
       warn: (w) => console.warn(w),
     });
   };
-  // The hosted-row guard's store read (record 0060): the reclaim
+  // Recovery uses the full record to settle an ordinary stale lease without
+  // another close. The hosted-row guard (record 0060) uses its status: the reclaim
   // abandons a hosted row only when the plain store already holds the
   // pipeline's outcome — its `finish` landed there because the ledger refused
   // the write — and re-hosts every parent whose deadline, Workflow or child
   // rows say the pipeline still runs.
-  const storedStatus = async (runId: string) => (await runStore.get(runId))?.status;
+  const storedRecord = (runId: string) => runStore.get(runId);
+  const storedStatus = async (runId: string) => (await storedRecord(runId))?.status;
   const hostedInstanceLive = async (instanceId: string): Promise<boolean | undefined> => {
     const answer = await fetchInstanceStatusViaShim(processShimOptions(), instanceId);
     const terminal =
@@ -2710,6 +2712,7 @@ export async function runBot(): Promise<void> {
       ledger: ledgerReclaim.client,
       gen: generation,
       storedStatus,
+      storedRecord,
       hostedInstanceLive,
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),
@@ -2748,6 +2751,7 @@ export async function runBot(): Promise<void> {
         ledger: reclaimClient,
         gen: generation,
         storedStatus,
+        storedRecord,
         hostedInstanceLive,
         log: (l) => console.log(l),
         warn: (w) => console.warn(w),
@@ -2760,6 +2764,7 @@ export async function runBot(): Promise<void> {
       ledger: ledgerReclaim.client,
       gen: generation,
       storedStatus,
+      storedRecord,
       hostedInstanceLive,
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),

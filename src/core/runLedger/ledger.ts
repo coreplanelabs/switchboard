@@ -352,8 +352,9 @@ export interface RunLedger {
   /** The live rows go with NO record (item 42): a run reserved at admission
    *  whose dispatch ended before its prompt existed — a refusal, a failed
    *  attach — never started, so there is nothing to record and nothing to
-   *  restart. Fenced by generation like `finish`. */
-  abandon(runId: string, gen: string): Promise<FenceResult>;
+   *  restart. Terminal settlement verifies the stored final execution and
+   *  archives checks without rewriting that result. Fenced like `finish`. */
+  abandon(runId: string, gen: string, opts?: { settleTerminal: true }): Promise<FenceResult>;
   /** Take over expired and handed-off runs; the transcript owner is updated before this resolves. */
   reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]>;
   listLive(): Promise<LiveRunRow[]>;

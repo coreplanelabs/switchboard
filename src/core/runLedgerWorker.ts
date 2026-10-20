@@ -1768,10 +1768,9 @@ export class WorkerRunLedger implements RunLedger {
     return { ok: true, stored: r.data.stored === true };
   }
 
-  async abandon(runId: string, gen: string): Promise<FenceResult> {
+  async abandon(runId: string, gen: string, opts?: { settleTerminal: true }): Promise<FenceResult> {
     this.checkIds(runId, gen);
-    // An abandoned run never had a prompt, so it owns no session log and wrote no row.
-    return this.fenceResult(await this.post("/runs/abandon", { storeKey: this.opts.storeKey, runId, gen }));
+    return this.fenceResult(await this.post("/runs/abandon", { storeKey: this.opts.storeKey, runId, gen, ...opts }));
   }
 
   async reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]> {

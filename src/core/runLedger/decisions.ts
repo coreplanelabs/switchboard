@@ -8,10 +8,46 @@ import type {
   IntakeReceipt,
   IntakeWriteResult,
   LivePhase,
+  LiveRunRow,
   LiveStateAssignRequest,
   StepRecord,
 } from "./types.js";
+import type { RunRecord } from "../runRecord.js";
 import { assignRunLiveState, type AssignRunLiveStateResult, type RunLiveState } from "../runLiveState.js";
+
+/** A final plain-store result can settle only its original execution's lease. */
+export function matchesStoredTerminal(
+  row: Pick<LiveRunRow, "runId" | "meta" | "startedAt">,
+  record:
+    | Pick<
+        RunRecord,
+        | "id"
+        | "status"
+        | "provisional"
+        | "restarting"
+        | "channelId"
+        | "userId"
+        | "threadKey"
+        | "startedAt"
+        | "finishedAt"
+      >
+    | null
+    | undefined,
+): boolean {
+  return (
+    !!record &&
+    !record.provisional &&
+    !record.restarting &&
+    (record.status === "completed" || record.status === "failed") &&
+    record.id === row.runId &&
+    record.channelId === row.meta.channelId &&
+    record.userId === row.meta.userId &&
+    record.threadKey === row.meta.threadKey &&
+    record.startedAt === row.startedAt &&
+    Number.isFinite(record.finishedAt) &&
+    record.finishedAt >= row.startedAt
+  );
+}
 
 /** One segment boundary for both ledger implementations; the ordinary live-state table stays forward-only. */
 export function assignLedgerLiveState(

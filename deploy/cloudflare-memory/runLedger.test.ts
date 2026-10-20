@@ -1,6 +1,7 @@
 import { testSourceInput } from "../../src/core/testing/sourceInputs.ts";
 import { captureSourceTaskSnapshot } from "../../src/core/references/sourceTaskSnapshot.ts";
 import { checkStateFixture } from "../../src/core/testing/checkState.ts";
+import { captureCheckArchive } from "../../src/core/checkInspection.ts";
 import type { CheckExecutionState } from "../../src/core/checkExecutionTypes.ts";
 import { cancellationRecordMatches } from "../../src/core/runLedger/cancellation.ts";
 import { isRunRecord } from "../../src/core/runRecord.ts";
@@ -17893,6 +17894,130 @@ describe("recorded check terminal custody in real SQLite", () => {
     ).toBe(200);
     return key;
   }
+  it.each(["completed", "failed"] as const)(
+    "settles a stored %s result and preserves recorded checks",
+    async (status) => {
+      const checks = await checkStateFixture(owner, { output: "saved verification output" });
+      const key = await setup({ checkExecutions: checks });
+      const saved = { ...terminal(), startedAt: 1_000, status };
+      expect((await post("/runs/put", { storeKey: key, record: saved })).status).toBe(200);
+      const before = (await post("/runs/get", { storeKey: key, id })).data;
+      expect(await post("/runs/abandon", { storeKey: key, runId: id, gen: "g1", settleTerminal: true })).toMatchObject({
+        status: 200,
+        data: { ok: true },
+      });
+      expect((await post("/runs/live", { storeKey: key })).data).toEqual({ runs: [] });
+      expect((await read(key)).data).toMatchObject({
+        kind: "source",
+        source: { state: "terminal", result: { stdout: "saved verification output", exitCode: 0 } },
+      });
+      expect((await post("/runs/get", { storeKey: key, id })).data).toEqual(before);
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_instance: RunHistoryDO, state) => {
+        expect(state.storage.sql.exec("SELECT run_id FROM plane_endings WHERE run_id = ?", id).toArray()).toEqual([]);
+        const row = state.storage.sql
+          .exec<{ work_evidence_json: string; bytes: number }>(
+            "SELECT work_evidence_json,bytes FROM runs WHERE run_id = ?",
+            id,
+          )
+          .one();
+        expect(JSON.parse(row.work_evidence_json).checkArchive.checks).toEqual(checks);
+        expect(row.bytes).toBeGreaterThan(new TextEncoder().encode(row.work_evidence_json).byteLength);
+      });
+      expect((await post("/runs/claim", claimBody(key, "next-run", thread, "g2", { meta }))).status).toBe(200);
+    },
+  );
+
+  it("terminal settlement refuses conflicting sealed check evidence", async () => {
+    const checks = await checkStateFixture(owner, { output: "latest output" });
+    const archived = await checkStateFixture(owner, { output: "sealed original output" });
+    const key = await setup({ checkExecutions: checks });
+    expect((await post("/runs/put", { storeKey: key, record: { ...terminal(), startedAt: 1_000 } })).status).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (instance: RunHistoryDO, state) => {
+      const [live] = await instance.listLive();
+      const evidence = JSON.stringify({
+        version: 1,
+        checkArchive: captureCheckArchive({ ...live, state: { checkExecutions: archived } }, true),
+      });
+      state.storage.sql.exec(
+        "UPDATE runs SET work_evidence_json = ?, bytes = bytes + ? WHERE run_id = ?",
+        evidence,
+        new TextEncoder().encode(evidence).byteLength,
+        id,
+      );
+    });
+    expect(await post("/runs/abandon", { storeKey: key, runId: id, gen: "g1", settleTerminal: true })).toMatchObject({
+      status: 409,
+      data: { ok: false, reason: "fenced" },
+    });
+    expect((await post("/runs/live", { storeKey: key })).data).toMatchObject({ runs: [{ runId: id }] });
+    expect((await read(key)).data).toMatchObject({
+      kind: "source",
+      source: { state: "live", result: { stdout: "latest output" } },
+    });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_instance: RunHistoryDO, state) => {
+      const row = state.storage.sql
+        .exec<{ work_evidence_json: string }>("SELECT work_evidence_json FROM runs WHERE run_id = ?", id)
+        .one();
+      expect(JSON.parse(row.work_evidence_json).checkArchive.checks).toEqual(archived);
+    });
+  });
+
+  it("terminal settlement retains an unknown original check outcome", async () => {
+    const checks = await checkStateFixture(owner, { unknown: true });
+    const key = await setup({ checkExecutions: checks });
+    expect(
+      (await post("/runs/put", { storeKey: key, record: { ...terminal(), startedAt: 1_000, status: "failed" } }))
+        .status,
+    ).toBe(200);
+    expect(await post("/runs/abandon", { storeKey: key, runId: id, gen: "g1", settleTerminal: true })).toMatchObject({
+      status: 200,
+      data: { ok: true },
+    });
+    expect((await post("/runs/live", { storeKey: key })).data).toEqual({ runs: [] });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_instance: RunHistoryDO, state) => {
+      const row = state.storage.sql
+        .exec<{ work_evidence_json: string }>("SELECT work_evidence_json FROM runs WHERE run_id = ?", id)
+        .one();
+      expect(JSON.parse(row.work_evidence_json).checkArchive.checks).toEqual(checks);
+      expect(JSON.parse(row.work_evidence_json).checkArchive.checks.receipts[0].outcome.kind).toBe("unknown");
+    });
+  });
+
+  it.each(["missing", "different start", "foreign generation", "provisional"] as const)(
+    "holds recorded checks when terminal settlement is unverified: %s",
+    async (fault) => {
+      const checks = await checkStateFixture(owner);
+      const key = await setup({ checkExecutions: checks });
+      if (fault !== "missing")
+        expect(
+          (
+            await post("/runs/put", {
+              storeKey: key,
+              record: {
+                ...terminal(),
+                startedAt: fault === "different start" ? 500 : 1_000,
+                ...(fault === "provisional" ? { provisional: true } : {}),
+              },
+            })
+          ).status,
+        ).toBe(200);
+      const before = (await post("/runs/live", { storeKey: key })).data;
+      expect(
+        await post("/runs/abandon", {
+          storeKey: key,
+          runId: id,
+          gen: fault === "foreign generation" ? "g2" : "g1",
+          settleTerminal: true,
+        }),
+      ).toMatchObject({ status: 409, data: { ok: false, reason: "fenced" } });
+      expect((await post("/runs/live", { storeKey: key })).data).toEqual(before);
+      expect((await read(key)).data).toMatchObject({
+        kind: "source",
+        source: { state: "live", result: { stdout: "saved original output", exitCode: 0 } },
+      });
+    },
+  );
+
   it("freezes final private authority, keeps stdout private and accounts for serialized evidence bytes", async () => {
     const checks = await checkStateFixture(owner, { output: "saved é output" });
     const key = await setup({
