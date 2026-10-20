@@ -32,7 +32,22 @@ const controller = (id: number, overrides = {}) => ({
   html_url: `https://github.com/${repo}/actions/runs/${id}`,
   ...overrides,
 });
-const live = (conclusion = "success") => [{ name: "staging / live Review", status: "completed", conclusion }];
+const live = (conclusion = "success") => [
+  {
+    name: "staging / full stack",
+    status: "completed",
+    conclusion,
+    steps: [
+      { name: "deploy the captured commit to staging", status: "completed", conclusion: "success" },
+      {
+        name: "run live Review acceptance on the deployed stack",
+        status: "completed",
+        conclusion,
+      },
+    ],
+  },
+  { name: "staging / live Review", status: "completed", conclusion },
+];
 
 function execute(
   options: {
@@ -44,6 +59,8 @@ function execute(
     totalCount?: number;
     historyFailure?: boolean;
     laterRuns?: ReturnType<typeof controller>[];
+    laterPull?: ReturnType<typeof pull>;
+    jobTotalCount?: number;
   } = {},
 ) {
   const workflow = parse(readFileSync(".github/workflows/staging-status.yml", "utf8"));
@@ -61,6 +78,8 @@ function execute(
         totalCount: options.totalCount,
         historyFailure: options.historyFailure,
         laterRuns: options.laterRuns,
+        laterPull: options.laterPull,
+        jobTotalCount: options.jobTotalCount,
       }),
     );
     writeFileSync(
@@ -76,7 +95,12 @@ if (args.includes("POST")) {
   fs.appendFileSync(process.env.POSTS, JSON.stringify({ path, ...body }) + "\\n");
   result = {};
 } else if (path.includes("/pulls?")) result = [fixture.pull];
-else if (path.endsWith("/pulls/7")) result = fixture.pull;
+else if (path.endsWith("/pulls/7")) {
+  const counter = process.env.FIXTURE + ".pull-reads";
+  const reads = fs.existsSync(counter) ? Number(fs.readFileSync(counter)) : 0;
+  fs.writeFileSync(counter, String(reads + 1));
+  result = reads > 0 && fixture.laterPull ? fixture.laterPull : fixture.pull;
+}
 else if (path.endsWith("/workflows/deploy-staging.yml")) result = { id: 77 };
 else if (path.includes("/workflows/deploy-staging.yml/runs?")) {
   if (fixture.historyFailure) process.exit(1);
@@ -88,7 +112,7 @@ else if (path.includes("/workflows/deploy-staging.yml/runs?")) {
 } else if (path.includes("/jobs")) {
   const id = path.match(/\\/runs\\/(\\d+)\\//)[1];
   const jobs = fixture.jobs[id] ?? [];
-  result = { total_count: jobs.length, jobs };
+  result = { total_count: fixture.jobTotalCount ?? jobs.length, jobs };
 } else if (/\\/actions\\/runs\\/\\d+$/.test(path)) result = fixture.runs.find(run => path.endsWith("/" + run.id));
 else throw new Error("Unexpected API route: " + path);
 process.stdout.write(JSON.stringify(result));
@@ -199,6 +223,164 @@ describe("PR staging acceptance status", () => {
     expect(result.posts.map((post) => [post.context, post.state])).toEqual([
       ["staging / Review E2E", "pending"],
       ["staging / Review E2E", conclusion],
+    ]);
+  });
+
+  it("describes an executed Review acceptance failure separately from a skipped acceptance", () => {
+    const failedRun = controller(20, { conclusion: "failure" });
+    const failed = execute({
+      eventName: "workflow_run",
+      event: { workflow_run: failedRun },
+      runs: [failedRun],
+      jobs: { "20": live("failure") },
+    });
+    expect(failed.posts.map((post) => [post.state, post.description])).toEqual([
+      ["pending", "Refreshing release staging acceptance"],
+      ["failure", "Live Review acceptance failed"],
+    ]);
+
+    const skippedRun = controller(21, { id: 21 });
+    const skippedJobs = [
+      {
+        name: "staging / full stack",
+        status: "completed",
+        conclusion: "success",
+        steps: [
+          { name: "deploy the captured commit to staging", status: "completed", conclusion: "skipped" },
+          {
+            name: "run live Review acceptance on the deployed stack",
+            status: "completed",
+            conclusion: "skipped",
+          },
+        ],
+      },
+      { name: "staging / live Review", status: "completed", conclusion: "failure" },
+    ];
+    const skipped = execute({
+      eventName: "workflow_run",
+      event: { workflow_run: skippedRun },
+      runs: [skippedRun],
+      jobs: { "21": skippedJobs },
+    });
+    expect(skipped.posts.map((post) => [post.state, post.description])).toEqual([
+      ["pending", "Refreshing release staging acceptance"],
+      ["failure", "Live Review acceptance did not run"],
+    ]);
+  });
+
+  it("marks a replaced release head as obsolete without accepting its old Review result", () => {
+    const oldSha = sha;
+    const newSha = "b".repeat(40);
+    const oldRun = controller(30, { head_sha: oldSha });
+    const result = execute({
+      eventName: "workflow_run",
+      event: { workflow_run: oldRun },
+      runs: [oldRun],
+      currentPull: pull(branch, newSha),
+      jobs: { "30": live() },
+    });
+    expect(result.posts.map((post) => [post.state, post.description])).toEqual([
+      ["pending", "Refreshing release staging acceptance"],
+      ["failure", "Candidate superseded; prior Review passed on obsolete head"],
+    ]);
+
+    const skippedRun = controller(31, { head_sha: oldSha });
+    const skipped = execute({
+      eventName: "workflow_run",
+      event: { workflow_run: skippedRun },
+      runs: [skippedRun],
+      currentPull: pull(branch, newSha),
+      jobs: {
+        "31": [
+          {
+            name: "staging / full stack",
+            status: "completed",
+            conclusion: "success",
+            steps: [
+              { name: "deploy the captured commit to staging", status: "completed", conclusion: "skipped" },
+              {
+                name: "run live Review acceptance on the deployed stack",
+                status: "completed",
+                conclusion: "skipped",
+              },
+            ],
+          },
+          { name: "staging / live Review", status: "completed", conclusion: "failure" },
+        ],
+      },
+    });
+    expect(skipped.posts.map((post) => [post.state, post.description])).toEqual([
+      ["pending", "Refreshing release staging acceptance"],
+      ["failure", "Candidate superseded; live Review acceptance did not run"],
+    ]);
+
+    const failedRun = controller(32, { head_sha: oldSha, conclusion: "failure" });
+    const failed = execute({
+      eventName: "workflow_run",
+      event: { workflow_run: failedRun },
+      runs: [failedRun],
+      currentPull: pull(branch, newSha),
+      jobs: { "32": live("failure") },
+    });
+    expect(failed.posts.map((post) => [post.state, post.description])).toEqual([
+      ["pending", "Refreshing release staging acceptance"],
+      ["failure", "Candidate superseded; live Review acceptance failed"],
+    ]);
+  });
+
+  it("does not publish success when the release head changes during job verification", () => {
+    const result = execute({
+      currentPull: pull(),
+      laterPull: pull(branch, "b".repeat(40)),
+      jobs: { "10": live() },
+    });
+    expect(result.posts.map((post) => [post.state, post.description])).toEqual([
+      ["pending", "Refreshing release staging acceptance"],
+      ["failure", "Candidate superseded during verification; prior Review passed on obsolete head"],
+    ]);
+  });
+
+  it("does not publish success after the release PR closes during job verification", () => {
+    const closed = { ...pull(), state: "closed" };
+    const result = execute({
+      currentPull: pull(),
+      laterPull: closed,
+      jobs: { "10": live() },
+    });
+    expect(result.posts.map((post) => [post.state, post.description])).toEqual([
+      ["pending", "Refreshing release staging acceptance"],
+      ["failure", "Candidate is no longer current; prior Review passed on obsolete head"],
+    ]);
+  });
+
+  it("keeps incomplete or ambiguous job evidence non-green", () => {
+    const run = controller(40);
+    const result = execute({
+      eventName: "workflow_run",
+      event: { workflow_run: run },
+      runs: [run],
+      jobs: { "40": live() },
+      jobTotalCount: 3,
+    });
+    expect(result.posts.map((post) => [post.state, post.description])).toEqual([
+      ["pending", "Refreshing release staging acceptance"],
+      ["failure", "Live Review outcome evidence is incomplete"],
+    ]);
+  });
+
+  it("keeps a passed Review step non-green when the final acceptance job fails", () => {
+    const run = controller(41, { conclusion: "failure" });
+    const jobs = live();
+    jobs[1]!.conclusion = "failure";
+    const result = execute({
+      eventName: "workflow_run",
+      event: { workflow_run: run },
+      runs: [run],
+      jobs: { "41": jobs },
+    });
+    expect(result.posts.map((post) => [post.state, post.description])).toEqual([
+      ["pending", "Refreshing release staging acceptance"],
+      ["failure", "Live Review step passed; final acceptance gate failed"],
     ]);
   });
 
