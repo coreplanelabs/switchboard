@@ -516,10 +516,14 @@ export function isContainerGone(err: unknown): err is ExecSandboxRestartedError 
  *  "Container suddenly disconnected") and aborts its start wait on it (line
  *  1409); the resident forwards it as `resident /exec: Network connection
  *  lost.`, and the plan owner's live run met exactly that at a rollout's
- *  onset. The typed paths never need these words (`saysTransportLost` decides
- *  by the executor's reason first); they are for the untyped ones. */
+ *  onset. A sandbox Durable Object may also answer an otherwise successful
+ *  `/exec` with "this Durable Object instance is no longer active" while the
+ *  SDK is classifying an interrupted command. This is a lost control-plane
+ *  connection, not proof that the container or its process ended. An
+ *  `answered` failure needs these exact words to take the one more identity
+ *  and process probe; waitable typed reasons are decided by type first. */
 export const CONTAINER_DOWN_WORDING = new RegExp(
-  `${STOPPED_CONTAINER_WORDING.source}|${CONTAINER_GONE_WORDING.source}|peer closed websocket|without sending close frame|\\bECONNRESET\\b|connection reset|socket hang up|network connection lost`,
+  `${STOPPED_CONTAINER_WORDING.source}|${CONTAINER_GONE_WORDING.source}|peer closed websocket|without sending close frame|\\bECONNRESET\\b|connection reset|socket hang up|network connection lost|connection closed: this durable object instance is no longer active`,
   "i",
 );
 
