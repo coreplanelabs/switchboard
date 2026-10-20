@@ -342,6 +342,18 @@ const READBACK_REASONS = {
   owned: ["live-owner", "terminal-owner"],
 };
 
+// Closed recovery reasons produced by NativeOperationJournal.list
+// (nativeOperation.ts): a stored operation is named by its record key and one of
+// these reasons. An unregistered reason collapses the whole readback to
+// "unavailable" and hides the record that holds the release, so this list tracks
+// the journal's vocabulary.
+const NATIVE_OPERATION_RECOVERY_REASONS = [
+  "legacy-or-invalid-record",
+  "original-native-evidence-unavailable",
+  "original-process-result-required",
+  "original-runtime-retired",
+];
+
 function registrationReadbackText(rows) {
   if (!Array.isArray(rows) || rows.length > 10) return "unavailable";
   const seen = new Set();
@@ -378,11 +390,7 @@ function nativeOperationReadbackText(readback) {
       typeof row !== "object" ||
       Array.isArray(row) ||
       !safe(row.key) ||
-      ![
-        "legacy-or-invalid-record",
-        "original-native-evidence-unavailable",
-        "original-process-result-required",
-      ].includes(row.recoveryReason)
+      !NATIVE_OPERATION_RECOVERY_REASONS.includes(row.recoveryReason)
     )
       return "unavailable";
     const pending = row.journal?.pending;
@@ -434,11 +442,7 @@ function nativeOperationDiagnostic(fetched) {
         !v.key.startsWith("native-operation:") ||
         !hash(v.recordHash) ||
         typeof v.recoverable !== "boolean" ||
-        ![
-          "legacy-or-invalid-record",
-          "original-native-evidence-unavailable",
-          "original-process-result-required",
-        ].includes(v.recoveryReason)
+        !NATIVE_OPERATION_RECOVERY_REASONS.includes(v.recoveryReason)
       )
         throw new Error("invalid row");
       let owner = null;

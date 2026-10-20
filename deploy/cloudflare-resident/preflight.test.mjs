@@ -1065,6 +1065,15 @@ describe("resident deploy preflight — main()", () => {
     expect(errors.join("\n")).toContain(`${BASE_URL_ENV} is not set`);
     expect(errors.join("\n")).toContain("deploy all");
   });
+
+  it("projects a retired stored operation by its reason instead of calling it malformed", async () => {
+    const actual = await captured([{ ...operation("retired"), recoveryReason: "original-runtime-retired" }]);
+    expect(actual.code).toBe(1);
+    expect(actual.diagnostic.resources[0].operations[0]).toMatchObject({
+      key: "native-operation:http:fixture:run-original:retired",
+      recoveryReason: "original-runtime-retired",
+    });
+  });
 });
 
 describe("resident deploy admission diagnostic", () => {
@@ -1387,6 +1396,43 @@ describe("resident deploy preflight — decide()", () => {
         resource: "repo:acme/api",
         error:
           "1 run/operation hold(s) unverified; registration readback: empty; operation readback: 1 stored hold(s); native-operation:op:original [original-process-result-required; processes=original-process/pid=42]",
+      },
+    ]);
+  });
+
+  it("names a retired stored operation instead of collapsing the whole readback", () => {
+    const result = decide(
+      payload([
+        {
+          resource: "repo:acme/api",
+          live: {
+            state: "warm",
+            inFlight: 1,
+            executingRuns: 0,
+            retainedRuns: 0,
+            unknownRuns: 1,
+            registrationReadback: [],
+            nativeOperationReadback: {
+              operations: [
+                { key: "native-operation:op:retired", recoveryReason: "original-runtime-retired" },
+                {
+                  key: "native-operation:op:original",
+                  recoveryReason: "original-process-result-required",
+                  journal: { pending: { attempt: { kind: "process", process: { id: "original-process", pid: 42 } } } },
+                },
+              ],
+              cursor: null,
+            },
+          },
+        },
+      ]),
+    );
+    expect(result.allow).toBe(false);
+    expect(result.unknown).toEqual([
+      {
+        resource: "repo:acme/api",
+        error:
+          "1 run/operation hold(s) unverified; registration readback: empty; operation readback: 2 stored hold(s); native-operation:op:retired [original-runtime-retired]; native-operation:op:original [original-process-result-required; processes=original-process/pid=42]",
       },
     ]);
   });
