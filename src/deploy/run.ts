@@ -1302,7 +1302,12 @@ export interface SandboxGateDeps {
   env: Record<string, string | undefined>;
   readHealth(url: string, bearer?: string, timeoutMs?: number, signal?: AbortSignal): Promise<HealthRead>;
   /** `wrangler containers info <app> --json` → the application's version and image, run in `dir`. */
-  readAppState(dir: string, containerApp: string, config?: string, signal?: AbortSignal): Promise<Read<AppState>>;
+  readAppState(
+    dir: string,
+    containerApp: string,
+    config?: string,
+    signal?: AbortSignal,
+  ): Promise<Read<AppState> & { diagnostic?: NativeReadEvidence }>;
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
   readInstances(
     dir: string,
@@ -2116,20 +2121,31 @@ async function deployStepTraced(
           ? await readResidentAppWithinDeadline(step, step.residentContainerApp, readyDeadline, deps)
           : undefined;
         let lastTargetWaitLog = -Infinity;
+        let lastTargetWaitStatus: number | undefined;
         while (
           step.residentContainerApp &&
           residentBefore &&
           "value" in residentBefore &&
           residentAfter &&
-          "value" in residentAfter &&
-          residentApplicationChange(residentBefore, residentAfter, step.residentContainerApp).kind !== "unknown" &&
-          ((residentPrintedTarget && residentAfter.value.version <= residentBefore.value.version) ||
-            (intendedImage && residentAfter.value.image !== intendedImage)) &&
+          (("error" in residentAfter &&
+            residentAfter.diagnostic?.stage === "application-info" &&
+            residentAfter.diagnostic.reason === "command-error" &&
+            [500, 502, 503, 504].includes(residentAfter.diagnostic.httpStatus ?? 0)) ||
+            ("value" in residentAfter &&
+              residentApplicationChange(residentBefore, residentAfter, step.residentContainerApp).kind !== "unknown" &&
+              ((residentPrintedTarget && residentAfter.value.version <= residentBefore.value.version) ||
+                (intendedImage && residentAfter.value.image !== intendedImage)))) &&
           deps.now() < readyDeadline
         ) {
-          if (deps.now() - lastTargetWaitLog >= MINUTE_MS) {
-            io.log("[deploy:all] resident: waiting for the selected container application target to register");
+          const status = "error" in residentAfter ? residentAfter.diagnostic?.httpStatus : 0;
+          if (status !== lastTargetWaitStatus || deps.now() - lastTargetWaitLog >= MINUTE_MS) {
+            io.log(
+              "error" in residentAfter
+                ? `[deploy:all] resident: application read unavailable (HTTP ${residentAfter.diagnostic?.httpStatus}); waiting within the readiness deadline`
+                : "[deploy:all] resident: waiting for the selected container application target to register",
+            );
             lastTargetWaitLog = deps.now();
+            lastTargetWaitStatus = status ?? undefined;
           }
           await deps.sleep(Math.min(LIVE_GATE_POLL_MS, readyDeadline - deps.now()), deps.signal);
           if (deps.signal?.aborted)
@@ -2137,7 +2153,9 @@ async function deployStepTraced(
           if (deps.now() >= readyDeadline)
             return residentNotReady(
               result,
-              "selected container application target did not register within the readiness deadline",
+              "error" in residentAfter
+                ? `container application ${step.residentContainerApp} unreadable after upload: ${residentAfter.error}; readiness deadline exhausted`
+                : "selected container application target did not register within the readiness deadline",
             );
           residentAfter = await readResidentAppWithinDeadline(step, step.residentContainerApp, readyDeadline, deps);
         }
@@ -2441,7 +2459,7 @@ async function readResidentAppWithinDeadline(
   application: string,
   deadline: number,
   deps: SandboxGateDeps,
-): Promise<Read<AppState>> {
+): Promise<Read<AppState> & { diagnostic?: NativeReadEvidence }> {
   const remaining = deadline - deps.now();
   if (remaining <= 0 || deps.signal?.aborted) return { error: "native application read budget exhausted" };
   const timeout = new AbortController();

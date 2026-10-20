@@ -16,6 +16,7 @@ import { RESIDENT_WAIT_MAX_MS, type DeployStep } from "./plan.js";
 import { deployStep, type SandboxGateDeps, type StepExec } from "./run.js";
 import { TEST_MAINTENANCE } from "./testing/profile.js";
 import { RESIDENT_READY_WAIT_MS } from "./residentReadiness.js";
+import { closedReadEvidence } from "./pagingDiagnostic.js";
 
 // Feature: docs/reference/specs/release-and-deploy.md item 31 — the resident
 // step drains the fleet before upload and lifts only after it can prove no
@@ -1557,6 +1558,108 @@ describe("resident application target", () => {
         image: "registry.example.test/resident:new",
       },
     });
+  });
+
+  it.each([1, 2])(
+    "recovers a transient application read at observation %s without repeating the upload",
+    async (failedRead) => {
+      const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+      let reads = 0;
+      h.deps.readAppState = async () => {
+        const observation = reads++;
+        if (observation === failedRead)
+          return {
+            error: "provider unavailable",
+            diagnostic: closedReadEvidence({ stage: "application-info", reason: "command-error", httpStatus: 500 }),
+          };
+        return observation < failedRead ? app : { value: { version: 18, image: "registry.example.test/resident:new" } };
+      };
+      const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+      expect(result).toMatchObject({ ok: true, live: "live" });
+      expect(h.calls.filter((call) => call.dep === "exec")).toHaveLength(1);
+      expect(
+        h.calls.find((call) => call.args[0] === "https://switchboard-resident.example.test/reconcile")?.args[2],
+      ).toEqual({
+        imageTarget: {
+          application: "switchboard-resident-residentdo",
+          version: 18,
+          image: "registry.example.test/resident:new",
+        },
+      });
+      expect(h.plain().join("\n")).toContain("application read unavailable (HTTP 500)");
+      expect(h.plain().join("\n")).not.toContain("provider unavailable");
+    },
+  );
+
+  it("keeps a persistent application read failure held at the original readiness deadline", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+    let reads = 0;
+    h.deps.readAppState = async () =>
+      reads++ === 0
+        ? app
+        : {
+            error: "provider unavailable",
+            diagnostic: closedReadEvidence({ stage: "application-info", reason: "command-error", httpStatus: 500 }),
+          };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: false });
+    expect(result.live).toContain("deployed, not live");
+    expect(result.reason).toContain("provider unavailable");
+    expect(h.deps.now()).toBe(RESIDENT_READY_WAIT_MS);
+    expect(h.calls.map((call) => call.args[0])).toEqual(["https://switchboard-resident.example.test/drain", undefined]);
+  });
+
+  it("refuses a denied application read without waiting or reconciling", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+    let reads = 0;
+    h.deps.readAppState = async () =>
+      reads++ === 0
+        ? app
+        : {
+            error: "read denied",
+            diagnostic: closedReadEvidence({ stage: "application-info", reason: "command-error", httpStatus: 403 }),
+          };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: false });
+    expect(result.reason).toContain("read denied");
+    expect(h.deps.now()).toBe(0);
+    expect(h.calls.map((call) => call.args[0])).toEqual(["https://switchboard-resident.example.test/drain", undefined]);
+  });
+
+  it("a recovered read cannot authorize a regressed application target", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+    let reads = 0;
+    h.deps.readAppState = async () => {
+      if (reads++ === 0) return app;
+      return reads === 2
+        ? {
+            error: "provider unavailable",
+            diagnostic: closedReadEvidence({ stage: "application-info", reason: "command-error", httpStatus: 503 }),
+          }
+        : { value: { version: 16, image: "registry.example.test/resident:new" } };
+    };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: false });
+    expect(result.reason).toContain("target is incomplete or regressed");
+    expect(h.calls.map((call) => call.args[0])).toEqual(["https://switchboard-resident.example.test/drain", undefined]);
+  });
+
+  it("operator cancellation stops a transient application read wait with the fleet held", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+    const control = new AbortController();
+    h.deps.signal = control.signal;
+    h.deps.sleep = async () => control.abort();
+    let reads = 0;
+    h.deps.readAppState = async () =>
+      reads++ === 0
+        ? app
+        : {
+            error: "provider unavailable",
+            diagnostic: closedReadEvidence({ stage: "application-info", reason: "command-error", httpStatus: 502 }),
+          };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: false, reason: "deployment cancelled" });
+    expect(h.calls.map((call) => call.args[0])).toEqual(["https://switchboard-resident.example.test/drain", undefined]);
   });
 
   it("retains the drain when native target evidence arrives after the readiness deadline", async () => {
