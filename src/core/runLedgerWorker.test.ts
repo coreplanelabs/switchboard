@@ -22,6 +22,247 @@ import { appendThreadTurn } from "./runLedger/threadSession.js";
 // step write's order (transcript before record), fenced answers as results,
 // and the same error classes as the run store.
 
+describe("storage client acknowledgment observations", () => {
+  const id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const state = { privateFixture: "PRIVATE_STATE_BYTES" };
+  const invoke = (ledger: WorkerRunLedger, operation: "state" | "heartbeat") =>
+    operation === "state" ? ledger.setState(id, "g1", state) : ledger.heartbeat(id, "g1", 30000);
+  const observations = (logs: string[]) =>
+    logs
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line))
+      .filter((row) => row.event === "storage.request.progress");
+  it.each(["state", "heartbeat"] as const)(
+    "records %s acceptance only after body validation with the original request identity",
+    async (operation) => {
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      let payload = "",
+        requestId: string | null = null,
+        calls = 0;
+      let enter!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const ledger = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "PRIVATE_TOKEN",
+        storeKey: "private-store-key",
+        fetch: async (_url, init) => {
+          calls++;
+          payload = String(init?.body);
+          requestId = new Headers(init?.headers).get("x-switchboard-storage-request-id");
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              stream = controller;
+            },
+          });
+          enter();
+          return new Response(body, { status: 200 });
+        },
+      });
+      const pending = invoke(ledger, operation);
+      try {
+        await entered;
+        expect(observations(logs)).toEqual([]);
+        state.privateFixture = "MUTATED_AFTER_DISPATCH";
+        stream.enqueue(new TextEncoder().encode(JSON.stringify({ ok: true, phase: "live", stop: null, effects: [] })));
+        stream.close();
+        expect(await pending).toMatchObject({ ok: true });
+        expect(calls).toBe(1);
+        expect(requestId).toMatch(/^[a-f0-9-]{36}$/);
+        expect(observations(logs)).toEqual([
+          {
+            event: "storage.request.progress",
+            side: "client",
+            stage: "acknowledgement",
+            operation: "/runs/" + operation,
+            requestId,
+            requestDigest: createHash("sha256")
+              .update(JSON.stringify({ operation: "/runs/" + operation, payload }))
+              .digest("hex"),
+            runId: id,
+            ownerGen: "g1",
+            httpStatus: 200,
+            outcome: "accepted",
+          },
+        ]);
+        expect(JSON.stringify(observations(logs))).not.toMatch(/PRIVATE|MUTATED|private-store-key/);
+        expect(new TextEncoder().encode(JSON.stringify(observations(logs)[0])).length).toBeLessThanOrEqual(1024);
+      } finally {
+        state.privateFixture = "PRIVATE_STATE_BYTES";
+        try {
+          stream?.close();
+        } catch {
+          /* The response was already consumed. */
+        }
+        await pending.catch(() => {});
+        log.mockRestore();
+      }
+    },
+  );
+  it.each(["state", "heartbeat"] as const)(
+    "records the %s refusal without claiming acceptance or repeating the request",
+    async (operation) => {
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      let calls = 0;
+      const ledger = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "token",
+        storeKey: "fixture",
+        fetch: async () => {
+          calls++;
+          return Response.json({ ok: false, reason: "fenced" }, { status: 409 });
+        },
+      });
+      try {
+        expect(await invoke(ledger, operation)).toEqual({ ok: false, reason: "fenced" });
+        expect(calls).toBe(1);
+        expect(observations(logs)).toMatchObject([
+          {
+            side: "client",
+            stage: "acknowledgement",
+            operation: "/runs/" + operation,
+            runId: id,
+            ownerGen: "g1",
+            httpStatus: 409,
+            outcome: "refused",
+            reason: "fenced",
+          },
+        ]);
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+  it.each(
+    (["state", "heartbeat"] as const).flatMap((operation) =>
+      ["malformed", "interrupted", "transport"].map((failure) => [operation, failure] as const),
+    ),
+  )("keeps %s %s response failures unacknowledged with no replay", async (operation, failure) => {
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let calls = 0;
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "token",
+      storeKey: "fixture",
+      fetch: async () => {
+        calls++;
+        if (failure === "transport") throw new TypeError("fetch failed");
+        if (failure === "interrupted")
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(new Error("body interrupted"));
+              },
+            }),
+            { status: 200 },
+          );
+        return Response.json({ unrelated: "PRIVATE_REPLY" });
+      },
+    });
+    try {
+      await expect(invoke(ledger, operation)).rejects.toMatchObject({
+        name: "UncertainStoreError",
+        outcome: "unknown",
+      });
+      expect(observations(logs)).toEqual([]);
+      expect(calls).toBe(1);
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+  });
+  it("keeps maximum valid identity fields bounded and leaves failed UUID generation absent", async () => {
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    const uuid = vi.spyOn(crypto, "randomUUID").mockImplementation(() => {
+      throw new Error("UUID unavailable");
+    });
+    const generation = "g".repeat(128);
+    let calls = 0;
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "token",
+      storeKey: "fixture",
+      fetch: async (_url, init) => {
+        calls++;
+        expect(new Headers(init?.headers).get("x-switchboard-storage-request-id")).toBeNull();
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      expect(await ledger.setState(id, generation, state)).toEqual({ ok: true });
+      const rows = observations(logs);
+      expect(rows).toMatchObject([
+        {
+          side: "client",
+          stage: "acknowledgement",
+          operation: "/runs/state",
+          runId: id,
+          ownerGen: generation,
+          outcome: "accepted",
+        },
+      ]);
+      expect(rows[0]).not.toHaveProperty("requestId");
+      expect(new TextEncoder().encode(JSON.stringify(rows[0])).length).toBeLessThanOrEqual(1024);
+      expect(calls).toBe(1);
+    } finally {
+      uuid.mockRestore();
+      log.mockRestore();
+    }
+  });
+  it.each([false, true])(
+    "keeps successful storage results when primary progress logging fails and fallback also fails=%s",
+    async (fallbackFails) => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {
+        throw new Error("private log sink failure");
+      });
+      const warnings: string[] = [];
+      const warn = vi.spyOn(console, "warn").mockImplementation((line) => {
+        warnings.push(String(line));
+        if (fallbackFails) throw new Error("private fallback failure");
+      });
+      let calls = 0;
+      const ledger = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "token",
+        storeKey: "fixture",
+        fetch: async () => {
+          calls++;
+          return Response.json({ ok: true });
+        },
+      });
+      try {
+        expect(await ledger.setState(id, "g1", state)).toEqual({ ok: true });
+        expect(await ledger.heartbeat(id, "g1", 30000)).toMatchObject({ ok: true });
+        expect(calls).toBe(2);
+        expect(warnings.map((line) => JSON.parse(line))).toEqual([
+          {
+            event: "storage.request.progress_telemetry_failed",
+            side: "client",
+            operation: "/runs/state",
+            stage: "acknowledgement",
+          },
+          {
+            event: "storage.request.progress_telemetry_failed",
+            side: "client",
+            operation: "/runs/heartbeat",
+            stage: "acknowledgement",
+          },
+        ]);
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+      }
+    },
+  );
+});
+
 describe("original write receipt client", () => {
   const selector = {
     runId: "receipt-run",

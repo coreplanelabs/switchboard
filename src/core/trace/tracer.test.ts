@@ -153,6 +153,41 @@ describe("createTracer", () => {
     expect(clock.now()).toBe(50_000); // the clock was never read for a graft
   });
 
+  it("keeps success and the original error when a sink and its warning reporter both fail", async () => {
+    const retained = recordingSink();
+    const broken: SpanSink = {
+      onStart() {
+        throw new Error("sink start failed");
+      },
+      onEnd() {
+        throw new Error("sink end failed");
+      },
+    };
+    let warnings = 0;
+    const tracer = createTracer({
+      clock: () => 1000,
+      warn: () => {
+        warnings++;
+        throw new Error("warning reporter failed");
+      },
+    });
+    const root = tracer.start("request", { sinks: [broken, retained] });
+    expect(await root.span("state.success", () => ({ ok: true, value: 42 }))).toEqual({ ok: true, value: 42 });
+    const original = new Error("original storage failure");
+    await expect(
+      root.span("state.failure", () => {
+        throw original;
+      }),
+    ).rejects.toBe(original);
+    root.end("ok");
+    expect(retained.ends.map((row) => [row.name, row.status])).toEqual([
+      ["state.success", "ok"],
+      ["state.failure", "error"],
+      ["request", "ok"],
+    ]);
+    expect(warnings).toBe(6);
+  });
+
   it("a throwing sink never reaches traced code; the tracer reports it once per call", async () => {
     const clock = createTickingClock();
     const warnings: string[] = [];

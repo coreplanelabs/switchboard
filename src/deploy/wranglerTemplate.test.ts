@@ -643,3 +643,19 @@ describe("sandbox runtime cancellation configuration", () => {
     expect(coldConfig.r2_buckets).toBeUndefined();
   });
 });
+
+describe("Memory request trace configuration", () => {
+  it("keeps native tracing disabled with query redaction and preserves the Memory bindings", () => {
+    const template = readFileSync(
+      new URL("../../deploy/cloudflare-memory/wrangler.template.jsonc", import.meta.url),
+      "utf8",
+    );
+    const rendered = renderTemplate(template, templateView(TEST_PROFILE, "memory", TEST_PUBLISHED_IMAGES)!);
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) throw new Error(rendered.problems.join("\n"));
+    const config = JSON.parse(stripJsonc(rendered.text));
+    expect(config.observability).toEqual({ enabled: true, redact_query_string: true, traces: { enabled: false } });
+    expect(config.durable_objects.bindings).toContainEqual({ name: "RUNS", class_name: "RunHistoryDO" });
+    expect(config.durable_objects.bindings).toContainEqual({ name: "MEMORY", class_name: "MemoryDO" });
+  });
+});
