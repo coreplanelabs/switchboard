@@ -265,7 +265,7 @@ function runner(
     readListedAppState: async () => app,
     readHealth: async (url) =>
       url.endsWith("/residents")
-        ? { status: 200, body: { draining: null, count: 0, residents: [] } }
+        ? { status: 200, body: { draining: null, count: 0, inFlightUnknown: 0, residents: [] } }
         : {
             status: 200,
             body: {
@@ -398,6 +398,58 @@ describe("config publication inputs", () => {
 });
 
 describe("runDeployPlan config publication", () => {
+  it.each(["opaque", "recoverable"])("refuses a closed %s Resident hold before uploading Memory", async (kind) => {
+    const store = stateStore();
+    const h = runner(store, ["memory", "resident", "bot"]);
+    for (const step of h.plan.steps) {
+      step.requiredEnv = [];
+      step.capabilities = [];
+    }
+    const readHealth = h.deps.readHealth;
+    h.deps.readHealth = async (...args) =>
+      args[0].endsWith("/residents")
+        ? {
+            status: 200,
+            body: {
+              draining: null,
+              count: 1,
+              inFlightUnknown: 0,
+              residents: [{ resource: "repo:acme/widgets", live: { inFlight: 0 } }],
+            },
+          }
+        : readHealth(...args);
+    h.deps.postJson = async (url) =>
+      url.endsWith("/debug")
+        ? {
+            status: 200,
+            body: {
+              operations: [
+                {
+                  key: "native-operation:op:original-restore",
+                  recordHash: "a".repeat(64),
+                  recoverable: kind === "recoverable",
+                  recoveryReason:
+                    kind === "recoverable"
+                      ? "original-process-result-required"
+                      : "original-native-evidence-unavailable",
+                  journal: { closed: true },
+                },
+              ],
+              cursor: null,
+            },
+          }
+        : { status: 200, body: {} };
+
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toEqual({
+      kind: "refused",
+      problems: [
+        'resident deployment blocked before any Worker upload: repo:acme/widgets has closed "native-operation:op:original-restore" at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa without original ending evidence; resolve that exact record before deployment',
+      ],
+    });
+    expect(processes.calls).toEqual([]);
+    expect(store.calls.filter((call) => call === "put")).toEqual([]);
+  });
+
   function installedRunner() {
     const store = stateStore();
     const h = runner(store);
