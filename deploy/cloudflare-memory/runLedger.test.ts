@@ -15486,6 +15486,382 @@ describe("state-write holds across Durable Object RPC", () => {
       },
     });
   }
+  it("recovers a pending state guard through a fresh read and writes the original state once", async () => {
+    const key = "runs:pending-guard-recovery";
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    await runInDurableObject(stub, (_owner, ctx) => {
+      ctx.storage.sql.exec(`CREATE TABLE guard_write_count(n INTEGER); INSERT INTO guard_write_count VALUES(0);
+        CREATE TRIGGER guard_count AFTER UPDATE OF state_json ON live_runs BEGIN UPDATE guard_write_count SET n=n+1; END;`);
+    });
+    const late = Promise.withResolvers<void>();
+    let restore!: () => void;
+    await runInDurableObject(stub, (owner) => {
+      const prototype = Object.getPrototypeOf(owner) as { stateWriteGuard: (runId: string, gen: string) => unknown };
+      const original = prototype.stateWriteGuard;
+      let first = true;
+      const spy = vi.spyOn(prototype, "stateWriteGuard").mockImplementation(function (this: RunHistoryDO, ...args) {
+        const result = Reflect.apply(original, this, args);
+        if (this === owner && first) {
+          first = false;
+          return late.promise.then(() => ({ ok: true, before: "WRONG_LATE_BASELINE" }));
+        }
+        return result;
+      });
+      restore = () => spy.mockRestore();
+    });
+    let reads = 0,
+      writes = 0,
+      disposed = 0;
+    const indices: number[] = [],
+      args: unknown[][] = [],
+      writeArgs: unknown[][] = [];
+    const routed = routedEnv(stub, (name, index) =>
+      name === "stateWriteGuard"
+        ? (...values: unknown[]) => {
+            reads++;
+            indices.push(index);
+            args.push(values);
+            const pending = Reflect.apply(stub.stateWriteGuard, stub, values);
+            return new Proxy(pending, {
+              get(target, key) {
+                const value = Reflect.get(target, key, target);
+                if (key === Symbol.dispose && typeof value === "function")
+                  return () => {
+                    disposed++;
+                    return Reflect.apply(value, target, []);
+                  };
+                return typeof value === "function" ? (...args: unknown[]) => Reflect.apply(value, target, args) : value;
+              },
+            });
+          }
+        : name === "setState"
+          ? (...values: unknown[]) => {
+              writes++;
+              writeArgs.push(values);
+              return Reflect.apply(stub.setState, stub, values);
+            }
+          : undefined,
+    );
+    const req = request(key);
+    req.headers.set("x-switchboard-storage-request-id", "11111111-1111-4111-8111-111111111111");
+    const digest = (await storeRequestWitness("/runs/state", await req.clone().text())).digest;
+    const pending = memoryWorker.fetch(req, routed);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const observed = await Promise.race([
+        pending.then((response) => ({ response })),
+        new Promise<{ response?: Response }>((resolve) => {
+          timer = setTimeout(() => resolve({}), 3500);
+        }),
+      ]);
+      expect(observed.response?.status).toBe(200);
+      expect(await observed.response!.json()).toEqual({ ok: true });
+      expect(reads).toBe(2);
+      expect(new Set(indices).size).toBe(2);
+      expect(args).toEqual([
+        [id, gen, { requestId: "11111111-1111-4111-8111-111111111111", requestDigest: digest, attempt: 1 }],
+        [id, gen, { requestId: "11111111-1111-4111-8111-111111111111", requestDigest: digest, attempt: 2 }],
+      ]);
+      expect(writes).toBe(1);
+      expect(writeArgs).toEqual([
+        [id, gen, state, "{}", { requestId: "11111111-1111-4111-8111-111111111111", requestDigest: digest }],
+      ]);
+      expect(disposed).toBe(2);
+      late.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(writes).toBe(1);
+      expect(
+        await runInDurableObject(stub, (_owner, ctx) => ({
+          state: JSON.parse(
+            ctx.storage.sql.exec<{ state_json: string }>("SELECT state_json FROM live_runs WHERE run_id=?", id).one()
+              .state_json,
+          ),
+          writes: ctx.storage.sql.exec<{ n: number }>("SELECT n FROM guard_write_count").one().n,
+        })),
+      ).toEqual({ state, writes: 1 });
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      late.resolve();
+      const response = await pending;
+      if (!response.bodyUsed) await response.text();
+      await runInDurableObject(stub, () => restore());
+    }
+  });
+  it.each(["exhaustion", "owner change", "abort", "consumed budget", "application error", "disposal failure"] as const)(
+    "keeps the original state unwritten after guard %s",
+    async (scenario) => {
+      const key = "runs:pending-guard:" + scenario.replaceAll(" ", "-");
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      await runInDurableObject(stub, (_owner, ctx) => {
+        ctx.storage.sql.exec(`CREATE TABLE guard_write_count(n INTEGER); INSERT INTO guard_write_count VALUES(0);
+          CREATE TRIGGER guard_count AFTER UPDATE OF state_json ON live_runs BEGIN UPDATE guard_write_count SET n=n+1; END;`);
+      });
+      const late = Promise.withResolvers<void>();
+      const entered = Promise.withResolvers<void>();
+      let restore!: () => void;
+      await runInDurableObject(stub, (owner) => {
+        const prototype = Object.getPrototypeOf(owner) as { stateWriteGuard: (runId: string, gen: string) => unknown };
+        const original = prototype.stateWriteGuard;
+        let first = true;
+        const spy = vi.spyOn(prototype, "stateWriteGuard").mockImplementation(function (this: RunHistoryDO, ...args) {
+          const result = Reflect.apply(original, this, args);
+          if (this !== owner) return result;
+          if (scenario === "application error" || scenario === "disposal failure")
+            throw new Error("guard application failure");
+          if (first || scenario === "exhaustion") {
+            first = false;
+            return late.promise.then(() => result);
+          }
+          return result;
+        });
+        restore = () => spy.mockRestore();
+      });
+      let reads = 0,
+        writes = 0,
+        disposed = 0;
+      const controller = new AbortController();
+      const req = new Request(request(key), { signal: controller.signal });
+      // Advance only the observed clock at body consumption, so a fresh route-local
+      // budget would wrongly dispatch a guard. No timers or production calls run.
+      const realNow = Date.now.bind(Date);
+      let offset = 0;
+      const clock =
+        scenario === "consumed budget" ? vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset) : undefined;
+      if (scenario === "consumed budget") {
+        const text = req.text.bind(req);
+        vi.spyOn(req, "text").mockImplementation(async () => {
+          const body = await text();
+          offset = 9000;
+          return body;
+        });
+      }
+      const routed = routedEnv(stub, (name) =>
+        name === "stateWriteGuard"
+          ? (...args: unknown[]) => {
+              reads++;
+              const pending = Reflect.apply(stub.stateWriteGuard, stub, args);
+              entered.resolve();
+              return new Proxy(pending, {
+                get(target, key) {
+                  const value = Reflect.get(target, key, target);
+                  if (key === Symbol.dispose && typeof value === "function")
+                    return () => {
+                      disposed++;
+                      const result = Reflect.apply(value, target, []);
+                      if (scenario === "disposal failure") throw new Error("RPC result disposal failed");
+                      return result;
+                    };
+                  return typeof value === "function"
+                    ? (...values: unknown[]) => Reflect.apply(value, target, values)
+                    : value;
+                },
+              });
+            }
+          : name === "setState"
+            ? (...args: unknown[]) => {
+                writes++;
+                return Reflect.apply(stub.setState, stub, args);
+              }
+            : undefined,
+      );
+      const pending = memoryWorker.fetch(req, routed);
+      try {
+        if (scenario === "owner change" || scenario === "abort") {
+          await entered.promise;
+          if (scenario === "abort") controller.abort(new DOMException("request canceled", "AbortError"));
+          else
+            await runInDurableObject(stub, (_owner, ctx) => {
+              ctx.storage.sql.exec("UPDATE live_runs SET owner_gen=? WHERE run_id=?", "new-owner", id);
+            });
+        }
+        const response = await pending;
+        expect(response.status).toBe(scenario === "owner change" ? 409 : 500);
+        expect(await response.json()).toEqual(
+          scenario === "owner change" ? { ok: false, reason: "fenced" } : { error: "storage request failed" },
+        );
+        if (scenario !== "owner change") {
+          const diagnostic = JSON.parse(response.headers.get(STORAGE_FAILURE_DIAGNOSTIC_HEADER)!);
+          expect(diagnostic.failure).toMatchObject({
+            stage: "state-read",
+            attempts: scenario === "exhaustion" ? 3 : 1,
+          });
+          expect(diagnostic.failure.exception.name).toBe(
+            scenario === "abort"
+              ? "AbortError"
+              : scenario === "application error"
+                ? "Error"
+                : scenario === "disposal failure"
+                  ? "AggregateError"
+                  : "TimeoutError",
+          );
+          expect(diagnostic.failure.exception).not.toHaveProperty("retryable");
+          if (scenario === "disposal failure")
+            expect(diagnostic.failure.exception.cause).toMatchObject({
+              name: "Error",
+              message: "guard application failure",
+            });
+        }
+        expect(reads).toBe(
+          scenario === "exhaustion" ? 3 : scenario === "owner change" ? 2 : scenario === "consumed budget" ? 0 : 1,
+        );
+        expect(disposed).toBe(reads);
+        late.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(writes).toBe(0);
+        expect(
+          await runInDurableObject(stub, (_owner, ctx) => ({
+            state: ctx.storage.sql
+              .exec<{ state_json: string }>("SELECT state_json FROM live_runs WHERE run_id=?", id)
+              .one().state_json,
+            writes: ctx.storage.sql.exec<{ n: number }>("SELECT n FROM guard_write_count").one().n,
+          })),
+        ).toEqual({ state: "{}", writes: 0 });
+      } finally {
+        clock?.mockRestore();
+        late.resolve();
+        try {
+          const response = await pending;
+          if (!response.bodyUsed) await response.text();
+        } finally {
+          await runInDurableObject(stub, () => restore());
+        }
+      }
+    },
+  );
+  it.each(["state", "heartbeat"] as const)(
+    "joins the %s receiver stages to the original HTTP request and preserves failures",
+    async (operation) => {
+      const key = "runs:receiver-progress:" + operation;
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      const requestId = "11111111-1111-4111-8111-111111111111";
+      const body = JSON.stringify({
+        storeKey: key,
+        runId: id,
+        gen,
+        ...(operation === "state" ? { state } : { leaseMs: 30000 }),
+      });
+      const path = "/runs/" + operation;
+      const digest = (await storeRequestWitness(path, body)).digest;
+      let corruptAfterPreflight = false;
+      const routed = routedEnv(stub, (name) =>
+        name === "promotionHold" && corruptAfterPreflight
+          ? async (...args: unknown[]) => {
+              const result = await Reflect.apply(stub.promotionHold, stub, args);
+              await runInDurableObject(stub, (_owner, ctx) => {
+                ctx.storage.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", "PRIVATE_CORRUPT_STATE", id);
+              });
+              return result;
+            }
+          : undefined,
+      );
+      const call = () =>
+        memoryWorker.fetch(
+          new Request("https://memory.test" + path, {
+            method: "POST",
+            body,
+            headers: {
+              ...AUTH,
+              "content-length": String(new TextEncoder().encode(body).length),
+              "x-switchboard-storage-request-id": requestId,
+            },
+          }),
+          routed,
+        );
+      const progress = () =>
+        logs
+          .filter((line) => line.startsWith("{"))
+          .map((line) => JSON.parse(line))
+          .filter(
+            (row) =>
+              row.event === "storage.write.progress" &&
+              row.operation === (operation === "state" ? "state-guard-read" : "heartbeat"),
+          );
+      try {
+        const response = await call();
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ ok: true });
+        const rows = progress();
+        expect(rows.map((row) => [row.stage, row.outcome])).toEqual(
+          operation === "state"
+            ? [
+                ["entry", "started"],
+                ["validation", "started"],
+                ["validation", "completed"],
+                ["result", "returned"],
+              ]
+            : [
+                ["entry", "started"],
+                ["transaction", "started"],
+                ["transaction", "completed"],
+                ["alarm", "started"],
+                ["alarm", "completed"],
+                ["result", "returned"],
+              ],
+        );
+        expect(rows).toEqual(
+          rows.map(() =>
+            expect.objectContaining({
+              side: "object",
+              objectId: stub.id.toString(),
+              incarnationId: expect.stringMatching(/^[a-f0-9-]{36}$/),
+              requestId,
+              requestDigest: digest,
+              runId: id,
+              ownerGen: gen,
+              attempt: 1,
+              elapsedMs: expect.any(Number),
+              build: { commit: "unknown" },
+            }),
+          ),
+        );
+        expect(JSON.stringify(rows)).not.toContain("fixture system");
+        expect(JSON.stringify(rows)).not.toContain("sessionPolicy");
+        logs.length = 0;
+        if (operation === "state") corruptAfterPreflight = true;
+        else
+          await runInDurableObject(stub, (_owner, ctx) => {
+            ctx.storage.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", "PRIVATE_CORRUPT_STATE", id);
+          });
+        const failed = await call();
+        expect(failed.status).toBe(500);
+        expect(await failed.json()).toEqual({ error: "storage request failed" });
+        expect(progress().map((row) => [row.stage, row.outcome, row.errorName])).toEqual([
+          ["entry", "started", undefined],
+          [operation === "state" ? "validation" : "transaction", "started", undefined],
+          [operation === "state" ? "validation" : "transaction", "failed", "SyntaxError"],
+        ]);
+        expect(JSON.stringify(progress())).not.toContain("PRIVATE_CORRUPT_STATE");
+        // Diagnostic sink failure must preserve the same receiver refusal.
+        log.mockImplementation(() => {
+          throw new Error("sink unavailable");
+        });
+        if (operation === "state")
+          await runInDurableObject(stub, (_owner, ctx) => {
+            ctx.storage.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", "{}", id);
+          });
+        const sinkFailed = await call();
+        expect(sinkFailed.status).toBe(500);
+        expect(await sinkFailed.json()).toEqual({ error: "storage request failed" });
+        expect(JSON.parse(sinkFailed.headers.get(STORAGE_FAILURE_DIAGNOSTIC_HEADER)!).failure).toMatchObject({
+          exception: { name: "SyntaxError", message: "Stored JSON is unreadable" },
+        });
+        await runInDurableObject(stub, (_owner, ctx) => {
+          ctx.storage.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", "{}", id);
+        });
+        corruptAfterPreflight = false;
+        const sinkSuccess = await call();
+        expect(sinkSuccess.status).toBe(200);
+        expect(await sinkSuccess.json()).toMatchObject({ ok: true });
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
   it("joins deletion and batch-query failure records to the original client request", async () => {
     const key = "runs:correlated-deletion";
     const stub = env.RUNS.get(env.RUNS.idFromName(key));
@@ -15990,6 +16366,10 @@ describe("state-write holds across Durable Object RPC", () => {
             build: { commit: "unknown" },
           },
         ]);
+        if (operation === "state" || operation === "heartbeat") {
+          await new Promise((resolve) => setTimeout(resolve, 2200));
+          expect(progress().map((row) => [row.outcome, row.attempt])).toEqual([["started", 1]]);
+        }
       } finally {
         release();
         await response;

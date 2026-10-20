@@ -508,6 +508,8 @@ import {
   PLANE,
   RANGE_PIN_RPC_SLOW_MS,
   STORE_RETRY_BACKOFFS_MS,
+  STATE_GUARD_READ_ATTEMPT_MS,
+  STATE_GUARD_WRITE_RESERVE_MS,
 } from "../../src/core/budgets.ts";
 import { isRetryableCloudflareError } from "../../src/core/cloudflareErrors.ts";
 import { RUN_STORE_TIMEOUT_MS } from "../../src/core/runStoreConstants.ts";
@@ -2372,6 +2374,61 @@ type LiveRow = {
 
 type StateWriteGuard = { ok: true; before: string } | { ok: false; reason: "fenced" | "unknown-run" };
 
+class StateGuardReadTimeoutError extends Error {
+  override name = "TimeoutError";
+  constructor() {
+    super("State guard read did not complete within its budget");
+  }
+}
+
+/** This deadline belongs only to a read. Disposing its result is not write rollback or remote-ending proof. */
+async function stateGuardRead(
+  call: () => PromiseLike<StateWriteGuard>,
+  deadlineAt: number,
+  signal?: AbortSignal,
+): Promise<StateWriteGuard> {
+  signal?.throwIfAborted();
+  const remaining = Math.min(STATE_GUARD_READ_ATTEMPT_MS, deadlineAt - systemClock());
+  if (remaining <= 0) throw new StateGuardReadTimeoutError();
+  const pending = call();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let aborted: (() => void) | undefined;
+  let failed: { error: unknown } | undefined;
+  let result: StateWriteGuard | undefined;
+  try {
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new StateGuardReadTimeoutError()), remaining);
+      aborted = () => reject(signal!.reason);
+      signal?.addEventListener("abort", aborted, { once: true });
+      if (signal?.aborted) aborted();
+    });
+    const value = await Promise.race([pending, deadline]);
+    // Copy the primitive answer before releasing the RPC result's owned resources.
+    result = value.ok ? { ok: true, before: value.before } : { ok: false, reason: value.reason };
+  } catch (error) {
+    failed = { error };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (aborted) signal?.removeEventListener("abort", aborted);
+  }
+  const dispose = (pending as { [Symbol.dispose]?: () => void })[Symbol.dispose];
+  if (typeof dispose === "function") {
+    try {
+      Reflect.apply(dispose, pending, []);
+    } catch (error) {
+      if (failed) {
+        throw new AggregateError([failed.error, error], "State guard read and result disposal failed", {
+          // eslint-disable-next-line preserve-caught-error -- The read stays primary; errors retains both failures.
+          cause: failed.error,
+        });
+      }
+      throw error;
+    }
+  }
+  if (failed) throw failed.error;
+  return result!;
+}
+
 function rowToLive(r: LiveRow): LiveRunRow {
   const state = parseStoredJson(r.state_json) as RunState;
   const liveState = state.liveState as LiveRunRow["liveState"];
@@ -2441,6 +2498,7 @@ function receiptReader(meta: unknown) {
 
 type CheckpointGateCorrelation = { requestId?: string; requestDigest?: string };
 type SeedGuardCorrelation = CheckpointGateCorrelation & { guardId?: string };
+type RpcAttemptCorrelation = CheckpointGateCorrelation & { attempt?: number };
 type SeedGuardBranch = "released-receipt" | "verify-source" | "missing" | "mismatch" | "corrupt" | "cancelled";
 type WriteStage =
   | "entry"
@@ -2452,17 +2510,26 @@ type WriteStage =
   | "session-write-rpc"
   | "source-proof"
   | "transaction"
+  | "alarm"
   | "result";
 function writeProgress(
   objectId: string | null,
   incarnationId: string | null,
   runId: string | undefined,
   ownerGen: string | undefined,
-  operation: "promotion-hold" | "source-session-owner" | "write-receipt-owner" | "assign-live-state" | "session-write",
-  input?: CheckpointGateCorrelation,
+  operation:
+    | "promotion-hold"
+    | "source-session-owner"
+    | "write-receipt-owner"
+    | "assign-live-state"
+    | "session-write"
+    | "state-guard-read"
+    | "heartbeat",
+  input?: RpcAttemptCorrelation,
 ) {
   const requestId = storageRequestIdOf(input?.requestId);
   const requestDigest = storageRequestDigestOf(input?.requestDigest);
+  const attempt = input?.attempt;
   const stages = new Map<WriteStage, number>();
   return (
     stage: WriteStage,
@@ -2488,6 +2555,9 @@ function writeProgress(
           incarnationId,
           ...(requestId ? { requestId } : {}),
           ...(requestDigest ? { requestDigest } : {}),
+          ...(typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1 && attempt <= 3
+            ? { attempt }
+            : {}),
           runId: typeof runId === "string" && RUN_ID_PATTERN.test(runId) ? runId : null,
           ownerGen: typeof ownerGen === "string" && GEN_PATTERN.test(ownerGen) ? ownerGen : null,
           stage,
@@ -8560,45 +8630,62 @@ export class RunHistoryDO extends DurableObject<Env> {
     leaseMs: number,
     now: number,
     facts?: HeartbeatFacts,
+    correlation?: RpcAttemptCorrelation,
   ): Promise<HeartbeatAnswer> {
-    let out: HeartbeatAnswer = { ok: false, reason: "unknown-run" };
-    this.ctx.storage.transactionSync(() => {
-      const row = this.liveRow(runId);
-      const fence = checkFence(row, gen);
-      if (!fence.ok || !row) {
-        out = fence;
-        return;
-      }
-      this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + leaseMs, runId);
-      // The heartbeat body (record 0064): the facts are judged for the
-      // checkpoint steer in this same transaction, so the inbox row and its
-      // dedupe row land with the lease or not at all. A cap throw here must
-      // not undo the lease of a healthy run, so the decision guards itself.
-      if (facts !== undefined) {
-        try {
-          const decision = decide(this.planeState(), { kind: "heartbeat", at: now, runId, facts });
-          this.applyPlaneWrites(decision.writes);
-          if (decision.writes.some((w) => w.table === "run_inbox"))
-            console.log(`[plane/steer] run ${runId} round ${facts.round} — checkpoint steer written`);
-        } catch (err) {
-          console.warn(`[plane/steer] run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+    const progress = writeProgress(this.ctx.id.toString(), this.incarnationId, runId, gen, "heartbeat", correlation);
+    let stage: WriteStage = "transaction";
+    progress("entry", "started");
+    progress(stage, "started");
+    try {
+      let out: HeartbeatAnswer = { ok: false, reason: "unknown-run" };
+      this.ctx.storage.transactionSync(() => {
+        const row = this.liveRow(runId);
+        const fence = checkFence(row, gen);
+        if (!fence.ok || !row) {
+          out = fence;
+          return;
         }
+        this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + leaseMs, runId);
+        // The heartbeat body (record 0064): the facts are judged for the
+        // checkpoint steer in this same transaction, so the inbox row and its
+        // dedupe row land with the lease or not at all. A cap throw here must
+        // not undo the lease of a healthy run, so the decision guards itself.
+        if (facts !== undefined) {
+          try {
+            const decision = decide(this.planeState(), { kind: "heartbeat", at: now, runId, facts });
+            this.applyPlaneWrites(decision.writes);
+            if (decision.writes.some((w) => w.table === "run_inbox"))
+              console.log(`[plane/steer] run ${runId} round ${facts.round} — checkpoint steer written`);
+          } catch (err) {
+            console.warn(`[plane/steer] run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        // The plane's open effects ride every owner's heartbeat answer (record
+        // 0064; orchestration-plane item 7) — empty until a unit writes them, but always present, so the
+        // client's ack loop needs no version probe.
+        out = {
+          ok: true,
+          stop: row.stop,
+          ...(row.state.killRequested === true ? { destructive: true } : {}),
+          phase: row.phase,
+          effects: this.openPlaneEffects(),
+        };
+      });
+      // The owner's heartbeat refreshes the lease, so the plane's alarm moves
+      // with it (record 0064): re-armed only when the earliest due changed.
+      progress(stage, "completed", { ok: out.ok });
+      if (out.ok) {
+        stage = "alarm";
+        progress(stage, "started");
+        await this.ensurePlaneAlarm(now);
+        progress(stage, "completed");
       }
-      // The plane's open effects ride every owner's heartbeat answer (record
-      // 0064; orchestration-plane item 7) — empty until a unit writes them, but always present, so the
-      // client's ack loop needs no version probe.
-      out = {
-        ok: true,
-        stop: row.stop,
-        ...(row.state.killRequested === true ? { destructive: true } : {}),
-        phase: row.phase,
-        effects: this.openPlaneEffects(),
-      };
-    });
-    // The owner's heartbeat refreshes the lease, so the plane's alarm moves
-    // with it (record 0064): re-armed only when the earliest due changed.
-    if (out.ok) await this.ensurePlaneAlarm(now);
-    return out;
+      progress("result", "returned", { ok: out.ok });
+      return out;
+    } catch (error) {
+      progress(stage, "failed", { errorName: checkpointErrorName(error) });
+      throw error;
+    }
   }
 
   /** Append events with their registry seq (item 30). Fenced. */
@@ -8836,12 +8923,32 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
   }
 
-  stateWriteGuard(runId: string, gen: string): StateWriteGuard {
-    const row = this.liveRow(runId);
-    const fence = checkFence(row, gen);
-    if (!fence.ok) return fence;
-    if (!row) return { ok: false, reason: "unknown-run" };
-    return { ok: true, before: canonicalSeedJson(row.state) };
+  stateWriteGuard(runId: string, gen: string, correlation?: RpcAttemptCorrelation): StateWriteGuard {
+    const progress = writeProgress(
+      this.ctx.id.toString(),
+      this.incarnationId,
+      runId,
+      gen,
+      "state-guard-read",
+      correlation,
+    );
+    progress("entry", "started");
+    progress("validation", "started");
+    try {
+      const row = this.liveRow(runId);
+      const fence = checkFence(row, gen);
+      const result: StateWriteGuard = !fence.ok
+        ? fence
+        : !row
+          ? { ok: false, reason: "unknown-run" }
+          : { ok: true, before: canonicalSeedJson(row.state) };
+      progress("validation", "completed", { ok: result.ok });
+      progress("result", "returned", { ok: result.ok });
+      return result;
+    } catch (error) {
+      progress("validation", "failed", { errorName: checkpointErrorName(error) });
+      throw error;
+    }
   }
 
   async setState(
@@ -15216,6 +15323,7 @@ async function handleLedger(
   reviewStopClient = false,
   requestDigest?: string,
   trustedRequest?: TrustedWriteRequest,
+  rpcBudget?: { deadlineAt: number; signal: AbortSignal },
 ): Promise<Response> {
   if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
   const b = body as Record<string, unknown>;
@@ -15738,11 +15846,11 @@ async function handleLedger(
   // use this loop for arbitrary mutations or for replaying an HTTP request.
   const replayableRpc = async <T>(
     stage: "heartbeat-rpc" | "append-rpc" | "step-rpc",
-    call: (fresh: ReturnType<typeof env.RUNS.get>) => Promise<T>,
+    call: (fresh: ReturnType<typeof env.RUNS.get>, attempt: number) => Promise<T>,
   ): Promise<T> => {
     for (let attempt = 1; ; attempt++) {
       try {
-        return await observeRpc(stage, attempt, () => call(env.RUNS.get(env.RUNS.idFromName(key.value))));
+        return await observeRpc(stage, attempt, () => call(env.RUNS.get(env.RUNS.idFromName(key.value)), attempt));
       } catch (error) {
         const delayMs = STORE_RETRY_BACKOFFS_MS[attempt - 1];
         const retry =
@@ -15776,48 +15884,63 @@ async function handleLedger(
   };
   const stateRpc = async <T>(
     stage: "promotion-preflight" | "state-read" | "state-rpc",
-    call: () => Promise<T>,
+    call: (attempt: number) => Promise<T>,
   ): Promise<T> => {
     for (let attempt = 1; ; attempt++) {
       try {
-        const result = await observeRpc(stage, attempt, call);
-        if (stateWitness && attempt > 1)
-          console.log(
-            JSON.stringify({
-              event: "state.write.recovered",
-              message: "State write RPC recovered",
-              runId: b.runId,
-              ownerGen: b.gen,
-              requestDigest: stateWitness.digest,
-              stage,
-              attempts: attempt,
-              build: BUILD,
-            }),
-          );
+        rpcBudget?.signal.throwIfAborted();
+        if (rpcBudget && systemClock() >= rpcBudget.deadlineAt) throw new StateGuardReadTimeoutError();
+        const result = await observeRpc(stage, attempt, () => call(attempt));
+        if (stateWitness && attempt > 1) {
+          try {
+            console.log(
+              JSON.stringify({
+                event: "state.write.recovered",
+                message: "State write RPC recovered",
+                runId: b.runId,
+                ownerGen: b.gen,
+                requestDigest: stateWitness.digest,
+                stage,
+                attempts: attempt,
+                build: BUILD,
+              }),
+            );
+          } catch (telemetryError) {
+            logStorageTelemetryFailure(pathname, "operator-log", telemetryError, undefined, stateWitness.digest);
+          }
+        }
         return result;
       } catch (error) {
         if (!stateWitness) throw error;
         const failure = stateWriteException(stage, error, attempt);
+        const delayMs = STORE_RETRY_BACKOFFS_MS[attempt - 1];
+        const readTimeout = stage === "state-read" && error instanceof StateGuardReadTimeoutError;
+        const reserve = stage === "state-read" ? STATE_GUARD_WRITE_RESERVE_MS : 0;
         const retry =
-          isRetryableCloudflareError(error) &&
-          "errorKind" in failure &&
-          failure.errorKind === "error" &&
-          attempt <= STORE_RETRY_BACKOFFS_MS.length;
-        console.log(
-          JSON.stringify({
-            event: "state.write.failure",
-            message: "State write RPC failed",
-            runId: b.runId,
-            ownerGen: b.gen,
-            requestDigest: stateWitness.digest,
-            build: BUILD,
-            failure,
-            retry,
-          }),
-        );
+          delayMs !== undefined &&
+          !rpcBudget?.signal.aborted &&
+          (readTimeout ||
+            (isRetryableCloudflareError(error) && "errorKind" in failure && failure.errorKind === "error")) &&
+          systemClock() + delayMs + reserve < (rpcBudget?.deadlineAt ?? now + RUN_STORE_TIMEOUT_MS);
+        try {
+          console.log(
+            JSON.stringify({
+              event: "state.write.failure",
+              message: "State write RPC failed",
+              runId: b.runId,
+              ownerGen: b.gen,
+              requestDigest: stateWitness.digest,
+              build: BUILD,
+              failure,
+              retry,
+            }),
+          );
+        } catch (telemetryError) {
+          logStorageTelemetryFailure(pathname, "operator-log", telemetryError, undefined, stateWitness.digest);
+        }
         if (!retry)
           throw new StateWriteBoundaryError({ version: 1, requestDigest: stateWitness.digest, failure }, error);
-        await new Promise((resolve) => setTimeout(resolve, STORE_RETRY_BACKOFFS_MS[attempt - 1]));
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
   };
@@ -16513,8 +16636,12 @@ async function handleLedger(
       typeof (b.facts as Record<string, unknown>).startedAt === "number"
         ? (b.facts as unknown as HeartbeatFacts)
         : undefined;
-    const r = (await replayableRpc("heartbeat-rpc", (fresh) =>
-      fresh.heartbeat(runId.value, g.value, lease.value, now, facts),
+    const r = (await replayableRpc("heartbeat-rpc", (fresh, attempt) =>
+      fresh.heartbeat(runId.value, g.value, lease.value, now, facts, {
+        requestId,
+        requestDigest: rpcWitness?.digest,
+        attempt,
+      }),
     )) as unknown as HeartbeatAnswer;
     return r.ok ? json(r) : json(r, 409);
   }
@@ -16595,26 +16722,37 @@ async function handleLedger(
   if (pathname === "/runs/state") {
     if (typeof b.state !== "object" || b.state === null) return json({ error: "state must be an object" }, 400);
     const guardRefused = (result: Extract<StateWriteGuard, { ok: false }>, stage: "state-read" | "state-rpc") => {
-      console.log(
-        JSON.stringify({
-          event: "state.write.guard_refused",
-          message: "State write guard refused",
-          runId: runId.value,
-          ownerGen: g.value,
-          requestDigest: stateWitness?.digest,
-          reason: result.reason,
-          stage,
-          build: BUILD,
-        }),
-      );
+      try {
+        console.log(
+          JSON.stringify({
+            event: "state.write.guard_refused",
+            message: "State write guard refused",
+            runId: runId.value,
+            ownerGen: g.value,
+            requestDigest: stateWitness?.digest,
+            reason: result.reason,
+            stage,
+            build: BUILD,
+          }),
+        );
+      } catch (telemetryError) {
+        logStorageTelemetryFailure(pathname, "operator-log", telemetryError, undefined, stateWitness?.digest);
+      }
       return fenced(result);
     };
     let result: FenceResult | PromotionHold;
     try {
-      const baseline = await stateRpc<StateWriteGuard>(
-        "state-read",
-        async () =>
-          (await env.RUNS.get(env.RUNS.idFromName(key.value)).stateWriteGuard(runId.value, g.value)) as StateWriteGuard,
+      const baseline = await stateRpc<StateWriteGuard>("state-read", (attempt) =>
+        stateGuardRead(
+          () =>
+            env.RUNS.get(env.RUNS.idFromName(key.value)).stateWriteGuard(runId.value, g.value, {
+              requestId,
+              requestDigest: stateWitness?.digest,
+              attempt,
+            }),
+          (rpcBudget?.deadlineAt ?? now + RUN_STORE_TIMEOUT_MS) - STATE_GUARD_WRITE_RESERVE_MS,
+          rpcBudget?.signal,
+        ),
       );
       if (!baseline.ok) return guardRefused(baseline, "state-read");
       const before = baseline.before;
@@ -16920,6 +17058,7 @@ export function featuresOf(env: Pick<Env, "RUN_METRICS" | "RUN_METRICS_DATASET">
 
 /** Every request, once `fetch` has decided whether it gets a root. */
 async function handleRequest(request: Request, env: Env, admission: Admission): Promise<Response> {
+  const requestStartedAt = systemClock();
   const url = new URL(request.url);
   if (url.pathname === "/healthz" && request.method === "GET")
     return json({ ok: true, build: BUILD, features: featuresOf(env) });
@@ -16993,6 +17132,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
               request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
               storageRequestDigestOf(request.headers.get(STORAGE_REQUEST_DIGEST_HEADER)),
               trustedRequest,
+              { deadlineAt: requestStartedAt + RUN_STORE_TIMEOUT_MS, signal: request.signal },
             )
           : handleRuns(
               url.pathname,
