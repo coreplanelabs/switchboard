@@ -1740,6 +1740,7 @@ describe("consumer read diagnostics", () => {
     ["list", 0, '{"private-shape":true}', 200, "application-list-shape", "unknown", "unknown", []],
     ["list", 0, "[]", 200, "application-not-found", "unknown", "unknown", []],
     ["info", 0, '{"version":"private-invalid-version"}', 200, "application-shape", "unknown", "unknown", []],
+    ["info", 1, '{"error":"There has been an internal error"}', 500, "command-error", "unknown", "unknown", []],
     [
       "instances",
       1,
