@@ -56,7 +56,7 @@ RUN npm ci --omit=dev --workspaces=false --include-workspace-root
 # no release assets, and `@latest` would make the binary a property of the
 # build date — the pnpm lesson in src/deploy/imagePins.test.ts. Bumping the sha
 # is a reviewable commit; src/deploy/botImageMeat.test.ts holds this shape.
-FROM docker.io/library/golang:1.27.1-bookworm AS meat
+FROM docker.io/library/golang:1.27.2-bookworm AS meat
 RUN CGO_ENABLED=0 go install meat.dev/cmd/meat@f39f41dfe7b5b37a12b35fdfbaecc7e779855bd3
 # JSON stays on stdout; the existing turn/tool callback writes progress to stderr.
 COPY scripts/meat-progress.patch /tmp/meat-progress.patch
