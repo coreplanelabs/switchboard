@@ -316,6 +316,9 @@ export const PROVIDER_RETRY_WAIT_MS = MINUTE_MS;
 
 /** Two retries for a known retryable store operation, inside its HTTP deadline. */
 export const STORE_RETRY_BACKOFFS_MS = [200, 800] as const;
+/** Bound only the pure state guard read, retaining time for its original write. */
+export const STATE_GUARD_READ_ATTEMPT_MS = 2_000;
+export const STATE_GUARD_WRITE_RESERVE_MS = 2_000;
 
 /** How often the model proxy writes an SSE comment while the provider is
  *  reasoning silently. The public container hop has cut an otherwise healthy
