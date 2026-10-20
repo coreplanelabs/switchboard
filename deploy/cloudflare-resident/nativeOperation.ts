@@ -44,6 +44,7 @@ export const NATIVE_OPERATION_PREFIX = "native-operation:";
 const RECEIPT_PREFIX = "native-operation-receipt:";
 const OPERATOR_ENDING_PREFIX = "native-operation-ending:";
 const PRODUCER_PREFIX = "native-operation-producer:";
+const ADMISSION_PREFIX = "native-operation-admission:";
 const RETIREMENT_PREFIX = "native-retirement:";
 const CONTROL_PREFIX = "native-operation-control:";
 const PAGE_SIZE = 25;
@@ -100,6 +101,15 @@ export const nativeOperationOriginSchema = z
   .strict();
 export type NativeOperationOrigin = z.infer<typeof nativeOperationOriginSchema>;
 export type NativeOperationProducer = NativeOperationOrigin["producer"];
+const operatorAdmissionSchema = z
+  .object({
+    opOwner: z.string().startsWith("op:"),
+    origin: nativeOperationOriginSchema,
+    permit: z.object({ id: z.string().uuid(), requestHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+    callbackMetadataEnded: z.boolean(),
+  })
+  .strict();
+type OperatorAdmission = z.infer<typeof operatorAdmissionSchema>;
 const nativeSchema = z
   .object({
     version: z.literal(1),
@@ -1185,7 +1195,206 @@ export class NativeOperationJournal {
     );
   }
 
-  /** Existing admin recovery can close only a new, before-effect operator scope. */
+  /** Enroll the original permit before any callback or native work. */
+  async enrollOperatorAdmission(
+    opOwner: string,
+    origin: NativeOperationOrigin,
+    permit: OperatorAdmission["permit"],
+  ): Promise<void> {
+    const value = operatorAdmissionSchema.parse({ opOwner, origin, permit, callbackMetadataEnded: false });
+    const key = ADMISSION_PREFIX + opOwner;
+    await this.storage.transaction(async (rows) => {
+      if (
+        (await rows.get(key)) !== undefined ||
+        (await rows.get(NATIVE_OPERATION_PREFIX + opOwner)) !== undefined ||
+        (await rows.get(OPERATOR_ENDING_PREFIX + NATIVE_OPERATION_PREFIX + opOwner)) !== undefined
+      )
+        throw new Error("operator admission identity already used");
+      await rows.put(key, value);
+    });
+  }
+
+  /** This proves callback handling and metadata completion, not response delivery. */
+  async endOperatorCallback(opOwner: string, callId: string, permit: OperatorAdmission["permit"]): Promise<boolean> {
+    return this.storage.transaction(async (rows) => {
+      const key = ADMISSION_PREFIX + opOwner;
+      const parsed = operatorAdmissionSchema.safeParse(await rows.get(key));
+      if (
+        !parsed.success ||
+        parsed.data.opOwner !== opOwner ||
+        parsed.data.origin.callId !== callId ||
+        JSON.stringify(parsed.data.permit) !== JSON.stringify(permit)
+      )
+        return false;
+      const operationKey = NATIVE_OPERATION_PREFIX + opOwner;
+      const original =
+        (await rows.get(operationKey)) ??
+        (await rows.get<{ original?: unknown }>(OPERATOR_ENDING_PREFIX + operationKey))?.original;
+      const record = recordSchema.safeParse(original);
+      if (
+        !record.success ||
+        !("opOwner" in record.data) ||
+        record.data.opOwner !== opOwner ||
+        !record.data.native.closed ||
+        JSON.stringify(record.data.origin) !== JSON.stringify(parsed.data.origin)
+      )
+        return false;
+      await rows.put(key, { ...parsed.data, callbackMetadataEnded: true });
+      return true;
+    });
+  }
+
+  /** Permit obligations survive native retirement and controller replacement. */
+  async producerAdmissions(
+    origin: NativeOperationOrigin,
+    selectOwner: (opOwner: string) => boolean,
+  ): Promise<OperatorAdmission[]> {
+    const selected: OperatorAdmission[] = [];
+    for (const [key, value] of await this.unresolved(ADMISSION_PREFIX)) {
+      const row = operatorAdmissionSchema.parse(value);
+      if (key !== ADMISSION_PREFIX + row.opOwner) throw new Error("operator admission owner changed");
+      if (
+        row.origin.producer === origin.producer &&
+        row.origin.resource === origin.resource &&
+        selectOwner(row.opOwner)
+      )
+        selected.push(row);
+    }
+    return selected;
+  }
+
+  async operatorAdmissionReady(
+    value: OperatorAdmission,
+    rows: Pick<NativeOperationRows, "get"> = this.storage,
+  ): Promise<boolean> {
+    const archived = await rows.get<{ original?: unknown }>(
+      OPERATOR_ENDING_PREFIX + NATIVE_OPERATION_PREFIX + value.opOwner,
+    );
+    const record = recordSchema.safeParse(archived?.original);
+    return (
+      value.callbackMetadataEnded &&
+      record.success &&
+      "opOwner" in record.data &&
+      record.data.opOwner === value.opOwner &&
+      JSON.stringify(record.data.origin) === JSON.stringify(value.origin) &&
+      JSON.stringify(await rows.get(ADMISSION_PREFIX + value.opOwner)) === JSON.stringify(value) &&
+      (await this.operatorEnded(
+        NATIVE_OPERATION_PREFIX + value.opOwner,
+        { opOwner: value.opOwner },
+        value.origin.callId,
+        rows,
+      ))
+    );
+  }
+
+  /** A bounded operator view, independent of payload and native-scope success. */
+  async admissionRecovery(selectOwner: (opOwner: string) => boolean) {
+    const records = [];
+    let count = 0;
+    for (const [key, value] of await this.unresolved(ADMISSION_PREFIX)) {
+      const row = operatorAdmissionSchema.parse(value);
+      if (key !== ADMISSION_PREFIX + row.opOwner) throw new Error("operator admission owner changed");
+      if (!selectOwner(row.opOwner)) continue;
+      count++;
+      if (records.length >= PAGE_SIZE) continue;
+      const stage = !row.callbackMetadataEnded
+        ? "callback-ending-unverified"
+        : (await this.operatorEnded(NATIVE_OPERATION_PREFIX + row.opOwner, { opOwner: row.opOwner }, row.origin.callId))
+          ? "registry-release-pending"
+          : "native-ending-unverified";
+      records.push({
+        id: row.permit.id,
+        opOwner: row.opOwner,
+        callId: row.origin.callId,
+        producer: row.origin.producer,
+        sourceId: row.origin.sourceId,
+        stage,
+        recovery: row.callbackMetadataEnded ? "producer-finalization" : "operator-request-end-receipt",
+      });
+    }
+    return { count, omitted: count - records.length, records };
+  }
+
+  /** Called only after the exact Registry release acknowledgement or receipt. */
+  async completeOperatorAdmission(value: OperatorAdmission): Promise<void> {
+    await this.storage.transaction(async (rows) => {
+      const key = ADMISSION_PREFIX + value.opOwner;
+      const original = await rows.get(key);
+      if (original === undefined) return;
+      if (JSON.stringify(original) !== JSON.stringify(value) || !(await this.operatorAdmissionReady(value, rows)))
+        throw new Error("operator admission ending changed");
+      await rows.delete(key);
+    });
+  }
+
+  /** Resume cleanup at the existing producer boundary, without invoking its payload. */
+  async resumeProducerFinalization(
+    origin: NativeOperationOrigin,
+    native: NativeScopeTransport,
+    ownerMatches: (record: NativeOperationRecord) => Promise<boolean>,
+  ): Promise<{ key?: string; opOwner?: string; outcome: "held" | "ended" } | undefined> {
+    const canResume = async (record: NativeOperationRecord) =>
+      "opOwner" in record &&
+      record.native.closed &&
+      Object.keys(record.native.pending).length === 0 &&
+      nativeOperatorScopeClosing(
+        await this.storage.get(nativeOperatorScopeKey({ opOwner: record.opOwner })),
+        { opOwner: record.opOwner },
+        record.native.scope ?? null,
+      );
+    let claimKey = await producerClaimKey(origin);
+    let selected: { key: string; opOwner: string; outcome: "held" } | undefined;
+    // An unchanged checkout can skip build. Any later refresh step must be
+    // able to finish saved cleanup before that step's payload starts.
+    if (origin.producer === "refresh-step") {
+      for (const [key, value] of await this.unresolved()) {
+        const parsed = recordSchema.safeParse(value);
+        if (!parsed.success || !("opOwner" in parsed.data)) continue;
+        const previous = parsed.data;
+        if (
+          previous.origin?.producer !== origin.producer ||
+          previous.origin.resource !== origin.resource ||
+          !(await canResume(previous))
+        )
+          continue;
+        claimKey = await producerClaimKey(previous.origin);
+        selected = { key, opOwner: previous.opOwner, outcome: "held" };
+        break;
+      }
+    }
+    if (!claimKey) return;
+    const value = await this.storage.get(claimKey);
+    if (value === undefined) return selected;
+    const parsedClaim = z
+      .object({ key: z.string(), opOwner: z.string(), callId: z.string().uuid() })
+      .strict()
+      .safeParse(value);
+    if (!parsedClaim.success) return { outcome: "held" };
+    const claim = parsedClaim.data;
+    if (selected && (selected.key !== claim.key || selected.opOwner !== claim.opOwner)) return selected;
+    const held = { key: claim.key, opOwner: claim.opOwner, outcome: "held" as const };
+    const original = await this.storage.get(claim.key);
+    const parsed = recordSchema.safeParse(original);
+    if (!parsed.success || !("opOwner" in parsed.data)) return held;
+    const record = parsed.data;
+    if (
+      record.opOwner !== claim.opOwner ||
+      claim.key !== `${NATIVE_OPERATION_PREFIX}${record.opOwner}` ||
+      !record.origin ||
+      record.origin.callId !== claim.callId ||
+      (await producerClaimKey(record.origin)) !== claimKey ||
+      !(await canResume(record))
+    )
+      return held;
+    const matches = async (current: NativeOperationRecord) =>
+      JSON.stringify(await this.storage.get(claimKey)) === JSON.stringify(claim) && (await ownerMatches(current));
+    if (!(await matches(record))) return held;
+    const result = await this.recoverOperator(claim.key, await recordHash(original), native, matches, true);
+    if (!result || !("outcome" in result) || result.outcome !== "operator-scope-ended") return held;
+    return { key: claim.key, opOwner: claim.opOwner, outcome: "ended" };
+  }
+
+  /** Admin recovery and saved producer finalization share exact-scope retirement. */
   async recoverOperator(
     key: string,
     hash: string,

@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   NativeRunScopes,
   CloudflareNativeScopeTransport,
+  NATIVE_SCOPE_CONTROL_MS,
   type NativeScopeRef,
   type NativeScopeTransport,
 } from "./nativeScope.js";
@@ -325,16 +326,105 @@ describe("native scope transport deadlines", () => {
     try {
       const exec = vi.fn(() => new Promise<never>(() => {}));
       const transport = new CloudflareNativeScopeTransport({ running: true, exec });
-      const pending = transport.request({ mode: "inspect" }, 50);
-      const assertion = expect(pending).rejects.toThrow("outcome is unknown");
+      const result = transport.request({ mode: "inspect" }, 50).then(
+        (value) => ({ value, error: null as unknown }),
+        (error: unknown) => ({ value: null, error }),
+      );
       await vi.advanceTimersByTimeAsync(50);
-      await assertion;
+      const outcome = await result;
+      expect(outcome.value).toBeNull();
+      expect(outcome.error).toMatchObject({
+        name: "NativeScopeControlTimeoutError",
+        mode: "inspect",
+        timeoutMs: 50,
+      });
+      expect((outcome.error as Error).message).toContain("native-scope outcome is unknown");
       expect(exec).toHaveBeenCalledTimes(1);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
+  it.each([
+    { readbackClosed: true, readbackForeign: false, readbackTimeout: false, expected: "settled" },
+    { readbackClosed: false, readbackForeign: false, readbackTimeout: false, expected: "unknown-open" },
+    { readbackClosed: true, readbackForeign: true, readbackTimeout: false, expected: "unknown-foreign" },
+    { readbackClosed: false, readbackForeign: false, readbackTimeout: true, expected: "unknown-timeout" },
+  ])(
+    "uses one exact readback after a close acknowledgement timeout ($expected)",
+    async ({ readbackClosed, readbackForeign, readbackTimeout, expected }) => {
+      vi.useFakeTimers();
+      try {
+        const h = fixture();
+        const requests: string[] = [];
+        let closed = false;
+        const transport = new CloudflareNativeScopeTransport({
+          running: true,
+          exec: async (_argv, options) => {
+            const request = JSON.parse(await new Response(options.stdin).text()) as Record<string, any>;
+            requests.push(request.mode);
+            const respond = (body: unknown) => ({
+              stdout: new Response(JSON.stringify(body)).body,
+              stderr: new Response("").body,
+              exitCode: Promise.resolve(0),
+            });
+            if (request.mode === "inspect")
+              return respond({ version: 1, boot: BOOT, ...(request.operator === true ? { operatorScopes: 1 } : {}) });
+            if (request.mode === "bootstrap") return respond({ ref: request.ref, closed: false });
+            if (request.mode === "close") {
+              closed = readbackClosed;
+              return {
+                ...respond({ ref: request.ref, closed, populated: !closed }),
+                exitCode: new Promise<number>(() => {}),
+              };
+            }
+            if (request.mode === "view" && readbackTimeout) {
+              return {
+                ...respond({ ref: request.ref, closed, populated: !closed, present: true, ready: true }),
+                exitCode: new Promise<number>(() => {}),
+              };
+            }
+            if (request.mode === "view") {
+              const ref = readbackForeign ? { ...request.ref, owner: { opOwner: "op:foreign" } } : request.ref;
+              return respond({ ref, closed, populated: !closed, present: true, ready: true });
+            }
+            throw new Error(`Unexpected native scope mode: ${request.mode}`);
+          },
+        } as any);
+        const scopes = new NativeRunScopes(h.storage, transport);
+        const operator = { opOwner: "op:timeout-close" };
+        const ref = await scopes.ensureOperator(operator, allowed);
+        const closeResult = scopes.closeOperator(operator, ref).then(
+          (value) => ({ value, error: null as unknown }),
+          (error: unknown) => ({ value: null, error }),
+        );
+        await vi.advanceTimersByTimeAsync(NATIVE_SCOPE_CONTROL_MS * 2);
+        const result = await closeResult;
+
+        if (expected === "settled") {
+          expect(result).toEqual({ value: ref, error: null });
+          expect([...h.rows]).toContainEqual([
+            "native-operator-scope:op%3Atimeout-close",
+            expect.objectContaining({ closing: true, closed: true, closedBoot: BOOT }),
+          ]);
+        } else {
+          expect(result.value).toBeNull();
+          expect(result.error).toBeInstanceOf(Error);
+          if (expected === "unknown-foreign")
+            expect((result.error as Error).message).toBe("native-scope owner changed during timeout readback");
+          else expect((result.error as Error).message).toContain("native-scope outcome is unknown");
+          expect(h.rows.get("native-operator-scope:op%3Atimeout-close")).toMatchObject({
+            closing: true,
+            closed: false,
+          });
+        }
+        expect(requests).toEqual(["inspect", "bootstrap", "inspect", "close", "view"]);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
   it("fences the same caller-known attempt when its initial launch acknowledgement is lost", async () => {
     vi.useFakeTimers();
     try {

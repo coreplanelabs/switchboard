@@ -32,6 +32,7 @@ import { RecordedCheckOperation, type CheckOperationContext } from "./checkOpera
 import {
   NativeRunScopes,
   CloudflareNativeScopeTransport,
+  type NativeScopeTransport,
   nativeScopeRetirementKey,
   NATIVE_SCOPE_CONTROL_MS,
   type NativeScopeRef,
@@ -3662,8 +3663,9 @@ class StepError extends Error {
   constructor(
     public step: string,
     message: string,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, { cause });
   }
 }
 
@@ -6579,6 +6581,7 @@ export class ResidentDO extends Sandbox<Env> {
         },
         "refresh-step",
         requestContext,
+        admission,
       );
       if (result.status !== "done") {
         outcome = result.status === "stopped" ? `stopped (${result.why})` : `failed (${result.reason})`;
@@ -6586,6 +6589,11 @@ export class ResidentDO extends Sandbox<Env> {
       }
       return { ...result, startedAt, trace: trace.steps() };
     } catch (err) {
+      if (err instanceof StepError && ["producer-cleanup-completed", "producer-cleanup-pending"].includes(err.step)) {
+        outcome = `stopped (${err.step})`;
+        await this.yieldCycle(instance);
+        return { status: "stopped", why: err.step, startedAt, trace: trace.steps() };
+      }
       if (err instanceof ResidentDownError) {
         // Already down with its reason (goDown recorded it); the instance ends.
         outcome = `failed (${err.message})`;
@@ -6643,14 +6651,53 @@ export class ResidentDO extends Sandbox<Env> {
     } finally {
       this.refreshAdmissionsInFlight--;
       if (counted) this.refreshesInFlight--;
-      await this.recordInstanceStep(instance, step, outcome).catch((err) =>
-        console.log(`refresh instance ${instance}: recording ${step} failed: ${errMsg(err)}`),
-      );
-      const ended = await new NativeOperationJournal(this.ctx.storage)
-        .operatorEnded(`native-operation:${operationOwner}`, { opOwner: operationOwner }, requestContext.callId)
-        .catch(() => false);
-      if (ended) await endTrackedDeployAdmission(registry, admission);
-      else
+      const journal = new NativeOperationJournal(this.ctx.storage);
+      let callbackMetadataEnded = false;
+      try {
+        await this.recordInstanceStep(instance, step, outcome);
+      } catch (error) {
+        emitDeployAdmission(
+          {
+            phase: "operator-ending",
+            stage: "callback-metadata",
+            id: admission.id,
+            commit: "unverified",
+            failure: "storage",
+          },
+          { error },
+        );
+        const reason = `refresh-step-metadata-unverified: ${step} status was not stored`;
+        await this.recordRefreshError(reason);
+        const status = await this.getStatus();
+        if (["warm", "refreshing", "degraded"].includes(status.state)) await this.setResidentState("degraded", reason);
+      }
+      try {
+        // A failed status write has settled too. It is reported above, rather
+        // than making the original caller's ending proof impossible to save.
+        callbackMetadataEnded = await journal.endOperatorCallback(operationOwner, requestContext.callId, admission);
+      } catch (error) {
+        emitDeployAdmission(
+          {
+            phase: "operator-ending",
+            stage: "callback-ending",
+            id: admission.id,
+            commit: "unverified",
+            failure: "storage",
+          },
+          { error },
+        );
+      }
+      const ended =
+        callbackMetadataEnded &&
+        (await journal
+          .operatorEnded(`native-operation:${operationOwner}`, { opOwner: operationOwner }, requestContext.callId)
+          .catch(() => false));
+      if (ended) {
+        await endTrackedDeployAdmission(registry, admission);
+        const origin = await this.operationOrigin("refresh-step", operationOwner, requestContext);
+        const saved = (await journal.producerAdmissions(origin, (owner) => owner === operationOwner))[0];
+        if (saved) await journal.completeOperatorAdmission(saved);
+      } else
         emitDeployAdmission({
           phase: "permit-release",
           id: admission.id,
@@ -14430,6 +14477,7 @@ export class ResidentDO extends Sandbox<Env> {
     fn: () => Promise<T>,
     producer: NativeOperationProducer,
     requestContext?: NativeRequestContext,
+    originalPermit?: DeployAdmissionIdentity,
   ): Promise<T> {
     this.activeOperatorRequests.add(owner);
     try {
@@ -14437,13 +14485,67 @@ export class ResidentDO extends Sandbox<Env> {
       const origin = await this.operationOrigin(producer, owner, requestContext);
       const scope = { key, owner, origin, active: true, allocated: false };
       const journal = new NativeOperationJournal(this.ctx.storage);
-      const scopes = new NativeRunScopes(this.ctx.storage, {
+      if (originalPermit) await journal.enrollOperatorAdmission(owner, origin, originalPermit);
+      const native: NativeScopeTransport = {
         request: (value, timeout) => this.nativeScopeTransport().request(value, timeout),
-      });
+      };
+      const scopes = new NativeRunScopes(this.ctx.storage, native);
+      let finalization;
+      let finalizationFailure: { error: unknown } | undefined;
+      try {
+        finalization = await journal.resumeProducerFinalization(
+          origin,
+          native,
+          async (record) => "opOwner" in record && !this.activeOperatorRequests.has(record.opOwner),
+        );
+        for (const saved of await journal.producerAdmissions(origin, (previous) => previous !== owner)) {
+          if (this.activeOperatorRequests.has(saved.opOwner)) {
+            finalization = { key: `native-operation:${saved.opOwner}`, opOwner: saved.opOwner, outcome: "held" };
+            break;
+          }
+          // Missing callback proof cannot be recreated by another request.
+          // Keep that permit held, without turning it into a new gate for every
+          // refresh step. The original native journal still owns exclusion.
+          if (!(await journal.operatorAdmissionReady(saved))) continue;
+          await endTrackedDeployAdmission(this.registry(), saved.permit);
+          await journal.completeOperatorAdmission(saved);
+          finalization = { key: `native-operation:${saved.opOwner}`, opOwner: saved.opOwner, outcome: "ended" };
+        }
+      } catch (error) {
+        emitDeployAdmission(
+          { phase: "operator-ending", stage: "resume", id: owner, commit: "unverified", failure: "storage-or-rpc" },
+          { error },
+        );
+        finalizationFailure = { error };
+      }
+      // A cleanup-only request still needs its own ending receipt before its
+      // caller can release the request's deployment permit.
       const admission = await journal.open(key, { opOwner: owner }, undefined, origin);
       await scopes.reserveOperator({ opOwner: owner });
       let callback: "returned" | "threw" = "threw";
       try {
+        if (finalizationFailure)
+          throw new StepError(
+            "producer-cleanup-pending",
+            "background producer cleanup remains pending",
+            finalizationFailure.error,
+          );
+        if (finalization) {
+          emitDeployAdmission({
+            phase: "operator-ending",
+            stage: "resume",
+            id: finalization.opOwner,
+            commit: finalization.outcome === "ended" ? "confirmed" : "unverified",
+            callback: "unknown",
+            originalOperationOutcome: "unknown",
+          });
+          throw new StepError(
+            finalization.outcome === "ended" ? "producer-cleanup-completed" : "producer-cleanup-pending",
+            finalization.outcome === "ended"
+              ? "background producer cleanup completed without repeating its operation"
+              : "background producer has an original active or unknown operation",
+          );
+        }
         if (admission === "producer-held")
           throw new Error("background producer has an original active or unknown operation");
         const result = await this.opOperationScope.run(scope, fn);
@@ -14464,10 +14566,11 @@ export class ResidentDO extends Sandbox<Env> {
               stage,
               commit: "unverified",
               failure: "opaque-or-scope-held",
+              callback,
             });
         } catch (error) {
           emitDeployAdmission(
-            { phase: "operator-ending", id: owner, stage, commit: "unverified", failure: "storage-or-rpc" },
+            { phase: "operator-ending", id: owner, stage, commit: "unverified", failure: "storage-or-rpc", callback },
             { error },
           );
         }
@@ -15321,6 +15424,9 @@ export class ResidentDO extends Sandbox<Env> {
           : null,
         skipped: refreshRow.skipped,
       },
+      deploymentAdmissionRecovery: await new NativeOperationJournal(this.ctx.storage).admissionRecovery(
+        (owner) => !this.activeOperatorRequests.has(owner),
+      ),
       threads,
       // Item 55: the last disk sample (`residentDiskBudget.ts` DiskSample), or
       // null before the first measurement of this incarnation.

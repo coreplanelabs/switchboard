@@ -379,6 +379,14 @@ Deployment refusals include bounded operation metadata separately from run owner
 
 A receipt with `outcome: "native-ended"` proves the recorded native work ended, including a non-zero exit. It does not mean the user's task succeeded. Missing or running processes, changed identities/owners/records, lost launch acknowledgements, opaque writes or publication effects and old records remain unresolved. Refresh the metadata after a changed-record refusal; do not replay uncertain work or clear records manually. Deployment still applies its normal fence and readiness checks.
 
+### Inspect original refresh permit cleanup
+
+Use the existing `POST /debug` info read for the selected resource. `deploymentAdmissionRecovery` reports saved local finalization evidence: a total count, at most 25 records and an omitted count. Each record names the original permit, operator owner, call, producer, step, missing stage and recovery owner. This is not the Registry's active-permit count.
+
+A failed refresh-status write records degraded metadata. Once that write and its error handling have settled, the original caller can still save its ending proof. The proof does not claim that the metadata write succeeded. A later refresh can finish native cleanup and release that exact permit. If a restart loses the original callback-ending proof, the permit remains held, but that record alone does not stop unrelated refresh steps. Original native journals and owner fences still prevent conflicting execution or container replacement.
+
+For `callback-ending-unverified`, an administrator needs independent evidence that the original request ended. Use the original permit ID with the [quoted request recovery protocol](../reference/specs/resident-repos.md#native-operation-recovery). It requires a fresh Registry quote and an HTTPS receipt for the original request ending. Its normal drain, fence, owner, lifecycle and process checks still apply. This path can release the permit without a full reset; it does not synthesize callback proof or discard the local unknown history. A native ending alone cannot supply the missing request-end receipt. If that receipt is unavailable, retain the permit.
+
 ### Clean up native work after a run ends
 
 For an ended run with an unresolved native operation, the existing Read `native-operations` report supplies the original key, `recordHash` and `journal.scope`. An administrator can send those exact values, plus `resource` and the selected resident number when needed, to `POST /retire-native-operation`. Use the complete original scope object. This route requires updated Memory and Resident workers; an older worker refuses it.

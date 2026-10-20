@@ -17,7 +17,12 @@ import { sanitizeResidentBody } from "../../src/execution/residentText.js";
 import { validNativeOperationKey } from "./nativeOperation.js";
 import { describe, expect, it } from "vitest";
 import { NativeOperationJournal, type NativeOperationStorage, type NativeOperationRows } from "./nativeOperation.js";
-import { NativeRunScopes, type NativeScopeTransport, type NativeTimeoutEnding } from "./nativeScope.js";
+import {
+  NativeRunScopes,
+  NativeScopeControlTimeoutError,
+  type NativeScopeTransport,
+  type NativeTimeoutEnding,
+} from "./nativeScope.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
 import { RUN_ID_PATTERN } from "../../src/core/runIdentity.js";
 
@@ -682,6 +687,278 @@ describe("native operation journal", () => {
       etag: "a".repeat(32),
     };
   }
+
+  async function admittedOperator() {
+    const h = fixture();
+    const owner = { opOwner: "op:original" };
+    const origin = {
+      producer: "refresh-step" as const,
+      resource: "repo:acme/api",
+      sourceId: "build",
+      callId: "11111111-1111-4111-8111-111111111111",
+      actor: "system" as const,
+      traceId: null,
+      parentSourceId: "refresh-original",
+      build: "a".repeat(40),
+      workerVersion: null,
+      startedAt: 1000,
+    };
+    const permit = { id: "22222222-2222-4222-8222-222222222222", requestHash: "a".repeat(64) };
+    await h.journal.enrollOperatorAdmission(owner.opOwner, origin, permit);
+    await h.journal.open(key, owner, undefined, origin);
+    return { ...h, owner, origin, permit };
+  }
+
+  it("enrolls the original permit before effects and refuses historical linkage", async () => {
+    const h = await admittedOperator();
+    expect(await h.journal.endOperatorCallback(h.owner.opOwner, h.origin.callId, h.permit)).toBe(false);
+    await h.journal.close(key);
+    expect(await h.journal.endOperatorCallback(h.owner.opOwner, "33333333-3333-4333-8333-333333333333", h.permit)).toBe(
+      false,
+    );
+    expect(
+      await h.journal.endOperatorCallback(h.owner.opOwner, h.origin.callId, {
+        ...h.permit,
+        requestHash: "b".repeat(64),
+      }),
+    ).toBe(false);
+    expect(await h.journal.endOperatorCallback(h.owner.opOwner, h.origin.callId, h.permit)).toBe(true);
+    await expect(h.journal.enrollOperatorAdmission(h.owner.opOwner, h.origin, h.permit)).rejects.toThrow(
+      "operator admission identity already used",
+    );
+    h.rows.delete("native-operation-admission:" + h.owner.opOwner);
+    await expect(h.journal.enrollOperatorAdmission(h.owner.opOwner, h.origin, h.permit)).rejects.toThrow(
+      "operator admission identity already used",
+    );
+    expect(await h.journal.producerAdmissions(h.origin, () => true)).toEqual([]);
+  });
+
+  it.each(["callback-marker", "call", "permit", "origin", "native-ending", "new-native-record"])(
+    "retains an enrolled permit with missing or changed %s proof",
+    async (fault) => {
+      const h = await admittedOperator();
+      await h.journal.close(key);
+      expect(await h.journal.endOperatorCallback(h.owner.opOwner, h.origin.callId, h.permit)).toBe(true);
+      await new NativeRunScopes(h.storage, {
+        request: async () => {
+          throw new Error("unstarted scope must not launch");
+        },
+      }).closeOperator(h.owner);
+      expect(await h.journal.endOperator(key, h.owner, "returned")).toBe(true);
+      const restarted = new NativeOperationJournal(h.storage);
+      const [saved] = await restarted.producerAdmissions(h.origin, () => true);
+      expect(saved).toMatchObject({ opOwner: "op:original", permit: h.permit, callbackMetadataEnded: true });
+      expect(await restarted.operatorAdmissionReady(saved!)).toBe(true);
+      if (fault === "callback-marker")
+        h.rows.set("native-operation-admission:" + h.owner.opOwner, { ...saved, callbackMetadataEnded: false });
+      if (fault === "call")
+        h.rows.set("native-operation-admission:" + h.owner.opOwner, {
+          ...saved,
+          origin: { ...saved!.origin, callId: "33333333-3333-4333-8333-333333333333" },
+        });
+      if (fault === "permit")
+        h.rows.set("native-operation-admission:" + h.owner.opOwner, {
+          ...saved,
+          permit: { ...h.permit, requestHash: "b".repeat(64) },
+        });
+      if (fault === "origin")
+        h.rows.set("native-operation-admission:" + h.owner.opOwner, {
+          ...saved,
+          origin: { ...saved!.origin, sourceId: "different-step" },
+        });
+      if (fault === "native-ending") h.rows.delete("native-operation-ending:" + key);
+      if (fault === "new-native-record") h.rows.set(key, { unknown: true });
+      expect(await restarted.operatorAdmissionReady(saved!)).toBe(false);
+      await expect(restarted.completeOperatorAdmission(saved!)).rejects.toThrow("operator admission ending changed");
+      expect(await restarted.producerAdmissions(h.origin, () => true)).toHaveLength(1);
+    },
+  );
+
+  it("resumes only original producer finalization after a controller restart", async () => {
+    const h = await ownedOperator("process", false);
+    await h.journal.settle(key, h.attempt);
+    await h.journal.close(key);
+    const scopes = new NativeRunScopes(h.storage, h.native);
+    await scopes.closeOperator(h.owner, h.ref);
+    const origin = (h.rows.get(key) as any).origin;
+    const restarted = new NativeOperationJournal(h.storage);
+    expect(await restarted.resumeProducerFinalization(origin, h.native, matches)).toEqual({
+      key,
+      opOwner: "op:original",
+      outcome: "ended",
+    });
+    expect(await restarted.operatorEnded(key, h.owner)).toBe(true);
+    expect(h.rows.get(`native-operation-ending:${key}`)).toMatchObject({
+      receipt: { callback: "unknown", originalOperationOutcome: "unknown" },
+    });
+    expect(await restarted.resumeProducerFinalization(origin, h.native, matches)).toBeUndefined();
+    expect(h.calls.filter((mode) => mode === "bootstrap")).toEqual(["bootstrap"]);
+  });
+
+  it("retires saved unstarted producer cleanup without waking native execution", async () => {
+    const h = fixture();
+    const owner = { opOwner: "op:original" };
+    const origin = {
+      producer: "refresh-step" as const,
+      resource: "repo:acme/api",
+      sourceId: "complete",
+      callId: "11111111-1111-4111-8111-111111111111",
+      actor: "system" as const,
+      traceId: null,
+      parentSourceId: "refresh-original",
+      build: "a".repeat(40),
+      workerVersion: null,
+      startedAt: 1000,
+    };
+    await h.journal.open(key, owner, undefined, origin);
+    await h.journal.close(key);
+    const native: NativeScopeTransport = {
+      request: async () => {
+        throw new Error("native must stay asleep");
+      },
+    };
+    expect(await new NativeRunScopes(h.storage, native).closeOperator(owner)).toBe("unstarted");
+    expect(await h.journal.resumeProducerFinalization({ ...origin, sourceId: "fetch" }, native, matches)).toEqual({
+      key,
+      opOwner: "op:original",
+      outcome: "ended",
+    });
+    expect(await h.journal.operatorEnded(key, owner)).toBe(true);
+    expect(h.rows.get(`native-operation-ending:${key}`)).toMatchObject({
+      receipt: { scope: null, callback: "unknown" },
+    });
+  });
+
+  it.each([
+    "active",
+    "journal-open",
+    "pending",
+    "not-closing",
+    "foreign-scope",
+    "foreign-boot",
+    "foreign-owner",
+    "foreign-claim",
+  ])("holds producer finalization when %s evidence is present", async (fault) => {
+    const h = await ownedOperator("process", false);
+    if (fault !== "pending") await h.journal.settle(key, h.attempt);
+    if (fault !== "journal-open") await h.journal.close(key);
+    const scopeKey = [...h.rows.keys()].find((name) => name.startsWith("native-operator-scope:"))!;
+    if (fault !== "not-closing") {
+      const scope = h.rows.get(scopeKey) as any;
+      h.rows.set(scopeKey, { ...scope, closing: true });
+    }
+    if (fault === "foreign-scope") {
+      const record = h.rows.get(key) as any;
+      record.native.scope.id = "33333333-3333-4333-8333-333333333333";
+    }
+    if (fault === "foreign-boot" || fault === "foreign-owner") {
+      const scope = h.rows.get(scopeKey) as any;
+      if (fault === "foreign-boot") scope.boot = "33333333-3333-4333-8333-333333333333";
+      else scope.owner = { opOwner: "op:foreign" };
+    }
+    if (fault === "foreign-claim") {
+      const claimKey = [...h.rows.keys()].find((name) => name.startsWith("native-operation-producer:"))!;
+      h.rows.set(claimKey, { key, opOwner: "op:original", callId: crypto.randomUUID() });
+    }
+    const before = structuredClone([...h.rows]);
+    const calls = h.calls.length;
+    expect(
+      await h.journal.resumeProducerFinalization(
+        (h.rows.get(key) as any).origin,
+        h.native,
+        async () => fault !== "active",
+      ),
+    ).toMatchObject({ outcome: "held" });
+    expect([...h.rows]).toEqual(before);
+    expect(h.calls.length).toBe(calls);
+    expect(h.rows.get(key)).toMatchObject({ opOwner: "op:original" });
+  });
+
+  it.each(["inspect", "readback", "retirement"])(
+    "resumes original producer finalization after unavailable %s evidence",
+    async (fault) => {
+      const h = await ownedOperator("process", false);
+      await h.journal.settle(key, h.attempt);
+      await h.journal.close(key);
+      const scopeKey = [...h.rows.keys()].find((name) => name.startsWith("native-operator-scope:"))!;
+      h.rows.set(scopeKey, { ...(h.rows.get(scopeKey) as object), closing: true });
+      const origin = (h.rows.get(key) as any).origin;
+      let unavailable = true;
+      let closed = false;
+      const requests: Record<string, unknown>[] = [];
+      const native: NativeScopeTransport = {
+        request: async (request, timeout) => {
+          requests.push(request);
+          if (request.mode === "close") closed = true;
+          if (
+            unavailable &&
+            ((fault === "inspect" && ["inspect", "view"].includes(String(request.mode))) ||
+              (fault === "readback" && ["close", "view"].includes(String(request.mode))))
+          )
+            throw new NativeScopeControlTimeoutError(String(request.mode), timeout);
+          return request.mode === "inspect"
+            ? h.native.request(request, timeout)
+            : {
+                stdout: JSON.stringify({ ref: request.ref, closed, populated: false }),
+                stderr: "",
+                exitCode: 0,
+                timedOut: false,
+              };
+        },
+      };
+      const storage: NativeOperationStorage = {
+        ...h.storage,
+        transaction: (action) =>
+          h.storage.transaction((rows) =>
+            action({
+              ...rows,
+              put: async (name, value) => {
+                if (fault === "retirement" && unavailable && name.startsWith("native-operation-ending:"))
+                  throw new Error("retirement storage unavailable");
+                await rows.put(name, value);
+              },
+            }),
+          ),
+      };
+      const interrupted = new NativeOperationJournal(storage).resumeProducerFinalization(origin, native, matches);
+      if (fault === "retirement") expect(await interrupted).toMatchObject({ outcome: "held" });
+      else await expect(interrupted).rejects.toThrow("native-scope outcome is unknown");
+      expect(h.rows.get(key)).toMatchObject({ opOwner: "op:original", native: { closed: true, pending: {} } });
+      unavailable = false;
+      const restarted = new NativeOperationJournal(storage);
+      expect(await restarted.resumeProducerFinalization(origin, native, matches)).toMatchObject({ outcome: "ended" });
+      expect(await restarted.operatorEnded(key, h.owner)).toBe(true);
+      expect(
+        requests
+          .filter((request) => request.mode !== "inspect")
+          .every((request) => JSON.stringify(request.ref) === JSON.stringify(h.ref)),
+      ).toBe(true);
+      expect([...h.rows.keys()].filter((name) => name.startsWith("native-operation-ending:"))).toEqual([
+        `native-operation-ending:${key}`,
+      ]);
+    },
+  );
+
+  it("retires one original producer once under concurrent finalization", async () => {
+    const h = await ownedOperator("process");
+    await h.journal.settle(key, h.attempt);
+    await h.journal.close(key);
+    const origin = (h.rows.get(key) as any).origin;
+    const outcomes = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        new NativeOperationJournal(h.storage).resumeProducerFinalization(origin, h.native, matches),
+      ),
+    );
+    expect(outcomes.some((result) => result?.outcome === "ended")).toBe(true);
+    expect(await h.journal.operatorEnded(key, h.owner)).toBe(true);
+    expect([...h.rows.keys()].filter((name) => name.startsWith("native-operation-ending:"))).toEqual([
+      `native-operation-ending:${key}`,
+    ]);
+    expect(h.rows.get(`native-operation-ending:${key}`)).toMatchObject({
+      original: { opOwner: "op:original" },
+      receipt: { originalOperationOutcome: "unknown" },
+    });
+  });
 
   it("reserves a restore descriptor before effects and blocks overlapping cleanup after restart", async () => {
     const h = await ownedOperator("opaque", false);
