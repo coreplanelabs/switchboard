@@ -1,12 +1,13 @@
+import { createHash } from "node:crypto";
 import { contentTypeFor } from "../artifacts/contentType.js";
 import { outboundKey, safeBasename } from "../artifacts/keys.js";
 import { MAX_PR_IMAGE_BYTES } from "../artifacts/prImages.js";
 import type { ArtifactStore } from "../artifacts/store.js";
-import { parseExitPrefix } from "../core/runEvents.js";
+import { redactAndCap } from "../core/redact.js";
 import type { UploadTicket } from "../core/types.js";
 import { BASH_TIMEOUT_MAX_MS, bashBudgetWithinRun } from "../execution/bashTimeout.js";
 import { MAX_READ_BYTES, parseByteSize, statCommandFor } from "../execution/binaryRead.js";
-import type { ExecOptions } from "../execution/executor.js";
+import type { ExecOptions, ExecResult } from "../execution/executor.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import type { RunnableTool, ToolContext } from "./runnableTool.js";
 
@@ -74,7 +75,7 @@ function fileNameOf(path: string): string {
   return segments[segments.length - 1] ?? path;
 }
 
-const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+const describe = (err: unknown): string => redactAndCap(err instanceof Error ? err.message : String(err), 1000);
 const secs = (ms: number): number => Math.max(0, Math.round(ms / 1000));
 
 /** The command the container runs to PUT the file to the store: the type is
@@ -91,7 +92,7 @@ const PUT_REPORT_FORMAT = "\\n%{http_code} %{size_upload}";
 /** curl's report as the error names it (`HTTP 200 after sending 119 bytes`), or
  *  null when the output carries none (a test double, a curl that died first). */
 export function parsePutReport(output: string): { httpCode: number; sentBytes: number } | null {
-  const m = /(\d{3}) (\d{1,15})\s*$/.exec(output);
+  const m = /^\n?(\d{3}) (\d{1,15})\s*$/.exec(output);
   return m ? { httpCode: Number(m[1]), sentBytes: Number(m[2]) } : null;
 }
 
@@ -113,19 +114,69 @@ async function attachThroughStore(
   ctx: ToolContext,
   publishForPr: boolean,
 ): Promise<string> {
-  const exec = (command: string, timeoutMs: number): Promise<string> => {
-    const opts: ExecOptions = { timeoutMs, ...(ctx.signal ? { signal: ctx.signal } : {}) };
-    return ctx.executor.exec(command, opts);
-  };
+  const run = ctx.executor.execResult?.bind(ctx.executor);
+  if (!run) return "error: attach_file requires structured command outcomes";
   // The file is recorded under the call that posts it; both loops hand every
   // call its id, so a missing one is a wiring fault, named rather than papered over.
   const callId = ctx.callId;
   if (callId === undefined) return "error: attach_file was run without its call id — the file cannot be recorded";
+  const exec = async (
+    command: string,
+    timeoutMs: number,
+    stage: "stat" | "put" | "post",
+  ): Promise<{ stdout: string } | { error: string }> => {
+    const opts: ExecOptions = { timeoutMs, ...(ctx.signal ? { signal: ctx.signal } : {}) };
+    const unverified = (
+      reason: "lost_reply" | "unverifiable_result" | "truncated_output" | "upload_outcome_unknown",
+      error: string,
+      exitCode?: number,
+    ): { error: string } => {
+      if (stage !== "stat") ctx.reportToolFailure?.({ code: "outcome_unknown", recovery: "stop" });
+      console.log(
+        JSON.stringify({
+          event: "attachment_command_refused",
+          tool: "attach_file",
+          stage,
+          reason,
+          callIdHash: createHash("sha256").update(callId).digest("hex"),
+          ...(exitCode !== undefined ? { exitCode } : {}),
+        }),
+      );
+      return { error };
+    };
+    let result: ExecResult;
+    try {
+      result = await run(command, opts);
+    } catch (err) {
+      // A lost response can follow a completed upload. Report the uncertainty
+      // without sending the command again or completing a channel ticket.
+      return unverified("lost_reply", `command outcome is unknown: ${describe(err)}`);
+    }
+    if (
+      !result ||
+      typeof result.stdout !== "string" ||
+      typeof result.stderr !== "string" ||
+      !Number.isInteger(result.exitCode) ||
+      result.exitCode < 0 ||
+      result.exitCode > 255 ||
+      typeof result.truncated !== "boolean"
+    )
+      return unverified("unverifiable_result", "command result could not be verified");
+    if (result.truncated) return unverified("truncated_output", "command output was truncated");
+    if (result.exitCode !== 0) {
+      const detail = `command exited with code ${result.exitCode}: ${describe(result.stderr || result.stdout)}`;
+      // Process completion does not prove whether the upload reached its destination.
+      return stage === "stat"
+        ? { error: detail }
+        : unverified("upload_outcome_unknown", `${detail}; upload outcome is unknown`, result.exitCode);
+    }
+    return { stdout: result.stdout };
+  };
   // 1. Measure. `stat` runs in the workspace as the thread user; its words are the error's.
-  const statOut = await exec(statCommandFor(shellQuote(path)), STAT_TIMEOUT_MS);
-  if (parseExitPrefix(statOut).failed) return `error: could not read ${path}: ${statOut.trim()}`;
-  const size = parseByteSize(statOut);
-  if (size === null) return `error: could not measure ${path}: ${statOut.trim()}`;
+  const statOut = await exec(statCommandFor(shellQuote(path)), STAT_TIMEOUT_MS, "stat");
+  if ("error" in statOut) return `error: could not read ${path}: ${statOut.error}`;
+  const size = parseByteSize(statOut.stdout);
+  if (size === null) return `error: could not measure ${path}: ${describe(statOut.stdout.trim())}`;
   if (size === 0) return `error: ${path} is empty — nothing to attach`;
   if (publishForPr && size > MAX_PR_IMAGE_BYTES) return `error: PR images take at most ${MAX_PR_IMAGE_BYTES} bytes`;
   if (size > MAX_ARTIFACT_BYTES) {
@@ -152,13 +203,13 @@ async function attachThroughStore(
   const contentType = contentTypeFor(name);
   const key = outboundKey(artifacts.runId, artifacts.nextSeq(), name);
   const putUrl = await artifacts.store.presignPut(key, contentType);
-  const putOut = await exec(putCommandFor(path, contentType, putUrl), timeoutMs);
-  if (parseExitPrefix(putOut).failed) {
-    return `error: the upload of ${name} to the artifact store failed: ${putOut.trim()}`;
+  const putOut = await exec(putCommandFor(path, contentType, putUrl), timeoutMs, "put");
+  if ("error" in putOut) {
+    return `error: the upload of ${name} to the artifact store failed: ${putOut.error}`;
   }
   // curl's own account of the PUT rides along in the error: whether the store
   // read short or curl sent short is the first question the record must answer.
-  const report = parsePutReport(putOut);
+  const report = parsePutReport(putOut.stdout);
   const curlSaid = report ? `; curl reported HTTP ${report.httpCode} after sending ${report.sentBytes} bytes` : "";
   const head = await artifacts.store.head(key);
   if (!head) {
@@ -178,7 +229,8 @@ async function attachThroughStore(
       const url = await artifacts.store.publishPrImage(key);
       return `${attached}; public PR image (retained by the artifact lifecycle): ![${safeBasename(name)}](${url})`;
     } catch (err) {
-      return `error: ${attached}; PR publication failed: ${describe(err)} — no public PR image was returned`;
+      ctx.reportToolFailure?.({ code: "outcome_unknown", recovery: "stop" });
+      return `error: ${attached}; PR publication has an unknown outcome: ${describe(err)} — no public PR image URL was returned`;
     }
   };
   // 4. Into the conversation. A channel with an upload ticket gets the same
@@ -188,7 +240,12 @@ async function attachThroughStore(
   if (!ctx.uploadTicket) {
     const link = artifacts.artifactUrl?.(key);
     const where = link ? ` — ${link}` : ` is on the run page as ${key}`;
-    await artifacts.reply(`${lead}\n📎 ${name} (${size} bytes)${where}`);
+    try {
+      await artifacts.reply(`${lead}\n📎 ${name} (${size} bytes)${where}`);
+    } catch (err) {
+      ctx.reportToolFailure?.({ code: "outcome_unknown", recovery: "stop" });
+      return `error: the file-link reply for ${name} has an unknown outcome: ${describe(err)}; the file is kept on the run page`;
+    }
     const linked = `attached ${name} (${size} bytes) to the run page as ${key}; this conversation's channel takes no file uploads, so the lead and the file's link were posted instead`;
     return publishForPr
       ? `error: ${linked}; PR publication requires a completed channel upload — no public PR image was published`
@@ -201,14 +258,15 @@ async function attachThroughStore(
   } catch (err) {
     return `error: the channel refused an upload ticket for ${name}: ${describe(err)}; ${kept}`;
   }
-  const postOut = await exec(postCommandFor(path, ticket.url), timeoutMs);
-  if (parseExitPrefix(postOut).failed) {
-    return `error: the upload of ${name} to the channel failed: ${postOut.trim()}; ${kept}`;
+  const postOut = await exec(postCommandFor(path, ticket.url), timeoutMs, "post");
+  if ("error" in postOut) {
+    return `error: the upload of ${name} to the channel failed: ${postOut.error}; ${kept}`;
   }
   try {
     await ticket.complete(lead);
   } catch (err) {
-    return `error: the channel refused to complete the upload of ${name}: ${describe(err)}; ${kept}`;
+    ctx.reportToolFailure?.({ code: "outcome_unknown", recovery: "stop" });
+    return `error: completion of the upload of ${name} has an unknown outcome: ${describe(err)}; ${kept}`;
   }
   return finish(`attached ${name} (${size} bytes) to the conversation and the run page`);
 }
@@ -270,7 +328,8 @@ export const attachFileTool: RunnableTool = {
     try {
       await ctx.attach({ name, bytes, lead });
     } catch (err) {
-      return `error: the channel refused the upload of ${name}: ${describe(err)}`;
+      ctx.reportToolFailure?.({ code: "outcome_unknown", recovery: "stop" });
+      return `error: the upload of ${name} has an unknown outcome: ${describe(err)}`;
     }
     return `attached ${name} (${bytes.byteLength} bytes) to the conversation`;
   },

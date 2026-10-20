@@ -61,7 +61,8 @@ export interface MoveOptions extends ExecTraceOptions {
 export interface Executor {
   /** Fixed operator diagnostic. Unsupported backends expose no shell fallback. */
   inspectCredentials?(input: CredentialInspectionInput): Promise<CredentialInspection>;
-  /** Run a shell command; returns combined output (never throws on non-zero
+  /** Run a shell command; returns presentation text, never machine status.
+   *  Returns combined output (never throws on non-zero
    *  exit). `opts.signal` is a hard run stop: an implementation that can
    *  cancel the underlying command does so and returns/throws promptly; one that
    *  cannot simply ignores it — the runner stops waiting on it either way. */
@@ -70,8 +71,8 @@ export interface Executor {
    * original process-ending proof; an exit code alone is not enough. Missing
    * evidence never permits execution. */
   inspectCheckResult?(operation: CheckOperation, opts?: ExecOptions): Promise<ExecResult | undefined>;
-  /** Structured command outcome for runner decisions. Human-readable `exec`
-   * output is presentation, never an authority or success signal. Backends
+  /** Structured status and truncation for runner decisions. Streams can be
+   * redacted or capped; they cannot select trusted paths or owners. Backends
    * without this result cannot perform effects that require it. */
   execResult?(command: string, opts?: ExecOptions): Promise<ExecResult>;
   /** Optional trusted Git transport. Implementations must keep `bearer` out

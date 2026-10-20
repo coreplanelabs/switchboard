@@ -4230,14 +4230,14 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       readBytes: async () => {
         throw new Error("the inline path must not run with a store");
       },
-      exec: async (command) => {
+      execResult: async (command) => {
         commands.push(command);
-        if (command.startsWith("stat ")) return "3\n";
+        if (command.startsWith("stat ")) return { stdout: "3\n", stderr: "", exitCode: 0, truncated: false };
         if (command.startsWith("curl -fsS -T ")) {
           const url = new URL(/'([^']+)'$/.exec(command)![1]);
           store.put(decodeURIComponent(url.pathname.slice(1)), new Uint8Array([1, 2, 3]), "image/png");
         }
-        return "";
+        return { stdout: "", stderr: "", exitCode: 0, truncated: false };
       },
     };
     const completed: string[] = [];
@@ -4284,14 +4284,14 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       provider: scripted(),
       executor: {
         ...executor,
-        exec: async (command) => {
+        execResult: async (command) => {
           commands.push(command);
-          if (command.startsWith("stat ")) return "3\n";
+          if (command.startsWith("stat ")) return { stdout: "3\n", stderr: "", exitCode: 0, truncated: false };
           if (command.startsWith("curl -fsS -T ")) {
             const url = new URL(/'([^']+)'$/.exec(command)![1]);
             store2.put(decodeURIComponent(url.pathname.slice(1)), new Uint8Array([1, 2, 3]), "image/png");
           }
-          return "";
+          return { stdout: "", stderr: "", exitCode: 0, truncated: false };
         },
       },
       artifacts: store2,
