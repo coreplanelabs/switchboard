@@ -5,8 +5,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DigestReport } from "../core/diffDigest.js";
-import { retainDigest } from "../core/diffDigest.js";
-import { checkDigestCoverage } from "../core/digestCoverage.js";
 import { TOOLSETS } from "./toolsets.js";
 import { diffDigestTool } from "./diffDigest.js";
 import type { ToolContext } from "./runnableTool.js";
@@ -50,48 +48,6 @@ function scripted(answers: Array<(cmd: string) => string | ExecResult>) {
 }
 
 describe("diff_digest tool", () => {
-  it.each(["initial listing", "after history fetch"])(
-    "retains full review coverage after a clipped comparison: %s",
-    async (stage) => {
-      const reports: DigestReport[] = [];
-      let saved: DigestReport | undefined;
-      let comparisons = 0;
-      const prefix = (base: string) => `@@diff_digest:range@@\n${base}\n${"b".repeat(40)}\n${"a".repeat(40)}\n`;
-      const ctx = ctxWith(async (command) => {
-        if (command.includes("--is-shallow-repository")) return "true\n";
-        if (command.includes("fetch --unshallow")) return "";
-        comparisons++;
-        if (comparisons === 1) return prefix("a".repeat(40)) + ONE_FILE;
-        if (comparisons === 2 && stage === "after history fetch")
-          return { stdout: "", stderr: "no merge base", exitCode: 128, truncated: false };
-        return { stdout: prefix("c".repeat(40)) + ONE_FILE, stderr: "", exitCode: 0, truncated: true };
-      });
-      ctx.digestTarget = () => ({ baseRef: "main", head: "b".repeat(40) });
-      ctx.onDigest = (next) => {
-        reports.push(next);
-        saved = retainDigest(saved, next);
-      };
-      await diffDigestTool.run({}, ctx);
-      expect(await diffDigestTool.run({ base: "c".repeat(40) }, ctx)).toContain("cannot state totals");
-      expect(reports.at(-1)).toMatchObject({ complete: false });
-      expect(reports.at(-1)).not.toHaveProperty("totals");
-      expect(saved).toEqual({
-        complete: true,
-        base: "origin/main",
-        totals: { files: 1, additions: 1, deletions: 0 },
-        range: { base: "a".repeat(40), head: "b".repeat(40), canonicalBase: "a".repeat(40), baseRef: "main" },
-      });
-      expect(
-        checkDigestCoverage({
-          digest: saved,
-          pr: { changedFiles: 1, additions: 1, deletions: 0 },
-          head: "b".repeat(40),
-          baseRef: "main",
-        }),
-      ).toEqual({ ok: true, compared: true });
-    },
-  );
-
   it("logs a coding refusal with bounded reason and base context", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const ctx = ctxWith(async () => ({ stdout: "", stderr: "PRIVATE_FAILURE", exitCode: 1, truncated: false }));
@@ -113,35 +69,6 @@ describe("diff_digest tool", () => {
     }
   });
 
-  it.each(["partial prefix", "changed head", "changed canonical base"])(
-    "holds clipped coverage without a confirmed matching range: %s",
-    async (kind) => {
-      let saved: DigestReport | undefined;
-      let calls = 0;
-      const ctx = ctxWith(async () => {
-        calls++;
-        if (calls === 1)
-          return `@@diff_digest:range@@\n${"a".repeat(40)}\n${"b".repeat(40)}\n${"a".repeat(40)}\n${ONE_FILE}`;
-        const stdout =
-          kind === "partial prefix"
-            ? `@@diff_digest:range@@\n${"c".repeat(40)}\n`
-            : `@@diff_digest:range@@\n${"c".repeat(40)}\n${(kind === "changed head" ? "d" : "b").repeat(40)}\n${(kind === "changed canonical base" ? "d" : "a").repeat(40)}\n`;
-        return { stdout, stderr: "", exitCode: 0, truncated: true };
-      });
-      ctx.digestTarget = () => ({ baseRef: "main", head: "b".repeat(40) });
-      ctx.onDigest = (next) => {
-        saved = retainDigest(saved, next);
-      };
-      await diffDigestTool.run({}, ctx);
-      expect(saved).toMatchObject({ complete: true, totals: { files: 1, additions: 1, deletions: 0 } });
-      expect(await diffDigestTool.run({ base: "old" }, ctx)).toContain("cannot state totals");
-      expect(saved).toMatchObject({ complete: false, base: "old" });
-      expect(checkDigestCoverage({ digest: saved, pr: { changedFiles: 1, additions: 1, deletions: 0 } })).toMatchObject(
-        { ok: false },
-      );
-    },
-  );
-
   it("records a bounded refusal without logging the caller's base expression", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const ctx = ctxWith(
@@ -149,16 +76,22 @@ describe("diff_digest tool", () => {
     );
     ctx.repo = "acme/api";
     ctx.reviewHistory = { target: { repo: "acme/api", number: 42 } };
-    ctx.digestTarget = () => ({ baseRef: "main", head: "c".repeat(40) });
+    ctx.reviewReadTarget = () => ({
+      repo: "acme/api",
+      pr: 42,
+      baseRef: "main",
+      head: "c".repeat(40),
+      base: "a".repeat(40),
+    });
     try {
-      expect(await diffDigestTool.run({ base: "caller-private-expression" }, ctx)).toBe(
+      expect(await diffDigestTool.run({}, ctx)).toBe(
         "diff_digest: the digest did not confirm the pinned review head and base.",
       );
       expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
         {
           event: "review_digest_refused",
           repo: "acme/api",
-          base: "custom",
+          base: "canonical",
           pr: 42,
           head: "c".repeat(40),
           baseRef: "main",
@@ -453,32 +386,25 @@ describe("diff_digest tool on a real multi-commit branch (LocalExecutor)", () =>
     ]);
   });
 
-  it("binds full and incremental digests to their immutable review ranges", async () => {
+  it("keeps the PR digest pinned when an alternate comparison is requested", async () => {
     const reports: DigestReport[] = [];
     const head = sh(wt, "git rev-parse HEAD").trim();
     const base = sh(wt, "git rev-parse main").trim();
-    const delta = sh(wt, "git rev-parse HEAD~1").trim();
     const ctx: ToolContext = {
       executor: new LocalExecutor(wt),
       onDigest: (report) => reports.push(report),
-      ...{ digestTarget: () => ({ baseRef: "main", head }) },
+      reviewReadTarget: () => ({ repo: "example/project", pr: 7, baseRef: "main", head, base }),
     };
-    const full = await diffDigestTool.run({ base: "main" }, ctx);
-    const incremental = await diffDigestTool.run({ base: "HEAD~1" }, ctx);
-    expect(full).toContain("4 files changed, +4204 -0");
-    expect(incremental).toContain("2 files changed, +2 -0");
+    expect(await diffDigestTool.run({}, ctx)).toContain("4 files changed, +4204 -0");
+    expect(await diffDigestTool.run({ base: "HEAD~1" }, ctx)).toBe(
+      "diff_digest: a PR review uses its pinned base; use git diff to inspect other ranges.",
+    );
     expect(reports).toEqual([
       {
         complete: true,
-        base: "main",
-        range: { base, head, canonicalBase: base, baseRef: "main" },
+        base,
+        range: { base, head, baseSha: base, baseRef: "main" },
         totals: { files: 4, additions: 4204, deletions: 0 },
-      },
-      {
-        complete: true,
-        base: "HEAD~1",
-        range: { base: delta, head, canonicalBase: base, baseRef: "main" },
-        totals: { files: 2, additions: 2, deletions: 0 },
       },
     ]);
   });

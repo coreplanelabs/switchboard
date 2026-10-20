@@ -12,6 +12,8 @@ import { TOOLSETS } from "./toolsets.js";
 import type { ToolContext } from "./runnableTool.js";
 import { shapeToolSchemasForWire } from "../core/providerToolSchemas.js";
 import { reviewReadTool } from "./reviewRead.js";
+import { diffDigestTool } from "./diffDigest.js";
+import { produceReadingDiff } from "../core/readingDiff.js";
 
 let root: string;
 let head: string;
@@ -25,7 +27,7 @@ function context(): ToolContext {
     checkout: () => root,
     repo: "example/project",
     github: { api: new InMemoryGithubApi(), canWrite: () => true },
-    reviewReadTarget: () => ({ repo: "example/project", pr: 7, head, baseRef: "main" }),
+    reviewReadTarget: () => ({ repo: "example/project", pr: 7, head, baseRef: "main", base }),
   };
 }
 async function read(input: Record<string, unknown>, ctx = context()) {
@@ -56,6 +58,25 @@ describe("review_read", () => {
     head = git("rev-parse", "HEAD");
   });
   afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  it("uses one pinned PR comparison for source and digest despite stale or missing remote refs", async () => {
+    const ctx = context();
+    ctx.reviewReadTarget = () => ({ repo: "example/project", pr: 7, head, baseRef: "main", base });
+    for (const remote of [head, undefined]) {
+      if (remote) git("update-ref", "refs/remotes/origin/main", remote);
+      else git("update-ref", "-d", "refs/remotes/origin/main");
+      try {
+        const page = await read({ kind: "diff" }, ctx);
+        expect(page.source).toMatchObject({ head, base, mergeBase: base });
+        expect(page.text).toContain("diff --git a/catalog.txt b/catalog.txt\n");
+        expect(String(await diffDigestTool.run({}, ctx))).toContain("Diff digest — 3 files changed, +6 -1");
+        const artifact = await produceReadingDiff(ctx.executor, { baseRef: "main", ...{ base, head } });
+        expect(artifact?.diff).toContain("diff --git a/catalog.txt b/catalog.txt\n");
+      } finally {
+        git("update-ref", "refs/remotes/origin/main", base);
+      }
+    }
+  });
 
   it("keeps first-page inputs optional on the Responses wire and enforces pinned continuations", async () => {
     const model: Model<"openai-responses"> = {
@@ -120,7 +141,7 @@ describe("review_read", () => {
         text: "\uFEFFé😀\r\nend\n",
         eof: true,
       });
-      ctx.reviewReadTarget = () => ({ repo: "example/project", pr: 7, head: "0".repeat(40), baseRef: "main" });
+      ctx.reviewReadTarget = () => ({ repo: "example/project", pr: 7, head: "0".repeat(40), baseRef: "main", base });
       expect(await read({ kind: "file", path: "unicode.txt" }, ctx)).toEqual({
         error: "bound review head does not match the checkout",
       });
@@ -193,7 +214,7 @@ describe("review_read", () => {
     ctx.github!.canWrite = () => false;
     expect(await read({ kind: "diff" }, ctx)).toMatchObject({ error: "review source access is unavailable" });
     ctx.github!.canWrite = () => true;
-    ctx.reviewReadTarget = () => ({ repo: "other/project", pr: 7, head, baseRef: "main" });
+    ctx.reviewReadTarget = () => ({ repo: "other/project", pr: 7, head, baseRef: "main", base });
     expect(await read({ kind: "diff" }, ctx)).toMatchObject({ error: "review source access is unavailable" });
     delete ctx.reviewReadTarget;
     expect(await read({ kind: "diff" }, ctx)).toMatchObject({ error: "review source access is unavailable" });
@@ -228,7 +249,7 @@ describe("review_read", () => {
     git("update-ref", "refs/remotes/origin/main", head);
     try {
       expect(await read({ kind: "diff", offset: page.nextOffset, sourceHash: page.sourceHash })).toMatchObject({
-        error: "source changed; start a new read at offset 0",
+        sourceHash: page.sourceHash,
       });
     } finally {
       git("update-ref", "refs/remotes/origin/main", base);

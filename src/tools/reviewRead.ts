@@ -6,6 +6,7 @@ export interface ReviewReadTarget {
   pr: number;
   head: string;
   baseRef: string;
+  base: string;
 }
 
 // Runs inside the executor, never on the bot host. Git reads immutable objects:
@@ -24,7 +25,7 @@ const fail = (error) => { process.stdout.write(JSON.stringify({ error })); };
 try {
   const head = git("rev-parse", "--verify", "HEAD").toString().trim();
   if (head !== args.target.head) throw new Error("bound review head does not match the checkout");
-  const base = git("rev-parse", "--verify", "--end-of-options", "refs/remotes/origin/" + args.target.baseRef + "^{commit}").toString().trim();
+  const base = args.target.base;
   const mergeBase = git("merge-base", base, head).toString().trim();
   if (!/^[a-f0-9]{40}$/.test(base) || !/^[a-f0-9]{40}$/.test(mergeBase)) throw new Error("review base could not be pinned");
   const source = { ...args.target, base, mergeBase, kind: args.kind, ...(args.path ? { path: args.path } : {}) };
@@ -90,6 +91,7 @@ export const reviewReadTool: RunnableTool = {
       target.repo !== ctx.repo ||
       !ctx.github?.canWrite(target.repo) ||
       !/^[a-f0-9]{40}$/.test(target.head) ||
+      !/^[a-f0-9]{40}$/.test(target.base) ||
       !target.baseRef ||
       !checkout ||
       !ctx.executor.execResult
@@ -144,6 +146,7 @@ export const reviewReadTool: RunnableTool = {
         page.source?.repo !== target.repo ||
         page.source?.pr !== target.pr ||
         page.source?.baseRef !== target.baseRef ||
+        page.source?.base !== target.base ||
         page.source?.kind !== input.kind ||
         page.source?.path !== path ||
         typeof page.text !== "string" ||
@@ -168,6 +171,7 @@ export const reviewReadTool: RunnableTool = {
         current.repo !== target.repo ||
         current.pr !== target.pr ||
         current.baseRef !== target.baseRef ||
+        current.base !== target.base ||
         !ctx.github.canWrite(target.repo)
       )
         return fail("review source access changed during the read");

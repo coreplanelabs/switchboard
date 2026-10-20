@@ -38,29 +38,13 @@ export interface DigestTotals {
 export interface DigestRange {
   base: string;
   head: string;
-  canonicalBase: string;
+  baseSha: string;
   baseRef: string;
 }
 
 export type DigestReport = (
   { complete: true; base: string; totals: DigestTotals } | { complete: false; base: string; reason: string }
 ) & { range?: DigestRange };
-
-/** Incremental inspection cannot replace full coverage of the same PR range. */
-export function retainDigest(previous: DigestReport | undefined, next: DigestReport): DigestReport {
-  const old = previous?.range;
-  const current = next.range;
-  return previous &&
-    old &&
-    current &&
-    old.base === old.canonicalBase &&
-    current.base !== current.canonicalBase &&
-    old.canonicalBase === current.canonicalBase &&
-    old.head === current.head &&
-    old.baseRef === current.baseRef
-    ? previous
-    : next;
-}
 
 export interface Digest {
   text: string;
@@ -275,7 +259,7 @@ export function parseDigestReport(value: unknown): DigestReport | undefined {
     if (!v.range || typeof v.range !== "object") return undefined;
     const r = v.range as Record<string, unknown>;
     if (
-      ![r.base, r.head, r.canonicalBase].every((x) => typeof x === "string" && /^[0-9a-f]{40}$/.test(x)) ||
+      ![r.base, r.head, r.baseSha].every((x) => typeof x === "string" && /^[0-9a-f]{40}$/.test(x)) ||
       typeof r.baseRef !== "string" ||
       !r.baseRef
     )
@@ -283,7 +267,7 @@ export function parseDigestReport(value: unknown): DigestReport | undefined {
     range = {
       base: r.base as string,
       head: r.head as string,
-      canonicalBase: r.canonicalBase as string,
+      baseSha: r.baseSha as string,
       baseRef: r.baseRef,
     };
   }

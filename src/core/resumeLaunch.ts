@@ -6,6 +6,7 @@
 // `interrupted` or the run has no channel to continue on, closed with a record
 // exactly as the boot reclaim closes the rest.
 
+import { normalizeHead } from "./reviewedHead.js";
 import type { RunEvent } from "./runEvents.js";
 import type { AgentDef } from "../agents/registry.js";
 import { parseDirectives } from "../directives.js";
@@ -156,6 +157,7 @@ export function repoContextOf(row: LiveRunRow, events: readonly RunEvent[] = [])
     ...(m.pr !== undefined ? { pr: m.pr } : {}),
     ...(m.headSha !== undefined ? { headSha: m.headSha } : {}),
     ...(baseRef !== undefined ? { baseRef } : {}),
+    ...(normalizeHead(m.baseSha) ? { baseSha: normalizeHead(m.baseSha) } : {}),
     ...(githubSource ? { githubSource } : {}),
   };
 }

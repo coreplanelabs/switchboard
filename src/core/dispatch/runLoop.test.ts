@@ -405,6 +405,7 @@ function setup(
       head: string;
       post: (target: ReviewCommentTarget, body: string) => Promise<GithubWriteResult | void>;
       currentHead?: string;
+      comparison?: { stdout: string; stderr: string; exitCode: number; truncated: boolean };
       commits?: (sha: string) => PrCommitList | undefined;
     };
     /** A writable coding run against a repository: the post-step observes the workspace and opens-or-edits the PR. */
@@ -466,6 +467,8 @@ function setup(
             sameRepoHead: true,
             headSha: opts.review!.currentHead ?? opts.review!.head,
             headBranchExists: true,
+            baseRef: opts.repoCtx?.baseRef ?? "main",
+            baseSha: opts.repoCtx?.baseSha ?? "e".repeat(40),
           }),
           fetchPrCommits: async ({ sha }: { sha: string }) => opts.review!.commits?.(sha),
         }
@@ -533,7 +536,25 @@ function setup(
     registry,
     round: {
       selection: {
-        executor: (opts.executor ?? {}) as never,
+        executor: (opts.review
+          ? {
+              ...opts.executor,
+              execResult: async (command: string, options?: Parameters<NonNullable<Executor["execResult"]>>[1]) => {
+                if (command.includes("@@diff_digest:range@@")) {
+                  if (opts.review?.comparison) return opts.review.comparison;
+                  const head = /test "\$digest_head" = '([a-f0-9]{40})'/.exec(command)?.[1] ?? opts.review!.head;
+                  return {
+                    stdout: `@@diff_digest:range@@\n${opts.repoCtx?.baseSha ?? "e".repeat(40)}\n${head}\n1\t0\tsrc/x.ts\n@@diff_digest:name-status@@\nM\tsrc/x.ts\n`,
+                    stderr: "",
+                    exitCode: 0,
+                    truncated: false,
+                  };
+                }
+                if (!opts.executor?.execResult) throw new Error("structured command outcomes are unavailable");
+                return opts.executor.execResult(command, options);
+              },
+            }
+          : (opts.executor ?? {})) as never,
         backend: "local" as const,
         ...(opts.binding ? { binding: opts.binding } : {}),
         ...(opts.seeded ? { seeded: opts.seeded } : {}),
@@ -554,7 +575,7 @@ function setup(
     validateExecutionContext: undefined as RunLoopContext["validateExecutionContext"],
     resume: undefined,
     recovered: false,
-    repoCtx: opts.repoCtx ?? {},
+    repoCtx: opts.review ? { baseRef: "main", baseSha: "e".repeat(40), ...opts.repoCtx } : (opts.repoCtx ?? {}),
     ...(opts.bearer === null
       ? {}
       : { githubDoor: { baseUrl: "https://git.bot.test", bearer: opts.bearer ?? "sbr_run-l.s3cret" } }),
@@ -8774,10 +8795,15 @@ describe("the pi harness — the container replaced under a living bot: the rela
     const currentExecutor = {
       execResult: async (command: string) => {
         commands.push(command);
-        if (
-          command.includes("/workspace/old checkout") ||
-          !command.includes("git -C '/workspace/new checkout' rev-parse --verify HEAD")
-        )
+        if (command.includes("/workspace/old checkout")) throw new Error("the replacement has no original checkout");
+        if (command.includes("@@diff_digest:range@@") && command.includes("git -C '/workspace/new checkout'"))
+          return {
+            stdout: `@@diff_digest:range@@\n${"e".repeat(40)}\n${checkoutHead}\n1\t0\tsrc/x.ts\n@@diff_digest:name-status@@\nM\tsrc/x.ts\n`,
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          };
+        if (!command.includes("git -C '/workspace/new checkout' rev-parse --verify HEAD"))
           throw new Error("the replacement has no original checkout");
         return { stdout: checkoutHead + "\n", stderr: "", exitCode: 0, truncated: false };
       },
@@ -8863,12 +8889,13 @@ describe("the pi harness — the container replaced under a living bot: the rela
         },
       ]);
       expect(checkoutHead).toBe("b1b2c3d4e5f60718293a4b5c6d7e8f9012345678");
-      expect(commands.filter((command) => !command.includes("review_before="))).toEqual(
-        Array(3).fill("git -C '/workspace/new checkout' rev-parse --verify HEAD"),
-      );
+      expect(
+        commands.filter((command) => !command.includes("review_before=") && !command.includes("@@diff_digest:range@@")),
+      ).toEqual(Array(3).fill("git -C '/workspace/new checkout' rev-parse --verify HEAD"));
       expect(commands.find((command) => command.includes("review_before="))).toContain(
         "git -C '/workspace/new checkout' check-ref-format 'refs/heads/main'",
       );
+      expect(commands.every((command) => command.includes("git -C '/workspace/new checkout'"))).toBe(true);
       s.ending.drain(true);
       await s.writer.settled();
       expect((await s.store.get("run-l"))?.reviewPost).toEqual({
@@ -9763,7 +9790,14 @@ describe("the pi harness — the review preset", () => {
     findings: [{ id: "F1", kind: "single", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
   };
   const prThread = {
-    repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" } as RepoContext,
+    repoCtx: {
+      repo: "o/r",
+      pr: 42,
+      ref: "fix/the-pr-head",
+      refFromPr: true,
+      baseRef: "main",
+      baseSha: "e".repeat(40),
+    } as RepoContext,
     binding: { ref: "fix/the-pr-head", sha: HEAD, workspace: "/srv/wt/pr-42" } as ResidentBinding,
     executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
   };
@@ -10485,6 +10519,7 @@ describe("the pi harness — the review preset", () => {
   ])(
     "a substantive head move mid-review on pi preserves the conversation and refuses stale approval across workspace transitions (%s)",
     async (mode) => {
+      const logs = mode === "reported head correction" ? vi.spyOn(console, "log") : undefined;
       const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
       const THIRD = "0123456789abcdef0123456789abcdef01234567";
       const secondPush = mode === "head moves again during re-review";
@@ -10502,6 +10537,7 @@ describe("the pi harness — the review preset", () => {
       let worktreeHead = adoption ? NEW : HEAD;
       const moves: string[] = [];
       const digestAnswers: string[] = [];
+      let digestBase = "e".repeat(40);
       const executor = {
         moveRequiresIdleProducer: requiresIdle,
         exec: async (command: string) =>
@@ -10630,7 +10666,13 @@ describe("the pi harness — the review preset", () => {
           { type: "tool_execution_start", toolCallId: id, toolName: "submit_verdict", args: submitted },
         );
         authorizeToolCall(live, { toolCallId: id, tool: "submit_verdict", input: submitted });
-        void runRelayedTool(live, { toolCallId: id, tool: "submit_verdict", input: submitted }).then((answer) => {
+        void runRelayedTool(live, { toolCallId: id, tool: "submit_verdict", input: submitted }).then(async (answer) => {
+          if (n === 0 && logs) {
+            // A later comparison result must revoke the submitted approval.
+            digestBase = "c".repeat(40);
+            await diffDigestTool.run({}, live.toolContext);
+            digestBase = "e".repeat(40);
+          }
           c.emit(
             {
               type: "tool_execution_end",
@@ -10673,6 +10715,18 @@ describe("the pi harness — the review preset", () => {
         executor,
         review: {
           head: HEAD,
+          ...(logs
+            ? {
+                comparison: {
+                  get stdout() {
+                    return `@@diff_digest:range@@\n${digestBase}\n${worktreeHead}\n1\t0\tsrc/x.ts\n@@diff_digest:name-status@@\nM\tsrc/x.ts\n`;
+                  },
+                  stderr: "",
+                  exitCode: 0,
+                  truncated: false,
+                },
+              }
+            : {}),
           post: async (target, body) => {
             const transcript = await nativeLedger!.readSession(
               ctx.ledgerRun!.session!.key,
@@ -10706,9 +10760,14 @@ describe("the pi harness — the review preset", () => {
         true,
       );
       const out = answered(await runLoop(s.deps, ctx));
+      if (logs) {
+        const invalidations = logs.mock.calls.filter(([line]) => String(line).includes("review_digest_invalidated"));
+        expect(invalidations).toEqual([[JSON.stringify({ event: "review_digest_invalidated", repo: "o/r", pr: 42 })]]);
+        logs.mockRestore();
+      }
       expect(digestAnswers).toEqual([
         expect.stringContaining("1 file changed, +1 -0"),
-        expect.stringContaining("1 file changed, +1 -0"),
+        "diff_digest: a PR review uses its pinned base; use git diff to inspect other ranges.",
       ]);
       expect(bearers.marksOf("run-l")).not.toHaveProperty("turn");
       expect(toolChoices).toEqual(["auto"]);
@@ -11800,7 +11859,14 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     findings: [{ id: "F1", kind: "single", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
   };
   const prThread = {
-    repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" } as RepoContext,
+    repoCtx: {
+      repo: "o/r",
+      pr: 42,
+      ref: "fix/the-pr-head",
+      refFromPr: true,
+      baseRef: "main",
+      baseSha: "e".repeat(40),
+    } as RepoContext,
     binding: { ref: "fix/the-pr-head", sha: HEAD, workspace: "/srv/wt/pr-42" } as ResidentBinding,
   };
   /** A provider that must never be asked: the model had already answered. */
@@ -12321,7 +12387,26 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       card: null,
       system: "the system prompt",
       tools: [],
-      state: opts.state ?? {},
+      state: {
+        ...(opts.agent === "review"
+          ? {
+              digest: {
+                complete: true,
+                base: "e".repeat(40),
+                totals: { files: 1, additions: 1, deletions: 0 },
+                range: {
+                  base: "e".repeat(40),
+                  baseSha: "e".repeat(40),
+                  baseRef: opts.repoCtx?.baseRef ?? "main",
+                  head:
+                    (opts.state?.verdict as { head?: string } | undefined)?.head ??
+                    "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+                },
+              },
+            }
+          : {}),
+        ...opts.state,
+      },
     };
     const lastStep: StepRecord = {
       step: 2,
@@ -13001,103 +13086,36 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     },
   );
 
-  it.each([
-    "matching",
-    "different repository",
-    "different PR",
-    "different base ref",
-    "missing original head",
-    "different original head",
-    "different checkout head",
-    "different listing head",
-    "incremental base",
-    "changed totals",
-    "truncated listing",
-    "unavailable listing",
-    "incomplete digest",
-    "malformed range",
-  ])("rebuilds legacy digest coverage before publication only when bound: %s", async (mode) => {
-    const base = "e".repeat(40);
-    const other = "c".repeat(40);
-    const posts: ReviewCommentTarget[] = [];
-    const repoCtx = { ...prThread.repoCtx, headSha: HEAD, prSize: { changedFiles: 1, additions: 7, deletions: 2 } };
+  it("refuses saved digest coverage without an immutable range instead of rebuilding it", async () => {
     const s = setup("", {
       agent: "review",
       provider: neverCalled(),
-      repoCtx,
-      cold: { ref: repoCtx.ref!, sha: HEAD, workspace: "/workspace/original-review" },
-      executor: {
-        execResult: async (command) => {
-          if (command.includes("@@diff_digest:range@@")) {
-            expect(command).toContain("git -C '/workspace/original-review'");
-            expect(command).toContain("'origin/main^{commit}'");
-            if (mode === "unavailable listing") throw new Error("unavailable");
-            return {
-              stdout:
-                `@@diff_digest:range@@\n${mode === "incremental base" ? other : base}\n` +
-                `${mode === "different listing head" ? other : HEAD}\n${base}\n` +
-                `${mode === "changed totals" ? 8 : 7}\t2\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n`,
-              stderr: "",
-              exitCode: 0,
-              truncated: mode === "truncated listing",
-            };
-          }
-          return {
-            stdout: mode === "different checkout head" ? other : HEAD,
-            stderr: "",
-            exitCode: 0,
-            truncated: false,
-          };
-        },
-      },
+      ...prThread,
+      repoCtx: { ...prThread.repoCtx, baseSha: "e".repeat(40) },
+      executor: { execResult: async () => ({ stdout: HEAD, stderr: "", exitCode: 0, truncated: false }) },
       review: {
         head: HEAD,
-        post: async (target) => {
-          const row = (await s.deps.runLedger.readLiveRuns())[0]!;
-          expect(row.state.digest).toEqual({
-            complete: true,
-            base: "origin/main",
-            totals: { files: 1, additions: 7, deletions: 2 },
-            range: { base, head: HEAD, canonicalBase: base, baseRef: "main" },
-          });
-          posts.push(target);
-          return { state: "accepted" };
+        post: async () => {
+          throw new Error("legacy coverage cannot publish");
         },
       },
     });
     const resume = finishing("Original review.", {
       agent: "review",
-      repoCtx: {
-        ...repoCtx,
-        ...(mode === "different repository" ? { repo: "other/repo" } : {}),
-        ...(mode === "different PR" ? { pr: 43 } : {}),
-        ...(mode === "different base ref" ? { baseRef: "release" } : {}),
-        ...(mode === "missing original head" ? { headSha: undefined } : {}),
-        ...(mode === "different original head" ? { headSha: other } : {}),
-      },
+      repoCtx: s.ctx.repoCtx,
       state: {
         verdict: VERDICT,
-        digest:
-          mode === "incomplete digest"
-            ? { complete: false, base: "origin/main", reason: "listing was cut" }
-            : {
-                complete: true,
-                base: "origin/main",
-                totals: { files: 1, additions: 7, deletions: 2 },
-                ...(mode === "malformed range" ? { range: { base } } : {}),
-              },
+        digest: { complete: true, base: "origin/main", totals: { files: 1, additions: 7, deletions: 2 } },
       },
     });
     const out = answered(
       await runLoop(s.deps, await trackedReviewContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
     );
-    expect({ published: out.reviewPost?.posted, targets: posts }).toEqual(
-      mode === "matching"
-        ? { published: true, targets: [{ repo: "o/r", number: 42, commitId: HEAD }] }
-        : { published: false, targets: [] },
-    );
-    if (out.reviewPost?.posted === false) expect(out.reviewPost.reason).toMatch(/digest|head/);
-    expect(out.toolCalls).toBe(0);
+    expect(out.reviewPost).toEqual({
+      posted: false,
+      reason: "the diff digest does not identify the pinned PR comparison",
+    });
+    expect(out.answer).toContain("Original review.");
   });
 
   it("admits exact original run review publication durably before native POST and records native acceptance", async () => {
@@ -15942,7 +15960,14 @@ describe("the run control's lease clock — started by the run loop on the harne
       agent: "review",
       yaml: YAML + "harness:\n  review: pi\n",
       harness: harnessDeps(replaced),
-      repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" } as RepoContext,
+      repoCtx: {
+        repo: "o/r",
+        pr: 42,
+        ref: "fix/the-pr-head",
+        refFromPr: true,
+        baseRef: "main",
+        baseSha: "e".repeat(40),
+      } as RepoContext,
       binding: { ref: "fix/the-pr-head", sha: HEAD, workspace: "/srv/wt/pr-42" } as ResidentBinding,
       executor: {
         exec: async (command) => {
@@ -15969,7 +15994,7 @@ describe("the run control's lease clock — started by the run loop on the harne
     // settle's HEAD read would have been a `needs: attach` the recovery refuses.
     // (The baseline reading diff ran before the model, as it does on every review.)
     expect(execsAtDeath).toBeGreaterThanOrEqual(0);
-    expect(execs.slice(0, execsAtDeath).every((c) => c.startsWith("git diff "))).toBe(true);
+    expect(execs.slice(0, execsAtDeath).every((c) => c.startsWith("git -C '/srv/wt/pr-42' diff "))).toBe(true);
     expect(execs.slice(execsAtDeath)).toEqual([]);
     // No verdict turn asked the model, and nothing reached the pull request:
     // the budget's answer is not a verdict.
@@ -16316,6 +16341,63 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
 
 // Feature: coding-checks.md — model selection precedes typed execution.
 describe("runLoop checkout-bound tools", () => {
+  it.each(["valid", "missing base", "failed listing", "cut listing"])(
+    "starts model work only after a complete pinned PR comparison: %s",
+    async (mode) => {
+      const observed = watched(piHarness);
+      const head = "a".repeat(40);
+      const s = setup("unused", {
+        agent: "review",
+        repoCtx: {
+          repo: "acme/api",
+          pr: 7,
+          headSha: head,
+          baseRef: "main",
+          baseSha: mode === "missing base" ? undefined : "e".repeat(40),
+        },
+        executor: {
+          execResult: async () => ({
+            stdout: "false",
+            stderr: "base object unavailable",
+            exitCode: 0,
+            truncated: false,
+          }),
+        },
+        review: {
+          head,
+          post: async () => ({ state: "accepted" as const }),
+          ...(mode === "failed listing" || mode === "cut listing"
+            ? {
+                comparison: {
+                  stdout: "",
+                  stderr: "base object unavailable",
+                  exitCode: mode === "failed listing" ? 128 : 0,
+                  truncated: mode === "cut listing",
+                },
+              }
+            : {}),
+        },
+        harness: {
+          harnesses: roster(observed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example",
+          loopbackUrl: "http://127.0.0.1:8080",
+        },
+      });
+      if (mode === "valid") {
+        expect(answered(await runLoop(s.deps, s.ctx)).answer).toBe("Done.");
+        expect(observed.calls.open).toHaveLength(1);
+      } else {
+        await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(
+          mode === "missing base"
+            ? "The PR base commit is unavailable"
+            : "The PR comparison could not be verified before review",
+        );
+        expect(observed.calls.open).toEqual([]);
+      }
+    },
+  );
+
   it("binds source reads to the resolved review head and acknowledged checkout", async () => {
     const observed = watched(piHarness);
     observed.harness.open = async (_deps, request) => {
@@ -16325,6 +16407,7 @@ describe("runLoop checkout-bound tools", () => {
         pr: 7,
         head: "a".repeat(40),
         baseRef: "main",
+        base: "e".repeat(40),
       });
       expect(request.toolContext.checkout?.()).toBe("/workspace/checkout");
       expect(await source.run({ kind: "diff" }, request.toolContext)).toBe(
@@ -16339,10 +16422,20 @@ describe("runLoop checkout-bound tools", () => {
     };
     const s = setup("unused", {
       agent: "review",
-      repoCtx: { repo: "acme/api", pr: 7, baseRef: "main", headSha: "b".repeat(40) },
+      repoCtx: { repo: "acme/api", pr: 7, baseRef: "main", baseSha: "e".repeat(40), headSha: "b".repeat(40) },
       review: { head: "a".repeat(40), post: async () => {} },
       cold: { ref: "work", sha: "a".repeat(40), workspace: "/workspace/checkout" },
-      executor: { execResult: async () => ({ stdout: "", stderr: "transport failed", exitCode: 1, truncated: false }) },
+      executor: {
+        execResult: async (command) =>
+          command.includes("@@diff_digest:range@@")
+            ? {
+                stdout: `@@diff_digest:range@@\n${"e".repeat(40)}\n${"a".repeat(40)}\n1\t0\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n`,
+                stderr: "",
+                exitCode: 0,
+                truncated: false,
+              }
+            : { stdout: "", stderr: "transport failed", exitCode: 1, truncated: false },
+      },
       harness: {
         harnesses: roster(observed.harness),
         registry: new HarnessRegistry(),
@@ -16352,68 +16445,6 @@ describe("runLoop checkout-bound tools", () => {
     });
     expect(answered(await runLoop(s.deps, s.ctx)).answer).toContain("source binding checked");
   });
-  it("retains full-range coverage after an incremental digest", async () => {
-    const observed = watched(piHarness);
-    observed.harness.open = async (_deps, request) => {
-      request.toolContext.onDigest?.({
-        complete: true,
-        base: "origin/main",
-        totals: { files: 49, additions: 1772, deletions: 126 },
-        ...{ range: { base: "a".repeat(40), canonicalBase: "a".repeat(40), head: "b".repeat(40), baseRef: "main" } },
-      });
-      request.toolContext.onDigest?.({
-        complete: true,
-        base: "prior-head",
-        totals: { files: 10, additions: 94, deletions: 9 },
-        ...{ range: { base: "c".repeat(40), canonicalBase: "a".repeat(40), head: "b".repeat(40), baseRef: "main" } },
-      });
-      return {
-        answer: "Inspected both ranges.",
-        followUp: async () => "",
-        remainingMs: () => 60_000,
-        end: async () => {},
-      };
-    };
-    const s = setup("unused", {
-      agent: "review",
-      harness: {
-        harnesses: roster(observed.harness),
-        registry: new HarnessRegistry(),
-        harnessUrl: "https://bot.example",
-        loopbackUrl: "http://127.0.0.1:8080",
-      },
-    });
-    const ctx = await trackedReviewContext(s);
-    const writes = vi.spyOn(ctx.ledgerRun!, "setState");
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    try {
-      expect(answered(await runLoop(s.deps, ctx)).answer).toBe("Inspected both ranges.");
-      const saved = writes.mock.calls.map(([state]) => state.digest).filter((value) => value !== undefined);
-      expect(saved.at(-1)).toMatchObject({
-        complete: true,
-        base: "origin/main",
-        totals: { files: 49, additions: 1772, deletions: 126 },
-      });
-      expect(
-        log.mock.calls
-          .map(([line]) => String(line))
-          .filter((line) => line.startsWith('{"event":"review_digest_retained"'))
-          .map((line) => JSON.parse(line)),
-      ).toEqual([
-        {
-          event: "review_digest_retained",
-          keptHead: "b".repeat(40),
-          keptBase: "a".repeat(40),
-          seenHead: "b".repeat(40),
-          seenBase: "c".repeat(40),
-        },
-      ]);
-    } finally {
-      log.mockRestore();
-      await ctx.ledgerRun!.close();
-    }
-  });
-
   it("computes a digest in the acknowledged cold checkout", async () => {
     const observed = watched(piHarness);
     observed.harness.open = async (_deps, request) => {

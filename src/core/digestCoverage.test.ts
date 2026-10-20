@@ -60,10 +60,10 @@ describe("checkDigestCoverage", () => {
 
 // Feature: agent-review.md item 15.
 describe("canonical digest range guard", () => {
-  it.each(["incremental", "stale head", "different base"])(
+  it.each(["different base commit", "stale head", "different base"])(
     "refuses %s coverage even when its totals are large",
     (kind) => {
-      const range = { base: "a".repeat(40), canonicalBase: "a".repeat(40), head: "b".repeat(40), baseRef: "main" };
+      const range = { base: "a".repeat(40), baseSha: "a".repeat(40), head: "b".repeat(40), baseRef: "main" };
       const digest = {
         complete: true as const,
         base: "main",
@@ -74,9 +74,10 @@ describe("canonical digest range guard", () => {
         pr: { changedFiles: 49, additions: 1772, deletions: 126 },
         head: "b".repeat(40),
         baseRef: "main",
+        baseSha: "a".repeat(40),
       };
       expect(checkDigestCoverage({ ...target, digest })).toEqual({ ok: true, compared: true });
-      if (kind === "incremental") range.base = "c".repeat(40);
+      if (kind === "different base commit") range.baseSha = "c".repeat(40);
       if (kind === "stale head") range.head = "c".repeat(40);
       if (kind === "different base") range.baseRef = "release";
       expect(checkDigestCoverage({ ...target, digest })).toEqual({

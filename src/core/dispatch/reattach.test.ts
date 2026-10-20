@@ -81,6 +81,35 @@ const lastStep: StepRecord = {
 };
 
 describe("restartEvidenceOf: boot recovery before promotion", () => {
+  it("restores the original review base when request-only recovery resolves a newer base", () => {
+    const evidence = restartEvidenceOf(
+      row({}, { agent: "review", ref: "patch-1", baseRef: "main", baseSha: "b".repeat(40) }),
+      [],
+    );
+    for (const baseSha of ["c".repeat(40), undefined]) {
+      expect(
+        carriedRepoContext(
+          { repo: "acme/api", ref: "patch-1", baseRef: "main", baseSha, headSha: "a".repeat(40) },
+          evidence.repoCtx,
+        ),
+      ).toEqual({
+        repo: "acme/api",
+        ref: "patch-1",
+        baseRef: "main",
+        baseSha: "b".repeat(40),
+        headSha: "a".repeat(40),
+      });
+    }
+  });
+  it.each(["main", "abcdef0"])(
+    "refuses a malformed saved base instead of substituting a newly resolved base: %s",
+    (baseSha) => {
+      const evidence = restartEvidenceOf(row({}, { agent: "review", baseSha }), []);
+      expect(() => carriedRepoContext({ repo: "acme/api", baseSha: "c".repeat(40) }, evidence.repoCtx)).toThrow(
+        "The original run's PR base commit could not be verified.",
+      );
+    },
+  );
   it.each([
     { branchPushReceipts: [{ ref: "unit/original", sha: "a".repeat(40), by: "push" }], pushedBranch: "auxiliary" },
     {

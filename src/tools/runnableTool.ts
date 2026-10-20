@@ -187,8 +187,6 @@ export interface ToolContext {
    *  PR's own size and refuses to post a verdict whose digest covered less
    *  (docs/reference/specs/agent-review.md item 15). Absent → the tool still answers. */
   onDigest?: (report: DigestReport) => void;
-  /** Controller-owned PR target; the tool resolves immutable Git ranges itself. */
-  digestTarget?: () => { baseRef: string; head: string } | undefined;
   /** The repository the run works in, `owner/name` as the dispatcher resolved
    *  it (`RepoContext.repo`). `submit_pr_description` reads it to decide
    *  whether the title is judged by this project's own title gate — only a

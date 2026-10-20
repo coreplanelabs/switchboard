@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { distillDiffStats, parseDigestReport, retainDigest, type DigestReport } from "./diffDigest.js";
+import { distillDiffStats, parseDigestReport } from "./diffDigest.js";
 
 // Feature: docs/reference/specs/distilled-diffs.md. distillDiffStats is the
 // pure, I/O-free core the diff_digest tool renders: `git diff --numstat` +
@@ -155,40 +155,5 @@ describe("parseDigestReport (a ledger row read back on resume)", () => {
     ]) {
       expect(parseDigestReport(bad)).toBeUndefined();
     }
-  });
-});
-
-// Feature: distilled-diffs.md item 8, agent-review.md item 15.
-describe("canonical digest retention", () => {
-  const full: DigestReport = {
-    complete: true,
-    base: "origin/main",
-    range: { base: "a".repeat(40), canonicalBase: "a".repeat(40), head: "b".repeat(40), baseRef: "main" },
-    totals: { files: 49, additions: 1772, deletions: 126 },
-  };
-  const delta: DigestReport = {
-    complete: true,
-    base: "prior",
-    range: { ...full.range!, base: "c".repeat(40) },
-    totals: { files: 10, additions: 94, deletions: 9 },
-  };
-  it("keeps canonical coverage through restart and both inspection orders", () => {
-    const restored = parseDigestReport(JSON.parse(JSON.stringify(full)));
-    expect(retainDigest(restored, delta)).toEqual(full);
-    expect(retainDigest(delta, full)).toEqual(full);
-    expect(parseDigestReport({ ...full, range: { ...full.range, head: "bad" } })).toBeUndefined();
-  });
-  it.each(["head", "canonicalBase", "baseRef"] as const)("does not reuse coverage after the %s changes", (key) => {
-    const moved: DigestReport = {
-      ...delta,
-      range: { ...delta.range!, [key]: key === "baseRef" ? "release" : "d".repeat(40) },
-    };
-    expect(retainDigest(full, moved)).toEqual(moved);
-    expect(retainDigest(full, delta)).toEqual(full);
-  });
-  it("keeps a failed canonical digest blocked when a smaller inspection succeeds", () => {
-    const failed: DigestReport = { complete: false, base: "origin/main", range: full.range, reason: "listing cut" };
-    expect(retainDigest(failed, delta)).toEqual(failed);
-    expect(retainDigest(failed, full)).toEqual(full);
   });
 });

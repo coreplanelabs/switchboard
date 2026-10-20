@@ -712,6 +712,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
       ...(repoCtx.baseRef !== undefined && !privateMain ? { baseRef: repoCtx.baseRef } : {}),
+      ...(repoCtx.baseSha !== undefined && !privateMain ? { baseSha: repoCtx.baseSha } : {}),
       ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
       ...(repoCtx.headSha !== undefined ? { headSha: repoCtx.headSha } : {}),
       at: clock(),
@@ -909,6 +910,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
       ...(decisionRecordTask !== undefined ? { recordTaskKey: decisionRecordTask } : {}),
       ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
       ...(repoCtx.baseRef !== undefined && !privateMain ? { baseRef: repoCtx.baseRef } : {}),
+      ...(repoCtx.baseSha !== undefined && !privateMain ? { baseSha: repoCtx.baseSha } : {}),
       ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
       ...(repoCtx.pr !== undefined && !privateMain ? { pr: repoCtx.pr } : {}),
       readonly: profile.identity === "read",
@@ -1775,6 +1777,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
             pr: repoCtx.pr,
             ref: repoCtx.ref,
             baseRef: repoCtx.baseRef,
+            baseSha: repoCtx.baseSha,
             ...(repoCtx.prSize ? { size: repoCtx.prSize } : {}),
           }
         : undefined,

@@ -295,7 +295,7 @@ describe("review settlement in a bound non-root checkout", () => {
               checkout: () => w.checkout,
               repo: "acme/api",
               github: { api: new InMemoryGithubApi(), canWrite: () => true },
-              reviewReadTarget: () => ({ repo: "acme/api", pr: 7, head, baseRef }),
+              reviewReadTarget: () => ({ repo: "acme/api", pr: 7, head, baseRef, base }),
             },
           ),
         ),
@@ -310,7 +310,7 @@ describe("review settlement in a bound non-root checkout", () => {
         {
           executor: w.input.executor,
           checkout: () => w.checkout,
-          digestTarget: () => ({ head, baseRef }),
+          reviewReadTarget: () => ({ repo: "acme/api", pr: 7, head, baseRef, base }),
           onDigest: (report) => {
             digest = report;
           },
@@ -319,7 +319,7 @@ describe("review settlement in a bound non-root checkout", () => {
       expect(digest).toMatchObject({
         complete: true,
         totals: { files: 1, additions: 1, deletions: 1 },
-        range: { base, canonicalBase: base, head, baseRef },
+        range: { base, baseSha: base, head, baseRef },
       });
       expect((await w.repo.execResult("git remote get-url origin")).stdout.trim()).toBe(
         "https://unfetchable.invalid/review.git",
@@ -342,7 +342,7 @@ describe("review settlement in a bound non-root checkout", () => {
               checkout: () => w.checkout,
               repo: "acme/api",
               github: { api: new InMemoryGithubApi(), canWrite: () => true },
-              reviewReadTarget: () => ({ repo: "acme/api", pr: 7, head: NEW_HEAD, baseRef: "main" }),
+              reviewReadTarget: () => ({ repo: "acme/api", pr: 7, head: NEW_HEAD, baseRef: "main", base: OLD_HEAD }),
             },
           ),
         ),

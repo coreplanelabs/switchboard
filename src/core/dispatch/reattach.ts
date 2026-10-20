@@ -178,7 +178,7 @@ export interface CarriedRunIdentity {
   pushedBranch?: unknown;
   identityUncertain?: boolean;
   /** The original resolved target, independent of the baseline's fingerprint evidence. */
-  repoCtx?: Pick<RepoContext, "repo" | "ref" | "baseRef">;
+  repoCtx?: Pick<RepoContext, "repo" | "ref" | "baseRef" | "baseSha">;
   /** The predecessor's retained events, replayed under their seqs. */
   events: RunEvent[];
   /** The predecessor's capability token: posted links stay valid. */
@@ -194,7 +194,12 @@ export function restartEvidenceOf(
   row: LiveRunRow,
   events: readonly AppendableEvent[],
 ): Pick<CarriedRunIdentity, "branchIdentityBaseline" | "pushedBranch" | "identityUncertain" | "repoCtx"> {
-  const repoCtx = { repo: row.meta.repo, ref: row.meta.ref, baseRef: row.meta.baseRef };
+  const repoCtx = {
+    repo: row.meta.repo,
+    ref: row.meta.ref,
+    baseRef: row.meta.baseRef,
+    ...(row.meta.baseSha !== undefined ? { baseSha: row.meta.baseSha } : {}),
+  };
   const owned = events.find((event) => event.type === "pushed_head" && event.ref === repoCtx.ref);
   const pushedBranch = owned?.type === "pushed_head" ? owned.ref : row.state.pushedBranch;
   const historyPresent = [
@@ -269,6 +274,12 @@ export function carriedRunIdentity(
 /** A same-ID segment restores the prior target; fresh resolution cannot redirect it. */
 export function carriedRepoContext(current: RepoContext, prior?: CarriedRunIdentity["repoCtx"]): RepoContext {
   if (!prior) return current;
+  const baseSha =
+    typeof prior.baseSha === "string" && /^[0-9a-f]{40}$/i.test(prior.baseSha)
+      ? prior.baseSha.toLowerCase()
+      : undefined;
+  if (prior.baseSha !== undefined && !baseSha)
+    throw new RefusalError(refusalOf("setup_failed", "The original run's PR base commit could not be verified."));
   for (const field of ["repo", "ref", "baseRef"] as const) {
     const original = prior[field];
     if (original !== undefined && current[field] !== undefined && original !== current[field])
@@ -281,6 +292,7 @@ export function carriedRepoContext(current: RepoContext, prior?: CarriedRunIdent
     ...(prior.repo !== undefined ? { repo: prior.repo } : {}),
     ...(prior.ref !== undefined ? { ref: prior.ref } : {}),
     ...(prior.baseRef !== undefined ? { baseRef: prior.baseRef } : {}),
+    ...(baseSha !== undefined ? { baseSha } : {}),
   };
 }
 

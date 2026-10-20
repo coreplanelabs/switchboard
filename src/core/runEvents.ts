@@ -876,6 +876,7 @@ export type RunEvent =
       ref?: string;
       /** The resolved PR target, distinct from the attached head branch. */
       baseRef?: string;
+      baseSha?: string;
       pr?: number;
       headSha?: string;
       /** The plan runner instance whose story this record is (agent-ship item

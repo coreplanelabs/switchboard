@@ -2203,18 +2203,40 @@ describe("PR size for the digest-coverage guard", () => {
   const size = { changed_files: 41, additions: 2459, deletions: 579 };
 
   it("an explicit PR carries prSize from changed_files/additions/deletions; an inherited PR too", async () => {
-    stubFetch({ body: { state: "open", head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } }, ...size } });
-    expect((await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), [])).prSize).toEqual({
-      changedFiles: 41,
-      additions: 2459,
-      deletions: 579,
+    stubFetch({
+      body: {
+        state: "open",
+        base: { ref: "main", sha: "e".repeat(40) },
+        head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } },
+        ...size,
+      },
     });
-    stubFetch({ body: { state: "open", head: { sha: SHA, repo: { full_name: "acme/api" } }, ...size } });
+    expect(await resolveRepoContext(msg("review https://github.com/acme/api/pull/3"), [])).toMatchObject({
+      baseRef: "main",
+      baseSha: "e".repeat(40),
+      prSize: {
+        changedFiles: 41,
+        additions: 2459,
+        deletions: 579,
+      },
+    });
+    stubFetch({
+      body: {
+        state: "open",
+        base: { ref: "main", sha: "e".repeat(40) },
+        head: { sha: SHA, repo: { full_name: "acme/api" } },
+        ...size,
+      },
+    });
     const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/3" }];
-    expect((await resolveRepoContext(msg("re-review"), history)).prSize).toEqual({
-      changedFiles: 41,
-      additions: 2459,
-      deletions: 579,
+    expect(await resolveRepoContext(msg("re-review"), history)).toMatchObject({
+      baseRef: "main",
+      baseSha: "e".repeat(40),
+      prSize: {
+        changedFiles: 41,
+        additions: 2459,
+        deletions: 579,
+      },
     });
   });
 
@@ -2779,6 +2801,7 @@ describe("prCommitsSince (compare base...sha for the head-moved classifier)", ()
           { sha: C1, commit: { message: "feat: catalog\n\nbody" } },
           { sha: C2, commit: { message: "fix: nits" } },
         ],
+        merge_base_commit: { sha: C1 },
         files: [{ filename: "src/a.ts" }, { filename: "docs/b.md" }],
       },
     });
@@ -2789,6 +2812,7 @@ describe("prCommitsSince (compare base...sha for the head-moved classifier)", ()
       ],
       files: ["src/a.ts", "docs/b.md"],
       filesTruncated: false,
+      mergeBase: C1,
     });
     expect(calls[0].url).toBe(`https://api.github.com/repos/acme/api/compare/main...${SHA}`);
   });

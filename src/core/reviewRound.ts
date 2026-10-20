@@ -44,7 +44,7 @@ import {
   type HeadMove,
   type PrCommitList,
 } from "./headMoved.js";
-import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
+import { decideReviewPost, reviewPostIntended, reviewPostOptedOut } from "./reviewPost.js";
 import { buildReviewPostBody, completeReviewVerdict, type ReviewPost, type ReviewVerdict } from "./reviewVerdict.js";
 import { checkReviewedHead, normalizeHead, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
@@ -451,7 +451,15 @@ export function makeSystemComposer(input: {
   cold?: { ref: string; workspace: string };
   /** Set for a PR review round: the REVIEW TARGET block's coordinates. */
   prTarget:
-    { repo: string; pr: number; ref: string | undefined; baseRef: string | undefined; size?: PrSize } | undefined;
+    | {
+        repo: string;
+        pr: number;
+        ref: string | undefined;
+        baseRef: string | undefined;
+        baseSha?: string;
+        size?: PrSize;
+      }
+    | undefined;
   /** The unit contract block of a plan-unit review round (docs/reference/specs/agent-ship.md
    *  item 13), rendered by the pipeline: placed right after the REVIEW TARGET
    *  block (after the agent's prompt when there is none), so the review child
@@ -501,6 +509,7 @@ export function makeSystemComposer(input: {
           ref: prTarget.ref,
           headSha: head.sha,
           baseRef: prTarget.baseRef,
+          baseSha: prTarget.baseSha,
           ...(prTarget.size ? { size: prTarget.size } : {}),
           resident,
           ...(workspace ? { workspace } : {}),
@@ -969,6 +978,9 @@ export async function runReviewPostStep(input: Parameters<typeof reviewPostStep>
       post: (target, body) => bounded("native_post", () => input.post(target, body, controller.signal)),
       fetchPrHead: (pr) => bounded("head_read", () => input.fetchPrHead(pr)),
       ...(input.fetchPrFacts ? { fetchPrFacts: (pr) => bounded("facts_read", () => input.fetchPrFacts!(pr)) } : {}),
+      ...(input.fetchPrCommits
+        ? { fetchPrCommits: (pr) => bounded("comparison_read", () => input.fetchPrCommits!(pr)) }
+        : {}),
       reply: (text) => bounded("reply", () => input.reply(text)).catch(() => {}),
     });
   } catch (error) {
@@ -996,7 +1008,7 @@ async function reviewPostStep(
   input: {
     agent: AgentDef;
     requestText: string;
-    repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize" | "ref" | "baseRef">;
+    repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize" | "ref" | "baseRef" | "baseSha">;
     publication?: ExistingPrPublicationBinding;
     pinnedHead?: string;
     /** The pinned head and the workspace HEAD observed after the turn. */
@@ -1017,6 +1029,7 @@ async function reviewPostStep(
     /** The original run's fenced, trim-independent publication receipt. */
     publicationJournal?: ReviewPublicationJournal;
     fetchPrHead: FetchPrHead;
+    fetchPrCommits?: FetchPrCommits;
     reply: (text: string) => Promise<void>;
     /** Legacy reply seam; current review notices use reply. */
     ack?: (text: string) => Promise<void>;
@@ -1078,7 +1091,52 @@ async function reviewPostStep(
     }
     return outcome;
   };
-  let postTarget: ReviewPostTarget | null = null;
+  let postTarget = input.hardStopped
+    ? null
+    : decideReviewPost({ agentName: agent.name, repo: repoCtx.repo, pr: repoCtx.pr, requestText: input.requestText });
+  const where = postTarget ? `${postTarget.repo}#${postTarget.number}` : "the pull request";
+  const uncertain = async (): Promise<ReviewPostOutcome> => {
+    const reason = "the review publication outcome is unconfirmed";
+    await input.reply(`ℹ️ I could not confirm whether the review posted to ${where}.`).catch(() => {});
+    return record({ posted: false, uncertain: true, reason });
+  };
+  const refused = async (): Promise<ReviewPostOutcome> => {
+    const reason = "the review publication was refused";
+    await input.reply(`ℹ️ Review not posted to ${where}: ${reason} — this verdict is Slack-only.`).catch(() => {});
+    return record({ posted: false, reason });
+  };
+  const journal = input.publicationJournal;
+  let body = "";
+  let pending: ReviewPublicationReceipt | undefined;
+  if (postTarget && reviewHead && journal) {
+    body = buildReviewPostBody(
+      input.answer,
+      verdict,
+      { repo: postTarget.repo, head: reviewHead },
+      input.reviewIncomplete,
+    );
+    pending = reviewPublicationOf({
+      version: 1,
+      runId: journal.runId,
+      target: { ...postTarget, commitId: reviewHead },
+      bodyHash: await sourceHash(body),
+      ...(completeReviewVerdict(verdict) ? { verdict: verdict!.verdict } : {}),
+      state: "pending",
+      ...(completeReviewVerdict(verdict) && verdict?.humanFindings !== undefined
+        ? { feedback: { format: 1, findings: verdict.findings?.length ?? 0, at: systemClock() } }
+        : {}),
+    });
+    // Settle the original effect before applying authority checks for a new write.
+    const previous = await journal.read();
+    if (previous === REVIEW_PUBLICATION_OWNER_ABSENT)
+      return record({ posted: false, reason: "the review publication owner is unavailable" });
+    if (previous !== null) {
+      const receipt = reviewPublicationOf(previous);
+      if (!receipt || !pending || !sameReviewPublication(receipt, pending)) return uncertain();
+      const accepted = acceptedReviewPublication(receipt);
+      return accepted ? record(accepted) : receipt.state === "refused" ? refused() : uncertain();
+    }
+  }
   // Why nothing was posted, carried into the typed outcome — every path that
   // leaves `postTarget` null fills it (the hard-stop skip is the default).
   const bound = input.publication;
@@ -1099,12 +1157,6 @@ async function reviewPostStep(
     return record({ posted: false, reason: "the saved review target was not confirmed" });
   let skipReason = "the round was hard-stopped — nothing is posted after an abort";
   if (!input.hardStopped) {
-    postTarget = decideReviewPost({
-      agentName: agent.name,
-      repo: repoCtx.repo,
-      pr: repoCtx.pr,
-      requestText: input.requestText,
-    });
     if (!postTarget) {
       skipReason = "no PR post was intended for this round";
       if (agent.name === "review") {
@@ -1164,6 +1216,7 @@ async function reviewPostStep(
       pr: repoCtx.prSize,
       head: reviewHead,
       baseRef: repoCtx.baseRef,
+      baseSha: repoCtx.baseSha,
     });
     if (!coverage.ok) {
       console.log(`[review-post] ${logKey} skipped: ${coverage.reason} (${where})`);
@@ -1174,7 +1227,11 @@ async function reviewPostStep(
       postTarget = null;
     }
   }
-  if ((input.guardTransition === true || pinnedHead !== undefined) && postTarget && reviewHead) {
+  if (
+    (input.guardTransition === true || pinnedHead !== undefined || repoCtx.baseSha !== undefined) &&
+    postTarget &&
+    reviewHead
+  ) {
     // Final transition guard immediately before the write: one fresh facts
     // read must prove the pull request is open, its head ref still exists and
     // that ref is at the commit this verdict covers. A head-only read can keep
@@ -1196,7 +1253,10 @@ async function reviewPostStep(
       exactBinding && facts?.state === "open" && facts.headBranchExists === true
         ? normalizeHead(facts.headSha)
         : undefined;
-    if (current === undefined || !sameCommit(current, pinned)) {
+    if (
+      (input.guardTransition === true || pinnedHead !== undefined) &&
+      (current === undefined || !sameCommit(current, pinned))
+    ) {
       const reason =
         current === undefined
           ? "the pull request is no longer open at a readable head"
@@ -1206,55 +1266,32 @@ async function reviewPostStep(
       skipReason = reason;
       postTarget = null;
     }
+    if (postTarget && repoCtx.baseSha !== undefined) {
+      const base = normalizeHead(facts?.baseSha);
+      const comparison =
+        base && base !== repoCtx.baseSha
+          ? await input.fetchPrCommits?.({ repo: postTarget.repo, base, sha: reviewHead })
+          : undefined;
+      if (
+        facts?.state !== "open" ||
+        facts.baseRef !== repoCtx.baseRef ||
+        !base ||
+        (base !== repoCtx.baseSha && comparison?.mergeBase !== input.digest?.range?.base)
+      ) {
+        skipReason = "the PR comparison changed or could not be verified after review";
+        await input.reply(`ℹ️ Review not posted to ${where}: ${skipReason}.`).catch(() => {});
+        postTarget = null;
+      }
+    }
   }
   if (postTarget && reviewHead) {
     // narrowing only — the guard above already required it
     // Only the reviewed commit can receive this verdict.
     const pinned = reviewHead;
     const target: ReviewCommentTarget = { ...postTarget, commitId: pinned };
-    // The verdict line is built here, by code — the model's prose never
-    // decides whether the body starts with "LGTM:" (auto-approve contract).
-    const body = buildReviewPostBody(
-      input.answer,
-      verdict,
-      { repo: postTarget.repo, head: pinned },
-      input.reviewIncomplete,
-    );
-    const where = `${postTarget.repo}#${postTarget.number}`;
-    const uncertain = async (): Promise<ReviewPostOutcome> => {
-      const reason = "the review publication outcome is unconfirmed";
-      await input.reply(`ℹ️ I could not confirm whether the review posted to ${where}.`).catch(() => {});
-      return record({ posted: false, uncertain: true, reason });
-    };
-    const refused = async (): Promise<ReviewPostOutcome> => {
-      const reason = "the review publication was refused";
-      await input.reply(`ℹ️ Review not posted to ${where}: ${reason} — this verdict is Slack-only.`).catch(() => {});
-      return record({ posted: false, reason });
-    };
-    const journal = input.publicationJournal;
     if (!journal) return record({ posted: false, reason: "the review publication owner is unavailable" });
-    const pending = reviewPublicationOf({
-      version: 1,
-      runId: journal.runId,
-      target,
-      bodyHash: await sourceHash(body),
-      ...(completeReviewVerdict(verdict) ? { verdict: verdict!.verdict } : {}),
-      state: "pending",
-      ...(completeReviewVerdict(verdict) && verdict?.humanFindings !== undefined
-        ? { feedback: { format: 1, findings: verdict.findings?.length ?? 0, at: systemClock() } }
-        : {}),
-    });
     if (!pending) return record({ posted: false, reason: "the complete review publication target was not confirmed" });
     try {
-      const previous = await journal.read();
-      if (previous === REVIEW_PUBLICATION_OWNER_ABSENT)
-        return record({ posted: false, reason: "the review publication owner is unavailable" });
-      if (previous !== null) {
-        const receipt = reviewPublicationOf(previous);
-        if (!receipt || !sameReviewPublication(receipt, pending)) return uncertain();
-        const accepted = acceptedReviewPublication(receipt);
-        return accepted ? record(accepted) : receipt.state === "refused" ? refused() : uncertain();
-      }
       if (!(await journal.canPublish())) return (await journal.read()) === null ? refused() : uncertain();
       const admission = await journal.commit(pending);
       if (admission === "refused") return refused();

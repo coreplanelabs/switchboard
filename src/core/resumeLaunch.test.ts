@@ -267,13 +267,14 @@ describe("the pure pieces", () => {
 
   it("repoContextOf restores a standalone PR's original non-default base from durable metadata", () => {
     const original = row();
-    original.meta = { ...original.meta, baseRef: "release/stable" };
+    original.meta = { ...original.meta, baseRef: "release/stable", ...{ baseSha: "e".repeat(40) } };
     expect(repoContextOf(original)).toEqual({
       repo: "acme/api",
       ref: "feat/x",
       pr: 12,
       headSha: "a".repeat(40),
       baseRef: "release/stable",
+      baseSha: "e".repeat(40),
     });
   });
 

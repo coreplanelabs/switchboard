@@ -549,6 +549,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
       ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
       ...(repoCtx.baseRef !== undefined && !privateMain ? { baseRef: repoCtx.baseRef } : {}),
+      ...(repoCtx.baseSha !== undefined && !privateMain ? { baseSha: repoCtx.baseSha } : {}),
       ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
       ...(repoCtx.pr !== undefined && !privateMain ? { pr: repoCtx.pr } : {}),
       readonly: profile.identity === "read",

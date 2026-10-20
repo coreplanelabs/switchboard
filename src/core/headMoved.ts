@@ -27,6 +27,8 @@ export function headMovedNote(input: { where: string; reviewed: string; current?
 /** One side of a `base...head` comparison: the commits unique to the head
  *  side (oldest first, full messages) and the files the range touches. */
 export interface PrCommitList {
+  /** Immutable common ancestor from the same GitHub comparison. */
+  mergeBase?: string;
   commits: Array<{ sha: string; message: string }>;
   files: string[];
   /** GitHub capped the file list (300); the set is incomplete. */
