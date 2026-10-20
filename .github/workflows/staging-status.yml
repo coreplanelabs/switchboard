@@ -61,7 +61,8 @@ jobs:
           const pulls = origin
             ? api(`pulls?state=open&head=${repo.split('/')[0]}:${branch}&per_page=100`)
             : [api(`pulls/${event.pull_request.number}`)];
-          if (!pulls.some(pull => isRelease(pull) && pull.head.sha === sha)) process.exit(0);
+          const release = pulls.find(isRelease);
+          const candidateWasCurrent = Boolean(release && release.head.sha === sha);
           const workflow = api('actions/workflows/deploy-staging.yml');
           function newest() {
             const history = api(`actions/workflows/deploy-staging.yml/runs?head_sha=${sha}&per_page=100`);
@@ -80,12 +81,53 @@ jobs:
               throw new Error('Controller execution order is ambiguous');
             return runs[0];
           }
+          function liveReviewResult(source) {
+            const jobs = api(`actions/runs/${source.id}/attempts/${source.run_attempt}/jobs?per_page=100`);
+            const refuse = description => ({ state: 'failure', description });
+            if (!Array.isArray(jobs.jobs) || !Number.isInteger(jobs.total_count) || jobs.total_count !== jobs.jobs.length)
+              return refuse('Live Review outcome evidence is incomplete');
+            const fullStackJobs = jobs.jobs.filter(job => job.name === 'staging / full stack');
+            const acceptanceJobs = jobs.jobs.filter(job => job.name === 'staging / live Review');
+            if (fullStackJobs.length !== 1 || acceptanceJobs.length !== 1)
+              return refuse('Live Review outcome evidence is incomplete');
+            const fullStack = fullStackJobs[0];
+            const acceptance = acceptanceJobs[0];
+            if (fullStack.status === 'completed' && fullStack.conclusion === 'skipped')
+              return refuse('Live Review acceptance did not run');
+            if (!Array.isArray(fullStack.steps)) return refuse('Live Review outcome evidence is incomplete');
+            const deploySteps = fullStack.steps.filter(step => step.name === 'deploy the captured commit to staging');
+            const reviewSteps = fullStack.steps.filter(step => step.name === 'run live Review acceptance on the deployed stack');
+            if (deploySteps.length !== 1 || reviewSteps.length !== 1)
+              return refuse('Live Review outcome evidence is incomplete');
+            const deployment = deploySteps[0];
+            const review = reviewSteps[0];
+            if (review.status === 'completed' && review.conclusion === 'skipped')
+              return refuse(['failure', 'cancelled', 'timed_out'].includes(deployment.conclusion)
+                ? 'Staging deployment did not complete; live Review acceptance did not run'
+                : 'Live Review acceptance did not run');
+            if (review.status !== 'completed' || !review.conclusion)
+              return refuse('Live Review outcome evidence is incomplete');
+            if (review.conclusion === 'failure') return refuse('Live Review acceptance failed');
+            if (review.conclusion !== 'success') return refuse('Live Review acceptance did not complete');
+            if (
+              deployment.status !== 'completed' || deployment.conclusion !== 'success' ||
+              fullStack.status !== 'completed' || fullStack.conclusion !== 'success'
+            ) return refuse('Full-stack staging did not complete successfully');
+            if (acceptance.status === 'completed' && acceptance.conclusion === 'failure')
+              return refuse('Live Review step passed; final acceptance gate failed');
+            if (acceptance.status !== 'completed' || acceptance.conclusion !== 'success')
+              return refuse('Live Review outcome evidence is incomplete');
+            if (source.conclusion !== 'success') return refuse('Staging controller did not complete successfully');
+            return { state: 'success', description: 'Release staging Review acceptance passed' };
+          }
           let source;
           try {
             source = newest();
           } catch (error) {
             // Incomplete evidence must remain a merge refusal.
-            publish('failure', 'Controller history cannot establish release acceptance');
+            publish('failure', candidateWasCurrent
+              ? 'Controller history cannot establish release acceptance'
+              : 'Candidate superseded; controller history cannot establish release acceptance', origin);
             throw error;
           }
           let state = 'failure';
@@ -94,12 +136,11 @@ jobs:
             if (source.status !== 'completed') {
               state = 'pending';
               description = 'Newest staging controller is still running';
-            } else if (source.conclusion === 'success') {
-              const jobs = api(`actions/runs/${source.id}/attempts/${source.run_attempt}/jobs?per_page=100`);
-              const accepted = jobs.jobs.find(job => job.name === 'staging / live Review');
-              if (jobs.total_count === jobs.jobs.length && accepted?.status === 'completed' && accepted.conclusion === 'success') {
-                state = 'success';
-                description = 'Release staging Review acceptance passed';
+            } else {
+              try {
+                ({ state, description } = liveReviewResult(source));
+              } catch {
+                description = 'Live Review outcome evidence is unavailable';
               }
             }
           }
@@ -110,6 +151,28 @@ jobs:
               current?.run_attempt !== source?.run_attempt || current?.status !== source?.status) {
             state = 'pending';
             description = 'Staging controller execution changed during verification';
+          }
+          let candidateIsCurrent = candidateWasCurrent;
+          let candidateWasSuperseded = Boolean(release && release.head.sha !== sha);
+          if (release) {
+            try {
+              const currentPull = api(`pulls/${release.number}`);
+              candidateIsCurrent = isRelease(currentPull) && currentPull.head.sha === sha;
+              candidateWasSuperseded = isRelease(currentPull) && currentPull.head.sha !== sha;
+            } catch {
+              state = 'failure';
+              description = 'Current release head evidence is unavailable';
+            }
+          }
+          if (!candidateIsCurrent) {
+            const outcome = state === 'success'
+              ? 'prior Review passed on obsolete head'
+              : `${description[0].toLowerCase()}${description.slice(1)}`;
+            state = 'failure';
+            const disposition = candidateWasSuperseded
+              ? candidateWasCurrent ? 'Candidate superseded during verification' : 'Candidate superseded'
+              : 'Candidate is no longer current';
+            description = `${disposition}; ${outcome}`;
           }
           publish(state, description, source);
           NODE
