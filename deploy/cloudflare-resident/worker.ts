@@ -15732,18 +15732,18 @@ export class ResidentDO extends Sandbox<Env> {
       const selected = unresolved.get(discardUnknownNative.key);
       const parsed = nativeOperationRecordSchema.safeParse(selected);
       const hashes = await journal.fingerprints(NATIVE_OPERATION_PREFIX);
-      if (
-        !resumeWithoutRecord &&
-        (unresolved.size !== 1 ||
-          !parsed.success ||
-          !("opOwner" in parsed.data) ||
-          parsed.data.native.closed !== true ||
-          !parsed.data.native.scope ||
-          !Object.values(parsed.data.native.pending).some((attempt) => attempt.restore) ||
-          Object.values(parsed.data.native.pending).some((attempt) => !attempt.restore) ||
-          hashes[discardUnknownNative.key] !== discardUnknownNative.recordHash)
-      )
-        throw new Error("resident-cleanup-refused: exact closed native restore changed or another hold remains");
+      const eligible =
+        parsed.success &&
+        "opOwner" in parsed.data &&
+        parsed.data.native.closed === true &&
+        !!parsed.data.native.scope &&
+        Object.values(parsed.data.native.pending).some((attempt) => attempt.restore) &&
+        !Object.values(parsed.data.native.pending).some((attempt) => !attempt.restore);
+      const hashMatch = hashes[discardUnknownNative.key] === discardUnknownNative.recordHash;
+      if (!resumeWithoutRecord && (unresolved.size !== 1 || !eligible || !hashMatch))
+        throw new Error(
+          `resident-cleanup-refused: exact closed native restore changed or another hold remains (holds=${unresolved.size}, eligible=${eligible}, hashMatch=${hashMatch})`,
+        );
     }
     for (const [key, value] of unresolved) {
       if (discardUnknownNative?.key === key) continue;
