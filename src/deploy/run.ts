@@ -19,6 +19,7 @@ import {
 } from "./pagingDiagnostic.js";
 import { spawn, execFileSync } from "node:child_process";
 import { maintenanceProfileMaterial } from "./profile.js";
+import { residentEarlyHoldProblem } from "./residentEarlyHold.js";
 import { sameResidentImageTarget, type ResidentImageTarget } from "./residentMaintenance.js";
 import { DRAIN, MINUTE_MS, minutesToMs } from "../core/budgets.js";
 import {
@@ -1331,8 +1332,8 @@ export interface SandboxGateDeps {
   probeExec(execUrl: string, bearer: string, threadKey: string, signal?: AbortSignal): Promise<ProbeResult>;
   now(): number;
   sleep(ms: number, signal?: AbortSignal): Promise<void>;
-  /** One authenticated JSON POST (the fleet drain's `/drain` and `/undrain`, release-and-deploy
-   *  item 31); absent → the runner never drains and says why. */
+  /** One authenticated JSON POST (fleet controls and read-scoped native-operation inventory);
+   *  absent → the runner refuses the affected operation. */
   postJson?(url: string, bearer: string, body: Record<string, unknown>): Promise<PostAnswer>;
 }
 
@@ -2962,6 +2963,18 @@ async function runSelectedDeployPlan(
   const problems = await preChecks(plan, io, deps.signal);
   if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
   if (problems.length > 0) return { kind: "refused", problems };
+  const residentStep = plan.steps.find((step) => step.name === "resident" && !step.maintenance);
+  if (residentStep) {
+    const earlyHold = await residentEarlyHoldProblem({
+      baseUrl: residentStep.drain?.url ?? residentStep.setEnv.RESIDENT_BASE_URL,
+      bearer: deps.env.RESIDENT_READ_TOKEN?.trim() || deps.env.RESIDENT_ADMIN_TOKEN?.trim(),
+      signal: deps.signal,
+      readHealth: deps.readHealth,
+      postJson: deps.postJson,
+    });
+    if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
+    if (earlyHold) return { kind: "refused", problems: [earlyHold] };
+  }
   // The commit being deployed — what a gated Worker's /healthz must report
   // before its step counts as live. In a checkout, HEAD, read AFTER the origin/main check;
   // from the package, the commit it was built from (its `source.json`), which the steps stamp
