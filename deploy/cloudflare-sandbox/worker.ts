@@ -57,6 +57,7 @@ import {
 } from "../../src/execution/sandboxLifecycle.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { DESTROY_GRACE_MS, IdleGuard, type IdleGuardHost } from "../../src/execution/sandboxIdle.js";
+import { SandboxLifecycleEvidence } from "../../src/execution/sandboxLifecycleEvidence.js";
 import {
   boundSeedMarkerDecision,
   boundSeedOriginMatches,
@@ -98,7 +99,7 @@ import {
   thrownShape,
   thrownText,
 } from "../../src/execution/sandboxErrors.js";
-import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
+import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { backupTransferMode } from "../../src/execution/residentBackupTransfer.js";
 import {
   judgeRestoreProgress,
@@ -342,17 +343,40 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   // deadline a command can hit (item 2), since a request in flight is service.
   sleepAfter = SANDBOX_SLEEP_AFTER;
 
+  private readonly lifecycleEvidence: SandboxLifecycleEvidence;
   private readonly idle: IdleGuard;
   private readonly gate: StartGate;
   private readonly checkoutFence = new CheckoutFence();
 
   constructor(...args: ConstructorParameters<typeof Sandbox<Env>>) {
     super(...args);
+    this.lifecycleEvidence = new SandboxLifecycleEvidence({
+      now: systemClock,
+      sandboxId: this.ctx.id.toString(),
+      build: buildId(BUILD),
+      log: (event) => console.log(JSON.stringify({ ...event, thread: this.ctx.id.name ?? this.ctx.id.toString() })),
+      reportLogFailure: (err) =>
+        console.error(
+          JSON.stringify({
+            event: "sandbox.lifecycle.telemetry-failed",
+            sandboxId: this.ctx.id.toString(),
+            build: buildId(BUILD),
+            errorName: err instanceof Error && /^[A-Za-z]+Error$/.test(err.name) ? err.name : "unknown",
+          }),
+        ),
+      supervise: (promise) => this.ctx.waitUntil(promise),
+    });
     this.idle = new IdleGuard(this.idleHost());
     this.gate = new StartGate(this.startHost());
     // Every wake, including the one the SDK's own alarm causes on a leaked
     // container: the baseline is read and a sweep armed before any request.
     this.ctx.blockConcurrencyWhile(() => this.idle.wake());
+    this.lifecycleEvidence.watch(this.ctx.container, "wake");
+  }
+
+  override async onStart(): Promise<void> {
+    await super.onStart();
+    this.lifecycleEvidence.watch(this.ctx.container, "start");
   }
 
   /** The guard's view of this object: the platform's running flag, the SDK's
@@ -372,7 +396,10 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       },
       loadLastServedAt: () => this.ctx.storage.get<number>(IDLE_LEDGER_KEY),
       saveLastServedAt: (at) => this.ctx.storage.put(IDLE_LEDGER_KEY, at),
-      log: (event) => console.log(JSON.stringify({ ...event, thread: this.ctx.id.name ?? this.ctx.id.toString() })),
+      log: (event) => {
+        this.lifecycleEvidence.guardIntent(event);
+        console.log(JSON.stringify({ ...event, thread: this.ctx.id.name ?? this.ctx.id.toString() }));
+      },
       wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     };
   }
@@ -625,6 +652,16 @@ export class SwitchboardSandbox extends Sandbox<Env> {
         }),
       log: (event) => console.log(JSON.stringify({ ...event, thread: this.ctx.id.name ?? this.ctx.id.toString() })),
     };
+  }
+
+  /** The base alarm also reconciles container stops outside our callbacks.
+   * Observe the whole invocation so an SDK failure does not vanish between
+   * `idleSweep` and `onActivityExpired`. */
+  override async alarm(props?: AlarmInvocationInfo): Promise<void> {
+    await this.lifecycleEvidence.alarm(
+      () => ({ inflight: this.idle.ledger.inflight.length, running: this.ctx.container?.running }),
+      () => super.alarm(props),
+    );
   }
 
   /** The idle sweep, scheduled by the guard through the SDK's schedule table
