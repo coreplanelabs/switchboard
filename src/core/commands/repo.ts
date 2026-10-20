@@ -749,6 +749,16 @@ export const repoRebuild = defineCommand({
       .describe(
         "discard all resident state, workspaces, bindings and backups; recreate from saved settings (for a clean start or stale operation hold)",
       ),
+    discardNativeKey: z
+      .string()
+      .regex(/^native-operation:.{1,495}$/)
+      .optional()
+      .describe("exact closed native operator record to discard after confirmed full reset"),
+    discardNativeRecordHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional()
+      .describe("record hash from the current native-operation inventory"),
   }),
   action: "repo:write",
   effect: "write",
@@ -758,7 +768,9 @@ export const repoRebuild = defineCommand({
       dryRunRequested(input)
         ? PLAN_ONLY_RISK
         : input.options?.full === true || input.options?.full === "true"
-          ? "permanently deletes all resident workspaces, bindings, operation records and backups, then recreates it"
+          ? input.options?.discardNativeKey
+            ? `destroys the resident container, discards native record ${input.options.discardNativeKey} at hash ${input.options.discardNativeRecordHash}, and deletes all resident workspaces, bindings and backups; original result remains unknown`
+            : "permanently deletes all resident workspaces, bindings, operation records and backups, then recreates it"
           : "discards the container and snapshot; keeps bindings and operation records",
   },
   describe:
@@ -773,13 +785,20 @@ export const repoRebuild = defineCommand({
     if (o.full === true) {
       const removed = obj(o.wouldRemove);
       const reprovision = obj(o.reprovision);
+      const unknownNative = Array.isArray(removed.unverifiedNativeOperations)
+        ? removed.unverifiedNativeOperations.map((entry) => obj(entry))
+        : [];
+      const discarded = o.discardedUnknownNative ? obj(o.discardedUnknownNative) : undefined;
       return o.dryRun === true
         ? [
             `Full rebuild of \`${slug}\` would delete its container, ${n(removed.threadBindings)} thread binding(s), ${n(removed.backupObjects)} backup object(s), ${n(removed.r2Objects)} prefix object(s), and all stored workspace and operation state.`,
+            ...unknownNative.map(
+              (entry) => `Unverified native record: \`${str(entry.key)}\` with hash \`${str(entry.recordHash)}\`.`,
+            ),
             `Keep the repo registration and commands; recreate on \`${str(reprovision.defaultRef)}\`.`,
             "Original operation results remain unknown. Nothing was changed.",
           ].join("\n")
-        : `Fully rebuilding \`${slug}\`: container destroyed, stored work cleared, ${n(o.backupObjectsDeleted)} backup object(s) and ${n(o.r2ObjectsDeleted)} prefix object(s) deleted. Recreating on \`${str(reprovision.defaultRef)}\`; provisioning has started. Original operation results remain unknown.`;
+        : `Fully rebuilding \`${slug}\`: container destroyed, stored work cleared, ${n(o.backupObjectsDeleted)} backup object(s) and ${n(o.r2ObjectsDeleted)} prefix object(s) deleted. Recreating on \`${str(reprovision.defaultRef)}\`; provisioning has started.${discarded ? ` Exact unverified native record \`${str(discarded.key)}\` was discarded after destruction; its audit remains.` : ""} Original operation results remain unknown.`;
     }
     const discards = obj(o.discards);
     const snap = discards.snapshot ? obj(discards.snapshot) : undefined;
@@ -814,12 +833,25 @@ export const repoRebuild = defineCommand({
   handler: async ({ args, options, deps, span }) => {
     const dryRun = options.dryRun ?? false;
     const full = options.full ?? false;
+    const discardUnknownNative =
+      options.discardNativeKey && options.discardNativeRecordHash
+        ? { key: options.discardNativeKey, recordHash: options.discardNativeRecordHash }
+        : undefined;
+    if (
+      (options.discardNativeKey !== undefined || options.discardNativeRecordHash !== undefined) &&
+      (!full || !discardUnknownNative || options.resident !== undefined)
+    )
+      throw new CommandError("invalid_input", "an exact native key and record hash require --full without --resident");
     const api = await adminOf(deps, span);
     const r = await call(() =>
       options.resident !== undefined
-        ? api.rebuild(repoResourceId(args.slug), dryRun, full, options.resident)
+        ? discardUnknownNative
+          ? api.rebuild(repoResourceId(args.slug), dryRun, full, options.resident, discardUnknownNative)
+          : api.rebuild(repoResourceId(args.slug), dryRun, full, options.resident)
         : full
-          ? api.rebuild(repoResourceId(args.slug), dryRun, true)
+          ? discardUnknownNative
+            ? api.rebuild(repoResourceId(args.slug), dryRun, true, undefined, discardUnknownNative)
+            : api.rebuild(repoResourceId(args.slug), dryRun, true)
           : api.rebuild(repoResourceId(args.slug), dryRun),
     );
     if (r.status !== 200 && r.status !== 202) {

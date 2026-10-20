@@ -1805,6 +1805,16 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "required": false,
         "type": "boolean",
       },
+      {
+        "name": "discardNativeKey",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "discardNativeRecordHash",
+        "required": false,
+        "type": "string",
+      },
     ],
     "resource": "command",
     "surfaces": [

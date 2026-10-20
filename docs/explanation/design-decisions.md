@@ -127,6 +127,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0108 | [Staging successors preserve consumed episodes](../decisions/0108-staging-successors-preserve-consumed-episodes.md) | Compare-and-swap episode pointer and immutable receipts | proposed | 2026-10-15 |
 | 0109 | [Follow-ups keep a continuation checkpoint](../decisions/0109-follow-ups-keep-a-continuation-checkpoint.md) | Snapshot and bounded log projection | proposed | 2026-10-16 |
 | 0110 | [Engineering rules compose before work](../decisions/0110-engineering-rules-compose-before-work.md) | Composition and ports and adapters | proposed | 2026-10-18 |
+| 0111 | [Explicit native disposal requires a confirmed full reset](../decisions/0111-explicit-native-disposal-requires-confirmed-full-reset.md) | Exact selection and retained unknown outcome | proposed | 2026-10-19 |
 
 <!-- /generated:decision-records -->
 

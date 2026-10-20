@@ -617,6 +617,14 @@ export const COMMAND_FIXTURES: Readonly<
     variants: { "all-options-set": { omit: ["warmResidents"] } },
     why: "at least one change is required; warm resident count changes are separate from branch and command changes",
   },
+  "repo.rebuild": {
+    hints: {
+      discardNativeKey: "native-operation:op:archive",
+      discardNativeRecordHash: "a".repeat(64),
+    },
+    variants: { "all-options-set": { omit: ["resident"] } },
+    why: "an exact native discard needs both selectors with full reset and cannot select a pool replica",
+  },
   "memory.forget": {
     hints: { id: FIXTURE.ownMemoryRecord },
     why: "the record must exist in the CALLER's own scope — the generic `id` hint is a run id",
