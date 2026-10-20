@@ -316,6 +316,24 @@ describe("thrownText", () => {
       "git: internal error; reference = 0123456789abcdefghijklmn",
     );
   });
+  it("names a referenced Durable Object storage reset while keeping an application prefix", () => {
+    expect(
+      thrownText({
+        message:
+          "Internal error in Durable Object storage caused object to be reset; reference = 0123456789abcdefghijklmn",
+      }),
+    ).toBe(
+      "Failed inside Cloudflare's infrastructure boundary: Internal error in Durable Object storage caused object to be reset; reference = 0123456789abcdefghijklmn",
+    );
+    expect(
+      thrownText({
+        message:
+          "git: Internal error in Durable Object storage caused object to be reset; reference = 0123456789abcdefghijklmn",
+      }),
+    ).toBe(
+      "git: Internal error in Durable Object storage caused object to be reset; reference = 0123456789abcdefghijklmn",
+    );
+  });
   it("returns the SDK's message verbatim (trimmed) when it has one", () => {
     expect(thrownText({ name: "SandboxError", message: "Session 'x' not found" })).toBe("Session 'x' not found");
     expect(thrownText({ message: "  fetch failed \n" })).toBe("fetch failed");

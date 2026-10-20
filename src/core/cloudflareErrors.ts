@@ -1,9 +1,10 @@
 import { unwrapUntrusted } from "./untrusted.js";
 
 /** Read only at a known Cloudflare boundary; a wrapped subrequest is not evidence. */
-export const CLOUDFLARE_INTERNAL_ERROR = /^internal error(?:; reference = [a-z0-9]{24})?\.?$/i;
+export const CLOUDFLARE_INTERNAL_ERROR =
+  /^internal error(?:(?: in Durable Object storage caused object to be reset)?; reference = [a-z0-9]{24})?\.?$/i;
 const CLOUDFLARE_FAILURE =
-  /^(?:internal error; reference = [a-z0-9]{24}\.?|Durable Object(?:'s isolate exceeded its memory limit and was reset\.| storage operation exceeded timeout which caused object to be reset\.| is overloaded(?:\..*)?| reset because its code was updated\..*)|internal error while starting up durable object storage caused object to be reset\.?)$/i;
+  /^(?:internal error(?: in Durable Object storage caused object to be reset)?; reference = [a-z0-9]{24}\.?|Durable Object(?:'s isolate exceeded its memory limit and was reset\.| storage operation exceeded timeout which caused object to be reset\.| is overloaded(?:\..*)?| reset because its code was updated\..*)|internal error while starting up durable object storage caused object to be reset\.?)$/i;
 const BOUNDARY = "Failed inside Cloudflare's infrastructure boundary: ";
 
 /** Preserve the platform's support reference, without assigning generic 5xx failures to it. */
