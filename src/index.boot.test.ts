@@ -34,17 +34,29 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-async function waitForHealth(url: string): Promise<Response> {
+// The child starts through tsx with a cold module cache: about 3s warm and 8s
+// cold on an idle machine, and slower on a loaded runner. Wait a minute for the
+// health server, and end the wait as soon as the child exits, so a boot that dies
+// reports the exit and the child's output instead of a bare fetch failure.
+async function waitForHealth(url: string, child: ChildProcess, output: () => string): Promise<Response> {
+  const deadline = Date.now() + 60_000;
   let last: unknown;
-  for (let i = 0; i < 300; i++) {
+  for (;;) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `boot fixture exited before its health server answered (code ${String(child.exitCode)}, signal ${String(child.signalCode)}):\n${output()}`,
+      );
+    }
     try {
-      return await fetch(url);
+      return await fetch(url, { signal: AbortSignal.timeout(1_000) });
     } catch (err) {
       last = err;
-      await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    if (Date.now() >= deadline) {
+      throw new Error(`boot fixture health server never answered (${String(last)}):\n${output()}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw last;
 }
 
 describe("the production process boot fixture", () => {
@@ -71,8 +83,15 @@ describe("the production process boot fixture", () => {
       stdio: ["ignore", "pipe", "pipe"],
     });
     children.push(child);
+    let output = "";
+    child.stdout?.on("data", (b) => {
+      output += String(b);
+    });
+    child.stderr?.on("data", (b) => {
+      output += String(b);
+    });
 
-    const health = await waitForHealth(`http://127.0.0.1:${botPort}/healthz`);
+    const health = await waitForHealth(`http://127.0.0.1:${botPort}/healthz`, child, () => output);
     expect(health.status).toBe(503);
     const body = await health.json();
     expect(body).toMatchObject({
@@ -85,5 +104,5 @@ describe("the production process boot fixture", () => {
     const blocked = await fetch(`http://127.0.0.1:${botPort}/ingress`, { method: "POST" });
     expect(blocked.status).toBe(503);
     expect(child.exitCode).toBeNull();
-  }, 25_000);
+  }, 90_000);
 });
