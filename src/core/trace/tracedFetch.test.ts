@@ -1,6 +1,6 @@
 // Feature: docs/reference/specs/tracing.md item 21 — one outbound call, one `http.client`
 // span; the trace context leaves only for our own hosts.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { recordingSink } from "../testing/recordingSink.js";
 import { classificationOf } from "./classify.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "./internalHosts.js";
@@ -37,6 +37,74 @@ describe("internalHostsOf", () => {
   });
 });
 
+describe("Worker request correlation transport", () => {
+  it("records the original request before a failed send and keeps foreign requests and telemetry failures isolated", async () => {
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failure = new DOMException("timed out", "TimeoutError");
+    const requestId = "11111111-1111-4111-a111-111111111111";
+    let atSend: unknown[] = [];
+    let sent: Headers | undefined;
+    try {
+      await expect(
+        tracedFetch(
+          undefined,
+          "https://state.example:8443/runs/step?token=PRIVATE",
+          {
+            method: "POST",
+            headers: { "x-switchboard-storage-request-id": requestId, authorization: "Bearer PRIVATE" },
+            body: "PRIVATE_BODY",
+          },
+          {
+            hosts,
+            route: "/runs/step",
+            fetchImpl: async (_url, init) => {
+              sent = new Headers(init?.headers);
+              atSend = logs.map((line) => JSON.parse(line));
+              throw failure;
+            },
+          },
+        ),
+      ).rejects.toBe(failure);
+      expect(sent?.get("x-switchboard-request-id")).toBe(requestId);
+      expect(sent?.get("x-switchboard-storage-request-id")).toBe(requestId);
+      expect(atSend).toEqual([
+        {
+          event: "cloudflare.request.sent",
+          requestId,
+          route: "/runs/step",
+          host: "state.example:8443",
+        },
+      ]);
+      const external = await tracedFetch(undefined, "https://foreign.example/path", undefined, {
+        hosts,
+        route: "/path",
+        fetchImpl: async (_url, init) =>
+          Response.json({ id: new Headers(init?.headers).get("x-switchboard-request-id") }),
+      });
+      expect(await external.json()).toEqual({ id: null });
+      expect(logs.map((line) => JSON.parse(line))).toEqual(atSend);
+      log.mockImplementation(() => {
+        throw new Error("PRIVATE_SINK_FAILURE");
+      });
+      const response = await tracedFetch(undefined, "https://resident.example/status", undefined, {
+        hosts,
+        route: "/status",
+        fetchImpl: async (_url, init) =>
+          Response.json({ id: new Headers(init?.headers).get("x-switchboard-request-id") }),
+      });
+      expect(await response.json()).toEqual({ id: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+      expect(warn.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        { event: "cloudflare.correlation.unavailable", service: "client", stage: "operator-log" },
+      ]);
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+  });
+});
+
 describe("tracedFetch", () => {
   it("wraps the call in an http.client span under the parent with host, route, method and status — never the query, a header or the body — and sets traceparent for an internal host only", async () => {
     const { log, parent, seen, fetchImpl } = harness();
@@ -70,11 +138,12 @@ describe("tracedFetch", () => {
     expect(log.ends.filter((e) => e.name === "http.client")).toHaveLength(2);
   });
 
-  it("without a parent span it is a plain fetch: no span, no header; the process's configured set is the default host set", async () => {
+  it("without a parent span internal requests still have correlation but no traceparent; the configured set is the default", async () => {
     const { log, seen, fetchImpl, parent } = harness();
     await tracedFetch(undefined, "https://resident.example/status", undefined, { route: "/status", hosts, fetchImpl });
     expect(log.ends).toEqual([]);
-    expect(seen[0]!.init).toBeUndefined();
+    expect(new Headers(seen[0]!.init?.headers).get("x-switchboard-request-id")).toMatch(/^[a-f0-9-]{36}$/);
+    expect(new Headers(seen[0]!.init?.headers).get("traceparent")).toBeNull();
     configureInternalHosts(hosts);
     try {
       await tracedFetch(parent, "https://state.example:8443/runs", { method: "PUT" }, { route: "/runs", fetchImpl });

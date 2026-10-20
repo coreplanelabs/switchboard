@@ -1,3 +1,4 @@
+import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import { prepareStorageRequest } from "../../src/core/storeResponse.js";
 import { storageTransport } from "../../src/core/storageTransport.js";
 import { assertRepositorySettingsWritable, resetRepositorySettings } from "../../src/execution/registrySettings.js";
@@ -16254,6 +16255,7 @@ export default {
     if (!route) return json({ error: "unknown route" }, 404);
     if (request.method !== route.method) return json({ error: `${route.method} only` }, 405);
 
+    observeWorkerRequest(request, { service: "resident", route: url.pathname, build: BUILD }, ctx?.tracing);
     const body: Record<string, unknown> =
       route.method === "POST" ? ((await request.json().catch(() => ({}))) as Record<string, unknown>) : {};
 

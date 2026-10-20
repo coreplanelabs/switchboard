@@ -3,6 +3,7 @@ import type { Span } from "./trace/types.js";
 import type { PreparedStorageRequest } from "./storeResponse.js";
 import type { StoreOperationKind } from "./storeResponse.js";
 import { systemClock } from "./trace/clock.js";
+import { internalHostsOf } from "./trace/internalHosts.js";
 import {
   reportStorageFailure,
   storageFailureNotice,
@@ -82,12 +83,11 @@ export async function storageTransport<T>(
         signal: options.signal,
         ...(options.redirect ? { redirect: options.redirect } : {}),
       };
-      response = options.span
-        ? await tracedFetch(options.span, String(options.url), init, {
-            route: request.operation,
-            fetchImpl: options.fetch ?? fetch,
-          })
-        : await (options.fetch ?? fetch)(options.url, init);
+      response = await tracedFetch(options.span, options.url, init, {
+        route: request.operation,
+        fetchImpl: options.fetch ?? fetch,
+        hosts: internalHostsOf([String(options.url)]),
+      });
     } catch (error) {
       throw options.transportError ? options.transportError(error) : error;
     }

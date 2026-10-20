@@ -1,3 +1,4 @@
+import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import { describe, expect, it, vi } from "vitest";
 import { RecordedCheckOperation, type CheckOperationStorage, type CheckOperationContext } from "./checkOperation.js";
 import { checkCommandHash } from "../../src/execution/checkOperation.js";
@@ -904,6 +905,8 @@ function inspectionHttpFixture(reads: unknown[], data = fixture()) {
     RESOURCE_KEY: "resident:resource",
     sanitizeResidentBody,
     STREAMED_ROUTES: new Set(),
+    observeWorkerRequest,
+    BUILD: { commit: "unknown" },
     startAdoptedRoot: () => undefined,
     tracer: {},
     traceSinks: [],

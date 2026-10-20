@@ -1,3 +1,4 @@
+import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -44,6 +45,8 @@ function worker(dependencies: Record<string, unknown> = {}) {
     TextEncoder,
     sanitizeResidentBody,
     STREAMED_ROUTES: new Set(),
+    observeWorkerRequest,
+    BUILD: { commit: "unknown" },
     startAdoptedRoot: () => undefined,
     tracer: {},
     traceSinks: [],

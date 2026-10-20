@@ -1,3 +1,5 @@
+import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
+import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { depotCiAuthorization, handleDepotCi } from "./depotCi.ts";
 import { maintenanceGate, WorkerMaintenanceStore } from "../../src/core/maintenance.ts";
 import { withDashboardFallback } from "./dashboardFallback.ts";
@@ -504,9 +506,10 @@ async function recordFiring(env: Env, firing: ScheduleFiring): Promise<void> {
  *  kept theirs, and a player that falls back to a plain read of a stream it
  *  cannot size never finds an index at the end of the file. */
 const withLength = (res: Response): Response => withKnownLength(res, (size) => new FixedLengthStream(size));
+const BUILD = injectedBuildStamp();
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const requestUrl = new URL(request.url);
     const pathname = requestUrl.pathname;
     if (githubDoorEdgeRoute(requestUrl, request.method, env.PUBLIC_GIT_BASE_URL) === "refuse")
@@ -543,6 +546,11 @@ export default {
         withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(inbound)),
       );
     const root = tracer.start("bot-shim.fetch", { sinks: traceSinks, attrs: { route } });
+    observeWorkerRequest(
+      request,
+      { service: "bot", route, traceId: root.traceId, build: BUILD, publicEdge: true },
+      ctx?.tracing,
+    );
     try {
       const forwarded = withTraceContext(inbound, root);
       // The routes the Worker answers itself — the restart, the coordinator's

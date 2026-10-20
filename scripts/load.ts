@@ -22,6 +22,7 @@
 // judged. Targets and bearers come from flags or the environment named in
 // `--help`; nothing here is hard-coded to one deployment.
 
+import { Console } from "node:console";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -2143,6 +2144,8 @@ async function home(f: Flags): Promise<boolean> {
 }
 
 async function main(): Promise<number> {
+  // Diagnostic logs must not corrupt the report written to stdout.
+  globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
   const [command, ...rest] = process.argv.slice(2);
   const f = flags(rest);
   if (!command || f.help) {

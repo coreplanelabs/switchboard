@@ -2,6 +2,8 @@ import type { PersonDirectory } from "../identity/contract.js";
 import { PERSONAL_TOKEN_WORKER_TIMEOUT_MS } from "../budgets.js";
 import { resultSchema, type OrganizationCommand, type OrganizationResult, type OrganizationStore } from "./contract.js";
 import { directoryResponses, type DirectoryCommand } from "./directoryTransport.js";
+import { tracedFetch } from "../trace/tracedFetch.js";
+import { internalHostsOf } from "../trace/internalHosts.js";
 
 export class WorkerOrganizationStore implements OrganizationStore {
   readonly directory: PersonDirectory;
@@ -48,16 +50,21 @@ export class WorkerOrganizationStore implements OrganizationStore {
   }
   private async post(path: string, command: unknown): Promise<unknown> {
     const body = JSON.stringify({ installation: this.options.installation, command });
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.options.token}`,
-        "content-type": "application/json",
-        "content-length": String(new TextEncoder().encode(body).length),
+    const response = await tracedFetch(
+      undefined,
+      `${this.baseUrl}${path}`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.options.token}`,
+          "content-type": "application/json",
+          "content-length": String(new TextEncoder().encode(body).length),
+        },
+        body,
+        signal: AbortSignal.timeout(PERSONAL_TOKEN_WORKER_TIMEOUT_MS),
       },
-      body,
-      signal: AbortSignal.timeout(PERSONAL_TOKEN_WORKER_TIMEOUT_MS),
-    });
+      { route: path, fetchImpl: this.fetchImpl, hosts: internalHostsOf([this.baseUrl]) },
+    );
     if (!response.ok) throw new Error("organization store unavailable");
     return response.json();
   }

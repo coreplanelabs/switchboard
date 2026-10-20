@@ -39,6 +39,7 @@ describe("durable feedback client", () => {
         authorization: "Bearer test",
         "content-type": "application/json",
         "x-switchboard-storage-request-id": expect.stringMatching(/^[a-f0-9-]{36}$/),
+        "x-switchboard-request-id": expect.stringMatching(/^[a-f0-9-]{36}$/),
       }),
     );
     expect(
