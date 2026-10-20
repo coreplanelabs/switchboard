@@ -22,7 +22,7 @@ const ALL_IMAGES = [...EXECUTION_IMAGES, BOT] as const;
 // the run bearer is pi's only key.
 
 export const PI_PACKAGE = "@earendil-works/pi-coding-agent";
-export const PI_VERSION = "1.0.4";
+export const PI_VERSION = "1.2.0";
 const PI_PROOF = `pi --version | grep -qx '${PI_VERSION}'`;
 
 /** The instruction lines of a Dockerfile, continuations joined, comments dropped. */
