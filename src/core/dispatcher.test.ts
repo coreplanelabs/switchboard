@@ -5985,7 +5985,8 @@ describe("resident repo dispatch", () => {
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(replies).toContainEqual(expect.stringContaining("answer"));
     expect(fetchSpy.mock.calls.filter((c) => String(c[0]).includes("resident.example"))).toHaveLength(2);
-    const coldNote = "resident restoring (rehydrating) after waiting for the resident's restore — using fresh sandbox";
+    const coldNote =
+      "This run uses a new workspace because the shared workspace is being restored (resident restoring (rehydrating) after waiting for the resident's restore)";
     expect(statuses.some((s) => s.title.includes(coldNote))).toBe(true);
     // …and on the run's stream: a `cold_sandbox` note with the same text, after
     // the attach and before the loop, head material like the rest of the setup
@@ -5995,7 +5996,7 @@ describe("resident repo dispatch", () => {
     const attachEndAt = events.findIndex((e) => e.type === "span_end" && e.name === "dispatch.workspace.attach");
     const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
     expect(events[noteAt]).toMatchObject({
-      summary: "resident restoring (rehydrating) after waiting for the resident's restore — using fresh sandbox",
+      summary: coldNote,
     });
     expect(noteAt).toBeGreaterThan(attachEndAt);
     expect(noteAt).toBeLessThan(loopAt);

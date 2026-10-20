@@ -385,6 +385,7 @@ import {
   swapCheckoutScript,
   restoreFailureDisposition,
   isRuntimeUnreachableSignal,
+  isBackgroundOperationHeld,
   killStaleBuildProcessesCommand,
   planRefresh,
   RUNTIME_MOVED_WORDING,
@@ -863,7 +864,7 @@ const INFRA_STREAK_KEY = "resident:infraStreak";
  *  re-enters the step. A control port that did not answer
  *  (`runtime-unreachable: …`, item 64) is the third: no command ran, the
  *  ladder over its own persisted count owns the recovery. */
-const NON_EVIDENCE_REASON = /^(?:stale-mid-flight|restore-interrupted|runtime-unreachable|infra-streak):/;
+const NON_EVIDENCE_REASON = /^(?:stale-mid-flight|restore-interrupted|runtime-unreachable|infra-streak|refresh-held):/;
 /** When the disk-full recovery last stopped the container (docs/reference/specs/resident-repos.md item 54):
  *  feeds `planDiskFullRecovery`'s cooldown so a working set that refills the
  *  disk is named, not recycled in a loop. */
@@ -1717,7 +1718,12 @@ interface DeployFenceReleaseReceipt {
 }
 
 /** Safe request provenance, never an authority or a native completion receipt. */
-class OpaqueNativeOutcomeUnconfirmedError extends Error {}
+class OpaqueNativeOutcomeUnconfirmedError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "OpaqueNativeOutcomeUnconfirmedError";
+  }
+}
 
 type NativeRequestContext = {
   sourceId?: string;
@@ -4675,6 +4681,7 @@ export class ResidentDO extends Sandbox<Env> {
           ),
           R2_TRANSFER_TIMEOUT_MS,
           "mirror backup",
+          new OpaqueNativeOutcomeUnconfirmedError("mirror backup outcome is unconfirmed after timeout"),
         ),
         withTimeout(
           this.withOpaqueNativeEffect(
@@ -4697,11 +4704,12 @@ export class ResidentDO extends Sandbox<Env> {
           ),
           R2_TRANSFER_TIMEOUT_MS,
           "checkout backup",
+          new OpaqueNativeOutcomeUnconfirmedError("checkout backup outcome is unconfirmed after timeout"),
         ),
       ]);
       return { ref, sha, lockfileHash, createdAt: new Date(systemClock()).toISOString(), mirror, checkout };
     } catch (err) {
-      throw new StepError("snapshot", errMsg(err));
+      throw new StepError("snapshot", errMsg(err), err);
     }
   }
 
@@ -4807,7 +4815,9 @@ export class ResidentDO extends Sandbox<Env> {
           const swept = await this.runOk(killStaleBuildProcessesCommand(BUILD_USER, dir), "deps-install-stale-sweep");
           if (swept.trim()) console.log(`deps: ${swept.trim()}`);
         }
-        await this.run(["rm", "-rf", ...deadPaths], { workspacePaths: deadPaths }).catch(() => {});
+        await this.run(["rm", "-rf", ...deadPaths], { workspacePaths: deadPaths }).catch((err) => {
+          if (isBackgroundOperationHeld(err)) throw err;
+        });
       }
       await this.ctx.storage.put(leaseKey, decision.row);
       break;
@@ -5007,10 +5017,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  their bytes, against the caller's one deadline), verify the restored
    *  mirror against the stamp and hand the checkout to the build user. Runs
    *  inside the hydration lease its caller holds — every mirror-mutex taker
-   *  hydrates first, so nothing else touches these trees meanwhile. A stalled
-   *  or capped restore leaves the resident `down` with the reason and the
-   *  container stopped, as the wake path always did; a restore the runtime
-   *  replacement interrupts (a deploy rolled the container under it) is
+   *  hydrates first, so nothing else touches these trees meanwhile. An
+   *  unknown, stalled or capped restore holds recovery without stopping the
+   *  container. A restore interrupted by a runtime replacement (a deploy
+   *  rolled the container under it) is
    *  `restore-interrupted`, degraded and rethrown for the instance step that
    *  called it to retry — nothing is streaming into a disk that no longer
    *  exists (restoreFailureDisposition). */
@@ -5028,18 +5038,9 @@ export class ResidentDO extends Sandbox<Env> {
           `${this.pendingRestores.size} earlier restore(s) still running`,
         );
       } catch (err) {
-        // Same exit as a stalled restore below: the stream is still running and
-        // a rebuild is what follows a `down`, so the container goes with it.
-        if (
-          !(await this.automaticContainerLoss("restore timeout", async () => {
-            this.swapIncarnation(); // deliberate incarnation swap
-            await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
-          }))
-        )
-          throw new StepError("restore", "workspace-preservation: automatic VM stop deferred");
-        throw await this.goDown(
-          `r2-restore-failed: ${errMsg(err)} — container stopped so the transfer cannot land on a rebuild`,
-        );
+        throw new OpaqueNativeOutcomeUnconfirmedError("earlier restore is still running or its result is unknown", {
+          cause: err,
+        });
       }
     }
     // The fixed mutation gate refuses inherited mounts and pending restores.
@@ -5053,9 +5054,8 @@ export class ResidentDO extends Sandbox<Env> {
       // the two targets share one hydration deadline, so a
       // concurrent pair only made the second one's clock run while it waited —
       // and each is judged by its own bytes (restoreWithProgress), not by
-      // a short fixed budget: a slow transfer waits, a stalled one goes down with
-      // the bytes and the idle span named instead of stranding `restoring` for
-      // the watchdog.
+      // a short fixed budget: a slow transfer waits; a stalled one holds
+      // recovery with the bytes and idle span named.
       await this.restoreExtracted(snap.mirror, MIRROR_DIR, "mirror restore", "mirror-restore-extract", deadlineMs);
       await this.restoreExtracted(
         snap.checkout,
@@ -5065,6 +5065,7 @@ export class ResidentDO extends Sandbox<Env> {
         deadlineMs,
       );
     } catch (err) {
+      if (isBackgroundOperationHeld(err)) throw err;
       // The typed and cause-chain check first: the SDK's replacement errors
       // (a stale process handle, an inactive runtime identity, an interrupted
       // operation) carry the wording one cause down or not at all. An extract
@@ -5103,8 +5104,8 @@ export class ResidentDO extends Sandbox<Env> {
         // came from the SDK's wording, the kill signature or the probe.
         throw new StepError(err instanceof StepError ? err.step : "restore", disposition.reason);
       }
-      // A progress failure is not cleanup proof. Preserve unresolved journal
-      // evidence even when the existing workspace policy permits a VM stop.
+      // A confirmed restore failure is not cleanup proof. Preserve unresolved
+      // journal evidence even when workspace policy permits a VM stop.
       if (
         !(await this.automaticContainerLoss("restore failure", async () => {
           this.swapIncarnation(); // deliberate incarnation swap
@@ -5123,7 +5124,10 @@ export class ResidentDO extends Sandbox<Env> {
     // chown below failing loudly if it is missing.
     const shaRes = await this.run(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${snap.ref}`]);
     const diskSha = shaRes.exitCode === 0 ? shaRes.stdout.trim() : `unreadable(${tail(shaRes.stderr, 120)})`;
-    const diskLock = await this.lockfileKey(snap.sha).catch((err) => `unreadable(${errMsg(err)})`);
+    const diskLock = await this.lockfileKey(snap.sha).catch((err) => {
+      if (isBackgroundOperationHeld(err)) throw err;
+      return `unreadable(${errMsg(err)})`;
+    });
     if (diskSha !== snap.sha || diskLock !== snap.lockfileHash) {
       throw await this.goDown(
         `snapshot-stamp-mismatch: restored disk {sha:${diskSha}, lockfileHash:${diskLock}} != stamp {sha:${snap.sha}, lockfileHash:${snap.lockfileHash}}`,
@@ -5544,10 +5548,10 @@ export class ResidentDO extends Sandbox<Env> {
   /** Ensure the container disk holds the stamped snapshot state. `restoring`
    *  is persisted BEFORE any restore work — DO storage would
    *  otherwise still say warm while the R2 restore runs. Refuses mismatched
-   *  stamps → down(snapshot-stamp-mismatch); a stalled or capped restore →
-   *  down(r2-restore-failed); a restore the runtime replacement interrupts →
-   *  degraded(restore-interrupted), rethrown so the instance step that called
-   *  it is retried by the engine. Throws ResidentDownError after the down
+   *  stamps → down(snapshot-stamp-mismatch); an unknown, stalled or capped
+   *  restore → degraded(refresh-held) with the VM kept; a restore interrupted
+   *  by a runtime replacement → degraded(restore-interrupted), then rethrown
+   *  so the instance step is retried. Throws ResidentDownError after the down
    *  transitions. Called by the refresh instance's fetch step (and the attach
    *  path). */
   async ensureHydrated(): Promise<void> {
@@ -5635,9 +5639,10 @@ export class ResidentDO extends Sandbox<Env> {
     // Housekeeping on the restore path: a failure here leaves the checkout
     // whole (the entry is either absent or complete) and the first attach
     // adopts instead.
-    await this.adoptCheckoutDeps(snap.lockfileHash).catch((err) =>
-      console.log(`deps: adopt after restore failed: ${errMsg(err)}`),
-    );
+    await this.adoptCheckoutDeps(snap.lockfileHash).catch((err) => {
+      if (isBackgroundOperationHeld(err)) throw err;
+      console.log(`deps: adopt after restore failed: ${errMsg(err)}`);
+    });
     // A snapshot taken since item 61 PR B carries the tree WITHOUT its deps
     // view. If the checkout has no node_modules after the adopt (a new-format
     // snapshot; an old one was adopted and linked just above), materialize
@@ -5686,6 +5691,7 @@ export class ResidentDO extends Sandbox<Env> {
         }
       }
     } catch (err) {
+      if (isBackgroundOperationHeld(err)) throw err;
       console.log(`deps: no view after restore — the next refresh installs: ${errMsg(err)}`);
     }
     // The restored checkout carries the snapshot's build, so the refresh
@@ -5867,6 +5873,7 @@ export class ResidentDO extends Sandbox<Env> {
       // a prune against a worktree clone.
       sha = (await this.fetchMirror({ ref: facts.defaultRef, cycle, token })).sha;
     } catch (err) {
+      if (isBackgroundOperationHeld(err)) throw err;
       // The fetch itself failed — or the tip could not be read afterwards,
       // which is the mirror's own failure, not GitHub's: the cycle's
       // classifier names that step.
@@ -6041,6 +6048,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  not accept the connect (`runtime-busy`, item 68) is a fourth: `busy`,
    *  and the cycle yields to the run that holds it. */
   private async classifyCycleError(err: unknown): Promise<RefreshFailure> {
+    if (isBackgroundOperationHeld(err))
+      return classifyRefreshFailure({
+        step: err instanceof StepError ? err.step : "refresh",
+        message: errMsg(err),
+        operationHeld: true,
+      });
     // The control port never answered (item 64): the count decides, and a disk
     // probe would only cost another 30 s abort against the same silent port.
     if (err instanceof RuntimeUnreachableError) {
@@ -6065,8 +6078,15 @@ export class ResidentDO extends Sandbox<Env> {
    *  clears it, same as a mint error), then `degraded` with the last snapshot
    *  still serving, and the disk-full recovery when that is the cause. */
   private async refreshFailed(failure: RefreshFailure, selfInFlight: number): Promise<void> {
-    console.log(`refresh: cycle failed — ${failure.reason.slice(0, 400)}`);
+    console.log(`refresh: cycle ${failure.operationHeld ? "held" : "failed"} — ${failure.reason.slice(0, 400)}`);
     await this.recordRefreshError(failure.reason);
+    if (failure.operationHeld) {
+      // The original effect may still be running. Replacing its VM cannot
+      // establish the outcome, and this hold breaks any earlier infra streak.
+      await this.ctx.storage.delete(INFRA_STREAK_KEY);
+      await this.setResidentState("degraded", failure.reason);
+      return;
+    }
     if (failure.diskFull) {
       await this.setResidentState("degraded", failure.reason);
       await this.recoverFromDiskFull(failure.reason, selfInFlight);
@@ -6884,6 +6904,7 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       return { status: "done", result: await work(), error: null };
     } catch (err) {
+      if (isBackgroundOperationHeld(err)) throw err;
       const failure = await this.classifyCycleError(err);
       if (failure.interrupted) throw err;
       console.log(`refresh instance: ${step} failed — ${failure.reason.slice(0, 400)}`);
@@ -10165,7 +10186,7 @@ export class ResidentDO extends Sandbox<Env> {
       () =>
         plan.action === "restore" && backupRecord
           ? this.restoreDepsEntry(key, backupRecord, restoreDeadlineMs, attempt).catch(async (err) => {
-              if (err instanceof OpaqueNativeOutcomeUnconfirmedError) throw err;
+              if (err instanceof OpaqueNativeOutcomeUnconfirmedError || isBackgroundOperationHeld(err)) throw err;
               console.log(`deps: restore of ${key.slice(0, 8)} failed — installing instead: ${errMsg(err)}`);
               await this.dropDepsBackups([key]).catch(() => {});
               return this.installDepsEntry(key, sha, installCmd, budgetMs, { ...opts, attempt });
@@ -10223,6 +10244,7 @@ export class ResidentDO extends Sandbox<Env> {
             ),
             R2_TRANSFER_TIMEOUT_MS,
             "deps backup",
+            new OpaqueNativeOutcomeUnconfirmedError("deps backup outcome is unconfirmed after timeout"),
           );
           // The entry may have been evicted or replaced while the archive was
           // taken (it is protected, but a rebuild wipes the disk): record only
@@ -10235,6 +10257,7 @@ export class ResidentDO extends Sandbox<Env> {
           await this.ctx.storage.put(depsBackupStorageKey(key), record);
           console.log(`deps: backed up ${key.slice(0, 8)} in ${systemClock() - t0}ms`);
         } catch (err) {
+          if (isBackgroundOperationHeld(err)) throw err;
           console.log(`deps: backup of ${key.slice(0, 8)} failed: ${errMsg(err)}`);
         } finally {
           this.depsBackupsInFlight.delete(key);
@@ -10295,8 +10318,11 @@ export class ResidentDO extends Sandbox<Env> {
       console.log(`deps: restored ${key.slice(0, 8)} from backup in ${systemClock() - t0}ms`);
       return depsEntryPath(key);
     } catch (err) {
-      if (err instanceof OpaqueNativeOutcomeUnconfirmedError) throw err;
-      await this.run(["rm", "-rf", scratch, staging], { workspacePaths: [scratch, staging] }).catch(() => {});
+      if (err instanceof OpaqueNativeOutcomeUnconfirmedError || isBackgroundOperationHeld(err)) throw err;
+      await this.run(["rm", "-rf", scratch, staging], { workspacePaths: [scratch, staging] }).catch((cleanupErr) => {
+        if (isBackgroundOperationHeld(cleanupErr))
+          throw new AggregateError([err, cleanupErr], "dependency restore cleanup is held", { cause: cleanupErr });
+      });
       throw err;
     }
   }
@@ -10415,7 +10441,11 @@ export class ResidentDO extends Sandbox<Env> {
       this.ctx.waitUntil(this.backupDepsEntry(key));
       return depsEntryPath(key);
     } catch (err) {
-      await this.run(["rm", "-rf", scratch, staging], { workspacePaths: [scratch, staging] }).catch(() => {});
+      if (isBackgroundOperationHeld(err)) throw err;
+      await this.run(["rm", "-rf", scratch, staging], { workspacePaths: [scratch, staging] }).catch((cleanupErr) => {
+        if (isBackgroundOperationHeld(cleanupErr))
+          throw new AggregateError([err, cleanupErr], "dependency install cleanup is held", { cause: cleanupErr });
+      });
       throw err;
     } finally {
       this.releaseDepsInstallSlot();
@@ -11023,7 +11053,11 @@ export class ResidentDO extends Sandbox<Env> {
     }
     if (!acknowledged(result))
       throw new OpaqueNativeOutcomeUnconfirmedError("original SDK acknowledgement is unconfirmed");
-    await attempt.settle();
+    try {
+      await attempt.settle();
+    } catch (cause) {
+      throw new OpaqueNativeOutcomeUnconfirmedError("original SDK settlement is unconfirmed", { cause });
+    }
     return result;
   }
 
@@ -14546,8 +14580,11 @@ export class ResidentDO extends Sandbox<Env> {
               : "background producer has an original active or unknown operation",
           );
         }
-        if (admission === "producer-held")
-          throw new Error("background producer has an original active or unknown operation");
+        if (admission === "producer-held") {
+          const held = new Error("producer-held: an earlier operation is still active or its result is unknown");
+          held.name = "BackgroundOperationHeldError";
+          throw held;
+        }
         const result = await this.opOperationScope.run(scope, fn);
         callback = "returned";
         return result;

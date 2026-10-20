@@ -947,7 +947,7 @@ describe("seedRetryDecision", () => {
 });
 
 describe("seededSandboxNote", () => {
-  it("names the reason the resident was not used, then what the sandbox was seeded from — ref@sha7", () => {
+  it("tells the user that the run continues from a saved copy and names the checked-out commit", () => {
     expect(
       seededSandboxNote("resident degraded (disk-pressure)", {
         slug: "acme/widgets",
@@ -956,10 +956,39 @@ describe("seededSandboxNote", () => {
         cached: false,
       }),
     ).toBe(
-      "resident degraded (disk-pressure) — seeded sandbox · from resident snapshot · acme/widgets · feat/x@89abcde",
+      "This run uses a separate workspace restored from a saved copy because the shared workspace is short on disk space (resident degraded (disk-pressure)) · acme/widgets · feat/x@89abcde",
     );
     expect(
       seededSandboxNote("resident restoring", { slug: "a/b", ref: "main", sha: seed.sha, cached: true }),
-    ).toContain("(already seeded)");
+    ).toContain("(already prepared)");
+  });
+
+  it("explains an earlier operation with an unknown result without claiming that it still runs", () => {
+    for (const reason of [
+      "resident degraded (refresh-held: an earlier operation is still active or its result is unknown)",
+      "resident degraded (refresh-failed: background producer has an original active or unknown operation)",
+    ]) {
+      expect(
+        seededSandboxNote(reason, {
+          slug: "acme/widgets",
+          ref: "main",
+          sha: "89abcdef0123456789abcdef0123456789abcdef",
+          cached: false,
+        }),
+      ).toBe(
+        "This run uses a separate workspace restored from a saved copy because the shared workspace cannot refresh while an earlier operation is active or its result is unknown · acme/widgets · main@89abcde",
+      );
+    }
+  });
+
+  it("keeps the restore wait visible when an operation hold sends the run to a saved copy", () => {
+    expect(
+      seededSandboxNote(
+        "resident degraded (refresh-held: an earlier operation is still active or its result is unknown) after waiting for the resident's restore",
+        { slug: "acme/widgets", ref: "main", sha: "89abcdef0123456789abcdef0123456789abcdef", cached: false },
+      ),
+    ).toBe(
+      "This run uses a separate workspace restored from a saved copy because the shared workspace cannot refresh while an earlier operation is active or its result is unknown; this run already waited for restoration · acme/widgets · main@89abcde",
+    );
   });
 });

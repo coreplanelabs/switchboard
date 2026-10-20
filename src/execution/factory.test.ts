@@ -975,12 +975,14 @@ describe("makeExecutor resident selection", () => {
     expect(bodies[3]).not.toHaveProperty("sha");
   });
 
-  it("not-warm probe → fallback carrying state and reason verbatim; no attach, discriminant NOT set", async () => {
+  it("not-warm probe → a separate workspace with the diagnostic detail; no attach, discriminant NOT set", async () => {
     stubEnvs();
     const { calls } = stubFetch({ body: { state: "down", reason: "r2-restore-failed: boom" } });
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
-    expect(note).toBe("resident down (r2-restore-failed: boom) — using fresh sandbox");
+    expect(note).toBe(
+      "This run uses a new workspace because the shared workspace is unavailable (resident down (r2-restore-failed: boom))",
+    );
     // A per-thread fallback is NOT the resident branch: the dispatcher must
     // keep the agent's own prompt, so the discriminant stays falsy.
     expect(resident).toBeFalsy();
@@ -1047,7 +1049,7 @@ describe("makeExecutor resident selection", () => {
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(resident).toBeFalsy();
     expect(note).toBe(
-      "resident degraded (install-failed: npm ERR! ERESOLVE unable to resolve dependency tree) — using fresh sandbox",
+      "This run uses a new workspace because the shared workspace could not refresh (resident degraded (install-failed: npm ERR! ERESOLVE unable to resolve dependency tree))",
     );
     expect(calls).toEqual(["/status"]);
   });
@@ -1070,7 +1072,9 @@ describe("makeExecutor resident selection", () => {
     const { executor, note, resident, trace } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(resident).toBeFalsy();
-    expect(note).toMatch(/^resident attach failed \(.*mirror busy.*\) — using fresh sandbox$/);
+    expect(note).toMatch(
+      /^This run uses a new workspace because the shared workspace could not prepare this run \(resident attach failed \(.*mirror busy.*\)\)$/,
+    );
     // The failed attach's trace rides the fallback selection so the dispatcher grafts it.
     expect(trace).toEqual([{ name: "mutex_wait", startMs: 0, durationMs: 4_000, status: "ok", waitedMs: 4_000 }]);
     expect(calls).toEqual(["/status", "/attach"]);
@@ -1090,22 +1094,30 @@ describe("makeExecutor resident selection", () => {
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(resident).toBeFalsy();
     expect(note).toBe(
-      `resident attach failed (resident attach failed for repo:jshttp/vary: ${reason}) — using fresh sandbox`,
+      `This run uses a new workspace because the shared workspace is short on disk space (resident attach failed (resident attach failed for repo:jshttp/vary: ${reason}))`,
     );
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
   // The engine-owned states: nothing serviceable to attach to.
   it.each([
-    ["onboarding", ""],
-    ["down", "provision-failed at clone: no such repo"],
-  ])("%s probe → per-thread fallback with the verbatim state/reason note; no attach", async (state, reason) => {
+    [
+      "onboarding",
+      "",
+      "This run uses a new workspace because the shared workspace is being prepared (resident onboarding)",
+    ],
+    [
+      "down",
+      "provision-failed at clone: no such repo",
+      "This run uses a new workspace because the shared workspace is unavailable (resident down (provision-failed at clone: no such repo))",
+    ],
+  ])("%s probe → per-thread fallback with the state and reason; no attach", async (state, reason, expected) => {
     stubEnvs();
     const { calls } = stubFetch({ body: { state, reason } });
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(resident).toBeFalsy();
-    expect(note).toBe(`resident ${state}${reason ? ` (${reason})` : ""} — using fresh sandbox`);
+    expect(note).toBe(expected);
     expect(calls).toEqual(["/status"]);
   });
 
@@ -1227,8 +1239,8 @@ describe("makeExecutor resident selection", () => {
       expect(resident).toBeFalsy();
       expect(calls).toEqual(["/status", "/await-restore"]);
       expect(note).toBe(
-        "resident restoring (rehydrating) — this Worker has no /await-restore route, " +
-          "so waiting for the resident's restore is not possible — using fresh sandbox",
+        "This run uses a new workspace because the shared workspace is being restored (resident restoring (rehydrating) — this Worker has no /await-restore route, " +
+          "so waiting for the resident's restore is not possible)",
       );
     });
 
@@ -1241,7 +1253,25 @@ describe("makeExecutor resident selection", () => {
       const { note, resident } = await makeExecutor(residentOpts(), repoCtx());
       expect(resident).toBeFalsy();
       expect(note).toBe(
-        "resident down (r2-restore-failed: boom) after waiting for the resident's restore — using fresh sandbox",
+        "This run uses a new workspace because the shared workspace is unavailable (resident down (r2-restore-failed: boom) after waiting for the resident's restore)",
+      );
+    });
+
+    it("a held refresh after a restore wait keeps the wait in the new workspace note", async () => {
+      stubEnvs();
+      stubFetch(
+        { body: { state: "restoring", reason: "rehydrating" } },
+        {
+          body: {
+            state: "degraded",
+            reason: "refresh-held: an earlier operation is still active or its result is unknown",
+          },
+        },
+      );
+      const { note, resident } = await makeExecutor(residentOpts(), repoCtx());
+      expect(resident).toBeFalsy();
+      expect(note).toBe(
+        "This run uses a new workspace because the shared workspace cannot refresh while an earlier operation is active or its result is unknown; this run already waited for restoration",
       );
     });
 
@@ -1251,7 +1281,7 @@ describe("makeExecutor resident selection", () => {
       const { executor, note } = await makeExecutor(residentOpts(), repoCtx());
       expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
       expect(note).toMatch(
-        /^resident restoring — waiting for the resident's restore failed \(.*fetch failed.*\) — using fresh sandbox$/,
+        /^This run uses a new workspace because the shared workspace is being restored \(resident restoring — waiting for the resident's restore failed \(.*fetch failed.*\)\)$/,
       );
     });
 
@@ -1290,7 +1320,7 @@ describe("makeExecutor resident selection", () => {
       expect(resident).toBeFalsy();
       expect(calls).toEqual(["/status", "/await-restore", "/attach"]);
       expect(note).toMatch(
-        /^resident attach failed \(.*mirror-busy.*\) after waiting for the resident's restore — using fresh sandbox$/,
+        /^This run uses a new workspace because the shared workspace could not prepare this run \(resident attach failed \(.*mirror-busy.*\) after waiting for the resident's restore\)$/,
       );
     });
   });
@@ -1327,7 +1357,7 @@ describe("makeExecutor resident selection", () => {
       expect(resident).toBeFalsy();
       expect(drainWaitMs).toBe(DRAIN_FALLBACK_WAIT_MS);
       expect(note).toMatch(
-        /^resident attach failed \(.*did not reopen within the 180s this run could wait.*\) — using fresh sandbox$/,
+        /^This run uses a new workspace because the shared workspace could not prepare this run \(resident attach failed \(.*did not reopen within the 180s this run could wait.*\)\)$/,
       );
       expect(calls).toEqual(["/status", ...Array.from({ length: polls + 1 }, () => "/attach")]);
     } finally {
@@ -1344,7 +1374,9 @@ describe("makeExecutor resident selection", () => {
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(resident).toBeFalsy();
-    expect(note).toMatch(/^resident attach failed \(.*mirror-busy.*\) — using fresh sandbox$/);
+    expect(note).toMatch(
+      /^This run uses a new workspace because the shared workspace could not prepare this run \(resident attach failed \(.*mirror-busy.*\)\)$/,
+    );
     // the probe WAS warm and the attach WAS attempted before falling back
     expect(calls).toEqual(["/status", "/attach"]);
   });
@@ -1390,7 +1422,9 @@ describe("makeExecutor resident selection", () => {
     control.abort();
     const { executor, note } = await makeExecutor(residentOpts(), { ...repoCtx(), stopSignal: control.signal });
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
-    expect(note).toMatch(/^resident attach failed \(.*exit 128.*\) — using fresh sandbox$/);
+    expect(note).toMatch(
+      /^This run uses a new workspace because the shared workspace could not prepare this run \(resident attach failed \(.*exit 128.*\)\)$/,
+    );
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
@@ -1499,7 +1533,7 @@ describe("makeExecutor resident selection", () => {
       await vi.advanceTimersByTimeAsync(1);
       await p;
       expect(settled?.note).toMatch(
-        /^resident attach failed \(.*waited 5s for the resident to come back.*\) — using fresh sandbox$/,
+        /^This run uses a new workspace because the shared workspace could not prepare this run \(resident attach failed \(.*waited 5s for the resident to come back.*\)\)$/,
       );
       expect(calls.slice(0, 2)).toEqual(["/status", "/attach"]);
       expect(calls.filter((c) => c === "/attach")).toHaveLength(3);
@@ -1574,9 +1608,13 @@ describe("makeExecutor resident selection", () => {
       { body: { state: "down", reason: "r2-restore-failed: boom" } },
     );
     const first = await makeExecutor(residentOpts(), repoCtx());
-    expect(first.note).toBe("resident onboarding — using fresh sandbox");
+    expect(first.note).toBe(
+      "This run uses a new workspace because the shared workspace is being prepared (resident onboarding)",
+    );
     const second = await makeExecutor(residentOpts(), repoCtx());
-    expect(second.note).toBe("resident down (r2-restore-failed: boom) — using fresh sandbox");
+    expect(second.note).toBe(
+      "This run uses a new workspace because the shared workspace is unavailable (resident down (r2-restore-failed: boom))",
+    );
     expect(fn).toHaveBeenCalledTimes(2);
   });
 
@@ -1585,7 +1623,9 @@ describe("makeExecutor resident selection", () => {
     const { fn } = stubFetch({ reject: "fetch failed" });
     const first = await makeExecutor(residentOpts(), repoCtx());
     expect(first.executor).toBeInstanceOf(CloudflareSandboxExecutor);
-    expect(first.note).toMatch(/^resident unreachable \(.*fetch failed.*\) — using fresh sandbox$/);
+    expect(first.note).toMatch(
+      /^This run uses a new workspace because the shared workspace did not respond \(resident unreachable \(.*fetch failed.*\)\)$/,
+    );
     const second = await makeExecutor(residentOpts(), repoCtx());
     expect(second.executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(second.note).toMatch(/unreachable/);
@@ -1608,11 +1648,15 @@ describe("makeExecutor resident selection", () => {
       void makeExecutor(residentOpts(), repoCtx()).then((s) => (first = s));
       await vi.advanceTimersByTimeAsync(8_000);
       expect(first?.executor).toBeInstanceOf(CloudflareSandboxExecutor);
-      expect(first?.note).toBe("resident unreachable (the 8s call deadline passed) — using fresh sandbox");
+      expect(first?.note).toBe(
+        "This run uses a new workspace because the shared workspace did not respond (resident unreachable (the 8s call deadline passed))",
+      );
       let second: { note?: string } | undefined;
       void makeExecutor(residentOpts(), repoCtx()).then((s) => (second = s));
       await vi.advanceTimersByTimeAsync(8_000);
-      expect(second?.note).toBe("resident unreachable (the 8s call deadline passed) — using fresh sandbox");
+      expect(second?.note).toBe(
+        "This run uses a new workspace because the shared workspace did not respond (resident unreachable (the 8s call deadline passed))",
+      );
       expect(second?.note).not.toMatch(/outage window/);
       expect(calls).toEqual(["/status", "/status"]); // the second dispatch probed: nothing was cached
     } finally {
@@ -1658,7 +1702,9 @@ describe("makeExecutor resident selection", () => {
       );
       const first = await makeExecutor(residentOpts(), repoCtx());
       expect(first.executor).toBeInstanceOf(CloudflareSandboxExecutor);
-      expect(first.note).toMatch(/^resident unreachable \(.*fetch failed.*\) — using fresh sandbox$/);
+      expect(first.note).toMatch(
+        /^This run uses a new workspace because the shared workspace did not respond \(resident unreachable \(.*fetch failed.*\)\)$/,
+      );
       const second = await makeExecutor(residentOpts(), repoCtx());
       expect(second.executor).toBeInstanceOf(CloudflareSandboxExecutor);
       expect(second.note).toMatch(/probe skipped during outage window/);
@@ -1744,7 +1790,7 @@ describe("makeExecutor resident selection", () => {
       await vi.advanceTimersByTimeAsync(60_000);
       await p;
       expect(settled?.note).toBe(
-        "resident unreachable (probe HTTP 502: no Worker document in the answer) after waiting 60s — using fresh sandbox",
+        "This run uses a new workspace because the shared workspace did not respond (resident unreachable (probe HTTP 502: no Worker document in the answer) after waiting 60s)",
       );
       expect(fn).toHaveBeenCalledTimes(13);
       // Inside the window the next dispatch skips the fetch, the wait named.
@@ -1775,7 +1821,7 @@ describe("makeExecutor resident selection", () => {
       await vi.advanceTimersByTimeAsync(60_000);
       await p1;
       expect(first?.note).toBe(
-        "resident unreachable (probe HTTP 500: internal error) after waiting 60s — using fresh sandbox",
+        "This run uses a new workspace because the shared workspace did not respond (resident unreachable (probe HTTP 500: internal error) after waiting 60s)",
       );
       const afterA = await makeExecutor(residentOpts(), repoCtx());
       expect(afterA.note).toMatch(/probe skipped during outage window/);
@@ -1793,7 +1839,7 @@ describe("makeExecutor resident selection", () => {
       await vi.advanceTimersByTimeAsync(60_000);
       await p2;
       expect(second?.note).toBe(
-        "resident unreachable (probe HTTP 502: no Worker document in the answer) after waiting 60s — using fresh sandbox",
+        "This run uses a new workspace because the shared workspace did not respond (resident unreachable (probe HTTP 502: no Worker document in the answer) after waiting 60s)",
       );
       const afterB = await makeExecutor(residentOpts(), repoCtx());
       expect(afterB.executor).toBeInstanceOf(ResidentExecutor);
@@ -1885,7 +1931,7 @@ describe("makeExecutor resident selection", () => {
         expect(settled, deadline).toBeUndefined();
         await vi.advanceTimersByTimeAsync(1);
         expect(settled?.note).toBe(
-          `resident unreachable (the ${deadline} call deadline passed) after waiting ${deadline} — using fresh sandbox`,
+          `This run uses a new workspace because the shared workspace did not respond (resident unreachable (the ${deadline} call deadline passed) after waiting ${deadline})`,
         );
         expect(calls).toEqual(["/status", "/status"]);
       }
@@ -1909,7 +1955,9 @@ describe("makeExecutor resident selection", () => {
       await vi.advanceTimersByTimeAsync(45_000);
       const { executor, note } = await p;
       expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
-      expect(note).toMatch(/^resident attach failed \(.*exit 128.*\) after waiting 45s — using fresh sandbox$/);
+      expect(note).toMatch(
+        /^This run uses a new workspace because the shared workspace could not prepare this run \(resident attach failed \(.*exit 128.*\) after waiting 45s\)$/,
+      );
       expect(calls.filter((c) => c === "/status")).toHaveLength(11);
       expect(calls.at(-1)).toBe("/attach");
     } finally {
@@ -1969,7 +2017,7 @@ describe("makeExecutor resident selection", () => {
       await vi.advanceTimersByTimeAsync(1);
       await p;
       expect(settled?.note).toBe(
-        "resident unreachable (probe HTTP 500: internal error) after waiting 60s — using fresh sandbox",
+        "This run uses a new workspace because the shared workspace did not respond (resident unreachable (probe HTTP 500: internal error) after waiting 60s)",
       );
       expect(fn).toHaveBeenCalledTimes(13);
       const second = await makeExecutor(residentOpts(), repoCtx());
@@ -2461,16 +2509,13 @@ describe("makeExecutor resident selection", () => {
     });
   });
 
-  it("404 not-onboarded → per-thread path with a named cold-fallback note pointing at onboarding", async () => {
+  it("404 not-onboarded → per-thread path with a note naming the new workspace", async () => {
     stubEnvs();
     const { fn } = stubFetch({ status: 404, body: { error: "unknown resource" } });
     const { executor, note, resident } = await makeExecutor(residentOpts(), repoCtx());
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(resident).toBeFalsy();
-    expect(note).toBe(
-      "repo not onboarded as a resident — running in a cold per-thread sandbox; " +
-        "onboard it (`repo onboard jshttp/vary`) for a warm, deps-ready environment",
-    );
+    expect(note).toBe("This repository is not registered for a shared workspace. This run uses a new workspace.");
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
@@ -2483,7 +2528,7 @@ describe("makeExecutor resident selection", () => {
       { body: { residents: [{ resource: "repo:jshttp/vary" }, { resource: "repo:acme/api" }] } },
     );
     const { note } = await makeExecutor(residentOpts(), { ...ctxOf(AGENTS.coding), repo: "jshttp/var", ref: "master" });
-    expect(note).toContain("did you mean `jshttp/vary`?");
+    expect(note).toContain("Did you mean `jshttp/vary`?");
     expect(fn).toHaveBeenCalledTimes(2);
     vi.unstubAllEnvs();
   });
@@ -3887,7 +3932,25 @@ describe("makeExecutor seeded sandbox", () => {
       ms: 30_500,
     });
     expect(sel.note).toBe(
-      `resident degraded (disk-pressure: need 2.1 GiB) — seeded sandbox · from resident snapshot · jshttp/vary · master@${HEAD.slice(0, 7)}`,
+      `This run uses a separate workspace restored from a saved copy because the shared workspace is short on disk space (resident degraded (disk-pressure: need 2.1 GiB)) · jshttp/vary · master@${HEAD.slice(0, 7)}`,
+    );
+  });
+
+  it("keeps a review at its requested head when an earlier operation holds the shared workspace", async () => {
+    stubEnvs();
+    const held = {
+      body: {
+        state: "degraded",
+        reason: "refresh-held: an earlier operation is still active or its result is unknown",
+        snapshot: snapshot(C1),
+      },
+    };
+    const { calls } = stubFetch(held, seededAnswer(C1));
+    const sel = await makeExecutor(residentOpts(), { ...repoCtx(), ...ctxOf(AGENTS.review), headSha: HEAD });
+    expect(calls).toEqual(["/status", "/seed"]);
+    expect(sel.seeded?.sha).toBe(HEAD);
+    expect(sel.note).toBe(
+      `This run uses a separate workspace restored from a saved copy because the shared workspace cannot refresh while an earlier operation is active or its result is unknown · jshttp/vary · master@${HEAD.slice(0, 7)}`,
     );
   });
 
@@ -3942,7 +4005,7 @@ describe("makeExecutor seeded sandbox", () => {
     expect(again.calls).toEqual(["/status", "/seed", "/status"]);
     expect(cold.seeded).toBeUndefined();
     expect(cold.note).toBe(
-      "resident degraded (disk-pressure: need 2.1 GiB) — using fresh sandbox (seed missing (restore: Backup not found) and the resident published no newer handle)",
+      "This run uses a new workspace because the shared workspace is short on disk space (resident degraded (disk-pressure: need 2.1 GiB)); its saved copy could not be restored (seed missing (restore: Backup not found) and the resident published no newer handle)",
     );
   });
 
@@ -3969,7 +4032,7 @@ describe("makeExecutor seeded sandbox", () => {
     expect(sel.executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(sel.seeded).toBeUndefined();
     expect(sel.note).toBe(
-      "resident degraded (disk-pressure: need 2.1 GiB) — using fresh sandbox (seed failed (fixup: fix-up exited 128))",
+      "This run uses a new workspace because the shared workspace is short on disk space (resident degraded (disk-pressure: need 2.1 GiB)); its saved copy could not be restored (seed failed (fixup: fix-up exited 128))",
     );
   });
 
@@ -3998,7 +4061,7 @@ describe("makeExecutor seeded sandbox", () => {
     expect(sel.executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(sel.seeded).toBeUndefined();
     expect(sel.note).toMatch(
-      /^resident degraded \(disk-pressure: need 2.1 GiB\) — using fresh sandbox \(seed failed \(/,
+      /^This run uses a new workspace because the shared workspace is short on disk space \(resident degraded \(disk-pressure: need 2.1 GiB\)\); its saved copy could not be restored \(seed failed \(/,
     );
   });
 
@@ -4008,14 +4071,16 @@ describe("makeExecutor seeded sandbox", () => {
     const noSnapshot = stubFetch({ body: { state: "onboarding", reason: "", snapshot: null } });
     const a = await makeExecutor(residentOpts(), repoCtx());
     expect(noSnapshot.calls).toEqual(["/status"]);
-    expect(a.note).toBe("resident onboarding — using fresh sandbox");
+    expect(a.note).toBe(
+      "This run uses a new workspace because the shared workspace is being prepared (resident onboarding)",
+    );
     expect(a.seeded).toBeUndefined();
 
     resetResidentProbeCache();
     const gone = stubFetch({ status: 404, body: { error: "unknown resource" } });
     const b = await makeExecutor(residentOpts(), repoCtx());
     expect(gone.calls).toEqual(["/status"]);
-    expect(b.note).toMatch(/^repo not onboarded as a resident/);
+    expect(b.note).toMatch(/^This repository is not registered for a shared workspace/);
   });
 
   it("a local execution type seeds nothing: the resident's handle needs a sandbox Worker", async () => {
@@ -4867,12 +4932,14 @@ describe("the setup result on the selection (record 0097)", () => {
     resetResidentProbeCache();
     stubFetch({ body: { state: "cold", reason: "" } });
     // A resolved head leaves the checkout to the caller's preparation: no clone here.
-    expect((await makeExecutor(residentOpts(), { ...repoCtx(), headSha: SHA })).setup).toEqual({
+    const without = await makeExecutor(residentOpts(), { ...repoCtx(), headSha: SHA });
+    expect(without.setup).toEqual({
       version: 1,
       requested: "resident",
       seeding: "fresh_no_snapshot",
       reason: "not_resident",
     });
+    expect(without.note).toBe("This repository has no shared workspace. This run uses a new workspace.");
   });
 
   it("the cold and blank classes, and a resident class with no resident configured, ask for what they get: no reason", async () => {
