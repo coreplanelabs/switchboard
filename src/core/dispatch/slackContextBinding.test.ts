@@ -25,6 +25,42 @@ const actor: Actor = {
 };
 
 describe("Slack context run binding", () => {
+  it("reports failed source persistence while retaining the unavailable result", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const bound = await bindSlackContext({
+        agentName: "orchestrator",
+        actor,
+        msg,
+        visibility: "dm",
+        io: {
+          reply: async () => {},
+          history: async () => [],
+          status: async () => ({ update: async () => {}, done: async () => {} }),
+          directAudience: () => msg.directAudience,
+          verifyDirectAudience: async () => ({ ok: true }),
+        },
+        create: () => testSlackCapability(msg, async () => "source"),
+      });
+      expect(
+        await bound!.initialize(testSessionSources(msg, []), async () => {
+          throw new TypeError("PRIVATE_SOURCE_BYTES");
+        }),
+      ).toBe(false);
+      expect(log.mock.calls.map(([line]) => JSON.parse(line))).toMatchObject([
+        {
+          event: "source_check.failed",
+          sourceCheckStage: "slack-persistence",
+          sourceErrorClass: "TypeError",
+          kind: "infra",
+          code: "source_check_failed",
+        },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("registers Slack reads only for the requester's verified direct main conversation", async () => {
     const create = vi.fn(() => testSlackCapability(msg, async () => "source"));
     const audience = {

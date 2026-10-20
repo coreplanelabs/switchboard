@@ -1,3 +1,8 @@
+import { testSlackReceipt } from "../testing/slackSources.js";
+import type { IncomingMessage } from "../types.js";
+import { revalidateAdmittedContext } from "./contextAccess.js";
+import { revalidateSourcesDecision, type PrivateAudienceLatch } from "./privateAudience.js";
+import { withOrganizationPrivateAudience, type OrganizationPrivateAudience } from "./privateDestination.js";
 import type { AudienceTrace } from "../audienceDecision.js";
 import { ToolRecoveryStoppedError } from "../harness/toolRecovery.js";
 import { createSpanLog } from "../trace/spanLog.js";
@@ -986,6 +991,199 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       ]);
     },
   );
+
+  it.each([
+    ["before", "slack-dm"],
+    ["before", "organization"],
+    ["before", "bound-slack"],
+    ["before", "slack-source"],
+    ["before", "admitted-source"],
+    ["after", "public-context"],
+    ["after", "private-context"],
+    ["after", "orchestrator-context"],
+    ["after", "slack-dm"],
+    ["after", "organization"],
+    ["after", "bound-slack"],
+    ["after", "slack-source"],
+    ["after", "admitted-source"],
+  ] as const)("withholds and saves a source failure %s card close for %s", async (phase, source) => {
+    const reported = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const s = finishedRun(async () => "ok");
+      const log = createSpanLog();
+      const trace = startRequestRoot({ clock: () => NOW, spanLog: log }, { channel: "slack", receivedAt: NOW });
+      const audience: AudienceTrace = {};
+      const states: unknown[] = [];
+      const ledgerRun = {
+        ...s.ctx.ledgerRun!,
+        commitState: async (patch: unknown) => {
+          states.push(structuredClone(patch));
+          return "ok";
+        },
+      } as LedgerRun;
+      let fail = phase === "before";
+      const available = async () => {
+        if (fail) throw new TypeError("PRIVATE_RESPONSE_BYTES");
+        return true;
+      };
+      const admitted = () =>
+        revalidateAdmittedContext(
+          () => ({ version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] }),
+          async () => {
+            await available();
+            return { ok: true };
+          },
+        );
+      const latch: PrivateAudienceLatch = { revoked: false };
+      const dm = {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DMAIN",
+        userId: "slack:UALICE",
+        threadKey: "slack:DMAIN:1.0",
+      };
+      const organization: OrganizationPrivateAudience = {
+        kind: "organization-private",
+        organization: "org:test",
+        stream: "stream:test",
+        actorId: "access:alice",
+        userId: "access:alice",
+        channelId: "http:home",
+        threadKey: "http:home:alice",
+      };
+      let message = s.ctx.msg as IncomingMessage;
+      let io: ChannelIO = s.ctx.io;
+      const contextOnly = source.endsWith("context");
+      if (source === "slack-dm" || source === "private-context" || source === "orchestrator-context") {
+        message = { ...message, ...dm, directAudience: dm };
+        io = {
+          ...io,
+          directAudience: () => dm,
+          verifyDirectAudience: async () => {
+            if (source === "slack-dm") await available();
+            return { ok: true };
+          },
+        };
+      } else if (source === "organization") {
+        message = withOrganizationPrivateAudience(
+          {
+            ...message,
+            channelId: organization.channelId,
+            userId: organization.userId,
+            threadKey: organization.threadKey,
+          },
+          organization,
+        );
+        io = {
+          ...io,
+          organizationPrivateAudience: () => organization,
+          verifyOrganizationPrivateAudience: async () => {
+            await available();
+            return { ok: true };
+          },
+        };
+      }
+      if (source === "slack-source")
+        latch.revalidateSources = () => revalidateSourcesDecision([testSlackReceipt(dm)], available);
+      if (source === "admitted-source") latch.revalidateSources = admitted;
+      const result = await deliverAnswer({
+        ...s.ctx,
+        msg: message,
+        io,
+        ledgerRun,
+        audience,
+        root: trace.root,
+        answer: "PRIVATE_MODEL_OUTPUT",
+        prNote: "PRIVATE_PR_NOTE",
+        privateAudienceLatch: latch,
+        ...(source === "bound-slack" || source.endsWith("source")
+          ? {
+              slackContext: {
+                capability: { read: async () => "unused" },
+                initialize: async () => true,
+                revalidate: async () => true,
+                sourcesStillValid: async () => ({ ok: true }),
+                destinationStillPrivate: source === "bound-slack" ? available : async () => true,
+                revoke: () => {},
+              },
+            }
+          : {}),
+        ...(contextOnly
+          ? { publicationCheck: source === "orchestrator-context" ? async () => admitted() : admitted }
+          : {}),
+        card: {
+          ...s.ctx.card,
+          done: async (frame) => {
+            await s.ctx.card.done(frame);
+            fail = true;
+          },
+        },
+      });
+      const contextFailure = contextOnly || source === "admitted-source";
+      const code = contextFailure
+        ? "saved-context-unproved"
+        : source === "slack-source"
+          ? "slack-source-unverified"
+          : "direct-audience-unavailable";
+      const receipt = {
+        version: 1,
+        code,
+        causeAt: "reply",
+        withheldAt: "reply",
+        ...(contextFailure ? { check: "context_validation_exception" } : {}),
+      };
+      expect(result).toEqual({ kind: "delivered" });
+      expect(audience.refusal).toEqual(receipt);
+      expect(states).toContainEqual({ audienceRefusal: receipt });
+      expect(s.closes).toHaveLength(1);
+      expect(s.sealed).toEqual(["replyOk=true"]);
+      expect(s.releases).toEqual([1]);
+      expect(s.replies).toEqual([
+        contextFailure
+          ? "I couldn't verify that the earlier source details are still safe to share here, so I withheld them. A Switchboard operator can check the source and conversation access."
+          : source === "slack-source"
+            ? "I couldn't verify the Slack source, so I did not use its earlier details. A Switchboard operator can check source access."
+            : "I couldn't verify who can read this private conversation, so I withheld the answer. A Switchboard operator can check conversation access.",
+      ]);
+      const stage = contextFailure
+        ? "admitted-context"
+        : source === "slack-source"
+          ? "slack-revalidation"
+          : source === "organization"
+            ? "private-destination"
+            : "private-audience";
+      expect(
+        log
+          .read()
+          .lines.filter(
+            (line) => line.span === "run.publication_context_check" && line.attrs.sourceCheckStage !== undefined,
+          ),
+      ).toEqual([
+        expect.objectContaining({
+          status: "error",
+          errorKind: "infra",
+          errorCode: "source_check_failed",
+          attrs: expect.objectContaining({
+            sourceCheckStage: stage,
+            sourceErrorClass: "TypeError",
+            outcome: contextFailure ? "context_validation_exception" : code,
+          }),
+        }),
+      ]);
+      expect(reported.mock.calls.map(([line]) => JSON.parse(line))).toEqual([
+        expect.objectContaining({
+          event: "source_check.failed",
+          sourceCheckStage: stage,
+          sourceErrorClass: "TypeError",
+        }),
+      ]);
+      if (source.endsWith("source")) expect(latch.revoked).toBe(true);
+      expect(
+        JSON.stringify({ replies: s.replies, closes: s.closes, spans: log.read(), reports: reported.mock.calls }),
+      ).not.toContain("PRIVATE_");
+    } finally {
+      reported.mockRestore();
+    }
+  });
 
   function finishedRun(finishing?: () => Promise<"ok" | "fenced" | "unavailable">) {
     const registry = new RunRegistry({ genId: () => "run-d", genToken: () => "tok" });

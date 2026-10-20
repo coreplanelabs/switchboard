@@ -1,3 +1,4 @@
+import { sourceCheckError } from "./sourceCheckError.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 import {
   addSourceReceipt,
@@ -71,7 +72,12 @@ export async function bindSlackContext(input: {
     let writes = Promise.resolve(true);
     const save = (next: SessionSources): Promise<boolean> => {
       sources = next;
-      writes = writes.then(async (ok) => ok && !!persist && (await persist(next))).catch(() => false);
+      writes = writes
+        .then(async (ok) => ok && !!persist && (await persist(next)))
+        .catch((error) => {
+          sourceCheckError("slack-persistence", error);
+          return false;
+        });
       return writes;
     };
     const revalidate = async (receipt: SlackSourceReceipt) =>
@@ -130,7 +136,8 @@ export async function bindSlackContext(input: {
         void save({ version: 1, status: "revoked" });
       },
     };
-  } catch {
+  } catch (error) {
+    sourceCheckError("slack-binding", error);
     return undefined;
   }
 }

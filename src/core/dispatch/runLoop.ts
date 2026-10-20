@@ -1,3 +1,4 @@
+import { sourceCheckError } from "./sourceCheckError.js";
 import {
   privateDestinationOf,
   requesterMessageId,
@@ -2518,20 +2519,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           if (privateAudienceLatch.revoked) return refused("audience_revoked");
           span.setAttrs({ outcome: "allowed" });
           return true;
-        } catch (error) {
-          // Messages and arbitrary error names can contain private source bytes.
-          const errorCode =
-            error instanceof TypeError
-              ? "TypeError"
-              : error instanceof RangeError
-                ? "RangeError"
-                : error instanceof SyntaxError
-                  ? "SyntaxError"
-                  : error instanceof Error
-                    ? "Error"
-                    : typeof error;
-          span.setAttrs({ errorCode });
-          return refused(`${stage}_exception`);
+        } catch (cause) {
+          const error = sourceCheckError(stage, cause);
+          span.setAttrs(error.diagnostic);
+          span.fail(error);
+          refused(`${stage}_exception`);
+          span.end("error");
+          return false;
         }
       }),
     );
@@ -5033,14 +5027,22 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     let publicationWithheld = false;
     const publicationAllowed = async (): Promise<boolean> => {
       if (publicationWithheld) return false;
-      const checked = await root.span("run.publication_context_check", async (span) => {
-        const result = privateRun
-          ? await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)
-          : ctx.admittedContextCheck
-            ? await ctx.admittedContextCheck()
-            : { ok: true as const };
-        span.setAttrs(audienceCheckAttrs(result));
-        return result;
+      const checked = await root.span<AudienceCheck>("run.publication_context_check", async (span) => {
+        try {
+          const result = privateRun
+            ? await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)
+            : ctx.admittedContextCheck
+              ? await ctx.admittedContextCheck()
+              : { ok: true as const };
+          span.setAttrs(audienceCheckAttrs(result));
+          return result;
+        } catch (cause) {
+          const error = sourceCheckError("publication-context", cause);
+          span.setAttrs({ ...error.diagnostic, outcome: error.refusal.check ?? error.refusal.code });
+          span.fail(error);
+          span.end("error");
+          return error.refusal;
+        }
       });
       if (!checked.ok) {
         const receipt = noteAudienceRefusal(

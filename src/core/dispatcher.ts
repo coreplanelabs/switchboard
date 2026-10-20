@@ -1,3 +1,4 @@
+import { SourceCheckError } from "./dispatch/sourceCheckError.js";
 import { NativeMediaHeldError } from "./harness/nativeMedia.js";
 import type { MaintenanceStore } from "./maintenance.js";
 import { agentMaintenanceRefusal } from "./maintenance.js";
@@ -3469,8 +3470,16 @@ export async function dispatch(
     // Saved text is reusable only with its complete current dependency envelope.
     // An unavailable optional context leaves the new request runnable.
     const candidateContext = contextDependenciesOf(fromSession?.seed?.sources);
-    const savedContextValid =
-      fromSession?.seed !== undefined && (await contextReader.validateDependencies(candidateContext)).ok;
+    let savedContextValid = false;
+    if (fromSession?.seed !== undefined) {
+      try {
+        savedContextValid = (await contextReader.validateDependencies(candidateContext)).ok;
+      } catch (error) {
+        // The check already reported its failure. Old context is optional;
+        // omitting it keeps the fresh request runnable without approving it.
+        if (!(error instanceof SourceCheckError)) throw error;
+      }
+    }
     let isolateExecutionSession = false;
     if (!opts.authoritativeHistory && !resume && !restart && opts.restartOf === undefined && !savedContextValid) {
       const retainedSources =
@@ -5645,7 +5654,8 @@ export async function dispatch(
                   },
                 );
                 return checked.ok ? revalidateAdmitted() : checked;
-              } catch {
+              } catch (error) {
+                if (error instanceof SourceCheckError) throw error;
                 return { ok: false, code: checking };
               }
             },

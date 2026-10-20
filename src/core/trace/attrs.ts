@@ -26,6 +26,16 @@ export type Channel = "slack" | "http" | "mcp" | "cli" | "web";
 export interface AttrDomain {
   errorKind: ErrorKind;
   errorCode: string;
+  sourceCheckStage: import("../dispatch/sourceCheckError.js").SourceCheckStage;
+  sourceErrorClass: string;
+  sourceErrorFile: string;
+  sourceErrorLine: number;
+  sourceErrorColumn: number;
+  storageOperation: string;
+  storagePhase: string;
+  storageRequestId: string;
+  sourceReadAttempts: number;
+  sourceReadStop: "attempts-exhausted" | "deadline" | "permanent";
   // request
   channel: Channel;
   status: "completed" | "failed" | "refused" | "stopped";
@@ -204,6 +214,13 @@ export type SpanAttrs = { readonly [K in SpanAttrKey]?: AttrDomain[K] };
 const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "errorKind",
   "errorCode",
+  "sourceCheckStage",
+  "sourceErrorClass",
+  "sourceErrorFile",
+  "storageOperation",
+  "storagePhase",
+  "storageRequestId",
+  "sourceReadStop",
   "restartOfRunId",
   "runId",
   "outcome",
@@ -267,6 +284,16 @@ export function invalidAttrKeys(attrs: SpanAttrs): string[] {
 const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   errorKind: "string",
   errorCode: "string",
+  sourceCheckStage: "string",
+  sourceErrorClass: "string",
+  sourceErrorFile: "string",
+  sourceErrorLine: "number",
+  sourceErrorColumn: "number",
+  storageOperation: "string",
+  storagePhase: "string",
+  storageRequestId: "string",
+  sourceReadAttempts: "number",
+  sourceReadStop: "string",
   githubStage: "string",
   githubReason: "string",
   githubTool: "string",

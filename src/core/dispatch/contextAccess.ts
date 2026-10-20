@@ -1,3 +1,4 @@
+import { sourceCheckError, type SourceCheckStage } from "./sourceCheckError.js";
 import { nativeMediaDigest } from "../nativeMedia.js";
 import { originalOrganizationDispatchOf } from "./originalOrganizationInput.js";
 import {
@@ -97,9 +98,8 @@ export async function revalidateAdmittedContext(
       if (!checked.ok) return checked;
       if (JSON.stringify(current()) === revision) return checked;
     }
-  } catch {
-    // Missing proof cannot authorize publication.
-    return denied("context_validation_exception");
+  } catch (error) {
+    throw sourceCheckError("admitted-context", error);
   }
   return denied("context_changed");
 }
@@ -406,10 +406,12 @@ function buildContextAccess(
     // Readers retain source input identity before current-source validation is
     // connected. Recognizing the schema cannot authorize model disclosure.
     if (dependencies.sourceInputs?.length) return denied("source_input_access_unproved");
+    let stage: SourceCheckStage = "dependencies";
     try {
       dependencies = structuredClone(dependencies);
       if (msg.threadKey.startsWith("worker:") && !(await destinationAudience()))
         return denied("worker_audience_unproved");
+      stage = "native-media";
       for (const leaf of dependencies.nativeMediaSources ?? []) {
         const pointer = originalOrganizationDispatchOf(msg);
         const current =
@@ -447,6 +449,7 @@ function buildContextAccess(
         )
           return denied("context_invalid");
       }
+      stage = "github-execution";
       if (dependencies.executionGithub?.length) {
         const readResults = new Map<string, Promise<unknown>>();
         const historical = dependencies.executionGithub.filter((ref) => ref.runId !== executionConsumer?.runId);
@@ -570,8 +573,10 @@ function buildContextAccess(
         }
       }
 
+      stage = "unit-status";
       for (const status of dependencies.unitStatuses ?? [])
         if (!(await unitStatusAllowed(status))) return denied("unit_status_unproved");
+      stage = "memory";
       for (const key of dependencies.memoryScopes ?? []) {
         const kind = key.slice(0, key.indexOf(":")) as MemoryScope;
         if (
@@ -583,6 +588,7 @@ function buildContextAccess(
         )
           return denied("memory_scope_denied");
       }
+      stage = "github-repositories";
       if (dependencies.githubRepos?.length) {
         const current = await githubCapabilityFor(deps, actor(), {
           requesterId: msg.userId,
@@ -593,10 +599,12 @@ function buildContextAccess(
         if (dependencies.githubRepos.some((repo) => !readable.has(repo.toLowerCase())))
           return denied("github_repository_unproved");
       }
+      stage = "origins";
       for (const origin of dependencies.origins) {
         const checked = await originDecision(origin);
         if (!checked.ok) return checked;
       }
+      stage = "slack-sources";
       const slack = await revalidateSourcesDecision(dependencies.slack, async (receipt) => {
         if (
           receipt.requester !== msg.userId ||
@@ -621,6 +629,7 @@ function buildContextAccess(
         return deps.slackContextForRun(actor(), original).revalidateSource(receipt);
       });
       if (!slack.ok) return slack;
+      stage = "mcp-sources";
       for (const reference of dependencies.mcp) {
         const row = await load(reference.runId);
         if (!row || !admitted(row)) return denied("mcp_record_unproved");
@@ -670,15 +679,15 @@ function buildContextAccess(
         if (!decision.ok) return decision;
       }
       return { ok: true };
-    } catch {
-      return denied("context_validation_exception");
+    } catch (error) {
+      throw sourceCheckError(stage, error);
     }
   };
   const canReadOrigin = async (origin: ContextOrigin): Promise<boolean> => {
     try {
       return await originAllowed(origin);
-    } catch {
-      return false;
+    } catch (error) {
+      throw sourceCheckError("origin-access", error);
     }
   };
   const normalizeDependencies = async (
@@ -722,7 +731,8 @@ function buildContextAccess(
             continue;
           }
           sources.push(source);
-        } catch {
+        } catch (error) {
+          sourceCheckError("checkpoint-normalization", error);
           // Normalization is optional; original admitted dependencies remain.
         }
       }
@@ -754,8 +764,8 @@ function buildContextAccess(
       }
       if (!(await validate(context)).ok || !(await originAllowed(origin))) return undefined;
       return context;
-    } catch {
-      return undefined;
+    } catch (error) {
+      throw sourceCheckError("run-dependencies", error);
     }
   };
   const authorizeMemory = async (record: MemoryRecord): Promise<AudienceCheck> => {
@@ -768,8 +778,8 @@ function buildContextAccess(
       const context = candidate.provenance?.dependencies;
       if (!producer || !context || !contextDependenciesContain(context, producer)) return denied();
       return validate(mergeContextDependencies(context, memoryScopeDependencies([candidate.scopeKey])));
-    } catch {
-      return denied();
+    } catch (error) {
+      throw sourceCheckError("memory-provenance", error);
     }
   };
   const readOperatorDecision = async (
@@ -805,8 +815,8 @@ function buildContextAccess(
       });
       if (!(await validate(context)).ok) return undefined;
       return { operator, context };
-    } catch {
-      return undefined;
+    } catch (error) {
+      throw sourceCheckError("operator-decision", error);
     }
   };
   const captureDependencies = async (source: HandoffSource): Promise<ContextDependencies> => {
@@ -920,8 +930,8 @@ function buildContextAccess(
           channelId: stored.instance.channelId,
           threadKey,
         });
-      } catch {
-        return undefined;
+      } catch (error) {
+        throw sourceCheckError("child-owner", error);
       }
     },
     loadRun: async (runId) => {

@@ -1,3 +1,4 @@
+import { sourceCheckError } from "./sourceCheckError.js";
 // Canonical checks for a child handoff. A manifest identifies evidence; it
 // never proves access or substitutes for the source run and durable log.
 import { sourceHash } from "../references/receipts.js";
@@ -363,7 +364,8 @@ export async function validateChildHandoff(input: {
     )
       return invalid("inline parent context does not match its frozen source rows");
     return { kind: "valid", context };
-  } catch {
+  } catch (error) {
+    sourceCheckError("child-context", error);
     return invalid("child context source could not be checked");
   }
 }

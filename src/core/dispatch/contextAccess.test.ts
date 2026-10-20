@@ -86,15 +86,29 @@ describe("publication of admitted context", () => {
         },
       ),
     ).toEqual({ ok: false, code: "saved-context-unproved", check: "context_changed" });
-    expect(
-      await revalidateAdmittedContext(
+    const cause = new TypeError("private source content");
+    await expect(
+      revalidateAdmittedContext(
         () => clean,
         async () => {
-          throw new Error("private source content");
+          throw cause;
         },
       ),
-    ).toEqual({ ok: false, code: "saved-context-unproved", check: "context_validation_exception" });
+    ).rejects.toMatchObject({ name: "SourceCheckError", stage: "admitted-context", cause });
   });
+  it("propagates the failed dependency stage and original cause", async () => {
+    const f = setup();
+    const cause = new TypeError("PRIVATE_SOURCE_BYTES");
+    f.deps.runLedger.readLiveRuns = async () => {
+      throw cause;
+    };
+    await expect(f.access.validateDependencies(closure)).rejects.toMatchObject({
+      name: "SourceCheckError",
+      stage: "origins",
+      cause,
+    });
+  });
+
   it("rechecks a dependency admitted during the asynchronous validation", async () => {
     let current: ContextDependencies = clean;
     const seen: unknown[] = [];
@@ -122,14 +136,14 @@ describe("publication of admitted context", () => {
         },
       ),
     ).toMatchObject({ ok: false });
-    expect(
-      await revalidateAdmittedContext(
+    await expect(
+      revalidateAdmittedContext(
         () => clean,
         async () => {
           throw new Error("source unavailable");
         },
       ),
-    ).toMatchObject({ ok: false });
+    ).rejects.toMatchObject({ name: "SourceCheckError", stage: "admitted-context" });
     expect(
       await revalidateAdmittedContext(
         () => ({ ...clean, status: "unknown" }),

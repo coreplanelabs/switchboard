@@ -1,3 +1,4 @@
+import { sourceCheckError } from "./sourceCheckError.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 import { copyChatActor } from "../authz/actor.js";
 import type { ChannelIO, IncomingMessage, SlackDirectAudience } from "../types.js";
@@ -86,8 +87,8 @@ export async function verifyPrivateSourceFacts(source: object): Promise<boolean>
   if (!guard) return false;
   try {
     return await guard();
-  } catch {
-    return false;
+  } catch (error) {
+    throw sourceCheckError("organization-source", error);
   }
 }
 /** Metadata-only copies retain their own source IO, never another queued message's address. */
@@ -159,7 +160,7 @@ export async function verifyPrivateDestination(
     return io.verifyOrganizationPrivateAudience
       ? await io.verifyOrganizationPrivateAudience(audience)
       : { ok: false, code: "direct-address-unproved" };
-  } catch {
-    return { ok: false, code: "direct-audience-unavailable" };
+  } catch (error) {
+    throw sourceCheckError("private-destination", error);
   }
 }

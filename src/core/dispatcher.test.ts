@@ -1,3 +1,4 @@
+import { createSpanLog } from "./trace/spanLog.js";
 import { operatorSettingsEvidence } from "./testing/operatorSettings.js";
 import { prepareFreshTurn } from "./dispatch/settle.js";
 import { withChatActor } from "./authz/actor.js";
@@ -4176,6 +4177,211 @@ describe("dispatch", () => {
     });
     expect(provider.requests).toHaveLength(0);
     expect(replies.join(" ")).toContain("check the source and conversation access");
+  });
+
+  it.each([
+    ["slack-dm", "audience-error"],
+    ["organization", "audience-error"],
+    ["slack-dm", "denied"],
+    ["organization", "denied"],
+    ["slack-dm", "context-error"],
+    ["organization", "context-error"],
+  ] as const)("retains final main publication evidence for %s %s", async (destination, outcome) => {
+    const reports = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const provider = capturingProvider("PRIVATE_FINAL_MODEL_OUTPUT");
+      const yaml = mainDmYaml
+        .replace(
+          '  "slack:DALICE": { agent: orchestrator }',
+          '  "slack:DALICE": { agent: orchestrator }\n  "http:home": { agent: orchestrator }',
+        )
+        .replace(
+          "grants:\n",
+          'grants:\n  "access:alice": { actions: all, channels: all, repos: all, organizations: [acme] }\n',
+        );
+      const deps = makeDeps(yaml, provider);
+      const spanLog = createSpanLog();
+      deps.spanLog = spanLog;
+      deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
+      deps.runRegistry = new RunRegistry({ genId: () => "final-main-run" });
+      const request: IncomingMessage =
+        destination === "slack-dm"
+          ? mainDm("Explain the result")
+          : {
+              channelId: "http:home",
+              userId: "access:alice",
+              threadKey: "http:home:alice",
+              text: "Explain the result",
+            };
+      await threadWithFinishedRun(deps, "orchestrator", {
+        channelId: request.channelId,
+        userId: request.userId,
+        threadKey: request.threadKey,
+        channelVisibility: "dm",
+        ...(request.directAudience ? { directAudience: request.directAudience } : {}),
+      });
+      const ledger = wireChildLedger(deps);
+      const channel = destination === "slack-dm" ? mainDmIO() : fakeIO();
+      let closed = 0;
+      let failed = false;
+      let recovered = false;
+      let failRead = false;
+      const verify = async () => {
+        if (closed && !failed && outcome !== "context-error") {
+          failed = true;
+          if (outcome === "audience-error") throw new TypeError("PRIVATE_FINAL_AUDIENCE_ERROR");
+          return { ok: false as const, code: "direct-audience-denied" as const };
+        }
+        if (closed && failed) recovered = true;
+        return { ok: true as const };
+      };
+      if (destination === "slack-dm") channel.io.verifyDirectAudience = verify;
+      else {
+        channel.io.organizationPrivateAudience = () => ({
+          kind: "organization-private",
+          organization: "acme",
+          stream: "person:alice",
+          actorId: request.userId,
+          userId: request.userId,
+          channelId: request.channelId,
+          threadKey: request.threadKey,
+        });
+        channel.io.verifyOrganizationPrivateAudience = verify;
+        channel.io.authoritativePrivateHistory = async () => [];
+      }
+      const status = channel.io.status;
+      channel.io.status = async (...args) => {
+        const card = await status(...args);
+        return {
+          ...card,
+          done: async (frame) => {
+            await card.done(frame);
+            closed++;
+          },
+        };
+      };
+      class FinalSources extends NullMcpToolSource {
+        override async toolsFor() {
+          if (closed && outcome === "context-error" && !failed) {
+            failed = true;
+            failRead = true;
+          }
+          return { tools: [], servers: [] };
+        }
+      }
+      deps.mcp = new FinalSources();
+      const readLive = deps.runLedger.readLiveRuns.bind(deps.runLedger);
+      deps.runLedger.readLiveRuns = async () => {
+        if (failRead) {
+          failRead = false;
+          throw new TypeError("PRIVATE_FINAL_CONTEXT_ERROR");
+        }
+        return readLive();
+      };
+      const result = await dispatch(deps, request, channel.io, {
+        authoritativeHistory: true,
+        ...(destination === "organization" ? { organizationConversation: true } : {}),
+        seed: [
+          {
+            role: "user",
+            text: "Earlier verified source",
+            context: {
+              ...freshContext(),
+              origins: [
+                {
+                  runId: "run-prev",
+                  requester: request.userId,
+                  channelId: request.channelId,
+                  threadKey: request.threadKey,
+                },
+              ],
+            },
+          },
+        ],
+      });
+      await deps.runHistoryWriter.settled();
+      const record = ledger.finished.get("final-main-run")!;
+      const contextError = outcome === "context-error";
+      const code = contextError
+        ? "saved-context-unproved"
+        : outcome === "denied"
+          ? "direct-audience-denied"
+          : "direct-audience-unavailable";
+      expect(result.status).toBe("completed");
+      expect(record.status).toBe("completed");
+      expect(record.replyOk).toBe(true);
+      expect(record.agent).toBe("orchestrator");
+      expect(closed).toBe(1);
+      expect(recovered).toBe(true);
+      expect(record.audienceRefusal).toEqual({
+        version: 1,
+        code,
+        causeAt: "reply",
+        withheldAt: "reply",
+        ...(contextError ? { check: "context_validation_exception" } : {}),
+      });
+      expect(channel.replies).toEqual([
+        contextError
+          ? "I couldn't verify that the earlier source details are still safe to share here, so I withheld them. A Switchboard operator can check the source and conversation access."
+          : "I couldn't verify who can read this private conversation, so I withheld the answer. A Switchboard operator can check conversation access.",
+      ]);
+      const publication = spanLog.read().lines.filter((line) => line.span === "run.publication_context_check");
+      if (outcome === "denied") {
+        expect(publication).toContainEqual(
+          expect.objectContaining({
+            status: "ok",
+            attrs: expect.objectContaining({ outcome: "direct-audience-denied" }),
+          }),
+        );
+        expect(publication.filter((line) => line.status === "error")).toEqual([]);
+        expect(reports.mock.calls).toEqual([]);
+      } else {
+        const stage = contextError
+          ? "origins"
+          : destination === "slack-dm"
+            ? "private-audience"
+            : "private-destination";
+        expect(publication).toContainEqual(
+          expect.objectContaining({
+            status: "error",
+            errorKind: "infra",
+            errorCode: "source_check_failed",
+            attrs: expect.objectContaining({
+              sourceCheckStage: stage,
+              sourceErrorClass: "TypeError",
+              outcome: contextError ? "context_validation_exception" : code,
+            }),
+          }),
+        );
+        const failedSpan = publication.find((line) => line.status === "error")!;
+        expect(record.events).toContainEqual(
+          expect.objectContaining({
+            type: "span_end",
+            name: "private activity",
+            spanId: failedSpan.spanId,
+            status: "error",
+          }),
+        );
+        expect(reports.mock.calls.map(([line]) => JSON.parse(line))).toEqual([
+          expect.objectContaining({
+            event: "source_check.failed",
+            sourceCheckStage: stage,
+            sourceErrorClass: "TypeError",
+          }),
+        ]);
+      }
+      expect(
+        JSON.stringify({
+          publication,
+          replies: channel.replies,
+          statuses: channel.statuses,
+          reports: reports.mock.calls,
+          refusal: record.audienceRefusal,
+        }),
+      ).not.toContain("PRIVATE_");
+    } finally {
+      reports.mockRestore();
+    }
   });
 
   it("withholds a main answer when its private source disappears before the reply", async () => {
@@ -27269,6 +27475,65 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
   beforeEach(() => {
     vi.mocked(runPiHarnessOpen).mockClear();
     vi.mocked(makeExecutor).mockClear();
+  });
+
+  it("omits saved context after a checkpoint read throws and completes the fresh request", async () => {
+    const reports = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const sources: SessionSources = {
+        ...testSessionSources(followUp, []),
+        context: {
+          version: 1,
+          status: "known",
+          revision: 0,
+          origins: [
+            {
+              runId: "run-prev",
+              requester: followUp.userId,
+              channelId: followUp.channelId,
+              threadKey: THREAD,
+              checkpoint: "a".repeat(64),
+            },
+          ],
+          slack: [],
+          mcp: [],
+        },
+      };
+      const t = await threadWithSession(PI_YAML, {
+        sources,
+        tail: [user("PRIVATE_OLD_REQUEST"), assistant("PRIVATE_OLD_ANSWER")],
+      });
+      const readCheckpoint = t.deps.runLedger.readContextCheckpoint.bind(t.deps.runLedger);
+      t.deps.runLedger.readContextCheckpoint = async (runId) => {
+        if (runId === "run-prev") throw new TypeError("PRIVATE_CHECKPOINT_ERROR");
+        return readCheckpoint(runId);
+      };
+      const { io, replies } = fakeIO();
+      let seeded: ChatMessage[] = [];
+      vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+      await vi.mocked(runPiHarnessOpen).withImplementation(
+        async (_deps, run) => {
+          seeded = run.messages;
+          return piAnswered("Fresh request completed.");
+        },
+        async () => dispatch(t.deps, { ...followUp, text: "Fresh request", threadReply: true }, io),
+      );
+      await t.writer.settled();
+      expect(JSON.stringify(seeded)).toContain("Fresh request");
+      expect(JSON.stringify(seeded)).not.toContain("PRIVATE_OLD_");
+      expect(replies.join("\n")).toContain("Fresh request completed.");
+      expect(t.ledger.finished.get("run-next")?.status).toBe("completed");
+      expect(reports.mock.calls.map(([line]) => JSON.parse(line))).toContainEqual(
+        expect.objectContaining({
+          event: "source_check.failed",
+          sourceCheckStage: "origins",
+          sourceErrorClass: "TypeError",
+        }),
+      );
+      expect(JSON.stringify({ seeded, replies, reports: reports.mock.calls })).not.toContain("PRIVATE_");
+    } finally {
+      reports.mockRestore();
+    }
   });
 
   it("starts a fresh review without importing an earlier run's execution receipts or notes", async () => {

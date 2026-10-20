@@ -1,3 +1,4 @@
+import { storeReadFailureOf } from "../storeFailure.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerRunLedger } from "../runLedgerWorker.js";
 
@@ -39,7 +40,9 @@ describe("read-only ledger recovery", () => {
       storeKey: "runs:default",
       fetch: async () => Response.json({ error: "refused" }, { status: ++calls === 1 ? 503 : 403 }),
     });
-    await expect(wire.sessionTail("session")).rejects.toMatchObject({ name: "PermanentStoreError" });
+    const failure = await wire.sessionTail("session").catch((error) => error);
+    expect(failure).toMatchObject({ name: "PermanentStoreError" });
+    expect(storeReadFailureOf(failure)).toEqual({ attempts: 2, stop: "permanent" });
     expect(calls).toBe(2);
   });
 
@@ -79,7 +82,9 @@ describe("read-only ledger recovery", () => {
         return Response.json({ error: "unavailable" }, { status: 503 });
       },
     });
-    await expect(wire.sessionTail("session")).rejects.toMatchObject({ name: "TransientStoreError" });
+    const failure = await wire.sessionTail("session").catch((error) => error);
+    expect(failure).toMatchObject({ name: "TransientStoreError" });
+    expect(storeReadFailureOf(failure)).toEqual({ attempts: 3, stop: "attempts-exhausted" });
     expect(calls).toBe(3);
   });
 
@@ -128,5 +133,6 @@ describe("read-only ledger recovery", () => {
     await request;
     await vi.advanceTimersByTimeAsync(50);
     expect(outcome).toMatchObject({ name: "TransientStoreError" });
+    expect(storeReadFailureOf(outcome)).toEqual({ attempts: 1, stop: "deadline" });
   });
 });
