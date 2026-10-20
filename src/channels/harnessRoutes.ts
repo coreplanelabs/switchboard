@@ -18,6 +18,7 @@
 // own split.
 
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
+import { finished } from "node:stream/promises";
 import type { RunBearerStore } from "../core/modelProxy/runBearers.js";
 import { compactionAskOf } from "../core/harness/pi/compactionFallback.js";
 import {
@@ -249,10 +250,12 @@ export function createHarnessRoutesHandler(
             ? `[harness] ${door.response.status} ${word} — held (${door.held.reason})${door.held.runId ? ` run=${door.held.runId}` : ""}`
             : `[harness] ${door.response.status} ${word} — ${String(door.response.body.error)}`,
         );
-        json(door.response);
-        // The body is never read on a refusal or a hold: drain it so the answer
-        // reaches the client whole — destroying the socket could drop the queued JSON.
+        // Discard without parsing before completing the response. A proxy can
+        // still be forwarding the upload and cannot read it after responding.
+        const discarded = finished(req, { cleanup: true });
         req.resume();
+        await discarded;
+        json(door.response);
         return;
       }
       let body: unknown;
