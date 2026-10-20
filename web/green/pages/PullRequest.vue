@@ -8,6 +8,7 @@ import { createRunPageModel } from "../../src/lib/runPageModel";
 import { attachRunStream } from "../../src/lib/runStream";
 import { useEventSourceFactory } from "../../src/lib/eventSource";
 import PrReviewPanel from "../../src/modules/pr-review/PrReviewPanel.vue";
+import { usePrChecks } from "../../src/lib/prChecks";
 import PageHeading from "../components/PageHeading.vue";
 import EmptyState from "../components/EmptyState.vue";
 const seed = useSeed("run");
@@ -15,6 +16,10 @@ const route = useRoute();
 const runQuery = computed(() => Object.fromEntries(Object.entries(route.query).filter(([key]) => key !== "view")));
 const viewingAs = useViewingAs();
 const collector = createPrReviewCollector();
+const checks = usePrChecks(
+  () => (seed?.capabilities.github ? seed.id : undefined),
+  () => collector.state.pr,
+);
 const model = createRunPageModel();
 const unavailable = ref(false);
 const ended = ref(false);
@@ -64,8 +69,8 @@ onBeforeUnmount(() => {
   <p v-if="unavailable" class="green-notice green-warning" role="status">
     The diff stream is unavailable. The last confirmed artifacts are shown.
   </p>
-  <section v-if="collector.state.ready" class="green-pr-pane">
-    <PrReviewPanel :data="collector.state" :abridge="abridge" />
+  <section v-if="collector.state.ready || checks" class="green-pr-pane">
+    <PrReviewPanel :data="collector.state" :abridge="abridge" :checks="checks" />
   </section>
   <template v-else
     ><PageHeading title="Pull request evidence" description="Read the diff recorded by this authorized run." />

@@ -1,11 +1,24 @@
 <script setup lang="ts">
 import PrReviewPanel from "../modules/pr-review/PrReviewPanel.vue";
-import { watch } from "vue";
+import { inject, watch } from "vue";
+import { SeedKey } from "../lib/seed";
+import { usePrChecks } from "../lib/prChecks";
 import { POPUP_LAYER } from "../lib/uiTheme";
 import { panelTitle, prLinks, type AbridgeControl, type PrReviewData } from "../modules/pr-review/types";
 
-defineProps<{ data: PrReviewData; abridge?: AbridgeControl; loading?: boolean; message?: string }>();
+const props = defineProps<{
+  data: PrReviewData;
+  abridge?: AbridgeControl;
+  loading?: boolean;
+  message?: string;
+  runId?: string;
+}>();
 const open = defineModel<boolean>("open", { default: false });
+const seed = inject(SeedKey, null);
+const checks = usePrChecks(
+  () => (open.value && seed?.capabilities.github ? props.runId : undefined),
+  () => props.data.pr,
+);
 let trigger: HTMLElement | null = null;
 watch(
   open,
@@ -34,7 +47,7 @@ function restoreFocus(event: Event) {
         <div v-if="$slots.actions" class="shrink-0 border-b border-default p-3">
           <slot name="actions" :close="close" />
         </div>
-        <template v-if="loading || message">
+        <template v-if="loading || (message && !checks)">
           <header class="flex shrink-0 items-start justify-between gap-3 border-b border-default p-4 sm:p-6">
             <h2 class="min-w-0 break-words text-lg font-semibold">{{ panelTitle(data) }}</h2>
             <UButton icon="i-lucide-x" color="neutral" variant="ghost" aria-label="Close" @click="close()" />
@@ -55,7 +68,12 @@ function restoreFocus(event: Event) {
             </a>
           </div>
         </template>
-        <PrReviewPanel v-else :data="data" :abridge="abridge" closable @close="close()" />
+        <template v-else>
+          <p v-if="message" role="status" class="shrink-0 border-b border-default px-4 py-2 text-sm text-muted">
+            {{ message }}
+          </p>
+          <PrReviewPanel :data="data" :abridge="abridge" :checks="checks" closable @close="close()" />
+        </template>
       </div>
     </template>
   </USlideover>

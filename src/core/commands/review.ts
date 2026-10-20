@@ -19,7 +19,9 @@ import {
   type ReviewAbridger,
 } from "../reviewAbridge.js";
 import { RUN_ID_PATTERN } from "../runRecord.js";
-import { runResource, type RunsService } from "../runsService.js";
+import { runResource, type RunRecordView, type RunsService } from "../runsService.js";
+import { pullRequestNumberOf } from "../runRecord.js";
+import { PrChecksUnavailable, type PrChecksSource } from "../prChecks.js";
 
 // The `review.*` registrations: `review abridge <id> [--model m] [--force]
 // [--wait]` asks for a finished PR review's ABRIDGED reading diff
@@ -48,6 +50,7 @@ export interface ReviewCommandDeps {
      *  normally hidden before it gets here). */
     abridger(): Promise<ReviewAbridger | undefined>;
     runs(): Promise<RunsService>;
+    checks?: PrChecksSource;
   };
 }
 
@@ -147,7 +150,7 @@ async function abridgerOf(deps: ReviewCommandDeps): Promise<ReviewAbridger> {
 
 /** The run must be one the caller may read (authorization.md items 5–7): a
  *  deny is the same `not_found` an unknown id gives. */
-async function assertVisible(deps: ReviewCommandDeps, id: string, caller: Caller): Promise<void> {
+async function assertVisible(deps: ReviewCommandDeps, id: string, caller: Caller): Promise<RunRecordView> {
   const runs = await deps.review.runs();
   const res = await runs.getRun(id);
   if (!res.ok) throw new CommandError("not_found", "no run found");
@@ -156,7 +159,53 @@ async function assertVisible(deps: ReviewCommandDeps, id: string, caller: Caller
     // The mask holds (record 0054): the sentence answers "not found" so the
     // run's existence is not revealed, while the cause tells the span the truth.
     throw new CommandError("not_found", "no run found", "policy");
+  return res.value;
 }
+
+export const reviewChecks = defineCommand({
+  id: "review.checks",
+  enabledWhen: (caps) => caps.github,
+  args: [{ name: "id", schema: runId, describe: "id of the run whose pull request to read" }],
+  action: "runs:read",
+  effect: "read",
+  annotations: { destructive: false, idempotent: true },
+  describe: "Read current GitHub checks for the pull request recorded on a run you may view.",
+  render: (output) => JSON.stringify(output),
+  handler: async ({ args, caller, deps }) => {
+    const run = await assertVisible(deps, args.id, caller);
+    const runs = await deps.review.runs();
+    let number = pullRequestNumberOf(run);
+    let repo = run.repo;
+    if (number === undefined) {
+      // Review metadata precedes the result and also covers unpublished reviews.
+      const events = await runs.getRunEvents(args.id, { limit: 100 });
+      const meta = events.ok ? events.value.events.find((e) => e.type === "run_meta") : undefined;
+      if (meta?.type === "run_meta") {
+        number = meta.pr;
+        repo = meta.repo;
+      }
+    }
+    if (!repo || number === undefined) throw new CommandError("unavailable", "This run has no recorded pull request.");
+    if (!deps.review.checks) throw new CommandError("unavailable", "GitHub checks are unavailable in this process.");
+    try {
+      const snapshot = await deps.review.checks.read(repo, number);
+      return {
+        ...snapshot,
+        checks: snapshot.checks.map((check) => ({
+          ...check,
+          name: wrapUntrusted(check.name),
+          ...(check.description !== undefined ? { description: wrapUntrusted(check.description) } : {}),
+          ...(check.provider !== undefined ? { provider: wrapUntrusted(check.provider) } : {}),
+        })),
+      } as unknown as JsonValue;
+    } catch (error) {
+      if (error instanceof PrChecksUnavailable) throw new CommandError("unavailable", error.message);
+      if (error instanceof z.ZodError || error instanceof SyntaxError)
+        throw new CommandError("unavailable", "GitHub returned incomplete check data.");
+      throw error;
+    }
+  },
+});
 
 function refused(err: unknown): never {
   if (err instanceof AbridgeRefusal) throw new CommandError(err.code, err.message);
@@ -222,6 +271,7 @@ export const reviewStatus = defineCommand({
 export const reviewCommands: readonly CommandDef<ReviewCommandDeps>[] = [
   reviewAbridge,
   reviewStatus,
+  reviewChecks,
 ] as unknown as CommandDef<ReviewCommandDeps>[];
 
 export function registerReviewCommands<D extends ReviewCommandDeps>(registry: CommandRegistry<D>): void {

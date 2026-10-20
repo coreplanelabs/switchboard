@@ -1330,7 +1330,9 @@ describe("createLiveViewHandler (node:http)", () => {
     const page = fakeReqRes("GET", "/runs");
     handler(page.req, page.res);
     await page.finished;
-    expect(page.headers["content-security-policy"]).toContain("img-src 'self' data: https://avatars.slack-edge.com;");
+    expect(page.headers["content-security-policy"]).toContain(
+      "img-src 'self' data: https://avatars.slack-edge.com https://avatars.githubusercontent.com;",
+    );
     expect(indexSeedOf(page.body()).rows[0]).toMatchObject({
       id,
       userId: "access:account-1",

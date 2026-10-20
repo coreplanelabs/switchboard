@@ -1,3 +1,5 @@
+import type { PrChecksSnapshot } from "../src/core/prChecks.js";
+import { serveCommandRead } from "../src/channels/commandReadStream.js";
 import { readFileSync } from "node:fs";
 import { maintenanceResponse } from "../src/core/maintenance.js";
 import { maintenancePageResponse } from "../src/channels/maintenancePage.js";
@@ -77,6 +79,12 @@ import type { PageSender } from "../src/channels/webShell.js";
 // renders of one tree agree (scripts/screenshots.mts).
 
 const PORT = Number(process.env.PORT ?? 8788);
+// Optional captured API responses, kept outside the tree. These are replayed
+// unchanged; the capture's checkedAt remains visible in the panel.
+const checksCaptures: Array<{ snapshot: PrChecksSnapshot; events: RunEvent[] }> = process.env.PR_CHECKS_PREVIEW_FILE
+  ? JSON.parse(readFileSync(process.env.PR_CHECKS_PREVIEW_FILE, "utf8"))
+  : [];
+
 const NOW = process.env.SWITCHBOARD_PREVIEW_NOW ? Number(process.env.SWITCHBOARD_PREVIEW_NOW) : systemClock();
 
 const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"), "green/main.ts");
@@ -91,13 +99,15 @@ const PREVIEW_ACTOR: Actor = {
   grants: { actions: "all", channels: "all", repos: "all" },
 };
 const documentPage = makePageSender(assets.entry, CAPABILITIES, { viewerProfile: () => ({ name: "Alice" }) });
+const checksCapturePage = makePageSender(assets.entry, { ...CAPABILITIES, readingDiffAbridge: false });
 const emoji = process.env.SWITCHBOARD_PREVIEW_EMOJI_DIR
   ? createSlackEmojiCache({ store: new FileEmojiStore(process.env.SWITCHBOARD_PREVIEW_EMOJI_DIR) })
   : undefined;
 await emoji?.load();
 const sendPage: PageSender = (req, res, status, actor, title, seed) => {
   const enriched = { ...seed, ...(emoji ? { emoji: emoji.catalog() } : {}) };
-  documentPage(req, res, status, actor ?? PREVIEW_ACTOR, title, enriched);
+  const sender = seed.page === "run" && seed.id.startsWith("checks-") ? checksCapturePage : documentPage;
+  sender(req, res, status, actor ?? PREVIEW_ACTOR, title, enriched);
 };
 
 const row = (over: Partial<RunIndexRowSeed>): RunIndexRowSeed => ({
@@ -2614,6 +2624,22 @@ function page(
   all: boolean,
   search: string,
 ): { title: string; seed: PageSeed; status?: number; viewer?: Actor } | null {
+  const capture = checksCaptures.find((c) => pathname === `/runs/checks-${c.snapshot.number}`);
+  if (capture)
+    return {
+      title: "API checks preview",
+      seed: {
+        page: "run",
+        mode: "history",
+        id: `checks-${capture.snapshot.number}`,
+        events: capture.events,
+        status: "completed",
+        eventCount: capture.events.length,
+        startedAt: capture.snapshot.checkedAt,
+        finishedAt: capture.snapshot.checkedAt,
+        durationMs: 0,
+      },
+    };
   // The runs index as an admin sees it while viewing as alice (`?viewing=1`, preview only — the
   // client routes by path, so the page stays /runs): the banner, the narrowed rows, the picker.
   if (pathname === "/runs" && new URLSearchParams(search).get("viewing") === "1")
@@ -2971,6 +2997,85 @@ createServer((req, res) => {
     return;
   }
   const snapshot = req.headers["x-switchboard-preview-snapshot"] === "1";
+  const checksCapture = checksCaptures.find((c) => url.searchParams.get("id") === `checks-${c.snapshot.number}`);
+  if (req.method === "GET" && url.pathname === "/api/review.checks" && checksCapture) {
+    serveCommandRead(
+      async () => ({ ok: true, value: checksCapture.snapshot as never }),
+      nodeSseSink(req, res),
+      30_000,
+      "review.checks",
+    );
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/review.checks" && url.searchParams.get("id") === "review-1") {
+    const head = "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d";
+    res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" });
+    res.write(
+      "retry: 3000\n\ndata: " +
+        JSON.stringify({
+          repo: "acme/api",
+          number: 57,
+          headSha: head,
+          checkedSha: head,
+          state: "OPEN",
+          checkedAt: NOW,
+          warnings: [],
+          checks: [
+            {
+              id: "change",
+              name: "ci / change plan",
+              status: "in_progress",
+              required: false,
+              provider: "Depot",
+              description: "This check has started…",
+              url: "https://github.com/acme/api/pull/57/checks",
+            },
+            {
+              id: "web",
+              name: "ci / web",
+              status: "in_progress",
+              required: true,
+              provider: "Depot",
+              description: "This check has started…",
+            },
+            {
+              id: "title",
+              name: "pr-title / title",
+              status: "success",
+              required: true,
+              provider: "GitHub Actions",
+              description: "The pull request title is valid",
+            },
+            {
+              id: "e2e",
+              name: "staging / Review E2E",
+              status: "expected",
+              required: true,
+              description: "Expected — Waiting for status to be reported",
+            },
+            {
+              id: "impact",
+              name: "Production impact",
+              status: "neutral",
+              required: false,
+              description: "Assessment complete",
+            },
+            {
+              id: "docs",
+              name: "ci / docs",
+              status: "skipped",
+              required: false,
+              description: "No documentation inputs changed",
+            },
+          ],
+        }) +
+        "\n\n",
+    );
+    const heartbeat = setInterval(() => res.write(": hb\n\n"), 20_000);
+    req.on("close", () => clearInterval(heartbeat));
+    return;
+  }
   if (snapshot) res.setHeader("x-switchboard-preview-snapshot", "1");
   if (
     greenPreview &&

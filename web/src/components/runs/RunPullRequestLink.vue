@@ -22,6 +22,7 @@ const reference = computed(() => ({ repo: props.run.repo, number: number.value }
 const open = ref(false);
 const loading = ref(false);
 const message = ref("");
+const checksRunId = ref<string>();
 const collector = shallowRef(createPrReviewCollector());
 const abridge = shallowRef<ReviewAbridge>();
 const data = computed(() => ({ ...collector.value.state, pr: { ...collector.value.state.pr, ...reference.value } }));
@@ -30,6 +31,7 @@ let generation = 0;
 let stream: RunStream | undefined;
 function dispose() {
   generation++;
+  checksRunId.value = undefined;
   stream?.close();
   stream = undefined;
   abridge.value?.dispose();
@@ -66,6 +68,7 @@ watch(open, async (value) => {
     current.state.pr.repo === reference.value.repo && current.state.pr.number === reference.value.number;
   const update = (event: unknown) => {
     current.handle(event);
+    if (matching()) checksRunId.value = seed.id;
     message.value = current.state.ready && matching() ? "" : "No diff was recorded for this pull request in this run.";
   };
   if (seed.mode === "history") {
@@ -88,7 +91,7 @@ watch(open, async (value) => {
       model: createRunPageModel(),
       handle: (event) => {
         update(event);
-        if (current.state.ready && matching()) loading.value = false;
+        if (matching()) loading.value = false;
       },
       onEnd: () => {
         loading.value = false;
@@ -131,6 +134,7 @@ onBeforeUnmount(dispose);
     v-if="open"
     v-model:open="open"
     :data="data"
+    :run-id="checksRunId"
     :abridge="abridge"
     :loading="loading"
     :message="message"

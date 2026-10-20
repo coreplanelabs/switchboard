@@ -36,6 +36,7 @@ import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { resolveGithubIdentity } from "../execution/githubApp.js";
+import { GithubPrChecksSource } from "../execution/githubPrChecks.js";
 import { resolveLogin } from "../execution/authorBinding.js";
 import { GithubDeliverySource } from "../execution/githubDelivery.js";
 import { ResidentOperations } from "../execution/resident.js";
@@ -498,7 +499,7 @@ export function buildCoreCommands(
     channels: () => (wiring.channelDirectory?.() ?? STATIC_CHANNEL_DIRECTORY).channels(),
     ...(wiring.names?.() ? { names: wiring.names() } : {}),
     runs,
-    review: { abridger, runs },
+    review: { abridger, runs, checks: new GithubPrChecksSource() },
     credentials: { runs, inspect: wiring.credentialInspection },
     friction: {
       ledger,

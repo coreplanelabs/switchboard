@@ -125,6 +125,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 |---|---|---|
 | `review abridge <id> [--model <string>] [--force] [--wait]` | Abridge a finished PR review's reading diff with meat.dev on the bot host (a paid model job) and store it on the run; idempotent — a stored one is answered, not recomputed. | every surface |
 | `review status <id>` | Read the progress of an abridged review diff without starting or recomputing it. | every surface |
+| `review checks <id>` | Read current GitHub checks for the pull request recorded on a run you may view. | every surface |
 
 ### `friction`
 

@@ -89,6 +89,9 @@ exports[`capability axis — a capability turning on changes exactly the command
     "runHistory",
     "readingDiffAbridge",
   ],
+  "review.checks": [
+    "github",
+  ],
   "review.status": [
     "runHistory",
     "readingDiffAbridge",
@@ -156,6 +159,7 @@ commands:
   steer run             — Fold words into a live run at its next step boundary, by run id.
   review abridge        — Abridge a finished PR review's reading diff with meat.dev on the bot host (a paid model job) and store it on the run; idempotent — a stored one is answered, not recomputed.
   review status         — Read the progress of an abridged review diff without starting or recomputing it.
+  review checks         — Read current GitHub checks for the pull request recorded on a run you may view.
   friction report       — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
   friction propose      — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
   friction analyze      — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
@@ -260,6 +264,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "repo.test",
   "repo.workload",
   "review.abridge",
+  "review.checks",
   "review.status",
   "runs.check",
   "runs.children",
@@ -336,6 +341,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "repo_test",
   "repo_workload",
   "review_abridge",
+  "review_checks",
   "review_status",
   "runs_check",
   "runs_children",
@@ -397,6 +403,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 *review*
 • \`review abridge\` — Abridge a finished PR review's reading diff with meat.dev on the bot host (a paid model job) and store it on the run; idempotent — a stored one is answered, not recomputed.
 • \`review status\` — Read the progress of an abridged review diff without starting or recomputing it.
+• \`review checks\` — Read current GitHub checks for the pull request recorded on a run you may view.
 *friction*
 • \`friction report\` — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
 • \`friction propose\` — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
@@ -524,6 +531,7 @@ commands:
   runs findings         — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
   runs search           — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
   steer run             — Fold words into a live run at its next step boundary, by run id.
+  review checks         — Read current GitHub checks for the pull request recorded on a run you may view.
   friction report       — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
   friction propose      — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
   friction analyze      — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
@@ -604,6 +612,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "pulls.rebase",
   "repo.build",
   "repo.test",
+  "review.checks",
   "runs.check",
   "runs.children",
   "runs.delete",
@@ -663,6 +672,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "pulls_rebase",
   "repo_build",
   "repo_test",
+  "review_checks",
   "runs_check",
   "runs_children",
   "runs_delete",
@@ -716,6 +726,8 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`runs findings\` — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
 *steer*
 • \`steer run\` — Fold words into a live run at its next step boundary, by run id.
+*review*
+• \`review checks\` — Read current GitHub checks for the pull request recorded on a run you may view.
 *friction*
 • \`friction report\` — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
 • \`friction propose\` — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.

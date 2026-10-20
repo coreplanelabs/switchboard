@@ -1217,7 +1217,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
     </div>
 
     <!-- The shared portal keeps the diff above the navigation at every width. -->
-    <PrReviewSlideover v-model:open="prPanelOpen" :data="prReview.state" :abridge="abridge">
+    <PrReviewSlideover v-model:open="prPanelOpen" :data="prReview.state" :abridge="abridge" :run-id="seed?.id">
       <template #actions="{ close }">
         <RouterLink
           v-if="seed"

@@ -111,7 +111,12 @@ const SSE_HEARTBEAT_MS = 20_000;
  *  cleared when the client disconnects (and if a write ever throws). node:http
  *  only — the transport-free `serve*` fns stay timer-free for unit tests. */
 export function startSseHeartbeat(req: HttpRequest, res: ServerResponse): void {
+  if (res.destroyed || res.writableEnded) return;
   const hb = setInterval(() => {
+    if (res.destroyed || res.writableEnded) {
+      clearInterval(hb);
+      return;
+    }
     try {
       res.write(": hb\n\n");
     } catch {
@@ -400,6 +405,9 @@ export function nodeSseSink(req: HttpRequest, res: ServerResponse): SseSink {
     writeHead: (status, headers) => void res.writeHead(status, headers),
     write: (chunk) => void res.write(chunk),
     end: () => void res.end(),
-    onClose: (cb) => void req.on("close", cb),
+    onClose: (cb) => {
+      req.on("close", cb);
+      if (res.destroyed || res.writableEnded) cb();
+    },
   };
 }

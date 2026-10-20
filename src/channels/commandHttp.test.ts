@@ -1,7 +1,7 @@
 import { preapprovedCaller } from "../core/testing/callers.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
-import { CommandRegistry, bindCommands, type CommandInvoker } from "../core/commandRegistry.js";
+import { CommandRegistry, bindCommands, type CommandInvoker, type Caller } from "../core/commandRegistry.js";
 import { toSurfaceNames } from "../core/commandSurface.js";
 import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
 import { registerReviewCommands, type ReviewCommandDeps } from "../core/commands/review.js";
@@ -132,12 +132,15 @@ function fakeReqRes(init: FakeReqInit) {
   const chunks = init.body === undefined ? [] : [Buffer.from(init.body)];
   let destroyed = false;
   let bodyRead = false;
+  const closeListeners: Array<() => void> = [];
   const req = {
     method: init.method,
     url: init.url,
     headers: { host: "bot.example.test", ...(init.headers ?? {}) },
     socket: { remoteAddress: init.remoteAddress ?? "127.0.0.1" },
-    on: () => {},
+    on: (name: string, cb: () => void) => {
+      if (name === "close") closeListeners.push(cb);
+    },
     destroy: () => void (destroyed = true),
     async *[Symbol.asyncIterator]() {
       bodyRead = true;
@@ -147,7 +150,17 @@ function fakeReqRes(init: FakeReqInit) {
   let status = 0;
   let outHeaders: Record<string, string> = {};
   const out: string[] = [];
+  let responseClosed = false;
   const res = {
+    get destroyed() {
+      return responseClosed;
+    },
+    get writableEnded() {
+      return responseClosed;
+    },
+    write: (chunk: string) => {
+      out.push(chunk);
+    },
     writeHead: (s: number, h?: Record<string, string>) => {
       status = s;
       outHeaders = Object.fromEntries(Object.entries(h ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
@@ -157,6 +170,10 @@ function fakeReqRes(init: FakeReqInit) {
     },
   };
   return {
+    close: () => {
+      responseClosed = true;
+      for (const cb of closeListeners) cb();
+    },
     req: req as unknown as IncomingMessage,
     res: res as unknown as ServerResponse,
     get status() {
@@ -1226,5 +1243,104 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
       kind: "access",
       id: callerIdFor(readerBot),
     });
+  });
+});
+
+describe("HTTP read streams", () => {
+  it("refuses new snapshots when current authentication or grants are unavailable", async () => {
+    vi.useFakeTimers();
+    try {
+      let current: Caller | undefined = callerWith("access", "access:user-1", ALL_GRANTS);
+      const { handler } = await fixture({
+        readStreams: {
+          intervals: { "runs.get": 30_000 },
+          caller: async () => current,
+        },
+      });
+      const c = fakeReqRes({
+        method: "GET",
+        url: "/api/runs.get?id=fin-priv",
+        headers: { accept: "text/event-stream" },
+      });
+      await handler(c.req, c.res, browser);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(c.text()).toContain('data: {"id":"fin-priv"');
+      current = callerWith("access", "access:user-1", NO_GRANTS);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(c.text()).toContain('"retry":false');
+      expect(c.text().split('data: {"id":"fin-priv"')).toHaveLength(2);
+      c.close();
+      current = undefined;
+      const expired = fakeReqRes({
+        method: "GET",
+        url: "/api/runs.get?id=fin-1",
+        headers: { accept: "text/event-stream" },
+      });
+      await handler(expired.req, expired.res, browser);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(expired.text()).toContain(
+        'event: unavailable\ndata: {"message":"Current authentication is unavailable.","retry":false}',
+      );
+      expect(expired.text()).not.toContain('data: {"id":"fin-1"');
+      expired.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts no work when a client closes during caller resolution", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolve!: (caller: Caller | undefined) => void;
+      const { handler } = await fixture({
+        readStreams: {
+          intervals: { "runs.get": 30_000 },
+          caller: async () => callerWith("access", "access:op-1", ALL_GRANTS),
+        },
+        resolveCaller: () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      });
+      const c = fakeReqRes({ method: "GET", url: "/api/runs.get?id=fin-1", headers: { accept: "text/event-stream" } });
+      const pending = handler(c.req, c.res, browser);
+      c.close();
+      resolve(callerWith("access", "access:user-1", ALL_GRANTS));
+      await pending;
+      expect(c.text()).toBe("");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the same command visibility gate for snapshot streams", async () => {
+    const { handler } = await fixture({
+      readStreams: {
+        intervals: { "runs.get": 30_000 },
+        caller: async () =>
+          callerFor(browser, {
+            grantsFor: (id) => grantsFor(id, { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] }),
+          }),
+      },
+    });
+    const allowed = fakeReqRes({
+      method: "GET",
+      url: "/api/runs.get?id=fin-1",
+      headers: { accept: "text/event-stream" },
+    });
+    await handler(allowed.req, allowed.res, browser);
+    await vi.waitFor(() => expect(allowed.text()).toContain('data: {"id":"fin-1"'));
+    expect(allowed.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+    allowed.close();
+    const denied = fakeReqRes({
+      method: "GET",
+      url: "/api/runs.get?id=fin-priv",
+      headers: { accept: "text/event-stream" },
+    });
+    await handler(denied.req, denied.res, browser);
+    await vi.waitFor(() => expect(denied.text()).toContain('"retry":false'));
+    expect(denied.text()).not.toContain('"id":"fin-priv"');
+    denied.close();
   });
 });

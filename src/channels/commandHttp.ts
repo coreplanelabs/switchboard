@@ -20,6 +20,8 @@ import { CHANNEL_DIRECTORY_TIMEOUT_MS } from "../core/dispatch/record.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
 import { holdsAll, isViewablePerson, viewingRefusal } from "../core/authz/viewAs.js";
 import { MAX_BODY_BYTES, readBody } from "./http.js";
+import { serveCommandRead } from "./commandReadStream.js";
+import { nodeSseSink, startSseHeartbeat } from "./liveView/sse.js";
 
 // Generic HTTP adapter for the command registry: `/api/<group>.<verb>` for
 // every registered command, with NO
@@ -49,6 +51,12 @@ import type { PersonLookup } from "./requester.js";
 export type { PersonLookup };
 
 export interface CommandHttpOptions {
+  /** Explicit opt-in for read-only SSE snapshots; values are reconciliation intervals. */
+  readStreams?: {
+    intervals: Readonly<Record<string, number>>;
+    /** Reverify the request credential and rebuild current actor permissions. */
+    caller: (req: IncomingMessage) => Promise<Caller | undefined>;
+  };
   /** Shared command context and a browser display capability, never a policy override. */
   core?: CoreDeps;
   browserApprovals?: boolean;
@@ -504,6 +512,30 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
     const input = namedToInput(cmd, named, keys);
     if ("error" in input) {
       refuse(res, ERROR_STATUS.invalid_input, "invalid_input", input.error);
+      return;
+    }
+
+    const interval = opts.readStreams?.intervals[cmd.id];
+    if (method === "GET" && cmd.effect === "read" && interval && header(req, "accept")?.includes("text/event-stream")) {
+      if (res.destroyed || res.writableEnded) return;
+      serveCommandRead(
+        async () => {
+          const current = await opts.readStreams!.caller(req);
+          return current && !res.destroyed && !res.writableEnded
+            ? commands.invoke(cmd.id, input, current)
+            : {
+                ok: false,
+                error: "unauthorized",
+                status: 403,
+                message: "Current authentication is unavailable.",
+                decidedBy: "door",
+              };
+        },
+        nodeSseSink(req, res),
+        interval,
+        cmd.id,
+      );
+      startSseHeartbeat(req, res);
       return;
     }
 
