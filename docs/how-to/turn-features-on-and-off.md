@@ -63,7 +63,7 @@ A command under two capabilities is on when either gives it a backend.
 | `residents` | `repo list`, `repo workload`, `repo onboard`, `repo offboard`, `repo reconfigure`, `repo rebuild`, `repo test`, `repo build` |
 | `memory` | `memory list`, `memory forget`, `memory sweep` |
 | `runHistory` | `runs findings`, `review abridge`, `review status`, `friction report`, `friction propose` |
-| `runLedger` | `runs original`, `runs claims` |
+| `runLedger` | `runs original`, `runs receipt`, `runs claims` |
 | `mcp` | `mcp add`, `mcp connect`, `mcp show`, `mcp remove`, `mcp promote` |
 | `costs` | `costs by`, `costs snapshot` |
 | `metrics` | `metrics trend`, `metrics reviews`, `metrics feedback` |

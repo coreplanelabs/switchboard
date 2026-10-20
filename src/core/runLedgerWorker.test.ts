@@ -22,6 +22,39 @@ import { appendThreadTurn } from "./runLedger/threadSession.js";
 // step write's order (transcript before record), fenced answers as results,
 // and the same error classes as the run store.
 
+describe("original write receipt client", () => {
+  const selector = {
+    runId: "receipt-run",
+    gen: "g1",
+    operation: "/runs/live-state" as const,
+    requestId: "11111111-1111-4111-8111-111111111111",
+    digest: "a".repeat(64),
+  };
+  const reply = () => ({
+    kind: "source",
+    resource: {
+      type: "run",
+      id: "receipt-run",
+      userId: "access:alice",
+      channelId: "mcp:fixture",
+      channelVisibility: "machine",
+    },
+    threadKey: "mcp:fixture:receipt",
+    receipt: { state: "unknown", reason: "missing" },
+  });
+  it("returns missing proof as unknown without issuing a write", async () => {
+    const { ledger } = stubWorker(() => ({ status: 200, data: reply() }));
+    expect(await ledger.readWriteReceipt(selector)).toEqual(reply());
+  });
+  it.each(["foreign-run", "private-field"])("refuses %s evidence from a backend", async (mode) => {
+    const data = reply();
+    if (mode === "foreign-run") data.resource.id = "other-run";
+    else Object.assign(data.receipt, { privatePayload: "PRIVATE" });
+    const { ledger } = stubWorker(() => ({ status: 200, data }));
+    await expect(ledger.readWriteReceipt(selector)).rejects.toBeInstanceOf(PermanentStoreError);
+  });
+});
+
 describe("bounded original evidence client", () => {
   const id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   const reply = () => ({

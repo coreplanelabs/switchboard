@@ -621,6 +621,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   };
   const runs = async () => ({
     ...createRunsService({ registry: s.reg, store: s.store, clock: () => NOW, units: s.units, sessions: s.ledger }),
+    writeReceipt: createRunsService({ registry: s.reg, store: s.store, ledger: s.ledger }).writeReceipt,
     originalEvidence: createRunsService({ registry: s.reg, store: s.store, ledger: s.ledger }).originalEvidence,
     listClaimObservations: ({
       visibleTo,

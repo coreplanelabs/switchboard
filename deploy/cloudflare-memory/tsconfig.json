@@ -17,6 +17,7 @@
   "include": [
     "worker.ts",
     "worker.test.ts",
+    "writeReceipts.test.ts",
     "runs.test.ts",
     "sessionUnification.test.ts",
     "schedules.test.ts",

@@ -1,3 +1,9 @@
+import {
+  writeReceiptReadOf,
+  writeReceiptSelectorSchema,
+  type WriteReceiptSelector,
+  type WriteReceiptRead,
+} from "./runLedger/writeReceipt.js";
 import { liveEventSnapshotOf, sameLiveEventSnapshot, type LiveEventSnapshot } from "./runLedger/eventPage.js";
 import { prepareInboxDelivery, inboxDeliveryResultOf, type InboxDeliveryResult } from "./runLedger/inboxDelivery.js";
 import { EXECUTION_PROTOCOL_HEADER, NATIVE_REVIEW_STOP_HEADER } from "./runLedger/types.js";
@@ -585,6 +591,15 @@ export class WorkerRunLedger implements RunLedger {
     return { ok: true, fence: r.data.fence as number };
   }
 
+  async readWriteReceipt(selector: WriteReceiptSelector): Promise<WriteReceiptRead> {
+    if (!writeReceiptSelectorSchema.safeParse(selector).success)
+      throw new PermanentStoreError("Invalid write receipt selector");
+    const result = await this.read("/runs/write-receipt", { storeKey: this.opts.storeKey, selector });
+    const value = writeReceiptReadOf(result.data, selector);
+    if (!value) throw this.invalidResult(new PermanentStoreError("Invalid write receipt evidence"), result);
+    return value;
+  }
+
   async readOriginal(selector: OriginalSelector): Promise<OriginalRead> {
     this.checkIds(selector.runId, selector.gen);
     const result = await this.read("/runs/original", {
@@ -955,7 +970,7 @@ export class WorkerRunLedger implements RunLedger {
   private target(runId: string, gen: string, session: string | undefined) {
     if (session === undefined) return { path: "/runs/transcript/write" as const, body: { runId, gen } };
     this.checkSessionKey(session);
-    return { path: "/runs/session/write" as const, body: { key: session, runId, gen } };
+    return { path: "/runs/session/write" as const, body: { key: session, runId, gen, storeKey: this.opts.storeKey } };
   }
 
   private async writeTurns(

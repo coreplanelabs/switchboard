@@ -102,6 +102,9 @@ exports[`capability axis — a capability turning on changes exactly the command
   "runs.original": [
     "runLedger",
   ],
+  "runs.receipt": [
+    "runLedger",
+  ],
   "schedule.list": [
     "schedules",
   ],
@@ -136,6 +139,7 @@ commands:
   credentials inspect   — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
   runs list             — List runs (live and persisted, newest first) — metadata only, never message text.
   runs original         — Inspect bounded stored evidence for one current original. Does not repeat writes, settle a run, or prove process ending.
+  runs receipt          — Read one original storage write receipt. Missing proof stays unknown and never permits replay.
   runs claims           — List persisted unknown native claim observations. These are not current holds or commit receipts; missing observations do not prove absence.
   runs get              — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic; \`--include shutdown\` checks the current target without contacting its runtime.
   runs events           — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
@@ -268,6 +272,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "runs.kill",
   "runs.list",
   "runs.original",
+  "runs.receipt",
   "runs.search",
   "runs.settlecheck",
   "runs.stop",
@@ -343,6 +348,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "runs_kill",
   "runs_list",
   "runs_original",
+  "runs_receipt",
   "runs_search",
   "runs_settlecheck",
   "runs_stop",

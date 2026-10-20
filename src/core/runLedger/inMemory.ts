@@ -351,6 +351,20 @@ export interface SessionLog {
 const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
 export class InMemoryRunLedger implements RunLedger {
+  async readWriteReceipt(
+    selector: import("./writeReceipt.js").WriteReceiptSelector,
+  ): Promise<import("./writeReceipt.js").WriteReceiptRead> {
+    const original = await this.readOriginal(selector);
+    return original.kind === "source"
+      ? {
+          kind: "source",
+          resource: original.resource,
+          threadKey: original.threadKey,
+          receipt: { state: "unknown", reason: "unsupported" },
+        }
+      : { kind: "unavailable" };
+  }
+
   async readOriginal(selector: OriginalSelector): Promise<OriginalRead> {
     const capture = () => {
       const row = this.live.get(selector.runId);
