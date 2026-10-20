@@ -590,6 +590,62 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     };
   }
 
+  it.each(["unchanged comparison", "changed comparison", "unavailable comparison"])(
+    "checks a moved base before publication: %s",
+    async (movement) => {
+      const h = harness();
+      const base = "e".repeat(40);
+      const out = await runReviewPostStep({
+        agent: AGENTS.review,
+        requestText: "review acme/api#42",
+        repoCtx: { repo: "acme/api", pr: 42, baseRef: "main", baseSha: base },
+        heads: { reviewHead: HEAD, observedHead: HEAD },
+        verdict,
+        answer,
+        digest: {
+          complete: true,
+          base,
+          totals: { files: 1, additions: 1, deletions: 0 },
+          range: { base, baseSha: base, head: HEAD, baseRef: "main" },
+        },
+        hardStopped: false,
+        guardTransition: true,
+        fetchPrFacts: async () => ({
+          state: "open",
+          sameRepoHead: true,
+          headSha: HEAD,
+          headBranchExists: true,
+          baseRef: "main",
+          ...{ baseSha: OTHER },
+        }),
+        ...{
+          fetchPrCommits: async () =>
+            movement === "unavailable comparison"
+              ? undefined
+              : {
+                  commits: [],
+                  files: [],
+                  filesTruncated: false,
+                  mergeBase: movement === "unchanged comparison" ? base : OTHER,
+                },
+        },
+        fetchPrHead: async () => HEAD,
+        post: h.post,
+        publicationJournal: h.publicationJournal,
+        reply: h.reply,
+        logKey: "t",
+      });
+      expect(out).toEqual(
+        movement === "unchanged comparison"
+          ? { posted: true, target: { repo: "acme/api", number: 42 }, head: HEAD, verdict: "approve" }
+          : { posted: false, reason: "the PR comparison changed or could not be verified after review" },
+      );
+      expect(h.posts.map((p) => p.target)).toEqual(
+        movement === "unchanged comparison" ? [{ repo: "acme/api", number: 42, commitId: HEAD }] : [],
+      );
+    },
+  );
+
   it("a canonical review cannot post a carried verdict at another saved head", async () => {
     const h = harness();
     const publication = {
@@ -1002,10 +1058,19 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       const out = await runReviewPostStep({
         ...base(h, events),
         carried: { reviewed: HEAD, current: OTHER, commits: 2 },
+        repoCtx: { repo: "acme/api", pr: 42, baseRef: "main", baseSha: "e".repeat(40) },
+        fetchPrFacts: async () => ({
+          state: "open",
+          sameRepoHead: true,
+          headSha: HEAD,
+          headBranchExists: true,
+          baseRef: "main",
+          baseSha: "e".repeat(40),
+        }),
         digest: {
           complete: true,
           base: "main",
-          range: { base: "e".repeat(40), canonicalBase: "e".repeat(40), head: HEAD, baseRef: "main" },
+          range: { base: "e".repeat(40), baseSha: "e".repeat(40), head: HEAD, baseRef: "main" },
           totals: { files: 1, additions: 1, deletions: 0 },
         },
         fetchPrHead: async () => OTHER,
@@ -2015,6 +2080,68 @@ describe("runReviewPostStep durable original publication", () => {
     expect(h.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted")).toBe(false);
     expect(JSON.stringify([...h.events, ...h.replies])).not.toContain("private native response bytes");
   });
+  it.each(["pending", "uncertain"] as const)(
+    "keeps an original %s publication unconfirmed when new comparison checks would refuse",
+    async (state) => {
+      for (const failure of ["changed comparison", "unavailable facts", "missing digest"] as const) {
+        const h = setup();
+        const commit = h.publicationJournal.commit;
+        h.publicationJournal.commit = async (receipt) =>
+          state === "pending" && (receipt as { state: string }).state === "uncertain" ? "unknown" : commit(receipt);
+        const first = await runReviewPostStep({
+          ...h.input,
+          post: async (target, body) => {
+            await h.input.post(target, body);
+            return { state: "uncertain" as const };
+          },
+        });
+        expect(first).toEqual({
+          posted: false,
+          uncertain: true,
+          reason: "the review publication outcome is unconfirmed",
+        });
+        const original = structuredClone(h.read());
+        expect(original).toMatchObject({ state });
+        h.events.length = 0;
+        h.replies.length = 0;
+        const base = "b".repeat(40);
+        const outcome = await runReviewPostStep({
+          ...h.input,
+          repoCtx: { ...h.input.repoCtx, baseRef: "main", baseSha: base },
+          digest:
+            failure === "missing digest"
+              ? undefined
+              : {
+                  complete: true,
+                  base,
+                  totals: { files: 1, additions: 1, deletions: 0 },
+                  range: { base, baseSha: base, head: HEAD, baseRef: "main" },
+                },
+          fetchPrFacts: async () => {
+            if (failure === "unavailable facts") throw new Error("fresh facts unavailable");
+            return {
+              state: "open",
+              baseRef: "main",
+              baseSha: OTHER,
+              headSha: HEAD,
+              headBranchExists: true,
+              sameRepoHead: true,
+            };
+          },
+          fetchPrCommits: async () => ({ commits: [], files: [], filesTruncated: false, mergeBase: OTHER }),
+        });
+        expect(outcome).toEqual({
+          posted: false,
+          uncertain: true,
+          reason: "the review publication outcome is unconfirmed",
+        });
+        expect(h.read()).toEqual(original);
+        expect(h.posts).toHaveLength(1);
+        expect(h.events).toEqual([]);
+        expect(h.replies).toEqual(["ℹ️ I could not confirm whether the review posted to acme/api#42."]);
+      }
+    },
+  );
   it("a stop or changed grant after pending ACK refuses before native dispatch", async () => {
     const h = setup();
     h.publicationJournal.canPublish = async () => h.receipts.length === 0;

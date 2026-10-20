@@ -1,3 +1,5 @@
+import type { ReviewReadTarget } from "../tools/reviewRead.js";
+import { gitInCheckout } from "../execution/workspaceAdvance.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { redactSecrets, stripAnsi, type RunEvent } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
@@ -76,13 +78,11 @@ export function readingDiffStartupWarning(
   return resolved?.provider === "meat" && !resolved.meatModel ? `[reading-diff] ${MEAT_MODEL_MISSING}` : undefined;
 }
 
-/** The one shell command of the baseline. The range is `origin/<base>...HEAD`
- *  (base falls back to the repository's default branch via `origin/HEAD`),
- *  quoted into one inert token; `--end-of-options` keeps a hostile ref from
- *  being parsed as a git option (same discipline as `diff_digest`). */
-export function readingDiffCommand(baseRef: string | undefined): string {
-  const range = shellQuote(`origin/${baseRef ?? "HEAD"}...HEAD`);
-  return `git diff --no-color --end-of-options ${range}`;
+/** The artifact uses the same immutable comparison as the review's source tools. */
+export function readingDiffCommand(target: Pick<ReviewReadTarget, "base" | "head"> & { checkout?: string }): string {
+  if (![target.base, target.head].every((sha) => /^[a-f0-9]{40}$/.test(sha)))
+    throw new Error("The reading diff requires pinned base and head commits.");
+  return `${gitInCheckout(target.checkout)} diff --no-color --end-of-options ${shellQuote(`${target.base}...${target.head}`)}`;
 }
 
 export interface MeatResult {
@@ -172,6 +172,9 @@ export function startReviewReadingDiff(args: {
   cfg: ReadingDiffConfig | undefined;
   env: Record<string, string | undefined>;
   baseRef: string | undefined;
+  base: string;
+  head: string;
+  checkout?: string;
   publish: (event: RunEvent) => void;
   /** The request's root: the production becomes a `run.reading_diff`
    *  background span under it, `outcome` saying whether it published, and the
@@ -182,7 +185,7 @@ export function startReviewReadingDiff(args: {
   if (!resolveReadingDiff(args.cfg, args.env)) return { baseline: Promise.resolve(false) };
   const produce = async (span: Span | undefined): Promise<boolean> => {
     try {
-      const artifact = await produceReadingDiff(args.executor, { baseRef: args.baseRef }, span);
+      const artifact = await produceReadingDiff(args.executor, args, span);
       if (!artifact) return false;
       args.publish({ type: "review_artifact", artifact: "reading_diff", ...artifact, at: systemClock() });
       return true;
@@ -206,13 +209,13 @@ export function startReviewReadingDiff(args: {
  *  the executor. */
 export async function produceReadingDiff(
   executor: { exec(command: string, opts?: ExecTraceOptions): Promise<string> },
-  opts: { baseRef: string | undefined },
+  opts: Pick<ReviewReadTarget, "base" | "head"> & { baseRef: string | undefined; checkout?: string },
   /** The production's own span; the executor's `exec.exec` hangs under it. */
   span?: Span,
 ): Promise<ReadingDiffArtifact | null> {
   const baseRef = opts.baseRef ?? "HEAD";
   try {
-    const out = await executor.exec(readingDiffCommand(opts.baseRef), span ? { span } : undefined);
+    const out = await executor.exec(readingDiffCommand(opts), span ? { span } : undefined);
     if (out.trim() === "" || failedOutput(out)) return null;
     const capped = capDiff(sanitizeArtifactText(out));
     return { poweredBy: "git", baseRef, diff: capped.diff, truncated: capped.truncated };

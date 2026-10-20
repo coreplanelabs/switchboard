@@ -181,7 +181,8 @@ import {
   type FindingDisposition,
   type ReviewVerdict,
 } from "../reviewVerdict.js";
-import { parseDigestReport, retainDigest, type DigestReport } from "../diffDigest.js";
+import { normalizeHead } from "../reviewedHead.js";
+import { parseDigestReport, type DigestReport } from "../diffDigest.js";
 import { runReviewPostStep, settleReviewedHead, type ReviewPostOutcome, type RoundWorkspace } from "../reviewRound.js";
 import { postReviewComment } from "../../execution/githubComments.js";
 import {
@@ -534,6 +535,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   } = ctx;
   run.control.trackRuntimeShutdown();
   const pinnedHead = reviewHeadOf(ctx.requestText);
+  const requiresComparison = isPrReview && !reviewPostOptedOut(ctx.requestText);
   if (pinnedHead !== undefined) root.setAttrs({ reviewPinnedHead: pinnedHead });
 
   const ledgerTrackedAtEntry = ledgerRun?.tracked() === true;
@@ -1414,6 +1416,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       cfg: deps.config.config.review?.readingDiff,
       env: publicEnv(),
       baseRef: repoCtx.baseRef,
+      base: repoCtx.baseSha ?? "",
+      head: reviewHead ?? "",
+      checkout: currentCheckout,
       publish: (event) => events.publish(event),
       parent: root,
     }).baseline.then((published) => {
@@ -1524,47 +1529,23 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       reviewSubmission = { status: "accepted", verdict: v };
     ledgerRun?.setState({ verdict: v, reviewSubmission });
   };
-  // Keep canonical coverage when a reviewer also inspects an incremental range.
-  // The immutable range survives restart and is checked again at publication.
-  const savedDigest = parseDigestReport(restored.digest);
-  let digest: DigestReport | undefined = savedDigest;
-  if (isPrReview && restored.digest !== undefined && !digest?.range) {
-    console.log(
-      JSON.stringify({
-        event: "review_digest_refused",
-        repo: repoCtx.repo,
-        pr: repoCtx.pr,
-        head: reviewHead,
-        baseRef: repoCtx.baseRef,
-        reason: "saved_range_unavailable",
-      }),
-    );
-    digest = {
-      complete: false,
-      base: repoCtx.baseRef ?? "unknown",
-      reason: "saved digest does not identify the current review range",
-    };
-  }
-  const onDigest = (d: DigestReport) => {
-    const kept = retainDigest(digest, d);
-    if (kept !== d) {
-      try {
-        console.log(
-          JSON.stringify({
-            event: "review_digest_retained",
-            repo: repoCtx.repo,
-            pr: repoCtx.pr,
-            keptHead: kept.range?.head,
-            keptBase: kept.range?.base,
-            seenHead: d.range?.head,
-            seenBase: d.range?.base,
-          }),
-        );
-      } catch {
-        // Optional observation cannot replace canonical coverage.
-      }
+  let digest = parseDigestReport(restored.digest);
+  const onDigest = (report: DigestReport) => {
+    if (
+      isPrReview &&
+      verdict &&
+      (!digest?.range ||
+        !report.range ||
+        digest.range.head !== report.range.head ||
+        digest.range.base !== report.range.base ||
+        digest.range.baseRef !== report.range.baseRef)
+    ) {
+      console.log(JSON.stringify({ event: "review_digest_invalidated", repo: repoCtx.repo, pr: repoCtx.pr }));
+      verdict = undefined;
+      reviewSubmission = { status: "rejected", reason: "The PR comparison changed; a current verdict is required." };
+      ledgerRun?.setState({ verdict, reviewSubmission });
     }
-    digest = kept;
+    digest = report;
     ledgerRun?.setState({ digest });
   };
   // Coding PR description, set only through the structured
@@ -3055,33 +3036,34 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     onVerdict,
     onReviewSubmission: persistReviewSubmission,
     ...(reviewHistory ? { reviewHistory } : {}),
-    reviewReadTarget: () => {
-      const head = reviewHistory?.requiredHead ?? reviewHead ?? repoCtx.headSha;
-      return !privateAudienceLatch.revoked &&
-        isPrReview &&
-        repoCtx.repo &&
-        repoCtx.pr !== undefined &&
-        repoCtx.baseRef &&
-        head
-        ? { repo: repoCtx.repo, pr: repoCtx.pr, head, baseRef: repoCtx.baseRef }
-        : undefined;
-    },
-    addressSeverity: ctx.addressSeverity.level,
-    onDigest,
     ...(isPrReview
       ? {
-          digestTarget: () => {
-            // Settlement commits the shared target before prompting a new-head turn.
-            const head = reviewHistory?.requiredHead ?? reviewHead;
-            return repoCtx.baseRef && head ? { baseRef: repoCtx.baseRef, head } : undefined;
+          reviewReadTarget: () => {
+            const head = reviewHistory?.requiredHead ?? reviewHead ?? repoCtx.headSha;
+            return !privateAudienceLatch.revoked &&
+              isPrReview &&
+              repoCtx.repo &&
+              repoCtx.pr !== undefined &&
+              repoCtx.baseRef &&
+              repoCtx.baseSha &&
+              head
+              ? { repo: repoCtx.repo, pr: repoCtx.pr, head, baseRef: repoCtx.baseRef, base: repoCtx.baseSha }
+              : undefined;
           },
         }
       : {}),
+    addressSeverity: ctx.addressSeverity.level,
+    onDigest,
     onPrDescription,
     onHandoff,
     onResearchBrief,
     onDispositions,
     ...(coordinator?.issuedFindingIds !== undefined ? { issuedFindingIds: coordinator.issuedFindingIds } : {}),
+  };
+  const prepareReviewComparison = async () => {
+    await diffDigestTool.run({}, toolContext);
+    if (!digest?.complete || !digest.range)
+      throw new Error("The PR comparison could not be verified before review; no model work started.");
   };
   // A resume whose plan is `finish` (run-history item 37): the model had
   // already answered when the previous generation died, so no loop runs here
@@ -3606,6 +3588,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           }
         }
       }
+    }
+    if (requiresComparison && !postedBefore && !normalizeHead(repoCtx.baseSha))
+      throw new Error("The PR base commit is unavailable; no review can start or publish.");
+    if (requiresComparison && !finish && run.control.requested === undefined) {
+      await prepareReviewComparison();
     }
     if (reentry && recordedFacts?.ended === true) {
       const intent = harnessLaunchIntentOf(launchIntent);
@@ -4393,7 +4380,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           onEvent,
           control: run.control,
           ...(harnessSession
-            ? { followUp: (input) => (endedRecord ? restartHarness!(input) : harnessSession!.followUp(input)) }
+            ? {
+                followUp: async (input) => {
+                  if (requiresComparison) await prepareReviewComparison();
+                  return endedRecord ? restartHarness!(input) : harnessSession!.followUp(input);
+                },
+              }
             : {}),
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
@@ -4424,48 +4416,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         };
       reviewHead = settled.reviewHead;
       observedHead = settled.observedHead;
-    }
-    // Older checkpoints have totals but no immutable range. Recompute the
-    // saved base only in the original PR checkout, before release. Equal
-    // totals alone cannot bind another target, head, or incremental range.
-    const originalReview = resume?.repoCtx;
-    if (
-      isPrReview &&
-      savedDigest?.complete &&
-      !savedDigest.range &&
-      digest?.complete === false &&
-      digest.reason === "saved digest does not identify the current review range" &&
-      !tailSkipped() &&
-      postedBefore === undefined &&
-      !unconfirmedReplayedPost &&
-      currentCheckout !== undefined &&
-      originalReview?.repo === repoCtx.repo &&
-      originalReview?.pr === repoCtx.pr &&
-      originalReview?.baseRef === repoCtx.baseRef &&
-      originalReview?.headSha !== undefined &&
-      originalReview.headSha === reviewHead &&
-      verdict?.head === reviewHead &&
-      observedHead === reviewHead
-    ) {
-      let rebuilt: DigestReport | undefined;
-      try {
-        await diffDigestTool.run(
-          { base: savedDigest.base },
-          { ...toolContext, onDigest: (report) => (rebuilt = report) },
-        );
-      } catch {
-        // An unavailable read retains the original publication refusal.
-      }
-      if (
-        rebuilt?.complete &&
-        rebuilt.range?.head === reviewHead &&
-        rebuilt.range.baseRef === originalReview.baseRef &&
-        rebuilt.range.base === rebuilt.range.canonicalBase &&
-        rebuilt.totals.files === savedDigest.totals.files &&
-        rebuilt.totals.additions === savedDigest.totals.additions &&
-        rebuilt.totals.deletions === savedDigest.totals.deletions
-      )
-        onDigest(rebuilt);
     }
     if (agent.name === "review" && reviewSubmission !== undefined) await persistReviewSubmission(reviewSubmission);
     // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt
@@ -5136,14 +5086,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           digest,
           answer,
           hardStopped: false,
-          ...(coordinator !== undefined || pinnedHead !== undefined
-            ? {
-                guardTransition: true as const,
-                fetchPrFacts:
-                  deps.fetchPrFacts ??
-                  ((pr) => fetchPullRequestFacts(pr, { verifyForkHead: pinnedHead !== undefined })),
-              }
-            : { guardTransition: false as const }),
+          guardTransition: coordinator !== undefined || pinnedHead !== undefined,
           publicationJournal: {
             runId: run.id,
             read: async () => {
@@ -5197,6 +5140,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           },
           post: deps.postReviewComment ?? postReviewComment,
           fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+          fetchPrFacts: deps.fetchPrFacts ?? ((pr) => fetchPullRequestFacts(pr, { verifyForkHead: true })),
+          fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
           reply: (text) => io.reply(text),
           ack: (text) => replyAck(io, resolved.verbosity, text),
           publish: (event) => events.publish(event),

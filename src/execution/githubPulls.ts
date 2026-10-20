@@ -663,6 +663,7 @@ export interface PullRequestFacts {
   /** The PR's own base branch — the resume path's true merge base (a PR
    *  opened against a non-default base must not resume against the default). */
   baseRef?: string;
+  baseSha?: string;
   htmlUrl?: string;
   /** The pull request's title as GitHub has it — the squash commit's title when the runner merges. */
   title?: string;
@@ -859,7 +860,7 @@ export async function fetchPullRequestFacts(
     html_url?: unknown;
     user?: { login?: unknown; id?: unknown };
     head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } };
-    base?: { ref?: unknown };
+    base?: { ref?: unknown; sha?: unknown };
     draft?: unknown;
     auto_merge?: unknown;
     mergeable?: unknown;
@@ -926,6 +927,7 @@ export async function fetchPullRequestFacts(
     ...(headBranchExists !== undefined ? { headBranchExists } : {}),
     sameRepoHead,
     ...(typeof data.base?.ref === "string" && data.base.ref ? { baseRef: data.base.ref } : {}),
+    ...(typeof data.base?.sha === "string" && /^[0-9a-f]{40}$/.test(data.base.sha) ? { baseSha: data.base.sha } : {}),
     ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
     ...(typeof data.title === "string" && data.title ? { title: data.title } : {}),
     ...(typeof data.draft === "boolean" ? { draft: data.draft } : {}),

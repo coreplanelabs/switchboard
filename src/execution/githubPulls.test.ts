@@ -949,6 +949,25 @@ describe("githubPulls", () => {
       }
     });
 
+    it("retains a valid PR base commit and refuses to invent a missing or malformed pin", async () => {
+      stubToken();
+      for (const sha of ["e".repeat(40), "main", undefined]) {
+        stubFetch((url) =>
+          url.includes("/git/ref/heads/")
+            ? Response.json({ object: { type: "commit", sha: "c".repeat(40) } })
+            : Response.json({ ...openPr, base: { ref: "main", sha } }),
+        );
+        expect(await fetchPullRequestFacts({ repo: "acme/api", number: 7 })).toMatchObject({
+          headSha: "c".repeat(40),
+          baseRef: "main",
+          ...(sha === "e".repeat(40) ? { baseSha: sha } : {}),
+        });
+        expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.baseSha).toBe(
+          sha === "e".repeat(40) ? sha : undefined,
+        );
+      }
+    });
+
     it("parses state, author login+id, head ref/sha, and a POSITIVE same-repo head match", async () => {
       stubToken();
       const calls = stubFetch((url) =>

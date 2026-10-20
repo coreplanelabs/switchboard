@@ -112,6 +112,7 @@ export interface LiveRunMeta {
   ref?: string;
   /** Resolved PR target base, retained independently of its checkout branch. */
   baseRef?: string;
+  baseSha?: string;
   headSha?: string;
   pr?: number;
   readonly?: boolean;

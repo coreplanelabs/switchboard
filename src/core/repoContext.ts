@@ -217,8 +217,10 @@ export interface RepoContext {
   headSha?: string;
   /** Base branch of that PR (from the same REST call), validated as a ref.
    *  Tells the review agent its diff base (docs/reference/specs/agent-review.md item 9);
-   *  unset when unknown — the agent then uses origin/HEAD. */
+   *  unset when unknown; a PR review requires both base branch and commit. */
   baseRef?: string;
+  /** Immutable PR base commit from the same authenticated metadata as its head. */
+  baseSha?: string;
   /** The PR's size as GitHub reports it (`changed_files`, `additions`,
    *  `deletions`, same REST call) — what the digest-coverage guard holds the
    *  review's diff digest against (docs/reference/specs/agent-review.md item 15). Unset
@@ -1024,6 +1026,7 @@ export async function resolveRepoContext(
     }
     if (head?.sha !== undefined) out.headSha = head.sha;
     if (head?.base !== undefined) out.baseRef = head.base;
+    if (head?.baseSha !== undefined) out.baseSha = head.baseSha;
     if (head?.size !== undefined) out.prSize = head.size;
     if (head?.facts !== undefined) out.prDescription = head.facts;
     if (head?.githubSource !== undefined) out.githubSource = head.githubSource;
@@ -1239,6 +1242,7 @@ export async function resolveRepoContext(
   // PR head is the ref when fetched, and a failed fetch stays repo-only.
   let headSha: string | undefined;
   let baseRef: string | undefined;
+  let baseSha: string | undefined;
   let prSize: PrSize | undefined;
   let facts: PrFacts | undefined;
   let githubSource: GithubPullSourceContext | undefined;
@@ -1263,6 +1267,7 @@ export async function resolveRepoContext(
     }
     headSha = head?.sha;
     baseRef = operationTarget?.ref === undefined || operationTarget.ref === head?.ref ? head?.base : undefined;
+    baseSha = head?.baseSha;
     prSize = head?.size;
     facts = head?.facts;
     githubSource = head?.githubSource;
@@ -1301,6 +1306,7 @@ export async function resolveRepoContext(
     if (isThreadOwnPr(records, repo, namedPr.number)) out.prIsThreadOwn = true;
     if (headSha) out.headSha = headSha;
     if (baseRef) out.baseRef = baseRef;
+    if (baseSha) out.baseSha = baseSha;
     if (prSize) out.prSize = prSize;
     if (facts) out.prDescription = facts;
     if (githubSource) out.githubSource = githubSource;
@@ -1319,6 +1325,7 @@ export async function resolveRepoContext(
           (operationTarget === undefined || (operationTarget.ref !== undefined && operationTarget.ref === head.ref))
         )
           out.baseRef = head.base;
+        if (head.baseSha) out.baseSha = head.baseSha;
         if (head.size) out.prSize = head.size;
         if (head.facts) out.prDescription = head.facts;
         if (head.githubSource) out.githubSource = head.githubSource;
@@ -1448,11 +1455,16 @@ function inheritedPr(
  *  thread's own pull request can still take a description edit there
  *  (`closedRecordPr`), and the branch tells a push past its head from a
  *  workspace on another branch. Never throws. */
-async function openPrHeadSha(pr: {
-  repo: string;
-  number: number;
-}): Promise<
-  | { sha: string; ref?: string; base?: string; size?: PrSize; facts?: PrFacts; githubSource?: GithubPullSourceContext }
+async function openPrHeadSha(pr: { repo: string; number: number }): Promise<
+  | {
+      sha: string;
+      ref?: string;
+      base?: string;
+      baseSha?: string;
+      size?: PrSize;
+      facts?: PrFacts;
+      githubSource?: GithubPullSourceContext;
+    }
   | { reason: "closed"; sha?: string; ref?: string; merged: boolean; mergedAt?: string }
   | { reason: "unreachable" }
 > {
@@ -1471,6 +1483,7 @@ async function openPrHeadSha(pr: {
       sha: head.sha,
       ...(head.ref ? { ref: head.ref } : {}),
       ...(head.base ? { base: head.base } : {}),
+      ...(head.baseSha ? { baseSha: head.baseSha } : {}),
       ...(head.size ? { size: head.size } : {}),
       ...(head.facts ? { facts: head.facts } : {}),
       ...(head.githubSource ? { githubSource: head.githubSource } : {}),
@@ -1548,6 +1561,7 @@ export async function prCommitsSince(input: {
   const data = (await res.json().catch(() => null)) as {
     commits?: Array<{ sha?: string; commit?: { message?: string } }>;
     files?: Array<{ filename?: string }>;
+    merge_base_commit?: { sha?: string };
   } | null;
   if (!data || !Array.isArray(data.commits)) return undefined;
   const commits: PrCommitList["commits"] = [];
@@ -1559,7 +1573,8 @@ export async function prCommitsSince(input: {
   const files = Array.isArray(data.files)
     ? data.files.map((f) => f.filename).filter((f): f is string => typeof f === "string")
     : [];
-  return { commits, files, filesTruncated: files.length >= COMPARE_FILES_CAP };
+  const mergeBase = normalizeHead(data.merge_base_commit?.sha);
+  return { commits, files, filesTruncated: files.length >= COMPARE_FILES_CAP, ...(mergeBase ? { mergeBase } : {}) };
 }
 
 /** GitHub's compare endpoint lists at most this many files. */
@@ -1578,6 +1593,7 @@ async function prHead(
       ref?: string;
       sha?: string;
       base?: string;
+      baseSha?: string;
       size?: PrSize;
       state?: "open" | "closed";
       /** GitHub's `merged`: a closed pull request that was merged, not just closed. */
@@ -1673,6 +1689,7 @@ async function prHead(
     ref,
     sha,
     base,
+    ...(data.base.sha ? { baseSha: data.base.sha } : {}),
     state,
     merged: data.headFacts?.merged === true,
     ...(data.headFacts?.size ? { size: data.headFacts.size } : {}),

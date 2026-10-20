@@ -653,6 +653,7 @@ export class RestGithubApi implements GithubApi {
       base: {
         ...(typeof base.sha === "string" && /^[a-f0-9]{40}$/.test(base.sha) ? { sha: base.sha } : {}),
         ...(baseRepositoryId !== undefined ? { repositoryId: baseRepositoryId } : {}),
+        ...(typeof base.sha === "string" && /^[0-9a-f]{40}$/.test(base.sha) ? { sha: base.sha } : {}),
         repo: typeof baseRepo.full_name === "string" ? baseRepo.full_name : "",
         ref: typeof base.ref === "string" ? base.ref : "",
       },

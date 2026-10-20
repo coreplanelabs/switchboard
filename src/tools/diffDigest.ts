@@ -35,7 +35,7 @@ export const diffDigestTool: RunnableTool = {
     "and risky-file flags (migrations/schema, auth/permission, whole-file deletions, lockfiles, very large files). " +
     "This is a DISTILLED summary, not the raw diff — use it to shape a PR description, or to orient before a review. " +
     "Runs `git diff --numstat` and `--name-status` over the merge-base range `<base>...HEAD` in the workspace, so it covers " +
-    "every file however large the change; base defaults to the repo's default branch (origin/HEAD). " +
+    "every file however large the change. PR reviews use the controller-pinned commits; coding defaults to origin/HEAD. " +
     "The totals it states are the whole change — a diff you read that shows fewer files or lines was cut short.",
   inputSchema: {
     type: "object",
@@ -43,14 +43,14 @@ export const diffDigestTool: RunnableTool = {
       base: {
         type: "string",
         description:
-          "Base ref to diff against (e.g. 'main' or a SHA). Defaults to the repo's default branch via origin/HEAD.",
+          "Coding base ref (e.g. 'main' or a SHA), default origin/HEAD. A PR review cannot change its pinned base.",
       },
     },
   },
   async run(input, ctx) {
     const base = String(input.base ?? "").trim();
-    const target = ctx.digestTarget?.();
-    const baseName = base || (target ? `origin/${target.baseRef}` : "origin/HEAD");
+    const target = ctx.reviewReadTarget?.();
+    const baseName = target?.base ?? (base || "origin/HEAD");
     let observedRange: DigestRange | undefined;
     const report = (
       value: DigestReport,
@@ -73,13 +73,18 @@ export const diffDigestTool: RunnableTool = {
         );
       ctx.onDigest?.({ ...value, ...(observedRange ? { range: observedRange } : {}) });
     };
-    if (ctx.digestTarget && (!target || !/^[0-9a-f]{40}$/i.test(target.head))) {
+    if (
+      ctx.reviewReadTarget &&
+      (!target || !/^[0-9a-f]{40}$/.test(target.head) || !/^[0-9a-f]{40}$/.test(target.base))
+    ) {
       report(
         { complete: false, base: baseName, reason: "the canonical review range is unavailable" },
         "review_target_unavailable",
       );
       return "diff_digest: the canonical review range is unavailable.";
     }
+    if (target && base && ![target.base, target.baseRef, `origin/${target.baseRef}`].includes(base))
+      return "diff_digest: a PR review uses its pinned base; use git diff to inspect other ranges.";
     // git OPTION injection (distinct from shell injection): a base like
     // `--output=/path` or `-O/etc/passwd` is parsed by GIT itself as an option
     // — arbitrary file write/read — even though the shell token is inert. Reject
@@ -95,15 +100,13 @@ export const diffDigestTool: RunnableTool = {
     const baseExpr = base
       ? shellQuote(base)
       : `"$(${git} rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)"`;
-    const selectedBase = base || (target ? `origin/${target.baseRef}` : undefined);
     const range = target ? '"$digest_base..$digest_head"' : `--end-of-options ${baseExpr}...HEAD`;
     const pin = target
       ? `digest_head=$(${git} rev-parse --verify HEAD) && ` +
-        `digest_base=$(${git} rev-parse --verify --end-of-options ${shellQuote(`${selectedBase}^{commit}`)}) && ` +
-        `digest_target=$(${git} rev-parse --verify --end-of-options ${shellQuote(`origin/${target.baseRef}^{commit}`)}) && ` +
+        `test "$digest_head" = ${shellQuote(target.head)} && ` +
+        `digest_base=$(${git} rev-parse --verify --end-of-options ${shellQuote(`${target.base}^{commit}`)}) && ` +
         `digest_base=$(${git} merge-base "$digest_base" "$digest_head") && ` +
-        `digest_target=$(${git} merge-base "$digest_target" "$digest_head") && ` +
-        `printf '%s\\n' '@@diff_digest:range@@' "$digest_base" "$digest_head" "$digest_target" && `
+        `printf '%s\\n' '@@diff_digest:range@@' "$digest_base" "$digest_head" && `
       : "";
     const listing = `${pin}${git} diff --numstat ${range} && echo ${NAME_STATUS_MARK} && ${git} diff --name-status ${range}`;
     const failed = (detail: string): string => {
@@ -118,10 +121,10 @@ export const diffDigestTool: RunnableTool = {
     let result = await execute(listing);
     let raw = result.stdout;
     const readRange = () => {
-      const match = /^@@diff_digest:range@@\n([0-9a-f]{40})\n([0-9a-f]{40})\n([0-9a-f]{40})\n/.exec(raw);
+      const match = /^@@diff_digest:range@@\n([0-9a-f]{40})\n([0-9a-f]{40})\n/.exec(raw);
       observedRange =
         target && match && match[2] === target.head.toLowerCase()
-          ? { base: match[1], head: match[2], canonicalBase: match[3], baseRef: target.baseRef }
+          ? { base: match[1], head: match[2], baseSha: target.base, baseRef: target.baseRef }
           : undefined;
     };
     // This fixed prefix is a complete machine frame even when the later

@@ -4374,6 +4374,7 @@ describe("browser installation", () => {
     "selects the requested Review context and rechecks its current authority: %s",
     async (variant) => {
       const head = "e".repeat(40);
+      const baseSha = "b".repeat(40);
       const followupAgent =
         variant === "general-followup" ? "general" : variant === "coding-followup" ? "coding" : undefined;
       const normalFollowup = variant === "normal-followup" || followupAgent !== undefined;
@@ -4464,7 +4465,7 @@ describe("browser installation", () => {
         core.githubCredentials = TEST_GITHUB_CREDENTIALS;
         core.resolveRepoContext = () => {
           if (phase === "fresh") installLateOwner();
-          return { repo: "sample/api", ref: "patch-1", baseRef: "main", pr: 42, headSha: head };
+          return { repo: "sample/api", ref: "patch-1", baseRef: "main", baseSha, pr: 42, headSha: head };
         };
         core.fetchPrHead = async () => head;
         core.fetchPrBase = async () => ({ baseRef: "main", baseSha: "a".repeat(40) });
@@ -4472,6 +4473,7 @@ describe("browser installation", () => {
           state: "open",
           headRef: "patch-1",
           baseRef: "main",
+          baseSha,
           headSha: head,
           headBranchExists: true,
           sameRepoHead: true,
@@ -4525,7 +4527,11 @@ describe("browser installation", () => {
           exec: async (command) => (command.includes("rev-parse") ? head + "\n" : ""),
           execResult: async (command) => ({
             exitCode: 0,
-            stdout: command.includes("rev-parse") ? head + "\n" : "",
+            stdout: command.includes("@@diff_digest:range@@")
+              ? `@@diff_digest:range@@\n${baseSha}\n${head}\n1\t0\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n`
+              : command.includes("rev-parse")
+                ? head + "\n"
+                : "",
             stderr: "",
             truncated: false,
           }),
@@ -4549,7 +4555,7 @@ describe("browser installation", () => {
           author: "alice",
           updatedAt: "2026-01-01T00:00:00Z",
           head: { repo: "sample/api", ref: "patch-1", sha: head },
-          base: { repo: "sample/api", ref: "main" },
+          base: { repo: "sample/api", ref: "main", sha: baseSha },
         },
       ];
       const text = `agent:review ${normalFollowup ? "" : "review-context:fresh "}model:anthropic/general-model effort:high review-head:${head} https://github.com/sample/api/pull/42`;

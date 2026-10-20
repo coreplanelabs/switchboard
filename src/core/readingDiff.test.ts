@@ -20,6 +20,8 @@ import { createTracer } from "./trace/tracer.js";
 // is reviewAbridge.ts's, after the review, on the bot host — nothing here runs
 // meat; `provider: meat` only decides that the abridging happens automatically.
 
+const COMPARISON = { base: "a".repeat(40), head: "b".repeat(40) };
+
 describe("resolveReadingDiff (config + env)", () => {
   it("defaults to git with meat's default runtime budget when nothing is configured", () => {
     expect(resolveReadingDiff(undefined, {})).toEqual({ provider: "git" });
@@ -76,20 +78,13 @@ describe("resolveReadingDiff (config + env)", () => {
 });
 
 describe("readingDiffCommand", () => {
-  it("a full diff against origin/<base>, option injection closed", () => {
-    expect(readingDiffCommand("main")).toBe("git diff --no-color --end-of-options 'origin/main...HEAD'");
+  it("compares the pinned commits without resolving branch refs", () => {
+    expect(readingDiffCommand(COMPARISON)).toBe(
+      `git diff --no-color --end-of-options '${"a".repeat(40)}...${"b".repeat(40)}'`,
+    );
   });
-
-  it("no base ref → origin/HEAD (the repository's default branch)", () => {
-    expect(readingDiffCommand(undefined)).toBe("git diff --no-color --end-of-options 'origin/HEAD...HEAD'");
-  });
-
-  it("a hostile base ref is quoted into one inert token", () => {
-    expect(readingDiffCommand("x; rm -rf /")).toBe("git diff --no-color --end-of-options 'origin/x; rm -rf /...HEAD'");
-  });
-
-  it("never names meat — no execution container runs it", () => {
-    expect(readingDiffCommand("main")).not.toContain("meat");
+  it.each(["main", "", "x; rm -rf /"])("refuses an unpinned base: %s", (base) => {
+    expect(() => readingDiffCommand({ ...COMPARISON, base })).toThrow("requires pinned base and head commits");
   });
 });
 
@@ -134,7 +129,7 @@ describe("produceReadingDiff", () => {
   it("one git command → a git-powered artifact", async () => {
     const a = await produceReadingDiff(
       exec((cmd) => (cmd.startsWith("git diff") ? "diff --git a/f b/f\n+x" : "?")),
-      { baseRef: "main" },
+      { ...COMPARISON, baseRef: "main" },
     );
     expect(a).toEqual({ poweredBy: "git", baseRef: "main", diff: "diff --git a/f b/f\n+x", truncated: false });
   });
@@ -142,14 +137,14 @@ describe("produceReadingDiff", () => {
   it("a git failure yields null (no artifact, never a throw into the run)", async () => {
     const a = await produceReadingDiff(
       exec(() => "fatal: ambiguous argument 'origin/gone...HEAD'"),
-      { baseRef: "gone" },
+      { ...COMPARISON, baseRef: "gone" },
     );
     expect(a).toBeNull();
     const b = await produceReadingDiff(
       exec(() => {
         throw new Error("sandbox dead");
       }),
-      { baseRef: "main" },
+      { ...COMPARISON, baseRef: "main" },
     );
     expect(b).toBeNull();
   });
@@ -158,7 +153,7 @@ describe("produceReadingDiff", () => {
     expect(
       await produceReadingDiff(
         exec(() => ""),
-        { baseRef: "main" },
+        { ...COMPARISON, baseRef: "main" },
       ),
     ).toBeNull();
   });
@@ -166,7 +161,7 @@ describe("produceReadingDiff", () => {
   it("caps the diff and marks truncation", async () => {
     const a = await produceReadingDiff(
       exec(() => "diff --git\n" + "y".repeat(READING_DIFF_CAP + 100)),
-      { baseRef: "main" },
+      { ...COMPARISON, baseRef: "main" },
     );
     expect(a?.truncated).toBe(true);
   });
@@ -178,7 +173,7 @@ describe("produceReadingDiff", () => {
     const secret = "ghp_" + "A".repeat(36);
     const git = await produceReadingDiff(
       exec(() => `diff --git a/.env b/.env\n+[31mGITHUB_TOKEN=${secret}[m`),
-      { baseRef: "main" },
+      { ...COMPARISON, baseRef: "main" },
     );
     expect(git?.diff).not.toContain(secret);
     expect(git?.diff).toContain("«redacted");
@@ -190,7 +185,7 @@ describe("produceReadingDiff", () => {
     const body = "d".repeat(READING_DIFF_CAP - 1) + emoji + "tail";
     const a = await produceReadingDiff(
       exec(() => body),
-      { baseRef: "main" },
+      { ...COMPARISON, baseRef: "main" },
     );
     expect(a?.truncated).toBe(true);
     const cut = a!.diff.slice(0, a!.diff.indexOf("…"));
@@ -204,6 +199,7 @@ describe("startReviewReadingDiff (the baseline, guaranteed)", () => {
   it("publishes the stamped envelope and resolves true", async () => {
     const published: RunEvent[] = [];
     const started = startReviewReadingDiff({
+      ...COMPARISON,
       executor: exec(() => "diff --git a/f b/f\n+x"),
       cfg: { provider: "git" },
       env: {},
@@ -228,6 +224,7 @@ describe("startReviewReadingDiff (the baseline, guaranteed)", () => {
     const commands: string[] = [];
     const published: RunEvent[] = [];
     const started = startReviewReadingDiff({
+      ...COMPARISON,
       executor: exec((cmd) => {
         commands.push(cmd);
         return "diff --git a/f b/f\n+x";
@@ -238,7 +235,7 @@ describe("startReviewReadingDiff (the baseline, guaranteed)", () => {
       publish: (e) => published.push(e),
     });
     expect(await started.baseline).toBe(true);
-    expect(commands).toEqual(["git diff --no-color --end-of-options 'origin/main...HEAD'"]);
+    expect(commands).toEqual([`git diff --no-color --end-of-options '${"a".repeat(40)}...${"b".repeat(40)}'`]);
     expect(
       published.map((e) => (e.type === "review_artifact" && e.artifact === "reading_diff" ? e.poweredBy : "?")),
     ).toEqual(["git"]);
@@ -249,6 +246,7 @@ describe("startReviewReadingDiff (the baseline, guaranteed)", () => {
     const published: RunEvent[] = [];
     let ran = 0;
     const a = startReviewReadingDiff({
+      ...COMPARISON,
       executor: exec(() => (ran++, "d")),
       cfg: { provider: "off" },
       env: {},
@@ -256,6 +254,7 @@ describe("startReviewReadingDiff (the baseline, guaranteed)", () => {
       publish: (e) => published.push(e),
     });
     const b = startReviewReadingDiff({
+      ...COMPARISON,
       executor: exec(() => (ran++, "d")),
       cfg: undefined,
       env: { SWITCHBOARD_READING_DIFF: "off" },
@@ -276,6 +275,7 @@ describe("startReviewReadingDiff (the baseline, guaranteed)", () => {
       },
     };
     const started = startReviewReadingDiff({
+      ...COMPARISON,
       executor: boom,
       cfg: { provider: "meat" },
       env: {},
@@ -297,8 +297,8 @@ describe("reading diff spans (docs/reference/specs/tracing.md items 17/18)", () 
       },
     };
     const span = createTracer({ clock: () => 1 }).start("run.reading_diff", { sinks: [] });
-    await produceReadingDiff(executor, { baseRef: "main" }, span);
-    await produceReadingDiff(executor, { baseRef: "main" });
+    await produceReadingDiff(executor, { ...COMPARISON, baseRef: "main" }, span);
+    await produceReadingDiff(executor, { ...COMPARISON, baseRef: "main" });
     expect(seen).toEqual([span, undefined]);
   });
 
@@ -314,6 +314,7 @@ describe("reading diff spans (docs/reference/specs/tracing.md items 17/18)", () 
     };
     const published: RunEvent[] = [];
     const started = startReviewReadingDiff({
+      ...COMPARISON,
       executor,
       cfg: { provider: "meat" },
       env: {},
@@ -328,6 +329,7 @@ describe("reading diff spans (docs/reference/specs/tracing.md items 17/18)", () 
     expect(execSpans).toEqual(["run.reading_diff"]);
     expect(published.map((e) => e.type)).toEqual(["review_artifact"]);
     const bare = startReviewReadingDiff({
+      ...COMPARISON,
       executor,
       cfg: { provider: "git" },
       env: {},
@@ -343,6 +345,7 @@ describe("reading diff spans (docs/reference/specs/tracing.md items 17/18)", () 
     const log = recordingSink();
     const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
     const started = startReviewReadingDiff({
+      ...COMPARISON,
       executor: { exec: async () => "" },
       cfg: undefined,
       env: {},

@@ -456,7 +456,7 @@ describe("distilled-diffs prompt behavior (resident variants)", () => {
     const sys = AGENTS.review.residentSystem!;
     expect(sys).not.toMatch(/typically the branch under review/);
     expect(sys).not.toMatch(/git fetch/);
-    expect(sys).toMatch(/origin\/<base>/);
+    expect(sys).toMatch(/pinned base commit/);
   });
 });
 
@@ -1003,7 +1003,7 @@ describe("review prompts: the spec contradiction check (agent-review item 14)", 
     for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
       expect(sys).toMatch(/SPEC CONTRADICTION CHECK/);
       expect(sys).toContain("docs/reference/specs/");
-      expect(sys).toContain("npm run --silent specs:coverage -- --changed origin/<base>...HEAD");
+      expect(sys).toContain("npm run --silent specs:coverage -- --changed <base-commit>...<head-commit>");
       expect(sys).toMatch(/Code.*Tests.*header/);
     }
   });
@@ -1061,7 +1061,7 @@ describe("review prompts: the test guard (agent-review item 16)", () => {
   it("both review prompts run the guard over the PR's range as a sub-step of the spec check", () => {
     for (const sys of prompts()) {
       expect(sys).toMatch(/3a\. TEST GUARD/);
-      expect(sys).toContain("npm run --silent specs:coverage -- --changed origin/<base>...HEAD --test-guard");
+      expect(sys).toContain("npm run --silent specs:coverage -- --changed <base-commit>...<head-commit> --test-guard");
       expect(sys.indexOf("TEST GUARD")).toBeGreaterThan(sys.indexOf("SPEC CONTRADICTION CHECK"));
       expect(sys.indexOf("TEST GUARD")).toBeLessThan(sys.indexOf("4. REPORT"));
     }
@@ -1664,7 +1664,7 @@ describe("seeded prompt variants", () => {
     expect(AGENTS.coding.seededSystem!).toContain("publish_branch");
     expect(AGENTS.coding.seededSystem!).toContain("submit_pr_description");
     expect(AGENTS.review.seededSystem!).toContain("gh pr view");
-    expect(AGENTS.review.seededSystem!).toContain("git diff origin/<base>...HEAD");
+    expect(AGENTS.review.seededSystem!).toContain("git diff <base-commit>...<head-commit>");
     expect(AGENTS.review.seededSystem!).toContain("REVIEW THE PR'S OWN HEAD");
   });
 });

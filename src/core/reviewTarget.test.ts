@@ -11,7 +11,7 @@ import { reviewTargetBlock } from "./reviewTarget.js";
 const SHA = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
 
 describe("reviewTargetBlock", () => {
-  const full = { repo: "acme/api", pr: 42, ref: "patch-1", headSha: SHA, baseRef: "main" };
+  const full = { repo: "acme/api", pr: 42, ref: "patch-1", headSha: SHA, baseRef: "main", baseSha: "a".repeat(40) };
 
   it("resident path: names every resolved fact and pins the first command to a HEAD check", () => {
     const b = reviewTargetBlock({ ...full, resident: true });
@@ -28,7 +28,7 @@ describe("reviewTargetBlock", () => {
     expect(b).toMatch(/submit no finding or verdict/);
     expect(b).not.toMatch(/request_changes/);
     expect(b).toMatch(/do not fetch or check out anything/i);
-    expect(b).toContain("`origin/main` is already present");
+    expect(b).toContain(`\`${"a".repeat(40)}\` is already present`);
     expect(b).toMatch(/do NOT run `git fetch`/);
     expect(b).toContain("`head` to submit_verdict");
     expect(b).not.toMatch(/gh pr checkout/);
@@ -51,7 +51,7 @@ describe("reviewTargetBlock", () => {
     const b = reviewTargetBlock({ repo: "acme/api", pr: 7, headSha: SHA, resident: true });
     expect(b).toContain("Head branch: unknown");
     expect(b).toContain("Base branch: the repository's default branch");
-    expect(b).toContain("`origin/HEAD`"); // the diff base when the base branch is unknown
+    expect(b).toContain("Base commit: unknown; no review can start or publish");
   });
 
   it("unknown head commit: says so and asks for `git rev-parse HEAD` as the reported head — no STOP rule to compare against", () => {
@@ -121,7 +121,15 @@ describe("reviewTargetBlock", () => {
 // docs/reference/specs/execution.md item 26: the seeded sandbox path — the
 // checkout is already at the head at a named path; no clone, the same HEAD check.
 describe("reviewTargetBlock — the seeded sandbox", () => {
-  const t = { repo: "acme/api", pr: 42, ref: "patch-1", headSha: "e".repeat(40), baseRef: "main", resident: false };
+  const t = {
+    repo: "acme/api",
+    pr: 42,
+    ref: "patch-1",
+    headSha: "e".repeat(40),
+    baseRef: "main",
+    baseSha: "a".repeat(40),
+    resident: false,
+  };
   it("names the seeded checkout, forbids a second clone, pins the first command to the HEAD check there, and diffs against the base already present", () => {
     const block = reviewTargetBlock({ ...t, seeded: { workspace: "/workspace/checkout" } });
     expect(block).toContain("already checked out at `/workspace/checkout`");
@@ -130,7 +138,7 @@ describe("reviewTargetBlock — the seeded sandbox", () => {
     expect(block).toMatch(/FIRST command there: `git rev-parse HEAD` — it must equal the head commit above/);
     expect(block).toMatch(/submit no finding or verdict/);
     expect(block).not.toMatch(/request_changes/);
-    expect(block).toContain("`origin/main` is already present in the checkout");
+    expect(block).toContain(`\`${"a".repeat(40)}\` is already present in the checkout`);
     expect(block).not.toContain("gh pr checkout");
     expect(block).not.toContain("worktree");
   });

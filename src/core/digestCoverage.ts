@@ -8,10 +8,9 @@
 // other question: did the digest the agent oriented with cover the change
 // GitHub says the PR carries? When it covered LESS, the verdict is not posted.
 //
-// Only under-coverage refuses. A local base that lags GitHub's (a mirror not
-// yet fetched to the newest default branch) makes the merge-base range wider
-// than the PR — the digest then covers MORE, and the review read every file of
-// the PR plus some of the base's; that is noise, not a hole.
+// A bound review must first identify its exact pinned comparison. Within that
+// range, the size check refuses only under-coverage; small differences from
+// GitHub's counts are handled by the tolerances below.
 //
 // Tolerances absorb what legitimately differs between git's listing and
 // GitHub's PR object — rename detection thresholds, binary files — and
@@ -39,8 +38,8 @@ export function coverageTolerance(pr: PrSize): { files: number; lines: number } 
 
 /**
  * Decide whether the digest the review oriented with covered the PR.
- * - no digest (the agent never called the tool, or the run was resumed past
- *   it) → nothing to compare: ok, `compared: false`;
+ * - a pinned review without an immutable digest range is refused;
+ * - unbound callers without a digest have nothing to compare;
  * - a digest that could not state its totals (its own output was cut) →
  *   refused: the review may not have read the whole change;
  * - no PR size (GitHub's object lagged the head, or the fields were missing)
@@ -53,8 +52,11 @@ export function checkDigestCoverage(input: {
   pr: PrSize | undefined;
   head?: string;
   baseRef?: string;
+  baseSha?: string;
 }): CoverageCheck {
   const { digest, pr } = input;
+  if (input.baseSha !== undefined && !digest?.range)
+    return { ok: false, reason: "the diff digest does not identify the pinned PR comparison" };
   if (!digest) return { ok: true, compared: false };
   if (!digest.complete) {
     return {
@@ -64,7 +66,7 @@ export function checkDigestCoverage(input: {
   }
   if (
     digest.range &&
-    (digest.range.base !== digest.range.canonicalBase ||
+    (digest.range.baseSha !== input.baseSha ||
       (input.head !== undefined && digest.range.head !== input.head.toLowerCase()) ||
       (input.baseRef !== undefined && digest.range.baseRef !== input.baseRef))
   )
