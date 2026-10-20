@@ -21,6 +21,11 @@ import { STORAGE_OPERATIONS, type StorageRequestContext } from "./storageRequest
 
 export const STORAGE_FAILURE_DIAGNOSTIC_HEADER = "x-switchboard-storage-failure";
 export const STORAGE_REQUEST_ID_HEADER = "x-switchboard-storage-request-id";
+/** Diagnostic correlation only. Receivers never use it to authorize or settle a write. */
+export const STORAGE_REQUEST_DIGEST_HEADER = "x-switchboard-storage-request-digest";
+export function storageRequestDigestOf(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
+}
 
 export function storageRequestIdOf(value: unknown): string | undefined {
   return typeof value === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value)

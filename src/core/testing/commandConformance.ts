@@ -552,6 +552,26 @@ export const COMMAND_FIXTURES: Readonly<
     hints: { after: "original-run|original" },
     why: "the cursor binds an original run and generation rather than arbitrary text",
   },
+  "runs.receipt": {
+    hints: {
+      gen: "g1",
+      operation: "live-state",
+      requestId: "11111111-1111-4111-8111-111111111111",
+      digest: "a".repeat(64),
+    },
+    baseline: {
+      gen: "g1",
+      operation: "live-state",
+      requestId: "11111111-1111-4111-8111-111111111111",
+      digest: "a".repeat(64),
+    },
+    why: "a receipt read uses a complete exact request selector",
+  },
+  "runs.original": {
+    hints: { gen: "g1" },
+    baseline: { gen: "g1" },
+    why: "the read selects the fixture original generation rather than a generic sample",
+  },
   "metrics.reviews": {
     // Two whole UTC days a week apart, `--from` first: the generic string sample is no day.
     hints: {

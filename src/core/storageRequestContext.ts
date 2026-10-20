@@ -159,6 +159,11 @@ export const STORAGE_OPERATIONS = {
   "/runs/cancellation/prepare": runId,
   "/runs/cancellation/read": cancellation,
   "/runs/check-source": selector,
+  "/runs/original": runId,
+  "/runs/write-receipt": codec<{ selector: Run } & Body>(
+    (b) => [nested(b.selector).runId],
+    (b) => nested(b.selector).gen,
+  ),
   "/runs/claim": claim,
   "/runs/claim-observations/list": nonRun("store"),
   "/runs/claim-observations/record": observation,

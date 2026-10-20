@@ -7,6 +7,7 @@ import {
   reportStorageFailure,
   storageFailureNotice,
   STORAGE_REQUEST_ID_HEADER,
+  STORAGE_REQUEST_DIGEST_HEADER,
   STORAGE_FAILURE_DIAGNOSTIC_HEADER,
   type StorageFailureNotice,
 } from "./storageFailureDiagnostic.js";
@@ -33,6 +34,8 @@ export async function storageTransport<T>(
 ): Promise<T> {
   const headers = new Headers(options.headers);
   if (request.requestId) headers.set(STORAGE_REQUEST_ID_HEADER, request.requestId);
+  if (request.operation === "/runs/live-state" || request.operation === "/runs/session/write")
+    headers.set(STORAGE_REQUEST_DIGEST_HEADER, request.digest);
   const startedAt = systemClock();
   let response: Response | undefined;
   const report = (error: unknown) => {

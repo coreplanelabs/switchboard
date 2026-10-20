@@ -621,6 +621,8 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   };
   const runs = async () => ({
     ...createRunsService({ registry: s.reg, store: s.store, clock: () => NOW, units: s.units, sessions: s.ledger }),
+    writeReceipt: createRunsService({ registry: s.reg, store: s.store, ledger: s.ledger }).writeReceipt,
+    originalEvidence: createRunsService({ registry: s.reg, store: s.store, ledger: s.ledger }).originalEvidence,
     listClaimObservations: ({
       visibleTo,
       ...query
@@ -1134,6 +1136,23 @@ export async function fixture(
   // note is the command's own test — the same strings ride `runs unit`'s
   // views as the record carries them).
   const ledger = new InMemoryRunLedger(() => NOW);
+  await ledger.claim({
+    runId: FIXTURE.liveRun,
+    gen: "g1",
+    startedAt: NOW,
+    leaseMs: 30000,
+    threadKey: "slack:C1:t",
+    system: "fixture original",
+    tools: [],
+    state: {},
+    meta: {
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      channelVisibility: "public",
+      threadKey: "slack:C1:t",
+      repo: FIXTURE.repo,
+    },
+  });
   const units = new InMemoryCoordinatorInstanceStore(ledger);
   await units.put({
     id: "ship-fin-1",

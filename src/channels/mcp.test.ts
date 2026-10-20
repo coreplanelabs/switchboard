@@ -1044,6 +1044,8 @@ describe("handleMcpRequest — registry commands as tools", () => {
     expect(tools.map((t) => t.name)).toEqual([
       "dispatch",
       "runs_list",
+      "runs_original",
+      "runs_receipt",
       "runs_claims",
       "runs_get",
       "runs_events",

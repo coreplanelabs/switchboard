@@ -1,3 +1,11 @@
+import { inspectOriginal, type OriginalCell } from "./originalEvidenceReader.js";
+import {
+  ORIGINAL_CELL_BYTES,
+  ORIGINAL_RECEIPT_BYTES,
+  originalUnavailable,
+  type OriginalRead,
+  type OriginalSelector,
+} from "./originalEvidence.js";
 import { sameSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
 import { INBOX_DELIVERY_RECEIPTS_MAX } from "../budgets.js";
 import { nativeClaimObservationOf, claimObservationKey, claimObservationQueryOf } from "./claimObservation.js";
@@ -343,6 +351,88 @@ export interface SessionLog {
 const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
 export class InMemoryRunLedger implements RunLedger {
+  async readWriteReceipt(
+    selector: import("./writeReceipt.js").WriteReceiptSelector,
+  ): Promise<import("./writeReceipt.js").WriteReceiptRead> {
+    const original = await this.readOriginal(selector);
+    return original.kind === "source"
+      ? {
+          kind: "source",
+          resource: original.resource,
+          threadKey: original.threadKey,
+          receipt: { state: "unknown", reason: "unsupported" },
+        }
+      : { kind: "unavailable" };
+  }
+
+  async readOriginal(selector: OriginalSelector): Promise<OriginalRead> {
+    const capture = () => {
+      const row = this.live.get(selector.runId);
+      if (!row) return;
+      const cell = (value: unknown, max: number): OriginalCell => {
+        const json = value === undefined ? null : JSON.stringify(value);
+        const bytes = json === null ? 0 : new TextEncoder().encode(json).byteLength;
+        return { json: bytes <= max ? json : null, bytes };
+      };
+      const archived = this.workspaceObligations.get(workspaceDurabilityKey(row.runId))?.allocation;
+      const allocation = cell(archived, ORIGINAL_CELL_BYTES);
+      const validated =
+        allocation.json === null ? undefined : workspaceDurabilityArchiveOf(parseStoredJson(allocation.json));
+      const storeKey = validated?.promotion ? parseStoredJson(validated.promotion.bodyJson).storeKey : RUN_STORE_KEY;
+      return {
+        storeKey,
+        runId: row.runId,
+        ownerGen: row.ownerGen,
+        startedAt: row.startedAt,
+        phase: row.phase,
+        stop: row.stop ?? null,
+        meta: row.meta,
+        state: cell(row.state, ORIGINAL_CELL_BYTES),
+        step: cell(
+          this.steps
+            .get(row.runId)
+            ?.filter((entry) => entry.step >= 0)
+            .at(-1),
+          ORIGINAL_RECEIPT_BYTES,
+        ),
+        allocation,
+        eventThrough: this.events.get(row.runId)?.at(-1)?.seq ?? null,
+      };
+    };
+    const snapshot = capture();
+    if (!snapshot) return { kind: "unavailable", reason: "missing" };
+    const before = JSON.stringify(snapshot);
+    const result = await inspectOriginal(selector, snapshot, async (key, reference) => {
+      const log = this.sessions.get(key);
+      for (const name of [sourceSeedOriginalKey(reference), "expectedSeedPending", "expectedSeedRelease"] as const) {
+        const raw = log?.[name];
+        if (
+          raw !== undefined &&
+          new TextEncoder().encode(typeof raw === "string" ? raw : JSON.stringify(raw)).byteLength >
+            ORIGINAL_RECEIPT_BYTES
+        )
+          return originalUnavailable("oversize");
+      }
+      try {
+        return this.sourceSeedRecord(key, reference);
+      } catch (error) {
+        if (error instanceof SourceSeedPendingError) return originalUnavailable("corrupt");
+        throw error;
+      }
+    });
+    if (JSON.stringify(capture()) !== before && result.kind === "source")
+      return {
+        ...result,
+        evidence: {
+          version: 1,
+          runId: selector.runId,
+          gen: selector.gen,
+          availability: "unavailable",
+          reason: "changed",
+        },
+      };
+    return result;
+  }
   private readonly claimObservations = new Map<string, import("./claimObservation.js").NativeClaimObservation>();
   async recordClaimObservation(
     input: import("./claimObservation.js").NativeClaimObservation,

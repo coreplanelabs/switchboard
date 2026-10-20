@@ -240,3 +240,5 @@ Private model-output history carries the producer's complete known dependency en
 | --- | --- |
 | A normal follow-up includes prior findings and current GitHub data, retains prior source dependencies, and completes its own exact-head verdict after login renewal. | `[unit]` `src/channels/browserHomeInstallation.test.ts::selects the requested Review context and rechecks its current authority: %s` |
 | Retention keeps an archived GitHub producer only while a retained derived holder needs it; deleted producers stay deleted. | `[unit]` `src/core/runLedger/contextRetention.test.ts::context retention — bounded references follow their live holders::retains an archived GitHub producer only while its derived context is retained` |
+
+Original session writes can retain a transaction-bound result and separate row, attachment and metadata effects under the [write receipt contract](write-receipts.md). A refused result does not imply no effects.
