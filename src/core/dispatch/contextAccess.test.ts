@@ -1,3 +1,6 @@
+import { sourceEvidenceMessageFromRecord } from "../runLedger/sourceEvidence.js";
+import { sourceSnapshot } from "../runLedger/sourceEvents.js";
+import { createLedgerWriteThrough } from "../runLedger/writeThrough.js";
 import { testSourceInput } from "../testing/sourceInputs.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
@@ -552,6 +555,113 @@ describe("canonical saved operator decisions", () => {
 });
 
 describe("message-bound context access", () => {
+  it.each([false, true])("revalidates canonical notice/fold=%s source access on every use", async (fold) => {
+    const f = setup();
+    const ledger = new InMemoryRunLedger(() => 123);
+    const saved = await ledger.receiveSourceEvent({
+      version: 2,
+      kind: "source-evidence",
+      sourceId: "fixture:source",
+      deliveryId: "one",
+      objectId: "comment:7",
+      changeId: "revision:1",
+      payload: {},
+      content: { kind: "text", state: "present", text: "PRIVATE_COMMENT" },
+    });
+    if (saved.kind === "refused") throw new Error("Expected saved source");
+    const owner = { runId: origin.runId, requesterId: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey };
+    await ledger.claim({
+      runId: origin.runId,
+      threadKey: msg.threadKey,
+      gen: "g1",
+      startedAt: 100,
+      leaseMs: 10000,
+      system: "Root",
+      tools: [],
+      meta: {
+        agent: "orchestrator",
+        userId: msg.userId,
+        channelId: msg.channelId,
+        threadKey: msg.threadKey,
+        repo: "acme/api",
+        pr: 7,
+      },
+    });
+    const record = (await ledger.readSourceEvent(saved.receipt.key))!;
+    const decisionId = JSON.stringify([origin.runId, "fold-1"]);
+    const message = (await sourceEvidenceMessageFromRecord(
+      record,
+      fold ? { kind: "fold", owner, decision: { runId: origin.runId, id: decisionId } } : { kind: "notice", owner },
+    ))!;
+    const inputHash = await sourceHash(sourceSnapshot(message));
+    const decision = {
+      version: 2,
+      kind: "source-fold",
+      id: decisionId,
+      owner,
+      source: { kind: "source-evidence", receipt: saved.receipt },
+      target: { kind: "run", hash: "a".repeat(64) },
+      inputHash,
+      contextHash: "b".repeat(64),
+    };
+    await ledger.setState(origin.runId, "g1", { orchestratorDecisions: [decision] });
+    const reference = {
+      ...testSourceInput(),
+      receipt: saved.receipt,
+      root: origin,
+      inputHash,
+      routing: fold
+        ? { kind: "fold", decision: { id: decisionId, hash: await sourceHash(sourceSnapshot(decision)) } }
+        : { kind: "notice" },
+    };
+    const dependencies = { ...clean, version: 4 as const, sourceInputs: [reference] } as ContextDependencies;
+    f.deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "reader",
+      fallback: { put: async () => {}, abandoned: async () => {} },
+      warn: () => {},
+    });
+    let allowed = true;
+    f.deps.revalidateSourceInput = async (input, consumer) => {
+      expect(input).toEqual({
+        record,
+        task: {
+          repo: "acme/api",
+          ref: null,
+          baseRef: null,
+          headSha: null,
+          pr: 7,
+          operationTarget: null,
+          githubSource: null,
+          recordTaskKey: null,
+        },
+        accessHash: "e".repeat(64),
+      });
+      expect(consumer).toMatchObject({ msg, verifiedDirectAudience: true });
+      return allowed;
+    };
+    const access = contextAccessForMessage(f.deps, { msg, io: f.io });
+    expect(await access.validateDependencies(dependencies)).toEqual({ ok: true });
+    allowed = false;
+    expect(await access.validateDependencies(dependencies)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "source_input_access_unproved",
+    });
+    allowed = true;
+    expect(await access.validateDependencies(dependencies)).toEqual({ ok: true });
+    const readSource = f.deps.runLedger.readSourceEvent;
+    f.deps.runLedger.readSourceEvent = undefined;
+    expect(await access.validateDependencies(dependencies)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "source_input_access_unproved",
+    });
+    f.deps.runLedger.readSourceEvent = readSource;
+    f.io.verifyDirectAudience = async () => ({ ok: false, code: "direct-audience-unavailable" });
+    expect(await access.validateDependencies(dependencies)).toMatchObject({ ok: false });
+  });
+
   it("retains source-input schema without authorizing model access before the source verifier exists", async () => {
     const f = setup();
     expect(await f.access.validateDependencies(clean)).toEqual({ ok: true });

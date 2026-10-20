@@ -571,6 +571,8 @@ export interface LedgerWriteThrough {
   liveRuns(): LedgerRun[];
   /** Internal canonical rows for source checks; never a public diagnostic projection. */
   readLiveRuns(): Promise<LiveRunRow[]>;
+  /** Canonical source record only; absent on older storage implementations. */
+  readSourceEvent?: RunLedger["readSourceEvent"];
   readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined>;
   /** A durable copy of a steered follow-up (run-history item 40), under the
    *  run's row whichever generation holds it: the ledger's inbox seq, or
@@ -693,6 +695,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   async readLiveRuns(): Promise<LiveRunRow[]> {
     return [];
+  }
+  async readSourceEvent(_key: string): Promise<undefined> {
+    return undefined;
   }
   async readContextCheckpoint(_runId: string): Promise<undefined> {
     return undefined;
@@ -3227,6 +3232,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     },
     liveRuns: () => [...live],
     readLiveRuns: () => ledger.listLive(),
+    readSourceEvent: ledger.readSourceEvent?.bind(ledger),
     readContextCheckpoint: (runId) => ledger.readContextCheckpoint(runId),
     async pushInbox(runId, message) {
       try {

@@ -1,3 +1,5 @@
+import { sourceHash } from "../core/references/receipts.js";
+import { sourceRunTask } from "../core/dispatch/orchestratorDecisions.js";
 import type { GithubCapability } from "../tools/github.js";
 import { githubPullSourceContextOf } from "../execution/githubReadSource.js";
 import { sourceSnapshot } from "../core/runLedger/sourceEvents.js";
@@ -78,4 +80,42 @@ export async function githubActivityTaskAccess(
     // Remote bodies, source names and private errors stay behind the adapter.
     return held;
   }
+}
+
+/** Bind the complete original task and native adapter identity, never a grant.
+ * Names remain those of the saved task; current access resolves native IDs. */
+export async function githubActivityInputAccessHash(taskValue: unknown): Promise<string | undefined> {
+  try {
+    const snapshot = sourceSnapshot(taskValue);
+    if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) return;
+    const task = sourceRunTask(snapshot);
+    if (JSON.stringify(sourceSnapshot(task)) !== JSON.stringify(snapshot)) return;
+    const source = githubPullSourceContextOf(task?.githubSource);
+    if (
+      !source ||
+      typeof task.repo !== "string" ||
+      task.pr !== source.number ||
+      (task.ref !== null && task.ref !== source.head.ref) ||
+      (task.headSha !== null && task.headSha !== source.head.sha) ||
+      (task.baseRef !== null && task.baseRef !== source.baseRef)
+    )
+      return;
+    return await sourceHash(sourceSnapshot({ version: 1, adapter: "github", task }));
+  } catch {
+    return;
+  }
+}
+
+/** The shared context guard loads canonical data and checks the destination.
+ * This adapter checks current App and requester access without routing input. */
+export async function githubActivityInputAccess(
+  input: { record: unknown; task: ReturnType<typeof sourceRunTask>; accessHash: string },
+  capability: Pick<GithubCapability, "api" | "readableRepos"> | undefined,
+): Promise<boolean> {
+  const hash = await githubActivityInputAccessHash(input.task);
+  return (
+    hash !== undefined &&
+    hash === input.accessHash &&
+    (await githubActivityTaskAccess(input.record, input.task.githubSource, capability)).kind === "available"
+  );
 }

@@ -1,3 +1,4 @@
+import { readSourceInputProof } from "../references/sourceInputProof.js";
 import { sourceCheckError, type SourceCheckStage } from "./sourceCheckError.js";
 import { nativeMediaDigest } from "../nativeMedia.js";
 import { originalOrganizationDispatchOf } from "./originalOrganizationInput.js";
@@ -74,6 +75,7 @@ export type ContextAccessDeps = Pick<
   | "artifacts"
   | "githubApi"
   | "coordinatorInstances"
+  | "revalidateSourceInput"
   | "revalidateNativeMediaSource"
 >;
 const denied = (check?: ContextRefusalCheck): Extract<AudienceCheck, { ok: false }> => ({
@@ -403,9 +405,7 @@ function buildContextAccess(
   const validate = async (dependencies: ContextDependencies): Promise<AudienceCheck> => {
     if (!isContextDependencies(dependencies)) return denied("context_invalid");
     if (dependencies.status !== "known") return denied("context_unknown");
-    // Readers retain source input identity before current-source validation is
-    // connected. Recognizing the schema cannot authorize model disclosure.
-    if (dependencies.sourceInputs?.length) return denied("source_input_access_unproved");
+    if (dependencies.sourceInputs?.length && !deps.revalidateSourceInput) return denied("source_input_access_unproved");
     let stage: SourceCheckStage = "dependencies";
     try {
       dependencies = structuredClone(dependencies);
@@ -677,6 +677,29 @@ function buildContextAccess(
             })) && (await destinationAudience()) !== undefined,
         });
         if (!decision.ok) return decision;
+      }
+      stage = "source-inputs";
+      for (const reference of dependencies.sourceInputs ?? []) {
+        if (!(await originAllowed(reference.root))) return denied("source_input_access_unproved");
+        const proof = await readSourceInputProof(reference, {
+          ledger: {
+            listLive: () => deps.runLedger.readLiveRuns(),
+            readSourceEvent: deps.runLedger.readSourceEvent?.bind(deps.runLedger),
+          },
+          runStore: deps.runStore,
+          checkAccess: async (record, task) => {
+            const before = await destinationAudience();
+            const audience = JSON.stringify(before);
+            const allowed = await deps.revalidateSourceInput?.(
+              { record, task, accessHash: reference.accessHash },
+              { actor: actor(), msg, verifiedDirectAudience: before !== undefined },
+            );
+            if (allowed !== true) return false;
+            const after = await destinationAudience();
+            return audience === JSON.stringify(after) && (await originAllowed(reference.root));
+          },
+        });
+        if (proof.kind !== "consistent") return denied("source_input_access_unproved");
       }
       return { ok: true };
     } catch (error) {

@@ -1,3 +1,8 @@
+import { NullMcpToolSource } from "../mcp/source.js";
+import { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { createTracer } from "../core/trace/tracer.js";
+import { secretsFrom } from "../secrets.js";
+import { handleModelProxyRequest, ANTHROPIC_MESSAGES_PATH } from "./modelProxy.js";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,11 +11,24 @@ import { ConfigStore } from "../config.js";
 import { InMemoryGithubApi, type PullSummary } from "../execution/githubApi.js";
 import { githubCapabilityFor } from "../core/dispatch/run.js";
 import { chatActorOf } from "../core/authz/actor.js";
+import { contextAccessForMessage, type ContextAccessDeps } from "../core/dispatch/contextAccess.js";
+import { sourceRunTask } from "../core/dispatch/orchestratorDecisions.js";
+import { sourceEvidenceMessageFromRecord } from "../core/runLedger/sourceEvidence.js";
+import { sourceHash } from "../core/references/receipts.js";
+import { sourceSnapshot } from "../core/runLedger/sourceEvents.js";
+import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
+import type { ContextDependencies } from "../core/references/contextDependencies.js";
+import type { ChannelIO } from "../core/types.js";
+import { InMemoryRunStore } from "../core/runStore.js";
 import { classifyEvidenceRelevance } from "../core/intake.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import type { GithubPullSourceContext } from "../execution/githubReadSource.js";
 import { normalizeGithubActivity } from "./githubActivity.js";
-import { githubActivityTaskAccess } from "./githubActivityAccess.js";
+import {
+  githubActivityTaskAccess,
+  githubActivityInputAccessHash,
+  githubActivityInputAccess,
+} from "./githubActivityAccess.js";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -105,6 +123,192 @@ restrict:
 }
 
 describe("current GitHub activity access", () => {
+  it("rechecks private GitHub input access through the shared context guard", async () => {
+    const f = await setup();
+    const msg = {
+      userId: "slack:UDEV",
+      channelId: "slack:DONE",
+      threadKey: "slack:DONE:1",
+      text: "continue",
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        userId: "slack:UDEV",
+        channelId: "slack:DONE",
+        threadKey: "slack:DONE:1",
+      },
+    };
+    const owner = { runId: "root", requesterId: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey };
+    await f.ledger.claim({
+      runId: "root",
+      threadKey: msg.threadKey,
+      gen: "g1",
+      startedAt: 100,
+      leaseMs: 10000,
+      system: "Root",
+      tools: [],
+      meta: {
+        agent: "orchestrator",
+        userId: msg.userId,
+        channelId: msg.channelId,
+        threadKey: msg.threadKey,
+        repo: "acme/api",
+        pr: 7,
+        githubSource: task(),
+      },
+    });
+    const originalTask = sourceRunTask({ repo: "acme/api", pr: 7, githubSource: task() });
+    const accessHash = (await githubActivityInputAccessHash(originalTask))!;
+    const message = (await sourceEvidenceMessageFromRecord(f.record, { kind: "notice", owner }))!;
+    const context: ContextDependencies = {
+      version: 4,
+      status: "known",
+      revision: 0,
+      origins: [],
+      slack: [],
+      mcp: [],
+      sourceInputs: [
+        {
+          version: 1,
+          receipt: f.record.receipt,
+          root: { runId: "root", requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
+          routing: { kind: "notice" },
+          inputHash: await sourceHash(sourceSnapshot(message)),
+          accessHash,
+        },
+      ],
+    };
+    let audience = true;
+    const io: ChannelIO = {
+      reply: async () => {
+        throw new Error("Unexpected reply during access validation");
+      },
+      status: async () => {
+        throw new Error("Unexpected status during access validation");
+      },
+      history: async () => [],
+      directAudience: () => msg.directAudience,
+      verifyDirectAudience: async () => (audience ? { ok: true } : { ok: false, code: "direct-audience-unavailable" }),
+    };
+    const deps: ContextAccessDeps = {
+      mcp: new NullMcpToolSource(),
+      config: f.config,
+      githubApi: f.api,
+      runStore: new InMemoryRunStore(),
+      runLedger: createLedgerWriteThrough({
+        ledger: f.ledger,
+        gen: "reader",
+        fallback: { put: async () => {}, abandoned: async () => {} },
+        warn: () => {},
+      }),
+      slackContextForRun: () => ({
+        originAudience: async () => "dm",
+        verifyDirectOrigin: async () => audience,
+        revalidateSource: async () => false,
+        canReadSource: async () => false,
+        readSource: async () => {
+          throw new Error("Unexpected Slack read during GitHub validation");
+        },
+      }),
+      revalidateSourceInput: (input, consumer) =>
+        githubActivityInputAccess(
+          input,
+          githubCapabilityFor({ config: f.config, githubApi: f.api }, consumer.actor, {
+            requesterId: consumer.msg.userId,
+            verifiedDirectAudience: consumer.verifiedDirectAudience,
+          }),
+        ),
+    };
+    const guard = contextAccessForMessage(deps, { msg, io });
+    const bearers = new RunBearerStore({ clock: () => 1 });
+    const token = bearers.mint(
+      {
+        runId: "consumer",
+        modelRef: "fixture/review-model",
+        providerName: "fixture",
+        providerWire: "anthropic-messages",
+        model: "review-model",
+        maxTokens: 64,
+        maxTurns: 4,
+        expiresAt: 60001,
+        span: createTracer({ clock: () => 1 }).start("request", { sinks: [] }),
+        publish: () => {},
+      },
+      { sourceGuardRequired: true },
+    );
+    bearers.bindSourceGuard("consumer", async () => (await guard.validateDependencies(context)).ok);
+    const upstream: unknown[] = [];
+    const send = (revokeDuringBody = false) =>
+      handleModelProxyRequest(
+        {
+          method: "POST",
+          path: ANTHROPIC_MESSAGES_PATH,
+          headers: { authorization: `Bearer ${token}` },
+          body: (async function* () {
+            if (revokeDuringBody) f.repository.permissions = { "ivy-dev": { id: 4242, permission: "none" } };
+            yield Buffer.from(
+              JSON.stringify({
+                model: "review-model",
+                max_tokens: 64,
+                stream: false,
+                messages: [{ role: "user", content: "Summary derived from PRIVATE_COMMENT" }],
+              }),
+            );
+          })(),
+        },
+        {
+          bearers,
+          clock: () => 1,
+          providers: () => ({ fixture: { type: "anthropic", apiKeyEnv: "FIXTURE_KEY" } }),
+          secrets: secretsFrom({ FIXTURE_KEY: "local-fixture-only" }),
+          fetch: async (_url, init) => {
+            upstream.push(JSON.parse(String(init?.body)));
+            return Response.json({
+              id: "answer",
+              type: "message",
+              role: "assistant",
+              model: "review-model",
+              content: [{ type: "text", text: "Review continued" }],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            });
+          },
+        },
+      );
+    expect((await send()).status).toBe(200);
+    expect(upstream).toEqual([
+      expect.objectContaining({ messages: [{ role: "user", content: "Summary derived from PRIVATE_COMMENT" }] }),
+    ]);
+    const withheld = await send(true);
+    expect(withheld.status).toBe(403);
+    expect(JSON.parse(String(withheld.body))).toMatchObject({ error: { type: "source_unavailable" } });
+    expect(upstream).toHaveLength(1);
+    f.repository.permissions = { "ivy-dev": { id: 4242, permission: "read" } };
+    expect(await guard.validateDependencies(context)).toEqual({ ok: true });
+    f.repository.permissions = { "ivy-dev": { id: 4242, permission: "none" } };
+    expect(await guard.validateDependencies(context)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "source_input_access_unproved",
+    });
+    f.repository.permissions = { "ivy-dev": { id: 4242, permission: "read" } };
+    expect(await guard.validateDependencies(context)).toEqual({ ok: true });
+    audience = false;
+    expect(await guard.validateDependencies(context)).toMatchObject({ ok: false });
+    audience = true;
+    const changedHash = {
+      ...context,
+      sourceInputs: context.sourceInputs!.map((ref) => ({ ...ref, accessHash: "f".repeat(64) })),
+    };
+    expect(await guard.validateDependencies(changedHash)).toMatchObject({ ok: false });
+    const originalRead = f.api.getPullRequest.bind(f.api);
+    f.api.getPullRequest = async (...args) => {
+      const pull = await originalRead(...args);
+      (await f.ledger.listLive())[0]!.meta.ref = "changed-task";
+      return pull;
+    };
+    expect(await guard.validateDependencies(context)).toMatchObject({ ok: false });
+  });
+
   it("requires the bound requester, direct audience and current person-level permission for private comments", async () => {
     const { record, repository, capability, config } = await setup();
     expect(await githubActivityTaskAccess(record, task(), capability())).toEqual({ kind: "available" });
