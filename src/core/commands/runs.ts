@@ -1,3 +1,4 @@
+import { writeReceiptSelectorSchema } from "../runLedger/writeReceipt.js";
 import { runMetadata } from "../runDisplay.js";
 import { cancellationFailureMessage } from "../runLedger/cancellation.js";
 import { claimObservationCursor } from "../runLedger/claimObservation.js";
@@ -392,6 +393,40 @@ export const runsList = defineCommand({
       visibleTo,
     });
     return asJson({ ...page, runs: page.runs.map(wrapRunView), ...(scopeProof ? { readScope: scopeProof } : {}) });
+  },
+});
+
+export const runsReceipt = defineCommand({
+  id: "runs.receipt",
+  args: [idArg],
+  options: writeReceiptSelectorSchema
+    .omit({ runId: true, operation: true })
+    .extend({ operation: z.enum(["live-state", "conversation-write"]) }),
+  surfaces: { chat: false },
+  enabledWhen: (caps) => caps.runLedger,
+  action: "runs:read",
+  effect: "read",
+  describe: "Read one original storage write receipt. Missing proof stays unknown and never permits replay.",
+  handler: async ({ args, options, caller, deps }) => {
+    const source = await (
+      await deps.runs()
+    ).writeReceipt({
+      runId: args.id,
+      ...options,
+      operation: options.operation === "live-state" ? "/runs/live-state" : "/runs/session/write",
+    });
+    if (source.kind !== "source") throw new CommandError("not_found", "no run found");
+    const decision = authorize(caller.actor, "runs:read", source.resource);
+    if (!decision.allow) {
+      (deps.denied ?? logDenied)({
+        commandId: "runs.receipt",
+        actorId: caller.actor.id,
+        action: "runs:read",
+        reason: decision.reason,
+      });
+      throw new CommandError("not_found", "no run found");
+    }
+    return asJson(source.receipt);
   },
 });
 
@@ -948,6 +983,7 @@ export const runsSearch = defineCommand({
 export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [
   runsList,
   runsOriginal,
+  runsReceipt,
   runsClaims,
   runsGet,
   runsEvents,

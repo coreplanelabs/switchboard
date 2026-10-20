@@ -1190,3 +1190,5 @@ The history store keeps a separate run-ID deletion fence. It rejects later recor
 | A private-context recovery hold stays live with its reason, hides the obsolete working projection, and preserves the canonical runtime state. | `[unit]` `src/core/runsService.test.ts::RunsService with the run ledger — one registry across generations (run-history item 41)::shows a private context recovery hold instead of the stale working state` |
 
 | An uncertain private-context hold keeps its exact original request and expected state outside the live producer set. Concurrent or repeated calls await that original. Only exact same-owner readback clears it; reconciliation starts no heartbeat, mutation replay or runtime. | `[unit]` `src/core/runLedger/writeThrough.test.ts::adopt — a reclaimed run continues under this generation (item 37)::retains an unknown original hold write until exact same-owner readback without replay` |
+
+Original live-state writes can retain a transaction-bound result under the [write receipt contract](write-receipts.md). Missing receipts remain unknown and grant no replay authority.

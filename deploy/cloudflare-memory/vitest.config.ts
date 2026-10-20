@@ -38,6 +38,7 @@ export default defineConfig({
       "reviewFeedback.test.ts",
       "config.test.ts",
       "runLedger.test.ts",
+      "writeReceipts.test.ts",
       "inventory.test.ts",
       "organization.test.ts",
       "harnessLaunch.test.ts",

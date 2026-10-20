@@ -1045,6 +1045,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
       "dispatch",
       "runs_list",
       "runs_original",
+      "runs_receipt",
       "runs_claims",
       "runs_get",
       "runs_events",

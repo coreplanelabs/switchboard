@@ -1,3 +1,4 @@
+import { writeReceiptReadOf, type WriteReceiptSelector, type WriteReceiptRead } from "./runLedger/writeReceipt.js";
 import type { PersonProfile } from "./names.js";
 import type { CancellationRefusal, CancellationObservation } from "./runLedger/cancellation.js";
 import { cancellationMatches, cancellationOf, cancellationRefusalOf } from "./runLedger/cancellation.js";
@@ -498,6 +499,7 @@ export interface LiveRunAccess {
 }
 
 export interface RunsService {
+  writeReceipt(selector: WriteReceiptSelector): Promise<WriteReceiptRead>;
   originalEvidence(
     selector: import("./runLedger/originalEvidence.js").OriginalSelector,
   ): Promise<import("./runLedger/originalEvidence.js").OriginalRead>;
@@ -626,7 +628,12 @@ export interface RunsServiceDeps {
         Partial<
           Pick<
             RunLedger,
-            "prepareCancellation" | "finishCancellation" | "readCheckSource" | "listClaimObservations" | "readOriginal"
+            | "prepareCancellation"
+            | "finishCancellation"
+            | "readCheckSource"
+            | "listClaimObservations"
+            | "readOriginal"
+            | "readWriteReceipt"
           >
         >)
     | null;
@@ -1324,6 +1331,11 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       };
     },
     deletedRuns,
+    async writeReceipt(selector) {
+      const source = writeReceiptReadOf(await ledger?.readWriteReceipt?.(selector), selector);
+      if (!source || (source.kind === "source" && privateWorkerRun(source))) return { kind: "unavailable" };
+      return source;
+    },
     async originalEvidence(selector) {
       const source = originalReadOf(await ledger?.readOriginal?.(selector));
       if (

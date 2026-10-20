@@ -2309,6 +2309,50 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "action": "runs:read",
     "args": [
       {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "runs.receipt",
+    "options": [
+      {
+        "name": "gen",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "requestId",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "digest",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "operation",
+        "required": true,
+        "type": "enum",
+        "values": [
+          "live-state",
+          "conversation-write",
+        ],
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
+    "args": [
+      {
         "name": "session",
         "required": true,
         "type": "string",

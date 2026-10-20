@@ -159,6 +159,9 @@ export function mergeRequesterTarget(prior: RequesterTarget | null, next: Reques
 }
 
 export interface RunLedger {
+  readWriteReceipt?(
+    selector: import("./writeReceipt.js").WriteReceiptSelector,
+  ): Promise<import("./writeReceipt.js").WriteReceiptRead>;
   /** Bounded canonical metadata only; this read never reconciles or repeats a write. */
   readOriginal?(
     selector: import("./originalEvidence.js").OriginalSelector,

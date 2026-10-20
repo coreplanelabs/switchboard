@@ -1,6 +1,17 @@
+import { WriteReceipts } from "./writeReceipts.js";
+import {
+  emptyWriteComponents,
+  writeReceiptSelectorSchema,
+  sameWriteReceipt,
+  type TrustedWriteRequest,
+  type WriteReceiptSelector,
+  type WriteReceiptRead,
+  type StoredWriteReceipt,
+} from "../../src/core/runLedger/writeReceipt.js";
 import { inspectOriginal, type OriginalSnapshot } from "../../src/core/runLedger/originalEvidenceReader.js";
 import {
   originalSelectorSchema,
+  originalMetaSchema,
   ORIGINAL_CELL_BYTES,
   ORIGINAL_RECEIPT_BYTES,
   originalUnavailable,
@@ -2415,6 +2426,19 @@ class RunDeletedError extends Error {
   }
 }
 
+function receiptReader(meta: unknown) {
+  if (!meta || typeof meta !== "object") return undefined;
+  const m = meta as Record<string, unknown>;
+  const parsed = originalMetaSchema.safeParse({
+    userId: m.userId,
+    channelId: m.channelId,
+    channelVisibility: m.channelVisibility ?? "unknown",
+    repo: m.repo,
+    threadKey: m.threadKey,
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+
 type CheckpointGateCorrelation = { requestId?: string; requestDigest?: string };
 type SeedGuardCorrelation = CheckpointGateCorrelation & { guardId?: string };
 type SeedGuardBranch = "released-receipt" | "verify-source" | "missing" | "mismatch" | "corrupt" | "cancelled";
@@ -2423,6 +2447,7 @@ type WriteStage =
   | "validation"
   | "promotion-preflight"
   | "source-owner-read"
+  | "receipt-owner-read"
   | "assign-live-state-rpc"
   | "session-write-rpc"
   | "source-proof"
@@ -2433,7 +2458,7 @@ function writeProgress(
   incarnationId: string | null,
   runId: string | undefined,
   ownerGen: string | undefined,
-  operation: "promotion-hold" | "source-session-owner" | "assign-live-state" | "session-write",
+  operation: "promotion-hold" | "source-session-owner" | "write-receipt-owner" | "assign-live-state" | "session-write",
   input?: CheckpointGateCorrelation,
 ) {
   const requestId = storageRequestIdOf(input?.requestId);
@@ -2579,6 +2604,7 @@ const TERMINAL_PULL_OWNER_COLUMNS = `SELECT run_id,
 
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  private readonly writeReceipts: WriteReceipts;
   private readonly reviewFeedback: ReviewFeedbackStorage;
   /** Diagnostic identity only; a reconstruction does not retain it or grant ownership. */
   private readonly incarnationId = crypto.randomUUID();
@@ -2815,6 +2841,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.writeReceipts = new WriteReceipts(this.sql);
     this.reviewFeedback = new ReviewFeedbackStorage(ctx.storage);
     this.metrics = env.RUN_METRICS !== undefined ? new AnalyticsEngineSink(env.RUN_METRICS) : new NullSink();
     // Idempotent schema. `runs` carries the listing columns plus the record
@@ -7035,6 +7062,78 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** A source write proves its canonical session through the claimed row. */
+  async writeReceiptOwner(runId: string, gen: string, sessionKey?: string, correlation?: CheckpointGateCorrelation) {
+    const progress = writeProgress(
+      this.ctx.id.toString(),
+      this.incarnationId,
+      runId,
+      gen,
+      "write-receipt-owner",
+      correlation,
+    );
+    progress("entry", "started");
+    try {
+      const row = this.liveRow(runId);
+      const reader =
+        row && row.ownerGen === gen && (sessionKey === undefined || row.meta.session?.key === sessionKey)
+          ? (receiptReader(row.meta) ?? null)
+          : null;
+      progress("result", "returned", { ok: reader !== null });
+      return reader;
+    } catch (error) {
+      progress("result", "failed", { errorName: checkpointErrorName(error) });
+      throw error;
+    }
+  }
+
+  async readWriteReceipt(selector: WriteReceiptSelector, storeKey: string): Promise<WriteReceiptRead> {
+    const before = await this.readOriginal(selector, storeKey);
+    if (before.kind !== "source") return { kind: "unavailable" };
+    const wrap = (receipt: Extract<WriteReceiptRead, { kind: "source" }>["receipt"]): WriteReceiptRead => ({
+      kind: "source",
+      resource: before.resource,
+      threadKey: before.threadKey,
+      receipt,
+    });
+    if (before.evidence.availability !== "observed") return wrap({ state: "unknown", reason: "fenced" });
+    const row = this.liveRow(selector.runId);
+    if (!row || row.ownerGen !== selector.gen) return wrap({ state: "unknown", reason: "changed" });
+    const boundary = (r: LiveRunRow | undefined) =>
+      r
+        ? JSON.stringify({
+            ownerGen: r.ownerGen,
+            startedAt: r.startedAt,
+            phase: r.phase,
+            stop: r.stop,
+            session: r.meta.session,
+            reader: receiptReader(r.meta),
+          })
+        : null;
+    const originalBoundary = boundary(row);
+    const reader = receiptReader(row.meta);
+    let saved: StoredWriteReceipt | "corrupt" | undefined;
+    if (selector.operation === "/runs/live-state") saved = this.writeReceipts.read(selector);
+    else {
+      const key = row.meta.session?.key;
+      if (!key) return wrap({ state: "unknown", reason: "unsupported" });
+      saved = await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).readWriteReceipt(selector);
+    }
+    const after = await this.readOriginal(selector, storeKey);
+    if (
+      originalBoundary !== boundary(this.liveRow(selector.runId)) ||
+      JSON.stringify(before) !== JSON.stringify(after) ||
+      !reader ||
+      JSON.stringify(reader) !== JSON.stringify(receiptReader(this.liveRow(selector.runId)?.meta))
+    )
+      return wrap({ state: "unknown", reason: "changed" });
+    if (saved === "corrupt") return wrap({ state: "unknown", reason: "corrupt" });
+    if (!saved) return wrap({ state: "unknown", reason: "missing" });
+    if (!sameWriteReceipt(saved, selector) || JSON.stringify(saved.reader) !== JSON.stringify(reader))
+      return wrap({ state: "unknown", reason: "changed" });
+    const { reader: _privateReader, ...record } = saved;
+    return wrap({ state: "recorded", record });
+  }
+
   async sourceSessionOwner(
     runId: string,
     gen: string,
@@ -8571,6 +8670,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     gen: string,
     assignment: LiveStateAssignRequest,
     correlation?: SeedGuardCorrelation,
+    trustedRequest?: TrustedWriteRequest,
   ): Promise<LiveStateAssignResult> {
     const progress = writeProgress(
       this.ctx.id.toString(),
@@ -8588,6 +8688,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       return result;
     };
     try {
+      assignment = structuredClone(assignment);
+      trustedRequest = trustedRequest ? structuredClone(trustedRequest) : undefined;
+      const effectDigest = trustedRequest
+        ? await sourceHash(canonicalSeedJson({ operation: "/runs/live-state", runId, gen, assignment }))
+        : undefined;
       if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion) {
         stage = "promotion-preflight";
         progress(stage, "started");
@@ -8608,92 +8713,120 @@ export class RunHistoryDO extends DurableObject<Env> {
       stage = "transaction";
       progress(stage, "started");
       this.ctx.storage.transactionSync(() => {
-        const row = this.liveRow(runId);
-        if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
-        const fence = checkFence(row, gen);
-        if (!fence.ok) {
-          out = fence;
-          return;
-        }
-        if (!row) {
-          out = { ok: false, reason: "unknown-run" };
-          return;
-        }
-        if (
-          !preserveCheckpointState(row.state, assignment.statePatch ?? {}) ||
-          !workEvidenceBelongsToRun(
-            { ...row.state, ...assignment.statePatch },
-            { id: row.runId, ...row.meta },
-            row.meta,
-          )
-        ) {
+        if (trustedRequest && this.writeReceipts.seen(trustedRequest.requestId)) {
           out = { ok: false, reason: "fenced" };
           return;
         }
-        const result = assignLedgerLiveState(row.liveState, row.liveStateSeq ?? 0, assignment);
-        if (!result.ok) {
-          out = result;
-          return;
-        }
-        let liveStateSeq = row.liveStateSeq ?? 0;
-        const last = this.sql
-          .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_events WHERE run_id = ?`, runId)
-          .one().m;
-        let lastEventSeq = last ?? 0;
-        for (const source of assignment.sourceEvents ?? []) {
-          if (source.seq <= lastEventSeq) {
+        const original = this.liveRow(runId);
+        const reader = original?.ownerGen === gen ? receiptReader(original.meta) : undefined;
+        const components = emptyWriteComponents();
+        const mutate = () => {
+          const row = this.liveRow(runId);
+          if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
+          const fence = checkFence(row, gen);
+          if (!fence.ok) {
+            out = fence;
+            return;
+          }
+          if (!row) {
+            out = { ok: false, reason: "unknown-run" };
+            return;
+          }
+          if (
+            !preserveCheckpointState(row.state, assignment.statePatch ?? {}) ||
+            !workEvidenceBelongsToRun(
+              { ...row.state, ...assignment.statePatch },
+              { id: row.runId, ...row.meta },
+              row.meta,
+            )
+          ) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          const result = assignLedgerLiveState(row.liveState, row.liveStateSeq ?? 0, assignment);
+          if (!result.ok) {
+            out = result;
+            return;
+          }
+          let liveStateSeq = row.liveStateSeq ?? 0;
+          const last = this.sql
+            .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_events WHERE run_id = ?`, runId)
+            .one().m;
+          let lastEventSeq = last ?? 0;
+          for (const source of assignment.sourceEvents ?? []) {
+            if (source.seq <= lastEventSeq) {
+              out = { ok: false, reason: "stale-sequence" };
+              return;
+            }
+            lastEventSeq = source.seq;
+          }
+          const boundarySeq = result.event ? (assignment.eventSeq ?? lastEventSeq + 1) : undefined;
+          if (boundarySeq !== undefined && boundarySeq <= lastEventSeq) {
             out = { ok: false, reason: "stale-sequence" };
             return;
           }
-          lastEventSeq = source.seq;
-        }
-        const boundarySeq = result.event ? (assignment.eventSeq ?? lastEventSeq + 1) : undefined;
-        if (boundarySeq !== undefined && boundarySeq <= lastEventSeq) {
-          out = { ok: false, reason: "stale-sequence" };
-          return;
-        }
-        for (const source of assignment.sourceEvents ?? []) {
-          this.sql.exec(
-            `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
-            runId,
-            source.seq,
-            JSON.stringify(source),
-          );
-          liveStateSeq = source.seq;
-        }
-        if (result.event && boundarySeq !== undefined) {
-          liveStateSeq = boundarySeq;
-          this.sql.exec(
-            `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
-            runId,
+          for (const source of assignment.sourceEvents ?? []) {
+            this.sql.exec(
+              `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
+              runId,
+              source.seq,
+              JSON.stringify(source),
+            );
+            components.eventsWritten++;
+            liveStateSeq = source.seq;
+          }
+          if (result.event && boundarySeq !== undefined) {
+            liveStateSeq = boundarySeq;
+            this.sql.exec(
+              `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
+              runId,
+              liveStateSeq,
+              JSON.stringify({ ...result.event, seq: liveStateSeq }),
+            );
+          }
+          if (result.event && boundarySeq !== undefined) components.eventsWritten++;
+          const state = preserveCheckpointState(row.state, {
+            ...row.state,
+            ...assignment.statePatch,
+            liveState: result.liveState,
             liveStateSeq,
-            JSON.stringify({ ...result.event, seq: liveStateSeq }),
+          });
+          if (!state) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          if (isContextDependencies(state.contextDependencies)) {
+            this.pinContext(runId, undefined, state.contextDependencies);
+            components.contextPinningApplied = true;
+          }
+          // The terminal event and no-replay phase must survive a restart together.
+          this.sql.exec(
+            `UPDATE live_runs SET state_json = ?, phase = ? WHERE run_id = ?`,
+            JSON.stringify(state),
+            assignment.state === "ended" ? "finishing" : row.phase,
+            runId,
           );
-        }
-        const state = preserveCheckpointState(row.state, {
-          ...row.state,
-          ...assignment.statePatch,
-          liveState: result.liveState,
-          liveStateSeq,
-        });
-        if (!state) {
-          out = { ok: false, reason: "fenced" };
-          return;
-        }
-        if (isContextDependencies(state.contextDependencies))
-          this.pinContext(runId, undefined, state.contextDependencies);
-        // The terminal event and no-replay phase must survive a restart together.
-        this.sql.exec(
-          `UPDATE live_runs SET state_json = ?, phase = ? WHERE run_id = ?`,
-          JSON.stringify(state),
-          assignment.state === "ended" ? "finishing" : row.phase,
-          runId,
-        );
-        out = {
-          ...result,
-          ...(result.event ? { event: { ...result.event, seq: liveStateSeq } } : {}),
-          liveStateSeq,
+          components.stateWritten = true;
+          out = {
+            ...result,
+            ...(result.event ? { event: { ...result.event, seq: liveStateSeq } } : {}),
+            liveStateSeq,
+          };
         };
+        mutate();
+        if (trustedRequest && effectDigest && reader)
+          this.writeReceipts.save({
+            version: 1,
+            runId,
+            gen,
+            operation: "/runs/live-state",
+            requestId: trustedRequest.requestId,
+            digest: trustedRequest.digest,
+            effectDigest,
+            reader,
+            components,
+            result: out.ok ? { ok: true, liveStateSeq: out.liveStateSeq } : out,
+          });
       });
       progress("transaction", "returned", { ok: out.ok });
       return finish(out);
@@ -10642,6 +10775,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       this.sql.exec(`DELETE FROM context_refs WHERE holder_run_id IN (${marks})`, ...batch);
       this.sql.exec(`DELETE FROM run_events WHERE run_id IN (${marks})`, ...batch);
+      for (const id of batch) this.writeReceipts.remove(id);
       this.sql.exec(`DELETE FROM runs WHERE run_id IN (${marks})`, ...batch);
     }
   }
@@ -11329,6 +11463,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(sessions),
       );
       this.sql.exec("INSERT OR IGNORE INTO run_deletions(run_id) VALUES(?)", id);
+      this.writeReceipts.remove(id);
       this.sql.exec("DELETE FROM live_runs WHERE run_id = ?", id);
       this.sql.exec("DELETE FROM plane_queue WHERE run_id = ?", id);
       this.sql.exec("DELETE FROM plane_reservations WHERE run_id = ?", id);
@@ -12900,11 +13035,13 @@ type SessionTurnRow = { id: number; idx: number; part: number; json: string; tex
  */
 export class SessionLogDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  private readonly writeReceipts: WriteReceipts;
   private readonly incarnationId = crypto.randomUUID();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.writeReceipts = new WriteReceipts(this.sql);
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS owner (k INTEGER PRIMARY KEY CHECK (k = 1), run_id TEXT NOT NULL, gen TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS revoked_runs (run_id TEXT PRIMARY KEY);
@@ -13374,6 +13511,7 @@ export class SessionLogDO extends DurableObject<Env> {
 
   async revokeRun(runId: string): Promise<{ ok: true }> {
     this.ctx.storage.transactionSync(() => {
+      this.writeReceipts.remove(runId);
       this.sql.exec("INSERT OR IGNORE INTO revoked_runs(run_id) VALUES(?)", runId);
       this.sql.exec("DELETE FROM owner WHERE run_id = ?", runId);
     });
@@ -13771,6 +13909,12 @@ export class SessionLogDO extends DurableObject<Env> {
     return { ok, appended };
   }
 
+  async readWriteReceipt(selector: WriteReceiptSelector): Promise<StoredWriteReceipt | "corrupt" | undefined> {
+    const owner = this.owner();
+    if (owner?.runId !== selector.runId || owner.gen !== selector.gen) return undefined;
+    return this.writeReceipts.read(selector);
+  }
+
   async write(
     gen: string,
     rows: TranscriptRow[],
@@ -13779,6 +13923,7 @@ export class SessionLogDO extends DurableObject<Env> {
     runId?: string,
     seed = false,
     correlation?: CheckpointGateCorrelation,
+    trustedRequest?: TrustedWriteRequest,
   ): Promise<FenceResult & { bytes?: number; sourcesSaved?: true }> {
     const progress = writeProgress(
       this.ctx.id.toString(),
@@ -13797,10 +13942,17 @@ export class SessionLogDO extends DurableObject<Env> {
     stage = "validation";
     progress(stage, "started");
     try {
-      const frozen = structuredClone({ rows, attachments, sourceUpdate });
+      const frozen = structuredClone({ rows, attachments, sourceUpdate, trustedRequest });
       rows = frozen.rows;
       attachments = frozen.attachments;
       sourceUpdate = frozen.sourceUpdate;
+      trustedRequest = frozen.trustedRequest;
+      const originalRunId = sourceUpdate?.runId ?? runId;
+      const effectDigest = trustedRequest
+        ? await sourceHash(
+            canonicalSeedJson({ operation: "/runs/session/write", runId, gen, rows, attachments, sourceUpdate, seed }),
+          )
+        : undefined;
       const projected = projectTranscriptRows(rows, [
         ...this.attachmentsOf(rows).filter((a) => !attachments.some((b) => b.ref === a.ref)),
         ...attachments,
@@ -13814,157 +13966,200 @@ export class SessionLogDO extends DurableObject<Env> {
       stage = "transaction";
       progress(stage, "started");
       this.ctx.storage.transactionSync(() => {
-        const pending = this.sourceSeedPending();
-        if (pending) {
-          const owner = this.owner();
-          const unchanged =
-            owner?.runId === (sourceUpdate?.runId ?? runId) &&
-            owner?.gen === gen &&
-            rows.every(
-              (r) =>
-                this.sql
-                  .exec<{ json: string }>("SELECT json FROM turns WHERE idx=? AND part=?", r.idx, r.part)
-                  .toArray()[0]?.json === r.json,
-            ) &&
-            attachments.every((a) => {
-              const old = this.sql
-                .exec<{ media_type: string; data: string }>(
-                  "SELECT media_type,data FROM attachments WHERE ref=?",
-                  a.ref,
-                )
-                .toArray()[0];
-              return old?.data === a.data && old.media_type === a.mediaType;
-            }) &&
-            (!sourceUpdate || canonicalSeedJson(sourceUpdate.sources) === canonicalSeedJson(this.sources()));
-          if (unchanged) {
-            out = { ok: true, ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
-            return;
-          }
-          throw new SourceSeedPendingError(pending.key, pending.runId);
-        }
-        const owner = this.owner();
-        if (owner === undefined) {
-          out = { ok: false, reason: "unknown-run" };
-          return;
-        }
-        if (
-          owner.gen !== gen ||
-          (this.requiresRunIdentity() && !sourceUpdate && runId === undefined) ||
-          (!sourceUpdate && (this.sourceMeta("sources") || runId !== undefined) && owner.runId !== runId)
-        ) {
+        if (trustedRequest && this.writeReceipts.seen(trustedRequest.requestId)) {
           out = { ok: false, reason: "fenced" };
           return;
         }
-        if (sourceUpdate) {
-          if (owner.runId !== sourceUpdate.runId) {
-            out = { ok: false, reason: "fenced" };
-            return;
-          }
-          const pending = this.sourceMeta("source_pending_owner");
-          const previous =
-            pending && pending !== `${owner.runId}:${gen}` ? taintSessionSources(this.sources()) : this.sources();
-          const start = this.sql
-            .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'source_start'`)
-            .toArray()[0]?.value;
-          const sources = mergeSessionSources(previous, sourceUpdate.sources, start === "0");
-          this.sql.exec(
-            `INSERT INTO meta (key, value) VALUES ('sources', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-            JSON.stringify(sources),
-          );
-          if (JSON.stringify(sources) !== JSON.stringify(sourceUpdate.sources)) {
-            out = { ok: false, reason: "fenced" };
-            return;
-          }
-        }
-        if (sourceUpdate) {
-          this.setSourceMeta("source_owner", `${owner.runId}:${gen}`);
-          this.sql.exec(`DELETE FROM meta WHERE key = 'source_pending_owner'`);
-        } else if (
-          rows.length &&
-          this.sourceMeta("sources") &&
-          this.sourceMeta("source_owner") !== `${owner.runId}:${gen}`
-        ) {
-          // A writer that cannot attest source completeness must not inherit a prior writer's receipt.
-          this.setSourceMeta("source_pending_owner", `${owner.runId}:${gen}`);
-        }
-        const pins = this.rangePins();
-        for (const row of rows) {
-          if (!sessionRowIsPinned(pins, row.idx)) continue;
-          const original = this.sql
-            .exec<{ json: string }>(`SELECT json FROM turns WHERE idx = ? AND part = ?`, row.idx, row.part)
-            .toArray()[0];
-          if (original?.json !== row.json) {
-            out = { ok: false, reason: "fenced" };
-            return;
-          }
-        }
-        if (attachments.some((a) => !validTranscriptChunk(a))) {
-          out = { ok: false, reason: "fenced" };
-          return;
-        }
-        try {
-          projectTranscriptRows(rows, [
-            ...this.attachmentsOf(rows).filter((a) => !attachments.some((b) => b.ref === a.ref)),
-            ...attachments,
-          ]);
-        } catch {
-          out = { ok: false, reason: "fenced" };
-          return;
-        }
-        for (const attachment of attachments) {
-          const original = this.sql
-            .exec<{ media_type: string; data: string }>(
-              `SELECT media_type, data FROM attachments WHERE ref = ?`,
-              attachment.ref,
-            )
-            .toArray()[0];
+        const ownerBefore = this.owner();
+        const eligible =
+          ownerBefore?.runId === originalRunId &&
+          ownerBefore?.gen === gen &&
+          !this.sql.exec("SELECT run_id FROM revoked_runs WHERE run_id=?", originalRunId ?? "").toArray().length;
+        const components = emptyWriteComponents();
+        const mutate = () => {
           if (
-            original &&
-            (original.data !== attachment.data || original.media_type !== attachment.mediaType) &&
-            this.sql
-              .exec<{ idx: number; json: string }>(`SELECT idx, json FROM turns`)
-              .toArray()
-              .some((row) => sessionRowIsPinned(pins, row.idx) && attachmentRefsOf(row.json).includes(attachment.ref))
+            originalRunId &&
+            this.sql.exec("SELECT run_id FROM revoked_runs WHERE run_id=?", originalRunId).toArray().length
           ) {
             out = { ok: false, reason: "fenced" };
             return;
           }
-        }
-        for (const a of attachments) {
-          this.sql.exec(
-            `INSERT OR REPLACE INTO attachments (ref, media_type, data, bytes) VALUES (?, ?, ?, ?)`,
-            a.ref,
-            a.mediaType,
-            a.data,
-            utf8ByteLength(a.data),
-          );
-        }
-        const tracked = this.sources();
-        if (tracked?.context && projected.rows.some((r) => rowKind(r.json) === "tool_result")) {
-          const indices = [...new Set(rows.map((r) => r.idx))];
-          const old = this.sql
-            .exec<{ idx: number; part: number; json: string }>(
-              `SELECT idx, part, json FROM turns WHERE kind = 'tool_use' OR idx IN (SELECT value FROM json_each(?)) ORDER BY idx, part`,
-              JSON.stringify(indices),
-            )
-            .toArray();
+          const pending = this.sourceSeedPending();
+          if (pending) {
+            const owner = this.owner();
+            const unchanged =
+              owner?.runId === (sourceUpdate?.runId ?? runId) &&
+              owner?.gen === gen &&
+              rows.every(
+                (r) =>
+                  this.sql
+                    .exec<{ json: string }>("SELECT json FROM turns WHERE idx=? AND part=?", r.idx, r.part)
+                    .toArray()[0]?.json === r.json,
+              ) &&
+              attachments.every((a) => {
+                const old = this.sql
+                  .exec<{ media_type: string; data: string }>(
+                    "SELECT media_type,data FROM attachments WHERE ref=?",
+                    a.ref,
+                  )
+                  .toArray()[0];
+                return old?.data === a.data && old.media_type === a.mediaType;
+              }) &&
+              (!sourceUpdate || canonicalSeedJson(sourceUpdate.sources) === canonicalSeedJson(this.sources()));
+            if (unchanged) {
+              out = { ok: true, ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
+              return;
+            }
+            throw new SourceSeedPendingError(pending.key, pending.runId);
+          }
+          const owner = this.owner();
+          if (owner === undefined) {
+            out = { ok: false, reason: "unknown-run" };
+            return;
+          }
           if (
-            uncoveredSourceResult(
-              projectTranscriptRows(old, this.attachmentsOf(old)).rows,
-              projected.rows,
-              tracked.context,
-              seed ? undefined : owner.runId,
-              verified,
-            )
-          )
-            this.setSourceMeta("sources", JSON.stringify(taintSessionSources(tracked)));
-        }
-        if (sourceUpdate && JSON.stringify(this.sources()) !== JSON.stringify(sourceUpdate.sources)) {
-          out = { ok: false, reason: "fenced" };
-          return;
-        }
-        for (const r of rows) this.putRow(r, r.json, false);
-        out = { ok: true, bytes: this.enforceBytePolicy(), ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
+            owner.gen !== gen ||
+            (this.requiresRunIdentity() && !sourceUpdate && runId === undefined) ||
+            (!sourceUpdate && (this.sourceMeta("sources") || runId !== undefined) && owner.runId !== runId)
+          ) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          if (sourceUpdate) {
+            if (owner.runId !== sourceUpdate.runId) {
+              out = { ok: false, reason: "fenced" };
+              return;
+            }
+            const pending = this.sourceMeta("source_pending_owner");
+            const previous =
+              pending && pending !== `${owner.runId}:${gen}` ? taintSessionSources(this.sources()) : this.sources();
+            components.sourceTainted = !!pending && pending !== `${owner.runId}:${gen}`;
+            const start = this.sql
+              .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'source_start'`)
+              .toArray()[0]?.value;
+            const sources = mergeSessionSources(previous, sourceUpdate.sources, start === "0");
+            this.sql.exec(
+              `INSERT INTO meta (key, value) VALUES ('sources', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+              JSON.stringify(sources),
+            );
+            components.sourcesWritten = true;
+            if (JSON.stringify(sources) !== JSON.stringify(sourceUpdate.sources)) {
+              out = { ok: false, reason: "fenced" };
+              return;
+            }
+          }
+          if (sourceUpdate) {
+            this.setSourceMeta("source_owner", `${owner.runId}:${gen}`);
+            this.sql.exec(`DELETE FROM meta WHERE key = 'source_pending_owner'`);
+            components.sourceOwnerWritten = true;
+          } else if (
+            rows.length &&
+            this.sourceMeta("sources") &&
+            this.sourceMeta("source_owner") !== `${owner.runId}:${gen}`
+          ) {
+            // A writer that cannot attest source completeness must not inherit a prior writer's receipt.
+            this.setSourceMeta("source_pending_owner", `${owner.runId}:${gen}`);
+            components.sourceOwnerWritten = true;
+          }
+          const pins = this.rangePins();
+          for (const row of rows) {
+            if (!sessionRowIsPinned(pins, row.idx)) continue;
+            const original = this.sql
+              .exec<{ json: string }>(`SELECT json FROM turns WHERE idx = ? AND part = ?`, row.idx, row.part)
+              .toArray()[0];
+            if (original?.json !== row.json) {
+              out = { ok: false, reason: "fenced" };
+              return;
+            }
+          }
+          if (attachments.some((a) => !validTranscriptChunk(a))) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          try {
+            projectTranscriptRows(rows, [
+              ...this.attachmentsOf(rows).filter((a) => !attachments.some((b) => b.ref === a.ref)),
+              ...attachments,
+            ]);
+          } catch {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          for (const attachment of attachments) {
+            const original = this.sql
+              .exec<{ media_type: string; data: string }>(
+                `SELECT media_type, data FROM attachments WHERE ref = ?`,
+                attachment.ref,
+              )
+              .toArray()[0];
+            if (
+              original &&
+              (original.data !== attachment.data || original.media_type !== attachment.mediaType) &&
+              this.sql
+                .exec<{ idx: number; json: string }>(`SELECT idx, json FROM turns`)
+                .toArray()
+                .some((row) => sessionRowIsPinned(pins, row.idx) && attachmentRefsOf(row.json).includes(attachment.ref))
+            ) {
+              out = { ok: false, reason: "fenced" };
+              return;
+            }
+          }
+          for (const a of attachments) {
+            this.sql.exec(
+              `INSERT OR REPLACE INTO attachments (ref, media_type, data, bytes) VALUES (?, ?, ?, ?)`,
+              a.ref,
+              a.mediaType,
+              a.data,
+              utf8ByteLength(a.data),
+            );
+          }
+          components.attachmentsWritten = attachments.length;
+          const tracked = this.sources();
+          if (tracked?.context && projected.rows.some((r) => rowKind(r.json) === "tool_result")) {
+            const indices = [...new Set(rows.map((r) => r.idx))];
+            const old = this.sql
+              .exec<{ idx: number; part: number; json: string }>(
+                `SELECT idx, part, json FROM turns WHERE kind = 'tool_use' OR idx IN (SELECT value FROM json_each(?)) ORDER BY idx, part`,
+                JSON.stringify(indices),
+              )
+              .toArray();
+            if (
+              uncoveredSourceResult(
+                projectTranscriptRows(old, this.attachmentsOf(old)).rows,
+                projected.rows,
+                tracked.context,
+                seed ? undefined : owner.runId,
+                verified,
+              )
+            ) {
+              this.setSourceMeta("sources", JSON.stringify(taintSessionSources(tracked)));
+              components.sourcesWritten = true;
+              components.sourceTainted = true;
+            }
+          }
+          if (sourceUpdate && JSON.stringify(this.sources()) !== JSON.stringify(sourceUpdate.sources)) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          for (const r of rows) this.putRow(r, r.json, false);
+          components.rowsWritten = rows.length;
+          out = { ok: true, bytes: this.enforceBytePolicy(), ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
+          components.bytePolicyApplied = true;
+        };
+        mutate();
+        if (trustedRequest?.reader && effectDigest && originalRunId && eligible)
+          this.writeReceipts.save({
+            version: 1,
+            runId: originalRunId,
+            gen,
+            operation: "/runs/session/write",
+            requestId: trustedRequest.requestId,
+            digest: trustedRequest.digest,
+            effectDigest,
+            reader: trustedRequest.reader,
+            components,
+            result: out,
+          });
       });
       progress("transaction", "returned", { ok: out.ok });
       progress("result", "returned", { ok: out.ok });
@@ -14448,6 +14643,7 @@ const LEDGER_ROUTES = new Set<string>([
   "/runs/source-events/relevance",
   "/runs/check-source",
   "/runs/original",
+  "/runs/write-receipt",
   "/runs/ingress/unread",
   "/runs/ingress/unread-hold",
   "/runs/ingress/unread-claim",
@@ -15019,6 +15215,7 @@ async function handleLedger(
   nativeClient = false,
   reviewStopClient = false,
   requestDigest?: string,
+  trustedRequest?: TrustedWriteRequest,
 ): Promise<Response> {
   if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
   const b = body as Record<string, unknown>;
@@ -15123,6 +15320,24 @@ async function handleLedger(
             }
           }
           progress("validation", "completed");
+          let sessionRequest: TrustedWriteRequest | undefined;
+          if (trustedRequest && typeof b.storeKey === "string") {
+            const runId =
+              typeof b.sourceRunId === "string" ? b.sourceRunId : typeof b.runId === "string" ? b.runId : undefined;
+            const store = parseStoreKey(b);
+            if (runId && parseRunId(runId).ok && store.ok && (b.runId === undefined || b.runId === runId)) {
+              stage = "receipt-owner-read";
+              progress(stage, "started", { targetObjectId: env.RUNS.idFromName(store.value).toString() });
+              const reader = await env.RUNS.get(env.RUNS.idFromName(store.value)).writeReceiptOwner(
+                runId,
+                g.value,
+                key.value,
+                { requestId, requestDigest },
+              );
+              progress(stage, "returned", { ok: reader !== null });
+              if (reader) sessionRequest = { ...trustedRequest, reader };
+            }
+          }
           stage = "session-write-rpc";
           progress(stage, "started", {
             targetObjectId: env.SESSION_LOGS.idFromName(key.value).toString(),
@@ -15140,6 +15355,7 @@ async function handleLedger(
             typeof b.runId === "string" ? b.runId : undefined,
             b.seed === true,
             { requestId, requestDigest },
+            sessionRequest,
           );
           progress(stage, "returned", { ok: r.ok });
           progress("result", "returned", { ok: r.ok });
@@ -15309,6 +15525,13 @@ async function handleLedger(
     const key = parseStoreKey(b);
     if (!key.ok) return json({ kind: "unavailable" }, 400);
     return json(await env.RUNS.get(env.RUNS.idFromName(key.value)).readCheckSource(selector.data));
+  }
+
+  if (pathname === "/runs/write-receipt") {
+    const selector = writeReceiptSelectorSchema.safeParse(b.selector);
+    const key = parseStoreKey(b);
+    if (!selector.success || !key.ok) return json({ error: "invalid write receipt selector" }, 400);
+    return json(await env.RUNS.get(env.RUNS.idFromName(key.value)).readWriteReceipt(selector.data, key.value));
   }
 
   if (pathname === "/runs/original") {
@@ -16348,7 +16571,13 @@ async function handleLedger(
     const progress = writeProgress(null, null, runId.value, g.value, "assign-live-state", { requestId, requestDigest });
     try {
       progress("assign-live-state-rpc", "started", { targetObjectId: env.RUNS.idFromName(key.value).toString() });
-      const r = await stub.assignLiveState(runId.value, g.value, assignment, { requestId, requestDigest });
+      const r = await stub.assignLiveState(
+        runId.value,
+        g.value,
+        assignment,
+        { requestId, requestDigest },
+        trustedRequest,
+      );
       progress("assign-live-state-rpc", "returned", { ok: r.ok });
       return r.ok ? json(r) : json(r, r.reason === "fenced" || r.reason === "unknown-run" ? 409 : 400);
     } catch (error) {
@@ -16478,6 +16707,7 @@ async function handleRuns(
   reviewStopClient = false,
   requestId?: string,
   requestDigest?: string,
+  trustedRequest?: TrustedWriteRequest,
 ): Promise<Response> {
   const stub = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
   if (LEDGER_ROUTES.has(pathname))
@@ -16491,6 +16721,7 @@ async function handleRuns(
       nativeClient,
       reviewStopClient,
       requestDigest,
+      trustedRequest,
     );
   if (pathname.startsWith("/runs/review-feedback/")) {
     if (!body || typeof body !== "object" || Array.isArray(body))
@@ -16740,6 +16971,14 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
       return json({ error: "body must be valid JSON" }, 400);
     }
     try {
+      const originalRequestId = storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER));
+      const trustedRequest =
+        originalRequestId && ["/runs/live-state", "/runs/session/write"].includes(url.pathname)
+          ? {
+              requestId: originalRequestId,
+              digest: (await storeRequestWitness(url.pathname, originalBody, body, originalRequestId)).digest,
+            }
+          : undefined;
       return await (PLANE_ROUTES.has(url.pathname)
         ? handlePlane(url.pathname, body, env)
         : needsSeed || ["/runs/state", "/runs/append", "/runs/heartbeat", "/runs/step"].includes(url.pathname)
@@ -16753,6 +16992,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
               request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
               request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
               storageRequestDigestOf(request.headers.get(STORAGE_REQUEST_DIGEST_HEADER)),
+              trustedRequest,
             )
           : handleRuns(
               url.pathname,
@@ -16762,6 +17002,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
               request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
               storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
               storageRequestDigestOf(request.headers.get(STORAGE_REQUEST_DIGEST_HEADER)),
+              trustedRequest,
             ));
     } catch (error) {
       if (error instanceof Error && error.name === "RunDeletedError") throw error;
