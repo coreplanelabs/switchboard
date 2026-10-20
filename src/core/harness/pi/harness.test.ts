@@ -5431,6 +5431,22 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.container.removed).toEqual([]);
   });
 
+  it("a sandbox Durable Object close during a log read checks the original process and resumes its answer", async () => {
+    const w = world({ backend: "sandbox" });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
+    w.container.failReadOnceThenAlive = new ExecInfraError(
+      "sandbox worker /exec: Connection closed: this Durable Object instance is no longer active. Reconnect or retry the request.",
+      "answered",
+    );
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    expect(w.events.filter((event) => event.type === "run_note" && event.kind === "resumed")).toEqual([
+      expect.objectContaining({ summary: TRANSPORT_ALIVE_REATTACH_NOTE }),
+    ]);
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+    expect(w.container.killed).toEqual([4242]);
+  });
+
   it("a transport loss whose one more command answers the identity recorded, on a sandbox-backed run, leaves the failure standing, NAMED as the transport error it was — never the verdict, never 'pi exited before the run settled' — with a harness_error note saying the one more command named no replacement, no sandbox_restarted note, pi ended and its root removed", async () => {
     const w = world({ backend: "sandbox" });
     w.container.files.set(paths.errLog, "Error: cannot find module 'foo'\n");

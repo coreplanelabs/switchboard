@@ -685,6 +685,14 @@ describe("saysTransportLost — the third failure shape: a container command fai
     expect(saysTransportLost(new Error("Process supervisor is closed"))).toBe(true);
     expect(saysTransportLost(new Error("read ECONNRESET"))).toBe(true);
     expect(saysTransportLost(new Error("socket hang up"))).toBe(true);
+    expect(
+      saysTransportLost(
+        new ExecInfraError(
+          "sandbox worker /exec: Connection closed: this Durable Object instance is no longer active. Reconnect or retry the request.",
+          "answered",
+        ),
+      ),
+    ).toBe(true);
     expect(saysTransportLost(new HarnessContainerDownError("identity", "The container is not running"))).toBe(true);
     for (const text of [
       "The container is not running, consider calling start()",
@@ -698,6 +706,7 @@ describe("saysTransportLost — the third failure shape: a container command fai
       "Network connection lost.",
       "Network connection lost",
       "resident /exec: Network connection lost.",
+      "Connection closed: this Durable Object instance is no longer active. Reconnect or retry the request.",
     ])
       expect(CONTAINER_DOWN_WORDING.test(text), text).toBe(true);
     // One source for each platform wording: the resident client's gone-for-a-moment
@@ -714,6 +723,11 @@ describe("saysTransportLost — the third failure shape: a container command fai
       "a refusal is no wait, whatever it says",
     ).toBe(false);
     expect(saysTransportLost(new ExecInfraError("resident /exec: The container just exited", "aborted"))).toBe(false);
+    expect(
+      saysTransportLost(
+        new ExecInfraError("sandbox worker /exec: this Durable Object instance is no longer active", "refused"),
+      ),
+    ).toBe(false);
     expect(saysTransportLost(new ExecInfraError("resident /exec: worktree evicted", "answered"))).toBe(false);
     expect(
       saysTransportLost(
