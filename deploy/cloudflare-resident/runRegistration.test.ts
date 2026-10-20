@@ -11,7 +11,7 @@ import {
   RestoreArchiveUnconfirmedError,
 } from "./restoreArchive.js";
 import { captureException } from "../../src/core/runStateWriteDiagnostic.js";
-import { NativeRunScopes, CloudflareNativeScopeTransport } from "./nativeScope.js";
+import { NativeRunScopes, CloudflareNativeScopeTransport, NativeScopeControlTimeoutError } from "./nativeScope.js";
 import { RecordedCheckOperation } from "./checkOperation.js";
 import { checkCommandHash } from "../../src/execution/checkOperation.js";
 import type { CheckSource } from "../../src/core/checkInspection.js";
@@ -41,6 +41,7 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { idleForPoolRecycle, retryPoolRecycleAfterRefresh } from "../../src/execution/residentRecreateAdmission.js";
 import { liveDrain } from "./drain.js";
+import { admissionRecordHash } from "./admissionRecovery.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
 import {
   killStaleBuildProcessesCommand,
@@ -1446,13 +1447,42 @@ const RESIDENT_WORKLOAD_LIMIT = Number(sharedWorkloadSource.match(/RESIDENT_WORK
 const workloadPool = Array.from({ length: 32 }, (_, i) => `worker${i + 2}`);
 
 function workloadResident(
-  options: { live?: number; retained?: number; unknown?: number; processes?: string; probeFails?: boolean } = {},
+  options: {
+    live?: number;
+    retained?: number;
+    unknown?: number;
+    processes?: string;
+    probeFails?: boolean;
+    rows?: Map<string, unknown>;
+    registryRows?: Map<string, unknown>;
+  } = {},
 ) {
+  const registrySource = workloadSource.slice(
+    workloadSource.indexOf("export class ResidentRegistryDO"),
+    workloadSource.indexOf("export class ResidentDO"),
+  );
+  const helpers = ts
+    .createSourceFile("worker.ts", workloadSource, ts.ScriptTarget.Latest, true)
+    .statements.filter(
+      (node) =>
+        ts.isFunctionDeclaration(node) &&
+        [
+          "deployAdmissionOrigin",
+          "validDeployAdmissionIdentity",
+          "validDeployReleaseReceipts",
+          "beginTrackedDeployAdmission",
+          "endTrackedDeployAdmission",
+        ].includes(node.name?.text ?? ""),
+    )
+    .map((node) => node.getText())
+    .join("\n");
   const compiled = ts.transpileModule(
-    `${ts
-      .createSourceFile("worker.ts", workloadSource, ts.ScriptTarget.Latest, true)
-      .statements.find((node) => ts.isClassDeclaration(node) && node.name?.text === "RuntimeUnreachableError")!
-      .getText()}
+    `${helpers}
+     class Registry { ${["beginDeployAdmission", "endDeployAdmission", "readDeployAdmissionReceipt", "recordDeployAdmissionResource"].map((name) => methodOf(registrySource, name)).join("\n")} }
+     ${ts
+       .createSourceFile("worker.ts", workloadSource, ts.ScriptTarget.Latest, true)
+       .statements.find((node) => ts.isClassDeclaration(node) && node.name?.text === "RuntimeUnreachableError")!
+       .getText()}
      ${ts
        .createSourceFile("worker.ts", workloadSource, ts.ScriptTarget.Latest, true)
        .statements.find(
@@ -1481,6 +1511,8 @@ function workloadResident(
        "reserveWorkloadSlot",
        "allocateOpUser",
        "withOpNativeOperation",
+       "runInstanceStep",
+       "yieldCycle",
        "operationOrigin",
        "withOpaqueNativeEffect",
        "withSharedNativeOperation",
@@ -1503,6 +1535,7 @@ function workloadResident(
        "registeredRunsBeyondOps",
        "automaticContainerLoss",
        "recreateContainer",
+       "debugRecreateContainerChecked",
        "inFlightCount",
        "runsInFlightCount",
        "reserveSafePoolUser",
@@ -1542,7 +1575,7 @@ function workloadResident(
   };
   const owners = new Map<string, unknown>();
   let onOwnerRead: ((runId: string) => Promise<void>) | undefined;
-  const Native = runInNewContext(`${compiled}\nResident`, {
+  const { Resident: Native, Registry } = runInNewContext(`${compiled}\n({Resident, Registry})`, {
     uidLedger,
     readUidReport,
     uidOwner,
@@ -1554,6 +1587,15 @@ function workloadResident(
     prepareStorageRequest,
     storageTransport,
     NativeOperationJournal,
+    ResidentDownError: class extends Error {},
+    CycleRestartError: class extends Error {},
+    admissionRecordHash,
+    DEPLOY_ADMISSION_KEY_PREFIX: "deploy:admission:",
+    DEPLOY_RELEASE_RECEIPTS_KEY: "deploy:release-receipts",
+    DEPLOY_RECOVERY_KEY_PREFIX: "deploy:recovered:",
+    DEPLOY_ABANDONED_KEY_PREFIX: "deploy:abandoned:",
+    DEPLOY_RELEASE_RECEIPT_BYTES: 64 * 1024,
+    DRAIN_KEY: "drain",
     archiveControlAnswer,
     archiveCapabilitySchema,
     executeRestoreArchive,
@@ -1736,7 +1778,7 @@ function workloadResident(
     },
   });
   const instance = new Native();
-  const rows = new Map<string, unknown>();
+  const rows = options.rows ?? new Map<string, unknown>();
   const lifecycle: string[] = [];
   const bindings: any[] = [];
   const spent: { user: string; owner: string }[] = [];
@@ -1796,6 +1838,10 @@ function workloadResident(
     swapIncarnation: () => {},
     setResidentState: async () => {},
     recordRefreshError: async () => {},
+    recordInstanceStep: async () => {},
+    clearInstanceLease: async () => {},
+    classifyCycleError: async (error: Error) => ({ reason: error.message }),
+    refreshFailed: async () => {},
     destroyConfirmed: async () => {
       lifecycle.push("destroyed");
       rows.set("resident:spentPoolUsers", []);
@@ -1940,7 +1986,8 @@ function workloadResident(
     fn: () => Promise<unknown>,
     producer = "op-test",
     context?: unknown,
-  ) => operatorEntry(owner, fn, producer, context);
+    permit?: unknown,
+  ) => operatorEntry(owner, fn, producer, context, permit);
   // Legacy SDK requests retain their original journal/async context; they do not adopt a new owned scope.
   instance.legacyOperator = (owner: string, fn: () => Promise<unknown>) => {
     const scope = { key: `native-operation:${owner}`, owner, active: true, allocated: false };
@@ -1950,9 +1997,35 @@ function workloadResident(
   };
   const storageLock = new KeyedAsyncLock();
   instance.ctx.storage.transaction = async (fn: (store: unknown) => Promise<unknown>) =>
-    storageLock.run("storage", () => fn(instance.ctx.storage));
+    storageLock.run("storage", async () => {
+      const before = structuredClone(rows);
+      try {
+        return await fn(instance.ctx.storage);
+      } catch (error) {
+        rows.clear();
+        for (const [key, value] of before) rows.set(key, value);
+        throw error;
+      }
+    });
+  const registry = new Registry();
+  const registryRows = options.registryRows ?? new Map<string, unknown>();
+  const registryLock = new KeyedAsyncLock();
+  const registryStorage = {
+    get: async (key: string) => structuredClone(registryRows.get(key)),
+    put: async (key: string, value: unknown) => {
+      registryRows.set(key, structuredClone(value));
+    },
+    delete: async (key: string) => registryRows.delete(key),
+    transaction: async (fn: (storage: unknown) => Promise<unknown>) =>
+      registryLock.run("storage", () => fn(registryStorage)),
+  };
+  registry.ctx = { storage: registryStorage };
+  registry.getStagingMaintenance = async () => null;
+  instance.registry = () => registry;
   return {
     instance,
+    registry,
+    registryRows,
     rows,
     native,
     lifecycle,
@@ -3915,4 +3988,313 @@ describe("resident workload admission", () => {
     native.loseOutput = false;
     expect([...(await instance.activeWorkloadOwners())]).toEqual([]);
   });
+
+  it("ends an operator record when readback proves a timed-out scope close", async () => {
+    const { instance, rows, native } = workloadResident();
+    instance.run = Object.getPrototypeOf(instance).run;
+    const originalTransport = instance.nativeScopeTransport.bind(instance);
+    instance.nativeScopeTransport = () => {
+      const transport = originalTransport();
+      return {
+        request: async (value: Record<string, any>, timeout: number) => {
+          const result = await transport.request(value, timeout);
+          if (value.mode === "close" && value.ref?.owner?.opOwner === "op:readback-close")
+            throw new NativeScopeControlTimeoutError("close", timeout);
+          return result;
+        },
+      };
+    };
+
+    expect(await instance.withOpNativeOperation("op:readback-close", () => instance.run(["true"]))).toMatchObject({
+      stdout: "completed",
+      exitCode: 0,
+      timedOut: false,
+    });
+    expect(native.scopeCalls.map((call) => call.mode)).toEqual([
+      "inspect",
+      "bootstrap",
+      "launch",
+      "inspect",
+      "close",
+      "view",
+    ]);
+    expect(rows.has("native-operation:op:readback-close")).toBe(false);
+    expect(rows.get("native-operation-ending:native-operation:op:readback-close")).toMatchObject({
+      receipt: { callback: "returned", originalOperationOutcome: "unknown" },
+    });
+    expect(
+      await new NativeOperationJournal(instance.ctx.storage).operatorEnded("native-operation:op:readback-close", {
+        opOwner: "op:readback-close",
+      }),
+    ).toBe(true);
+    expect([...(await instance.activeWorkloadOwners())]).toEqual([]);
+  });
+
+  it("bounds the saved admission recovery preview without hiding its total", async () => {
+    const h = workloadResident();
+    const journal = new NativeOperationJournal(h.instance.ctx.storage);
+    for (let i = 0; i < 26; i++)
+      await journal.enrollOperatorAdmission(
+        `op:pending-${i}`,
+        {
+          producer: "refresh-step",
+          resource: "repo:acme/api",
+          sourceId: "build",
+          callId: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`,
+          actor: "system",
+          traceId: null,
+          parentSourceId: "refresh-original",
+          build: "test-build",
+          workerVersion: null,
+          startedAt: 1000,
+        },
+        { id: `22222222-2222-4222-8222-${String(i).padStart(12, "0")}`, requestHash: "a".repeat(64) },
+      );
+    const info = await h.instance.getResidentInfo();
+    expect(info.deploymentAdmissionRecovery).toMatchObject({ count: 26, omitted: 1 });
+    expect(info.deploymentAdmissionRecovery.records).toHaveLength(25);
+    expect(info.deploymentAdmissionRecovery.records[0]).toEqual({
+      id: "22222222-2222-4222-8222-000000000000",
+      opOwner: "op:pending-0",
+      callId: "11111111-1111-4111-8111-000000000000",
+      producer: "refresh-step",
+      sourceId: "build",
+      stage: "callback-ending-unverified",
+      recovery: "operator-request-end-receipt",
+    });
+  });
+
+  it.each(["callback-ending-write", "journal-open"])(
+    "keeps an unproved %s permit visible after restart without blocking another refresh",
+    async (fault) => {
+      const first = workloadResident();
+      first.instance.run = Object.getPrototypeOf(first.instance).run;
+      const put = first.instance.ctx.storage.put;
+      first.instance.ctx.storage.put = async (key: string, value: any) => {
+        if (
+          (fault === "callback-ending-write" &&
+            key.startsWith("native-operation-admission:") &&
+            value.callbackMetadataEnded === true) ||
+          (fault === "journal-open" && key.startsWith("native-operation:op:"))
+        )
+          throw new Error("injected-original-write-failure");
+        return put(key, value);
+      };
+      let builds = 0;
+      const original = await first.instance.runInstanceStep("refresh-original", "build", async () => {
+        builds++;
+        await first.instance.run(["true"]);
+        return { status: "done" };
+      });
+      expect(original.status).toBe(fault === "journal-open" ? "failed" : "done");
+      const [admissionKey, admission] = [...first.rows].find(([key]) =>
+        key.startsWith("native-operation-admission:"),
+      )! as [string, { opOwner: string; permit: { id: string; requestHash: string }; origin: { callId: string } }];
+      if (fault === "callback-ending-write") {
+        // A separate unresolved native owner still excludes physical reuse,
+        // even though the lost callback marker alone must not stop a fetch.
+        const nativeJournal = new NativeOperationJournal(first.instance.ctx.storage);
+        await nativeJournal.open("native-operation:op:unresolved-native", { opOwner: "op:unresolved-native" });
+        await nativeJournal.begin("native-operation:op:unresolved-native", "process");
+      } else {
+        expect(first.native.execCount).toBe(0);
+        expect(first.native.scopeCalls.filter((call) => call.mode === "launch")).toEqual([]);
+      }
+      const restarted = workloadResident({ rows: first.rows, registryRows: first.registryRows });
+      let fetches = 0;
+      expect(
+        await restarted.instance.runInstanceStep("refresh-later", "fetch", async () => {
+          fetches++;
+          return { status: "done", value: "fetched" };
+        }),
+      ).toMatchObject({ status: "done", value: "fetched" });
+      expect({ builds, fetches }).toEqual({ builds: fault === "journal-open" ? 0 : 1, fetches: 1 });
+      expect(await restarted.registry.readDeployAdmissionReceipt(admission.permit)).toMatchObject({
+        state: "admitted",
+        ...admission.permit,
+      });
+      expect(restarted.rows.get(admissionKey)).toMatchObject({ callbackMetadataEnded: false });
+      if (fault === "callback-ending-write") {
+        expect(await restarted.instance.debugRecreateContainerChecked()).toEqual({
+          recreated: false,
+          status: 409,
+          error: "recreate-refused: 1 run(s) still in flight",
+        });
+        expect(restarted.rows.get("native-operation:op:unresolved-native")).toMatchObject({
+          native: { closed: false, pending: {} },
+        });
+      }
+      expect(await restarted.instance.getResidentInfo()).toMatchObject({
+        deploymentAdmissionRecovery: {
+          count: 1,
+          omitted: 0,
+          records: [
+            {
+              id: admission.permit.id,
+              opOwner: admission.opOwner,
+              callId: admission.origin.callId,
+              producer: "refresh-step",
+              sourceId: "build",
+              stage: "callback-ending-unverified",
+              recovery: "operator-request-end-receipt",
+            },
+          ],
+        },
+      });
+    },
+  );
+
+  it.each(["acknowledged", "lost-release-reply", "release-unavailable", "completion-write-failed", "metadata-failed"])(
+    "resumes saved producer cleanup on the next refresh without repeating its build: %s",
+    async (fault) => {
+      const { instance, registry, registryRows, rows, native } = workloadResident();
+      instance.run = Object.getPrototypeOf(instance).run;
+      const originalTransport = instance.nativeScopeTransport.bind(instance);
+      let unavailable = true;
+      instance.nativeScopeTransport = () => {
+        const transport = originalTransport();
+        return {
+          request: async (value: Record<string, any>, timeout: number) => {
+            const result = await transport.request(value, timeout);
+            if (unavailable && ["close", "view"].includes(value.mode))
+              throw new NativeScopeControlTimeoutError(value.mode, timeout);
+            return result;
+          },
+        };
+      };
+      const context = {
+        sourceId: "build",
+        callId: "11111111-1111-4111-8111-111111111111",
+        actor: "system",
+        traceId: null,
+        parentSourceId: "refresh-original",
+      };
+      let builds = 0;
+      const build = async () => {
+        builds++;
+        return instance.run(["true"]);
+      };
+      const recordMetadata = instance.recordInstanceStep;
+      if (fault === "metadata-failed") {
+        instance.setResidentState = async (state: string, reason: string) => {
+          rows.set("resident:state", state);
+          rows.set("resident:reason", reason);
+        };
+        instance.recordInstanceStep = async () => {
+          throw new Error("metadata-unavailable");
+        };
+      }
+      expect(
+        await instance.runInstanceStep("refresh-original", "build", async () => {
+          const result = await build();
+          return { status: "done", value: result.exitCode };
+        }),
+      ).toMatchObject({ status: "done", value: 0 });
+      instance.recordInstanceStep = recordMetadata;
+      const [originalKey] = [...rows].find(([key]) => key.startsWith("native-operation:op:"))! as [
+        string,
+        { opOwner: string },
+      ];
+      const [permitKey, permit] = [...registryRows].find(([key]) => key.startsWith("deploy:admission:"))! as [
+        string,
+        { requestHash: string },
+      ];
+      const permitIdentity = { id: permitKey.slice("deploy:admission:".length), requestHash: permit.requestHash };
+      expect(await registry.readDeployAdmissionReceipt(permitIdentity)).toMatchObject({
+        state: "admitted",
+        ...permitIdentity,
+      });
+      expect(rows.get(originalKey)).toMatchObject({ native: { closed: true, pending: {} } });
+      await expect(
+        instance.withOpNativeOperation("op:cleanup-unavailable", build, "refresh-step", {
+          ...context,
+          sourceId: "fetch",
+          callId: "44444444-4444-4444-8444-444444444444",
+          parentSourceId: "refresh-unavailable",
+        }),
+      ).rejects.toMatchObject({
+        step: "producer-cleanup-pending",
+        cause: expect.objectContaining({ message: expect.stringContaining("native-scope outcome is unknown") }),
+      });
+      expect(
+        await new NativeOperationJournal(instance.ctx.storage).operatorEnded(
+          "native-operation:op:cleanup-unavailable",
+          { opOwner: "op:cleanup-unavailable" },
+          "44444444-4444-4444-8444-444444444444",
+        ),
+      ).toBe(true);
+      expect(
+        await instance.runInstanceStep("refresh-pending", "fetch", async () => {
+          builds++;
+          return { status: "done" };
+        }),
+      ).toMatchObject({ status: "stopped", why: "producer-cleanup-pending" });
+      expect(rows.get(originalKey)).toMatchObject({ native: { closed: true, pending: {} } });
+      unavailable = false;
+      // A new controller has no original in-memory request state.
+      instance.activeOperatorRequests = new Set();
+      const originalEnd = registry.endDeployAdmission.bind(registry);
+      const originalDelete = instance.ctx.storage.delete;
+      registry.endDeployAdmission = async (id: string, hash: string) => {
+        if (id === permitIdentity.id && fault === "release-unavailable") throw new Error("registry-unavailable");
+        await originalEnd(id, hash);
+        if (id === permitIdentity.id && fault === "lost-release-reply") throw new Error("release-reply-lost");
+      };
+      instance.ctx.storage.delete = async (key: string) => {
+        if (
+          key === "native-operation-admission:" + originalKey.slice("native-operation:".length) &&
+          fault === "completion-write-failed"
+        )
+          throw new Error("completion-write-failed");
+        return originalDelete(key);
+      };
+      const recovery = () =>
+        instance.runInstanceStep("refresh-next", "fetch", async () => {
+          builds++;
+          return { status: "done" };
+        });
+      const pending = ["release-unavailable", "completion-write-failed"].includes(fault);
+      expect(await recovery()).toMatchObject({
+        status: "stopped",
+        why: pending ? "producer-cleanup-pending" : "producer-cleanup-completed",
+      });
+      if (fault === "metadata-failed") {
+        expect(rows.get("resident:state")).toBe("degraded");
+        expect(rows.get("resident:reason")).toBe("refresh-step-metadata-unverified: build status was not stored");
+      }
+      if (pending) {
+        expect(rows.has(originalKey)).toBe(false);
+        expect(await registry.readDeployAdmissionReceipt(permitIdentity)).toMatchObject({
+          state: fault === "completion-write-failed" ? "released" : "admitted",
+          ...permitIdentity,
+        });
+        registry.endDeployAdmission = originalEnd;
+        instance.ctx.storage.delete = originalDelete;
+        instance.activeOperatorRequests = new Set();
+        expect(await recovery()).toMatchObject({ status: "stopped", why: "producer-cleanup-completed" });
+      }
+      expect(builds).toBe(1);
+      expect(rows.get("native-operation-ending:" + originalKey)).toMatchObject({
+        receipt: { callback: "unknown", originalOperationOutcome: "unknown" },
+      });
+      expect([...(await instance.activeWorkloadOwners())]).toEqual([]);
+      expect(await registry.readDeployAdmissionReceipt(permitIdentity)).toMatchObject({
+        state: "released",
+        ...permitIdentity,
+      });
+      expect([...registryRows.keys()].filter((key) => key.startsWith("deploy:admission:"))).toEqual([]);
+      expect(native.scopeCalls.filter((call) => call.mode === "launch")).toHaveLength(1);
+      expect(
+        await instance.withOpNativeOperation("op:next-cycle", build, "refresh-step", {
+          ...context,
+          callId: "33333333-3333-4333-8333-333333333333",
+          parentSourceId: "refresh-after-cleanup",
+        }),
+      ).toMatchObject({ stdout: "completed", exitCode: 0 });
+      expect(builds).toBe(2);
+      expect(rows.get("native-operation-ending:native-operation:op:next-cycle")).toMatchObject({
+        receipt: { callback: "returned", originalOperationOutcome: "unknown" },
+      });
+    },
+  );
 });

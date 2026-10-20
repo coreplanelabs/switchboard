@@ -161,9 +161,21 @@ export async function reserveNativeOperatorScope(
   await rows.put(at, initial);
   return initial;
 }
-export function nativeOperatorScopeClosing(value: unknown, owner: NativeOperatorOwner): boolean {
+export function nativeOperatorScopeClosing(
+  value: unknown,
+  owner: NativeOperatorOwner,
+  expected?: NativeOperatorScopeRef | null,
+): boolean {
   const row = operatorRowSchema.safeParse(value);
-  return row.success && row.data.owner.opOwner === owner.opOwner && row.data.closing;
+  return (
+    row.success &&
+    row.data.owner.opOwner === owner.opOwner &&
+    row.data.closing &&
+    (expected === undefined ||
+      (expected === null
+        ? row.data.boot === null
+        : !!row.data.boot && JSON.stringify(refOf(row.data)) === JSON.stringify(expected)))
+  );
 }
 function refOf(row: Row): NativeExecutionScopeRef {
   return "kind" in row
@@ -440,13 +452,7 @@ export class NativeRunScopes {
       return "unstarted";
     }
     const ref = refOf(row);
-    // Old wrappers validate the original boot before any payload instruction.
-    // A fresh different kernel proves that this original scope cannot run here.
-    const kernel = z
-      .object({ version: z.literal(1), boot: z.string().uuid() })
-      .strict()
-      .parse(answer(await this.native.request({ mode: "inspect" }, NATIVE_SCOPE_CONTROL_MS)));
-    if (kernel.boot !== ref.boot) {
+    const commitClosure = async (closedBoot: string): Promise<void> => {
       let committedClosure: Row | undefined;
       try {
         await this.storage.transaction(async (rows) => {
@@ -454,55 +460,105 @@ export class NativeRunScopes {
           if (current.id !== row.id || current.boot !== row.boot || !current.closing)
             throw new Error("native-scope changed");
 
-          committedClosure = { ...current, closed: true, closedBoot: kernel.boot };
+          committedClosure = { ...current, closed: true, closedBoot };
           await rows.put(at, committedClosure);
         });
       } catch (error) {
         if (!committedClosure || JSON.stringify(await this.storage.get(at)) !== JSON.stringify(committedClosure))
           throw error;
       }
+    };
+    const confirmTimedOutClosure = async (
+      timeout: NativeScopeControlTimeoutError,
+    ): Promise<NativeExecutionScopeRef> => {
+      let view: {
+        ref: NativeExecutionScopeRef;
+        closed: boolean;
+        populated: boolean;
+        present?: boolean;
+        ready?: boolean;
+      };
+      try {
+        view = z
+          .object({
+            ref: nativeExecutionScopeRefSchema,
+            closed: z.boolean(),
+            populated: z.boolean(),
+            present: z.boolean().optional(),
+            ready: z.boolean().optional(),
+          })
+          .strict()
+          .parse(answer(await this.native.request({ mode: "view", ref }, NATIVE_SCOPE_CONTROL_MS)));
+      } catch (readbackError) {
+        throw new Error(`${timeout.message}; exact closure readback failed`, {
+          cause: readbackError,
+        });
+      }
+      if (JSON.stringify(view.ref) !== JSON.stringify(ref))
+        throw new Error("native-scope owner changed during timeout readback", { cause: timeout });
+      if (!view.closed || view.populated)
+        throw new Error(`${timeout.message}; readback closed=${view.closed} populated=${view.populated}`, {
+          cause: timeout,
+        });
+      await commitClosure(ref.boot);
       return ref;
-    }
-    let result: unknown;
-    if (row.closing || row.closed) {
-      const view = z
-        .object({
-          ref: nativeExecutionScopeRefSchema,
-          closed: z.boolean(),
-          populated: z.boolean(),
-          present: z.boolean().optional(),
-          ready: z.boolean().optional(),
-        })
-        .strict()
-        .parse(answer(await this.native.request({ mode: "view", ref }, NATIVE_SCOPE_CONTROL_MS)));
-      if (JSON.stringify(view.ref) !== JSON.stringify(ref)) throw new Error("native-scope owner changed");
-      // Close is monotonic for this immutable scope. A positive open/absent
-      // observation resumes a reset before submission, never a payload replay.
-      result =
-        view.closed && !view.populated
-          ? { ref: view.ref, closed: true, populated: false }
-          : answer(await this.native.request({ mode: "close", ref }, NATIVE_SCOPE_CONTROL_MS));
-    } else result = answer(await this.native.request({ mode: "close", ref }, NATIVE_SCOPE_CONTROL_MS));
-    const observed = z
-      .object({ ref: nativeExecutionScopeRefSchema, closed: z.literal(true), populated: z.literal(false) })
-      .strict()
-      .parse(result);
-    if (JSON.stringify(observed.ref) !== JSON.stringify(ref)) throw new Error("native-scope owner changed");
-    let committedClosure: Row | undefined;
+    };
     try {
-      await this.storage.transaction(async (rows) => {
-        const current = ownedExecutionRow(await rows.get(at), owner, threadKey);
-        if (current.id !== row.id || current.boot !== row.boot || !current.closing)
-          throw new Error("native-scope changed");
-
-        committedClosure = { ...current, closed: true, closedBoot: kernel.boot };
-        await rows.put(at, committedClosure);
-      });
+      // Old wrappers validate the original boot before any payload instruction.
+      // A fresh different kernel proves that this original scope cannot run here.
+      const kernel = z
+        .object({ version: z.literal(1), boot: z.string().uuid() })
+        .strict()
+        .parse(answer(await this.native.request({ mode: "inspect" }, NATIVE_SCOPE_CONTROL_MS)));
+      if (kernel.boot !== ref.boot) {
+        await commitClosure(kernel.boot);
+        return ref;
+      }
+      let result: unknown;
+      if (row.closing || row.closed) {
+        const view = z
+          .object({
+            ref: nativeExecutionScopeRefSchema,
+            closed: z.boolean(),
+            populated: z.boolean(),
+            present: z.boolean().optional(),
+            ready: z.boolean().optional(),
+          })
+          .strict()
+          .parse(answer(await this.native.request({ mode: "view", ref }, NATIVE_SCOPE_CONTROL_MS)));
+        if (JSON.stringify(view.ref) !== JSON.stringify(ref)) throw new Error("native-scope owner changed");
+        // Close is monotonic for this immutable scope. A positive open/absent
+        // observation resumes a reset before submission, never a payload replay.
+        result =
+          view.closed && !view.populated
+            ? { ref: view.ref, closed: true, populated: false }
+            : answer(await this.native.request({ mode: "close", ref }, NATIVE_SCOPE_CONTROL_MS));
+      } else result = answer(await this.native.request({ mode: "close", ref }, NATIVE_SCOPE_CONTROL_MS));
+      const observed = z
+        .object({ ref: nativeExecutionScopeRefSchema, closed: z.literal(true), populated: z.literal(false) })
+        .strict()
+        .parse(result);
+      if (JSON.stringify(observed.ref) !== JSON.stringify(ref)) throw new Error("native-scope owner changed");
+      await commitClosure(kernel.boot);
+      return ref;
     } catch (error) {
-      if (!committedClosure || JSON.stringify(await this.storage.get(at)) !== JSON.stringify(committedClosure))
-        throw error;
+      if (error instanceof NativeScopeControlTimeoutError) return confirmTimedOutClosure(error);
+      throw error;
     }
-    return ref;
+  }
+}
+
+export class NativeScopeControlTimeoutError extends Error {
+  readonly mode: string;
+  readonly timeoutMs: number;
+
+  constructor(mode: string, timeoutMs: number) {
+    const safeMode = /^[a-z][a-z0-9-]{0,31}$/.test(mode) ? mode : "unknown";
+    const safeTimeout = Number.isSafeInteger(timeoutMs) && timeoutMs >= 0 ? timeoutMs : 0;
+    super(`native-scope outcome is unknown (mode=${safeMode}, timeoutMs=${safeTimeout})`);
+    this.name = "NativeScopeControlTimeoutError";
+    this.mode = safeMode;
+    this.timeoutMs = safeTimeout;
   }
 }
 
@@ -589,7 +645,8 @@ export class CloudflareNativeScopeTransport implements NativeScopeTransport {
               nativeEnding: nativeTimeoutEndingSchema.parse({ version: 1, ...closure, launcherExitCode: killed[2] }),
             };
         }
-        throw new Error("native-scope outcome is unknown");
+        const mode = typeof value.mode === "string" ? value.mode : "unknown";
+        throw new NativeScopeControlTimeoutError(mode, timeoutMs);
       }
       return { stdout: output[0], stderr: output[1], exitCode: output[2], timedOut: false, truncated };
     } finally {
