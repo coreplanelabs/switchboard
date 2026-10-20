@@ -1,4 +1,5 @@
-import { gitInCheckout } from "../execution/workspaceAdvance.js";
+import { currentPrBase, type FetchPrBase } from "./repoContext.js";
+import { prepareReviewBase, gitInCheckout } from "../execution/workspaceAdvance.js";
 import { engineeringRulesBlock, engineeringRulesFor, type EngineeringRules } from "../engineering.js";
 import type { ExistingPrPublicationBinding } from "./coordinator/contract.js";
 // Per-round review + workspace machinery, extracted from dispatch() as
@@ -612,6 +613,7 @@ export interface SettleReviewedHeadInput {
   executor: Executor;
   turn: ReviewTurnSpec;
   fetchPrHead: FetchPrHead;
+  fetchPrBase?: FetchPrBase;
   fetchPrCommits: FetchPrCommits;
   /** Re-evaluated after every awaited settlement boundary. True only when a
    *  stop preceded substantive review work; the caller owns latching and
@@ -656,6 +658,16 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
       return undefined;
     const head = result.stdout.trim();
     return /^[a-f0-9]{40}$/.test(head) ? head : undefined;
+  };
+  const prepareBase = async (head: string) => {
+    if (!executor.execResult) throw new ReviewWorkspaceAdvanceError(head, "structured command results unavailable");
+    await prepareReviewBase(
+      executor.execResult.bind(executor),
+      head,
+      input.baseRef,
+      await (input.fetchPrBase ?? currentPrBase)(pr),
+      { checkout: checkout(), signal: turn.control.hardSignal, ...trace },
+    );
   };
   let answer = input.answer;
   let verdict = input.verdict;
@@ -711,6 +723,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         const summary = `workspace adopted ${current.slice(0, 7)} after ${expected.slice(0, 7)} — ${turn.followUp ? "re-reviewing the current head" : "no session to re-review; not approving"}`;
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
         if (turn.followUp) {
+          await prepareBase(current);
           const text = [
             `The workspace for ${where} now observes ${current}, superseding ${expected}. The earlier verdict is void: workspace recovery alone does not prove the new head was reviewed.`,
             `Re-review at ${current}: confirm with git rev-parse HEAD, read the current diff and its affected callers, and re-check the prior findings and every invariant case. Read complete review history again through github_pull_get with includeReviewHistory: true.`,
@@ -801,6 +814,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         if (stopped()) return outcome();
         if (!confirmed || !sameCommit(confirmed, current))
           throw new ReviewWorkspaceAdvanceError(current, "workspace HEAD could not confirm the advance");
+        await prepareBase(current);
         observedHead = confirmed;
         verdict = undefined; // the earlier verdict is void; the re-review must submit its own
         reviewHead = current;

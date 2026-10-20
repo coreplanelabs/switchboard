@@ -1253,6 +1253,7 @@ describe("settleReviewedHead — the head-move re-review", () => {
         ...turn,
       },
       fetchPrHead: async () => OTHER,
+      fetchPrBase: async () => ({ baseRef: "main", baseSha: HEAD }),
       fetchPrCommits: async ({ sha }) =>
         sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
       preReviewStopped: () => false,

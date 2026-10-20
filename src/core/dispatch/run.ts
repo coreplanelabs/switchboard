@@ -120,7 +120,7 @@ export interface RunDeps
   extends
     RecordDeps,
     Pick<AdmissionDeps, "runLedger">,
-    Pick<AuthorizeDeps, "fetchPrHead">,
+    Pick<AuthorizeDeps, "fetchPrHead" | "fetchPrBase">,
     Pick<ProvisionDeps, "skills" | "runBearers" | "dataDir" | "githubCredentials" | "githubBindings"> {
   config: ConfigStore;
   commands?: ChatCommands;

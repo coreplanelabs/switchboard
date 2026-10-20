@@ -4467,6 +4467,7 @@ describe("browser installation", () => {
           return { repo: "sample/api", ref: "patch-1", baseRef: "main", pr: 42, headSha: head };
         };
         core.fetchPrHead = async () => head;
+        core.fetchPrBase = async () => ({ baseRef: "main", baseSha: "a".repeat(40) });
         core.fetchPrFacts = async () => ({
           state: "open",
           headRef: "patch-1",
@@ -5621,6 +5622,7 @@ describe("browser installation", () => {
       undefined,
       (core) => {
         core.fetchPrHead = async () => head;
+        core.fetchPrBase = async () => ({ baseRef: "main", baseSha: "a".repeat(40) });
         core.resolveRepoContext = () => ({
           repo: "sample/api",
           ref: "patch-1",

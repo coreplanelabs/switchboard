@@ -4,6 +4,7 @@ import { startRequestRoot } from "./requestTrace.js";
 import type { RunEvent } from "./runEvents.js";
 import {
   currentPrHeadSha,
+  currentPrBase,
   explicitPrOf,
   explicitRepoOf,
   PR_BODY_CAP,
@@ -257,6 +258,29 @@ describe("resolveRepoContext: read-scoped PR lookup", () => {
       ],
     ]);
   });
+});
+
+describe("currentPrBase — trusted review preparation", () => {
+  it.each(["current", "missing SHA", "invalid SHA", "wrong repository", "closed", "invalid ref"] as const)(
+    "returns only an exact usable PR base: %s",
+    async (mode) => {
+      stubFetch({
+        body: {
+          number: 7,
+          state: mode === "closed" ? "closed" : "open",
+          head: { sha: "a".repeat(40), repo: { full_name: "fork/api" } },
+          base: {
+            ref: mode === "invalid ref" ? "bad..ref" : "release",
+            ...(mode === "missing SHA" ? {} : { sha: mode === "invalid SHA" ? "short" : "b".repeat(40) }),
+            repo: { full_name: mode === "wrong repository" ? "acme/other" : "acme/api" },
+          },
+        },
+      });
+      expect(await currentPrBase({ repo: "acme/api", number: 7 })).toEqual(
+        mode === "current" ? { baseRef: "release", baseSha: "b".repeat(40) } : undefined,
+      );
+    },
+  );
 });
 
 describe("currentPrHeadSha — the review post transition guard", () => {

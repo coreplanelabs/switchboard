@@ -1,4 +1,4 @@
-import { gitInCheckout, runWorkspaceCommand } from "../../execution/workspaceAdvance.js";
+import { gitInCheckout, runWorkspaceCommand, prepareReviewBase } from "../../execution/workspaceAdvance.js";
 import { checkoutOfSelection } from "../../execution/factory.js";
 // The authorize stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the gates a resolved request passes before a model turn, each asked against
@@ -9,6 +9,7 @@ import { checkoutOfSelection } from "../../execution/factory.js";
 // them: the agent gate before the thread is claimed, the repository gates once
 // the target has landed and the ack card is up, the head gates around the
 // workspace attach.
+import { reviewPublicationOf } from "../reviewPublication.js";
 import type { ConfigStore } from "../../config.js";
 import type { ExistingPrPublicationBinding } from "../coordinator/contract.js";
 import type { AgentDef } from "../../agents/registry.js";
@@ -17,7 +18,13 @@ import type { BoundaryScope, ProfileRefusal, ProfileResolution, RunProfile } fro
 import { reviewHeadOf, type RequestDirectives } from "../../directives.js";
 import type { Capabilities } from "../capabilities.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
-import { currentPrHeadSha, type RepoContext, type ResidentSlugs } from "../repoContext.js";
+import {
+  currentPrBase,
+  type FetchPrBase,
+  currentPrHeadSha,
+  type RepoContext,
+  type ResidentSlugs,
+} from "../repoContext.js";
 import { nearMatch } from "../nearMatch.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import { BASH_TIMEOUT_MS } from "../../execution/bashTimeout.js";
@@ -53,6 +60,8 @@ export interface AuthorizeDeps {
    * Injectable so tests assert the note without a network call.
    */
   fetchPrHead?: (pr: { repo: string; number: number }) => Promise<string | undefined>;
+  /** Fresh GitHub base facts for trusted review checkout preparation. */
+  fetchPrBase?: FetchPrBase;
   /**
    * The resident registry listing, for the not-onboarded gate's best guess
    * (record 0054): one bounded call — the probe's timeout, skipped inside a
@@ -697,6 +706,41 @@ export async function authorizeAttachedHead(
       });
       return { kind: "refused", reason: "workspace_head_mismatch" };
     }
+  }
+  const replay = resume?.plan?.kind === "finish" ? reviewPublicationOf(resume.row.state.reviewPublication) : undefined;
+  const finishingAcceptedReview =
+    replay?.state === "accepted" &&
+    replay.runId === resume?.row.runId &&
+    replay.target.repo === repoCtx.repo &&
+    replay.target.number === repoCtx.pr &&
+    (ctx.publication === undefined ||
+      (replay.target.repo === ctx.publication.repo &&
+        replay.target.number === ctx.publication.pr &&
+        replay.target.commitId === ctx.publication.expectedHeadSha));
+  if (
+    agent.name === "review" &&
+    repoCtx.repo &&
+    repoCtx.pr !== undefined &&
+    repoCtx.headSha !== undefined &&
+    !finishingAcceptedReview
+  ) {
+    const pr = { repo: repoCtx.repo, number: repoCtx.pr };
+    const { headSha } = repoCtx;
+    await root.span("dispatch.gate.review_base", async (span) => {
+      if (!executor.execResult)
+        throw new RefusalError(
+          refusalOf("setup_failed", "review base preparation requires structured command results"),
+        );
+      const base = await (deps.fetchPrBase ?? currentPrBase)(pr);
+      const baseRef = repoCtx.baseRef ?? base?.baseRef;
+      await prepareReviewBase(executor.execResult.bind(executor), headSha, baseRef, base, {
+        checkout: checkoutOfSelection(selection),
+        signal: stopSignal,
+        span,
+      });
+      if (repoCtx.baseRef === undefined) repoCtx = { ...repoCtx, baseRef };
+    });
+    if (stopSignal.aborted) return { kind: "stopped" };
   }
   return { kind: "allowed", repoCtx, verifiedAtAttach, headAdopted };
 }

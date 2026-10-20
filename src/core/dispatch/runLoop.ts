@@ -4397,6 +4397,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             : {}),
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
+        fetchPrBase: deps.fetchPrBase,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
         preReviewStopped: tailSkipped,
         // What the run did about a moved head: the re-review's note is an

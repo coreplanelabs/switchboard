@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
@@ -110,6 +110,7 @@ function setup(over: { user?: string; text?: string; residents?: boolean } = {})
   const cardCtx: GateCard = { card, shell, closeLines: () => ({}), clock: () => NOW };
   const deps: AuthorizeDeps = {
     config: configStore(),
+    fetchPrBase: async () => ({ baseRef: "main", baseSha: SHA_B }),
     capabilities: { ...NO_CAPABILITIES, residents: over.residents ?? true },
   };
   const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf(message.channelId), receivedAt: NOW });
@@ -615,7 +616,7 @@ describe("authorizePrHead — the PR head preflight", () => {
 
 describe("authorizeAttachedHead — every review workspace is at the PR head before the first model turn", () => {
   const review = getAgent("review");
-  const repoCtx: RepoContext = { repo: "acme/api", pr: 41, ref: "feature/x", headSha: SHA_A };
+  const repoCtx: RepoContext = { repo: "acme/api", pr: 41, ref: "feature/x", headSha: SHA_A, baseRef: "main" };
 
   function selection(over: { sha?: string; resident?: boolean; observed?: string | string[]; seeded?: boolean } = {}): {
     selection: ExecutorSelection;
@@ -847,6 +848,68 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     expect(s.refusals).toEqual(["workspace_head_mismatch"]);
     expect(releases).toEqual(["always"]);
   });
+  it.each([
+    "accepted",
+    "coordinator accepted",
+    "active resume",
+    "pending",
+    "uncertain",
+    "foreign run",
+    "foreign PR",
+    "foreign repository",
+    "foreign publication head",
+    "malformed",
+    "display event only",
+  ] as const)("finish recovery skips the base read only for its accepted publication: %s", async (mode) => {
+    const s = setup();
+    const { selection: sel } = selection({ sha: SHA_A, observed: SHA_A });
+    const receipt = {
+      version: 1,
+      runId: mode === "foreign run" ? "other-run" : "original-run",
+      target: {
+        repo: mode === "foreign repository" ? "other/api" : "acme/api",
+        number: mode === "foreign PR" ? 42 : 41,
+        commitId: mode === "malformed" ? "short" : mode === "foreign publication head" ? SHA_B : SHA_A,
+      },
+      bodyHash: "c".repeat(64),
+      state: mode === "pending" || mode === "uncertain" ? mode : "accepted",
+    };
+    const resume = {
+      row: { runId: "original-run", state: mode === "display event only" ? {} : { reviewPublication: receipt } },
+      plan: { kind: mode === "active resume" ? "resume" : "finish" },
+      events: [{ type: "review_posted", repo: "acme/api", number: 41, head: SHA_A }],
+    } as unknown as ResumeContext;
+    const fetchPrBase = vi.fn(async () => undefined);
+    const input = {
+      ...ctx(s, sel, { resume }),
+      ...(mode === "coordinator accepted" || mode === "foreign publication head"
+        ? {
+            publication: {
+              repo: "acme/api",
+              pr: 41,
+              headRef: "feature/x",
+              baseRef: "main",
+              publicationRef: "feature/x",
+              expectedHeadSha: SHA_A,
+              owner: { instanceId: "ship_review", unit: "ONE" },
+            },
+          }
+        : {}),
+    };
+    if (mode === "accepted" || mode === "coordinator accepted") {
+      expect(await authorizeAttachedHead({ ...s.deps, fetchPrBase }, input)).toMatchObject({
+        kind: "allowed",
+        repoCtx: { repo: "acme/api", pr: 41, headSha: SHA_A },
+      });
+      expect(fetchPrBase.mock.calls).toEqual([]);
+    } else {
+      await expect(authorizeAttachedHead({ ...s.deps, fetchPrBase }, input)).rejects.toThrow(
+        "review base does not match the current pull request",
+      );
+      expect(fetchPrBase.mock.calls).toEqual([[{ repo: "acme/api", number: 41 }]]);
+    }
+  });
+
   it("a resumed coordinator review still verifies the saved head before its next turn", async () => {
     const publication = {
       repo: "acme/api",
@@ -952,7 +1015,7 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       verifiedAtAttach: true,
       headAdopted: false,
     });
-    expect(atHead.commands).toHaveLength(2);
+    expect(atHead.commands).toHaveLength(3);
     expect(atHead.commands[0]).toContain("git remote add origin 'https://door.example/git/acme/api.git'");
     expect(atHead.commands[0]).not.toContain("https://github.com/acme/api.git");
     expect(atHead.commands[0]).toContain("refs/pull/41/head");
@@ -962,7 +1025,7 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     const seeded = setup();
     const seededHead = selection({ resident: false, observed: `${SHA_A}\n`, seeded: true });
     expect((await authorizeAttachedHead(seeded.deps, ctx(seeded, seededHead.selection))).kind).toBe("allowed");
-    expect(seededHead.commands).toEqual(["git -C '/workspace/checkout' rev-parse HEAD"]);
+    expect(seededHead.commands[0]).toBe("git -C '/workspace/checkout' rev-parse HEAD");
 
     const residentWithoutBinding = setup();
     const observedResident = selection({ observed: `${SHA_A}\n` });
@@ -974,7 +1037,8 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
         )
       ).kind,
     ).toBe("allowed");
-    expect(observedResident.commands).toEqual(["git rev-parse HEAD"]); // never wipe a resident worktree
+    expect(observedResident.commands[0]).toBe("git rev-parse HEAD");
+    expect(observedResident.commands.join("\n")).not.toContain("git init");
 
     const mismatched = setup();
     const elsewhere = selection({ resident: false, observed: `${SHA_B}\n` });

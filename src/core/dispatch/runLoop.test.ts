@@ -459,6 +459,7 @@ function setup(
       ? {
           postReviewComment: opts.review.post,
           fetchPrHead: async () => opts.review!.currentHead ?? opts.review!.head,
+          fetchPrBase: async () => ({ baseRef: "main", baseSha: "c".repeat(40) }),
           fetchPrFacts: async () => ({
             state: "open" as const,
             sameRepoHead: true,
@@ -8686,7 +8687,10 @@ describe("the pi harness — the container replaced under a living bot: the rela
     const currentExecutor = {
       execResult: async (command: string) => {
         commands.push(command);
-        if (command !== "git -C '/workspace/new checkout' rev-parse --verify HEAD")
+        if (
+          command.includes("/workspace/old checkout") ||
+          !command.includes("git -C '/workspace/new checkout' rev-parse --verify HEAD")
+        )
           throw new Error("the replacement has no original checkout");
         return { stdout: checkoutHead + "\n", stderr: "", exitCode: 0, truncated: false };
       },
@@ -8772,7 +8776,12 @@ describe("the pi harness — the container replaced under a living bot: the rela
         },
       ]);
       expect(checkoutHead).toBe("b1b2c3d4e5f60718293a4b5c6d7e8f9012345678");
-      expect(commands).toEqual(Array(3).fill("git -C '/workspace/new checkout' rev-parse --verify HEAD"));
+      expect(commands.filter((command) => !command.includes("review_before="))).toEqual(
+        Array(3).fill("git -C '/workspace/new checkout' rev-parse --verify HEAD"),
+      );
+      expect(commands.find((command) => command.includes("review_before="))).toContain(
+        "git -C '/workspace/new checkout' check-ref-format 'refs/heads/main'",
+      );
       s.ending.drain(true);
       await s.writer.settled();
       expect((await s.store.get("run-l"))?.reviewPost).toEqual({
