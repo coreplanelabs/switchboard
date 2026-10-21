@@ -66,6 +66,24 @@ describe("the readers' router is retired", () => {
       toolCalls: [{ id: "t1", tool: "bind_preset", input: { model: "openai/example", preset: "review" } }],
     });
   });
+
+  it("forwards HTTP send and headers observations to the routing recorder", async () => {
+    const observations: unknown[] = [];
+    const provider: Provider = {
+      name: "fake",
+      complete: async (request) => {
+        request.observer?.onRequestStart?.();
+        request.observer?.onResponseHeaders?.(200);
+        return { content: [], stopReason: "end_turn" };
+      },
+    };
+    await providerStructuredModel(provider, "model")(
+      { system: "system", user: "review", tool: { name: "bind_preset", description: "review", inputSchema: {} } },
+      { maxTokens: 50, signal: new AbortController().signal, observe: (value) => observations.push(value) },
+    );
+    expect(observations).toContainEqual({ transport: "request_send" });
+    expect(observations).toContainEqual({ transport: "response_headers", status: 200 });
+  });
 });
 
 describe("mintConfirmationOffer — risk projection", () => {

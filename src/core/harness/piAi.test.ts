@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AssistantMessage as PiAssistantMessage, Model, ProviderStreams } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { secretsFrom } from "../../secrets.js";
@@ -118,6 +118,35 @@ function fakeFetch(stream: string, status = 200, headers: Record<string, string>
 }
 
 describe("PiAiProviders — the provider table config.yaml names, built on pi's model library", () => {
+  it("observes request send and response headers even without a provider request ID", async () => {
+    let returnHeaders!: (response: Response) => void;
+    const headers = new Promise<Response>((resolve) => {
+      returnHeaders = resolve;
+    });
+    const events: string[] = [];
+    const table = new PiAiProviders(CONFIGS, {
+      secrets: SECRETS,
+      clock: CLOCK,
+      fetch: async () => {
+        events.push("fetch");
+        return headers;
+      },
+    });
+    const completion = table.get("anthropic").complete({
+      ...routeRequest(),
+      observer: {
+        onRequestStart: () => events.push("send"),
+        onResponseHeaders: (status) => events.push(`headers:${status}`),
+      },
+    });
+    await vi.waitFor(() => expect(events).toEqual(["send", "fetch"]));
+    returnHeaders(
+      new Response(anthropicToolCallStream(), { status: 200, headers: { "content-type": "text/event-stream" } }),
+    );
+    await expect(completion).resolves.toMatchObject({ stopReason: "tool_use" });
+    expect(events).toEqual(["send", "fetch", "headers:200"]);
+  });
+
   it("observes the provider request ID at response headers without changing the completion", async () => {
     const { fetchImpl } = fakeFetch(anthropicToolCallStream(), 200, { "request-id": "req_routing" });
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });

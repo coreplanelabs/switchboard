@@ -100,6 +100,21 @@ export class RoutingRecorder {
         return;
       }
       if (value.toolCalls) this.recordCalls(step, value.toolCalls);
+      if (value.transport === "request_send") {
+        step.transportAttempts = (step.transportAttempts ?? 0) + 1;
+        step.requestSentAt = this.now();
+        delete step.responseHeadersAt;
+        delete step.responseStatus;
+      } else if (
+        value.transport === "response_headers" &&
+        step.requestSentAt !== undefined &&
+        Number.isInteger(value.status) &&
+        value.status! >= 100 &&
+        value.status! <= 599
+      ) {
+        step.responseHeadersAt = this.now();
+        step.responseStatus = value.status;
+      }
       for (const key of ["provider", "model", "effort", "effortWord", "requestId", "stopReason"] as const) {
         if (value[key] !== undefined) step[key] = safe(value[key], 128);
       }

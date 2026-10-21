@@ -3435,6 +3435,18 @@ export async function operatorStage(
         ...(step?.provider ? { provider: step.provider } : {}),
         ...(step?.model ? { model: step.model } : {}),
         ...(step?.requestId ? { requestId: step.requestId } : {}),
+        ...(step?.phase === "model"
+          ? {
+              transportStage:
+                step.responseHeadersAt !== undefined
+                  ? "after_headers"
+                  : step.requestSentAt !== undefined
+                    ? "awaiting_headers"
+                    : "before_send",
+              transportAttempts: step.transportAttempts ?? 0,
+              ...(step.responseStatus !== undefined ? { responseStatus: step.responseStatus } : {}),
+            }
+          : {}),
       }),
     );
   };

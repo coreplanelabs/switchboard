@@ -528,7 +528,15 @@ export function providerStructuredModel(
       maxTokens: call.maxTokens,
       signal: call.signal,
       ...(call.beforeSend ? { beforeSend: call.beforeSend } : {}),
-      ...(call.observe ? { observer: { onResponse: (requestId: string) => observe({ requestId }) } } : {}),
+      ...(call.observe
+        ? {
+            observer: {
+              onRequestStart: () => observe({ transport: "request_send" }),
+              onResponseHeaders: (status: number) => observe({ transport: "response_headers", status }),
+              onResponse: (requestId: string) => observe({ requestId }),
+            },
+          }
+        : {}),
       // The caller's configured effort, card-decided (`turnEffort`): intake's
       // `intake.effort` or the operator's `defaults.efforts.general`. Absent →
       // the model's own default.

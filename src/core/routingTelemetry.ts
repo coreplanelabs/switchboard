@@ -2,6 +2,9 @@ import type { TokenUsage } from "./provider.js";
 import type { SpanEndEvent } from "./runEvents.js";
 
 export interface RoutingModelObservation {
+  /** Transient provider transport events; the recorder stamps them with its clock. */
+  transport?: "request_send" | "response_headers";
+  status?: number;
   provider?: string;
   model?: string;
   effort?: string;
@@ -26,7 +29,7 @@ export interface RoutingToolCall {
   result?: string;
 }
 
-export interface RoutingStep extends Omit<RoutingModelObservation, "toolCalls"> {
+export interface RoutingStep extends Omit<RoutingModelObservation, "toolCalls" | "transport" | "status"> {
   index: number;
   phase: RoutingPhase;
   startedAt: number;
@@ -34,6 +37,11 @@ export interface RoutingStep extends Omit<RoutingModelObservation, "toolCalls"> 
   durationMs: number;
   remainingMs: number;
   outcome: "completed" | "timeout" | "error";
+  /** Count and last-attempt stage, including SDK retries. */
+  transportAttempts?: number;
+  requestSentAt?: number;
+  responseHeadersAt?: number;
+  responseStatus?: number;
   tool?: string;
   question?: string;
   proposal?: string;
