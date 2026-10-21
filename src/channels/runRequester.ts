@@ -16,6 +16,8 @@ interface RequesterNames {
   profile?(id: string): Promise<PersonProfile | undefined>;
   tokens: IngressTokenMap;
   personByEmail?: PersonLookup;
+  /** Email from a current, verified browser session for this exact Access id. */
+  verifiedAccessEmail?(id: string): Promise<string | undefined>;
 }
 
 /** Keep diagnostics queryable without logging identities or provider payloads. */
@@ -56,6 +58,12 @@ export async function requesterProfile(id: string, options: RequesterNames): Pro
     const people = new Set(
       bindings.flatMap((binding) => (binding.status === "bound" ? [binding.binding.personId] : [])),
     );
+    if (people.size === 0) {
+      const email = await options.verifiedAccessEmail?.(id);
+      const person = email ? await options.personByEmail?.(email) : undefined;
+      if (!person?.id.startsWith("slack:")) return;
+      return (await profileOf(person.id)) ?? (person.name ? { name: person.name } : undefined);
+    }
     if (people.size !== 1) return;
     const personId = [...people][0]!;
     const peers = await options.store.execute({ action: "identities", organization: options.organization, personId });

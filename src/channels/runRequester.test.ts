@@ -57,6 +57,18 @@ describe("requesterName", () => {
     expect(await requesterName("access:unlinked", options)).toBeUndefined();
   });
 
+  it("names an unlinked browser account from its current verified session email", async () => {
+    const { options } = await fixture();
+    const current = {
+      ...options,
+      verifiedAccessEmail: async (id: string) => (id === "access:unlinked" ? "alice@example.test" : undefined),
+      personByEmail: async (email: string) =>
+        email === "alice@example.test" ? { id: "slack:UALICE", name: "Alice Chen" } : undefined,
+    };
+    expect(await requesterProfile("access:unlinked", current)).toEqual({ name: "Alice Chen" });
+    expect(await requesterProfile("access:other", current)).toBeUndefined();
+  });
+
   it("does not use revoked or foreign-workspace profile links", async () => {
     const { store, options } = await fixture();
     expect(await requesterName("access:account-1", { ...options, slackTeam: "T2" })).toBeUndefined();
@@ -71,6 +83,13 @@ describe("requesterName", () => {
       proof: { method: "authenticated-human", version: 1 },
     });
     expect(await requesterName("access:account-1", options)).toBeUndefined();
+    expect(
+      await requesterName("access:account-1", {
+        ...options,
+        verifiedAccessEmail: async () => "alice@example.test",
+        personByEmail: async () => ({ id: "slack:UALICE", name: "Alice Chen" }),
+      }),
+    ).toBeUndefined();
     expect(await requesterName("slack:UALICE", options)).toBe("Alice Chen");
   });
 
