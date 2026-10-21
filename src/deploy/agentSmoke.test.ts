@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { agentSmokeTransport, parseSmokeConfig, runAgentSmoke, smokeProgress } from "./agentSmoke.js";
+import { agentSmokeTransport, parseSmokeConfig, runAgentSmoke, SmokeReaderError, smokeProgress } from "./agentSmoke.js";
 import { handleMcpRequest } from "../channels/mcp.js";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
@@ -58,6 +58,99 @@ function withReaderProbe(fetch: typeof globalThis.fetch): typeof globalThis.fetc
 }
 
 describe("bounded agent smoke", () => {
+  it("finishes the original Review run after one transient read failure", async () => {
+    const { transport } = fixture();
+    const request = transport.request;
+    transport.request = vi.fn(async (scenario, thread, onIntake) => {
+      const response = (await request(scenario, thread, onIntake)) as { run: { id: string }; build: unknown };
+      return {
+        ...response,
+        threadKey: `http:smoke:${thread}`,
+        run: { id: response.run.id, status: "started" },
+        admission: { status: "accepted", receiptId: `receipt-${scenario.id}`, runId: response.run.id },
+      };
+    });
+    const readRun = transport.readRun;
+    let lostRead = false;
+    const snapshots: unknown[] = [];
+    transport.readRun = async (id, onRecord) => {
+      if (id === "run-review" && !lostRead) {
+        lostRead = true;
+        throw new SmokeReaderError({ code: "mcp_transport_failed", operation: "runs_get" });
+      }
+      if (id === "run-review")
+        expect(snapshots).toContainEqual(
+          expect.objectContaining({
+            scenarios: expect.arrayContaining([
+              expect.objectContaining({
+                id: "review",
+                runId: "run-review",
+                readRetry: { code: "mcp_transport_failed", operation: "runs_get" },
+              }),
+            ]),
+          }),
+        );
+      return readRun(id, onRecord);
+    };
+
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport,
+      onReceipt: async (saved) => {
+        snapshots.push(saved);
+      },
+    });
+
+    expect(receipt.capabilityOutcome).toBe("passed");
+    expect(receipt.scenarios[2]).toMatchObject({
+      id: "review",
+      runId: "run-review",
+      outcome: "passed",
+      reason: "accepted",
+      readRetry: { code: "mcp_transport_failed", operation: "runs_get" },
+      outputReadback: { kind: "native-persisted-run", runId: "run-review" },
+    });
+    expect(transport.request).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps a denied run read incomplete without another request", async () => {
+    const { transport } = fixture();
+    const request = transport.request;
+    transport.request = vi.fn(async (scenario, thread, onIntake) => {
+      const response = (await request(scenario, thread, onIntake)) as { run: { id: string }; build: unknown };
+      return {
+        ...response,
+        threadKey: `http:smoke:${thread}`,
+        run: { id: response.run.id, status: "started" },
+        admission: { status: "accepted", receiptId: `receipt-${scenario.id}`, runId: response.run.id },
+      };
+    });
+    const readRun = transport.readRun;
+    let deniedReads = 0;
+    transport.readRun = async (id, onRecord) => {
+      if (id === "run-review") {
+        deniedReads++;
+        throw new SmokeReaderError({ code: "mcp_read_unauthorized", operation: "runs_get", rpcCode: -32001 });
+      }
+      return readRun(id, onRecord);
+    };
+
+    const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+
+    expect(receipt.capabilityOutcome).toBe("incomplete");
+    expect(receipt.scenarios[2]).toMatchObject({
+      id: "review",
+      runId: "run-review",
+      outcome: "incomplete",
+      reason: "run_record_unproven",
+      observationError: { code: "mcp_read_unauthorized", operation: "runs_get", rpcCode: -32001 },
+    });
+    expect(deniedReads).toBe(1);
+    expect(transport.request).toHaveBeenCalledTimes(3);
+  });
+
   it.each(["local", "unavailable"] as const)("retains an explicit %s mapping for the original run", async (mapping) => {
     const original = fixture();
     const receipt = await runAgentSmoke({

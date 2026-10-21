@@ -1043,6 +1043,11 @@ describe("the `end` frame's stamps and the delivery caption (docs/reference/spec
     expect(parseEndFrame('{"sealedAt":1003000,"replyOk":true}')).toEqual({ sealedAt: 1_003_000, replyOk: true });
     expect(parseEndFrame('{"sealedAt":1003000}')).toEqual({ sealedAt: 1_003_000 });
     expect(parseEndFrame('{"sealedAt":1003000,"replyOk":false}')).toEqual({ sealedAt: 1_003_000, replyOk: false });
+    expect(parseEndFrame('{"sealedAt":1003000,"replyOk":false,"replyNote":"no channel to deliver to"}')).toEqual({
+      sealedAt: 1_003_000,
+      replyOk: false,
+      replyNote: "no channel to deliver to",
+    });
     for (const empty of [
       "{}",
       undefined,
@@ -1062,6 +1067,7 @@ describe("the `end` frame's stamps and the delivery caption (docs/reference/spec
     expect(deliveryCaption({ finishedAt: 1_000_000, sealedAt: 999_000, replyOk: true })).toBe("delivered in 0s"); // skew never negative
     expect(deliveryCaption({ finishedAt: 1_000_000, sealedAt: 1_002_400, replyOk: false })).toBe("reply failed");
     expect(deliveryCaption({ replyOk: false })).toBe("reply failed");
+    expect(deliveryCaption({ replyOk: false, replyNote: "no channel to deliver to" })).toBe("no separate reply");
     expect(deliveryCaption({ finishedAt: 1_000_000, sealedAt: 1_002_400 })).toBe(""); // no attempt measured
     expect(deliveryCaption({ finishedAt: 1_000_000, replyOk: true })).toBe(""); // no seal stamp
     expect(deliveryCaption({})).toBe("");

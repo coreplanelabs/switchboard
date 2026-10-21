@@ -799,6 +799,21 @@ describe("serveEvents (SSE, transport-free)", () => {
     expect(rec.ended).toBe(true);
   });
 
+  it("streams the no-channel reply reason to a live run page", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create();
+    const rec = recordingSink();
+    serveEvents(
+      (onEvent, onFinished, onSealed) => reg.subscribe(id, token, { onEvent, onFinished, onSealed }),
+      rec.sink,
+    );
+    reg.finish(id);
+    reg.seal(id, { replyOk: false, replyNote: "no channel to deliver to" });
+    expect(rec.body()).toMatch(
+      /event: end\ndata: \{"sealedAt":\d+,"replyOk":false,"replyNote":"no channel to deliver to"\}\n\n$/,
+    );
+  });
+
   it("an already-sealed run replays its backlog, then `finished`, then `end`, immediately (still 200)", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
@@ -2140,6 +2155,19 @@ describe("live view on RunsService: history pages + index toggle", () => {
   const done = (t: { finished: Promise<void> }) => t.finished;
 
   describe("persisted run page (history mode)", () => {
+    it("seeds the no-channel reply reason from a saved run", async () => {
+      const h = harness();
+      await h.store!.put(record("async-run", { replyOk: false, replyNote: "no channel to deliver to" }));
+      const request = fakeReqRes("GET", "/runs/async-run");
+      expect(h.handler(request.req, request.res)).toBe(true);
+      await request.finished;
+      expect(runSeedOf(request.body())).toMatchObject({
+        mode: "history",
+        replyOk: false,
+        replyNote: "no channel to deliver to",
+      });
+    });
+
     it("200s tokenless: the seed is history mode with the record's events, status and duration — no token anywhere", async () => {
       const h = harness();
       await h.store!.put(record("r1"));

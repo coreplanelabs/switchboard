@@ -103,7 +103,7 @@ const runClock = seed?.mode === "live" ? createRunClock(seed, nowWall.value) : n
 const frozenMs = ref<number | undefined>(undefined);
 /** The stamps a live page learns from the `finished` and `end` frames — the
  *  delivery caption's inputs. A history page reads the seed's. */
-const liveStamps = ref<{ finishedAt?: number; sealedAt?: number; replyOk?: boolean }>({});
+const liveStamps = ref<{ finishedAt?: number; sealedAt?: number; replyOk?: boolean; replyNote?: string }>({});
 
 /** The outcome chip once ended: the history seed's record status, or — on a
  *  live page — the stop the viewer knows about; an unstopped end is the honest
@@ -138,11 +138,11 @@ const endChip = computed(() => {
   };
 });
 const endMs = computed(() => (isHistory && seed?.mode === "history" ? seed.durationMs : frozenMs.value));
-/** `delivered in 2s` / `reply failed` / nothing (live-view item 22; tracing.md). */
+/** `delivered in 2s` / `no separate reply` / `reply failed` / nothing (live-view item 22). */
 const delivery = computed(() =>
   deliveryCaption(
     isHistory && seed?.mode === "history"
-      ? { finishedAt: seed.finishedAt, sealedAt: seed.sealedAt, replyOk: seed.replyOk }
+      ? { finishedAt: seed.finishedAt, sealedAt: seed.sealedAt, replyOk: seed.replyOk, replyNote: seed.replyNote }
       : liveStamps.value,
   ),
 );
@@ -251,7 +251,12 @@ const timeline = computed(() => {
       owner,
       totalMs,
       phase: "ended",
-      delivery: { finishedAt: seed.finishedAt, sealedAt: seed.sealedAt, replyOk: seed.replyOk },
+      delivery: {
+        finishedAt: seed.finishedAt,
+        sealedAt: seed.sealedAt,
+        replyOk: seed.replyOk,
+        replyNote: seed.replyNote,
+      },
       // The record's terminal status: what a step still open at the run's
       // terminal event is marked cut by (live-view item 25).
       ...(seed.status ? { endedBy: seed.status } : {}),

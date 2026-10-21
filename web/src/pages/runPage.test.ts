@@ -1579,6 +1579,27 @@ describe("RunPage — live mode", () => {
     expect(b.wrapper.find("#delivery").exists()).toBe(false);
   });
 
+  it("shows no separate reply for a run without a reply channel", async () => {
+    const live = mountLive();
+    live.es().emitOpen();
+    live.es().emitNamed("finished", JSON.stringify({ finishedAt: liveSeed.startedAt + 10_000 }));
+    live.es().emitNamed(
+      "end",
+      JSON.stringify({
+        sealedAt: liveSeed.startedAt + 12_000,
+        replyOk: false,
+        replyNote: "no channel to deliver to",
+      }),
+    );
+    await live.wrapper.vm.$nextTick();
+    expect(live.wrapper.find("#delivery").text()).toBe("· no separate reply");
+
+    const history = mountApp(RunPage, {
+      seed: historySeed([], { status: "completed", replyOk: false, replyNote: "no channel to deliver to" }),
+    });
+    expect(history.find("#delivery").text()).toBe("· no separate reply");
+  });
+
   it("a history page reads the caption from the record's stamps", () => {
     const w = mountApp(RunPage, {
       seed: historySeed([], {
