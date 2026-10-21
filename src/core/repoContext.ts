@@ -1497,19 +1497,10 @@ export type FetchPrBase = (pr: {
   number: number;
 }) => Promise<{ baseRef: string; baseSha: string } | undefined>;
 
-/** Pin the current PR base through the read-only GitHub boundary. Missing
- * facts refuse workspace preparation; they never select a default branch. */
+/** Pin the live PR base ref through the read-only GitHub boundary. PR-object
+ * base.sha can lag the branch tip; missing facts never select a default. */
 export const currentPrBase: FetchPrBase = async (pr) => {
-  const pull = await new RestGithubApi().getPullRequest(pr.repo, pr.number);
-  const baseRef = validRef(pull.base.ref);
-  const baseSha = pull.base.sha;
-  return pull.state === "open" &&
-    pull.base.repo.toLowerCase() === pr.repo.toLowerCase() &&
-    baseRef &&
-    baseSha &&
-    /^[a-f0-9]{40}$/.test(baseSha)
-    ? { baseRef, baseSha }
-    : undefined;
+  return new RestGithubApi().getCurrentPullBase(pr.repo, pr.number);
 };
 
 /** The PR's head SHA as GitHub reports it NOW (40-hex), or undefined when the

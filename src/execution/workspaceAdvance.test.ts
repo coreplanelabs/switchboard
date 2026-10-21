@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalExecutor } from "./executor.js";
 import { shellQuote } from "./shellQuote.js";
-import { advanceWorkspace } from "./workspaceAdvance.js";
+import { advanceWorkspace, prepareReviewBase } from "./workspaceAdvance.js";
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true })));
 async function repository() {
@@ -118,5 +118,23 @@ describe("executor workspace advance", () => {
     await expect(h.executor.moveTo(target)).rejects.toThrow();
     expect(await h.executor.readFile("private.txt")).toBe("private bytes");
     expect((await h.executor.execResult("git rev-parse HEAD")).stdout.trim()).toBe(h.old);
+  });
+});
+
+describe("review base preparation", () => {
+  it("reports a missing Git credential without exposing command data", async () => {
+    const w = await repository();
+    await expect(
+      prepareReviewBase(
+        (command, opts) => w.executor.execResult(command, { ...opts, env: { GH_ENTERPRISE_TOKEN: "" } }),
+        w.old,
+        "main",
+        {
+          baseRef: "main",
+          baseSha: w.target,
+        },
+      ),
+    ).rejects.toThrow("review base: Git credential unavailable");
+    expect((await w.executor.execResult("git rev-parse HEAD")).stdout.trim()).toBe(w.old);
   });
 });

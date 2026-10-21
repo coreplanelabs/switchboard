@@ -6333,9 +6333,11 @@ function residentFetchStub(
     if (path === "/native/exec" || path === "/exec") {
       const command = String(body?.command);
       const git = attachedWorkspace === undefined ? "git" : `git -C ${shellQuote(attachedWorkspace)}`;
-      const preparingBase = command.startsWith(
-        `set -eu\n${git} check-ref-format 'refs/heads/main'\ntest "$(${git} rev-parse --verify HEAD)" = '${attachedSha}'\n`,
-      );
+      const preparingBase =
+        command.startsWith("set -eu\n") &&
+        command.includes(`${git} check-ref-format 'refs/heads/main'`) &&
+        command.includes(`= '${attachedSha}' || review_fail 'checkout HEAD changed'`) &&
+        command.includes("review_before=");
       const comparison = comparisonResult(command);
       if (comparison) return Response.json({ ...comparison, cwd: attachedWorkspace });
       if (handlers.exec !== undefined) return handlers.exec(body ?? {});

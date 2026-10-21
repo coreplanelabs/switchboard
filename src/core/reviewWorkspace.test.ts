@@ -83,7 +83,7 @@ async function workspace(
     url: "https://sandbox.example",
     token: "fixture",
     threadKey: "cli:review",
-    resolveEnvs: async () => ({}),
+    resolveEnvs: async () => ({ GH_ENTERPRISE_TOKEN: "synthetic" }),
   });
   const followUp = vi.fn(async (input) => {
     expect((await repo.execResult("git rev-parse HEAD")).stdout.trim()).toBe(target);
@@ -228,7 +228,11 @@ describe("review settlement in a bound non-root checkout", () => {
               },
       ),
     ).rejects.toThrow(
-      mode === "missing" || mode === "retargeted" ? "review base does not match" : "prepare_review_base failed",
+      mode === "missing" || mode === "retargeted"
+        ? "review base does not match"
+        : mode === "wrong SHA"
+          ? "GitHub and remote base tips differ"
+          : "prepare_review_base failed",
     );
     expect((await w.repo.execResult("git rev-parse HEAD")).stdout.trim()).toBe(
       mode === "HEAD changed" ? OLD_HEAD : NEW_HEAD,
@@ -394,7 +398,9 @@ describe("review settlement in a bound non-root checkout", () => {
               }),
             );
           }
-          return new Response(JSON.stringify(await new LocalExecutor(current).execResult(body.command)));
+          return new Response(
+            JSON.stringify(await new LocalExecutor(current).execResult(body.command, { env: body.env })),
+          );
         }),
       );
       const executor = new ResidentExecutor({
@@ -407,6 +413,7 @@ describe("review settlement in a bound non-root checkout", () => {
         ownerFence: 7,
         refHint: "feature",
         sha: OLD_HEAD,
+        resolveEnvs: async () => ({ GH_ENTERPRISE_TOKEN: "synthetic" }),
       });
       const binding = await executor.attach();
       const selection = { executor, backend: "resident" as const, resident: true, binding };
