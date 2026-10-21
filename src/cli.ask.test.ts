@@ -125,32 +125,35 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-/** `npx tsx src/cli.ts ask <text>` from the empty directory, both streams captured. */
-function ask(
-  text: string,
-  flags: string[] = [],
+/** The CLI process from the empty directory, with both streams captured. */
+function cliProcess(
+  args: string[],
   clientConfig?: string,
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const repo = process.cwd();
-  const child = spawn(
-    process.execPath,
-    [join(repo, "node_modules/.bin/tsx"), join(repo, "src/cli.ts"), "ask", ...flags, text],
-    {
-      cwd: dir,
-      env: {
-        ...process.env,
-        SWITCHBOARD_CONFIG: join(dir, "config", "config.yaml"),
-        SWITCHBOARD_SKILLS_DIR: join(repo, "skills"),
-        SWITCHBOARD_CLIENT_CONFIG: clientConfig ?? join(dir, "no-hosted-profile.json"),
-        FAKE_API_KEY: "not-a-real-key",
-      },
+  const child = spawn(process.execPath, [join(repo, "node_modules/.bin/tsx"), join(repo, "src/cli.ts"), ...args], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      SWITCHBOARD_CONFIG: join(dir, "config", "config.yaml"),
+      SWITCHBOARD_SKILLS_DIR: join(repo, "skills"),
+      SWITCHBOARD_CLIENT_CONFIG: clientConfig ?? join(dir, "no-hosted-profile.json"),
+      FAKE_API_KEY: "not-a-real-key",
     },
-  );
+  });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
   child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
   return new Promise((resolve) => child.on("close", (code) => resolve({ code, stdout, stderr })));
+}
+
+function ask(
+  text: string,
+  flags: string[] = [],
+  clientConfig?: string,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return cliProcess(["ask", ...flags, text], clientConfig);
 }
 
 /** The core's process log: `[run] …`, `[event] …`, `[done] …` — a tag in brackets at the start of a line. */
@@ -263,4 +266,103 @@ describe("the hosted CLI process admission receipt", () => {
       await new Promise<void>((resolve) => host.close(() => resolve()));
     }
   }, 60_000);
+});
+
+describe("hosted CLI failure output", () => {
+  it("prints only safe details for hosted commands and asks across response failures", async () => {
+    const bearer = "a".repeat(64);
+    let response = "transport";
+    const host = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        if (response === "transport") {
+          res.destroy();
+          return;
+        }
+        if (response === "malformed") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end("PRIVATE_RESPONSE");
+          return;
+        }
+        if (response === "refused") {
+          res.writeHead(403, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: { code: -32001, message: `forbidden https://private.example/x bearer ${bearer}` },
+            }),
+          );
+          return;
+        }
+        if (response === "rpc-refused") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { code: -32001, message: "forbidden https://private.example/x" } }));
+          return;
+        }
+        if (response === "unparseable") {
+          res.writeHead(503, { "content-type": "application/json" });
+          res.end("PRIVATE_RESPONSE");
+          return;
+        }
+        if (response === "bad-result") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ result: { content: [{ text: "header\nPRIVATE_RESPONSE" }] } }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("null");
+      });
+    });
+    await new Promise<void>((resolve) => host.listen(0, "127.0.0.1", resolve));
+    try {
+      const profile = join(dir, "hosted-failure-test.json");
+      writeFileSync(
+        profile,
+        JSON.stringify({ url: `http://127.0.0.1:${(host.address() as AddressInfo).port}`, bearer }),
+      );
+      const cases = [
+        { name: "transport", expected: "MCP transport failed before a response" },
+        { name: "malformed", expected: "MCP HTTP 200 response was invalid" },
+        { name: "refused", expected: "MCP HTTP 403; code -32001; message forbidden «redacted-url» bearer «redacted»" },
+        { name: "unparseable", expected: "MCP HTTP 503" },
+        { name: "primitive", expected: "MCP returned HTTP 200 without JSON" },
+      ];
+      for (const { name, expected } of cases) {
+        response = name;
+        for (const args of [
+          ["runs", "list"],
+          ["ask", "check status"],
+        ]) {
+          const result = await cliProcess(args, profile);
+          expect(result.code, `${name} ${args[0]}: ${result.stderr}`).toBe(1);
+          expect(result.stdout).toBe("");
+          expect(result.stderr.trim().split("\n").at(-1), `${name} ${args[0]}`).toBe(expected);
+          expect(result.stderr).not.toContain("PRIVATE_RESPONSE");
+          expect(result.stderr).not.toContain("private.example");
+          expect(result.stderr).not.toContain(bearer);
+          expect(result.stderr).not.toContain("fetch failed");
+        }
+      }
+      response = "rpc-refused";
+      for (const args of [
+        ["runs", "list"],
+        ["ask", "check status"],
+      ]) {
+        const result = await cliProcess(args, profile);
+        expect(result.code).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr.trim().split("\n").at(-1)).toBe(
+          `${args[0] === "ask" ? "hosted request" : "hosted command"} failed: code -32001; message forbidden «redacted-url»`,
+        );
+        expect(result.stderr).not.toContain("private.example");
+      }
+      response = "bad-result";
+      const malformedResult = await cliProcess(["runs", "list"], profile);
+      expect(malformedResult.code).toBe(1);
+      expect(malformedResult.stdout).toBe("");
+      expect(malformedResult.stderr.trim().split("\n").at(-1)).toBe("hosted command failed: invalid response");
+      expect(malformedResult.stderr).not.toContain("PRIVATE_RESPONSE");
+    } finally {
+      await new Promise<void>((resolve) => host.close(() => resolve()));
+    }
+  }, 120_000);
 });

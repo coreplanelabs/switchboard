@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   connectHosted,
+  hostedMcpCall,
+  hostedRpcErrorDetails,
   hostedUrl,
   installCodexMcp,
   mcpProxyError,
@@ -222,6 +224,185 @@ describe("hosted client setup", () => {
       result: { content: [{ text: "ok" }] },
     });
     expect(sent).toEqual([{ url: "https://bot.example/mcp", authorization: `Bearer ${profile.bearer}`, body: line }]);
+  });
+
+  it("retains safe HTTP and JSON-RPC details when a hosted MCP request is refused", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          {
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32001, message: "forbidden https://private.example/path?token=SECRET" },
+          },
+          { status: 403 },
+        ),
+      ),
+    );
+    const profile = { url: "https://bot.example", bearer: "f".repeat(64) };
+    await expect(hostedMcpCall(profile, "tools/list")).rejects.toThrow(
+      "MCP HTTP 403; code -32001; message forbidden «redacted-url»",
+    );
+    await expect(proxyHostedMcp(profile, '{"jsonrpc":"2.0","id":7,"method":"tools/list"}')).rejects.toThrow(
+      "MCP HTTP 403; code -32001; message forbidden «redacted-url»",
+    );
+  });
+
+  it("a hosted setup timeout names its last safe refusal without storing the bearer", async () => {
+    const dir = temp();
+    const profilePath = join(dir, "client.json");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const bearer = String((init.headers as Record<string, string>).authorization).slice("Bearer ".length);
+        return Response.json(
+          { jsonrpc: "2.0", id: null, error: { code: -32001, message: `forbidden token ${bearer}` } },
+          { status: 403 },
+        );
+      }),
+    );
+    await expect(
+      connectHosted("https://bot.example", {
+        open: () => {},
+        output: () => {},
+        attempts: 1,
+        pollMs: 0,
+        profilePath,
+        codexPath: join(dir, "config.toml"),
+      }),
+    ).rejects.toThrow(
+      "Connection timed out. Run connect again and approve the matching code in your browser. Last response: MCP HTTP 403; code -32001; message forbidden token «redacted»",
+    );
+    expect(() => statSync(profilePath)).toThrow();
+  });
+
+  it("a JSON-RPC initialize refusal remains visible at the setup deadline", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32001, message: "forbidden https://private.example/path?token=SECRET" },
+        }),
+      ),
+    );
+    const dir = temp();
+    await expect(
+      connectHosted("https://bot.example", {
+        open: () => {},
+        output: () => {},
+        attempts: 1,
+        pollMs: 0,
+        profilePath: join(dir, "client.json"),
+        codexPath: join(dir, "config.toml"),
+      }),
+    ).rejects.toThrow("Last response: MCP initialize: code -32001; message forbidden «redacted-url»");
+  });
+
+  it("a malformed later initialize response replaces an earlier refusal in the timeout", async () => {
+    const dir = temp();
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(Response.json({ error: { code: -32001, message: "forbidden" } }, { status: 403 }))
+        .mockResolvedValueOnce(Response.json({ jsonrpc: "2.0", id: 1 })),
+    );
+    await expect(
+      connectHosted("https://bot.example", {
+        open: () => {},
+        output: () => {},
+        attempts: 2,
+        pollMs: 0,
+        profilePath: join(dir, "client.json"),
+        codexPath: join(dir, "config.toml"),
+      }),
+    ).rejects.toThrow("Last response: MCP initialize returned no result");
+  });
+
+  it("a hosted read-scope refusal does not print a raw JSON-RPC error or save the bearer", async () => {
+    const dir = temp();
+    const profilePath = join(dir, "client.json");
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        calls++;
+        if (calls === 1)
+          return Response.json({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: "switchboard" } } });
+        const bearer = String((init.headers as Record<string, string>).authorization).slice("Bearer ".length);
+        return Response.json({
+          jsonrpc: "2.0",
+          id: 1,
+          error: {
+            code: -32001,
+            message: `forbidden https://private.example/path?token=SECRET bearer ${bearer}`,
+          },
+        });
+      }),
+    );
+    await expect(
+      connectHosted("https://bot.example", {
+        open: () => {},
+        output: () => {},
+        attempts: 1,
+        pollMs: 0,
+        profilePath,
+        codexPath: join(dir, "config.toml"),
+      }),
+    ).rejects.toThrow(
+      "MCP access is missing runs:read: code -32001; message forbidden «redacted-url» bearer «redacted»",
+    );
+    expect(() => statSync(profilePath)).toThrow();
+  });
+
+  it("formats a hosted command error without the bearer or response URL", () => {
+    const bearer = "f".repeat(64);
+    expect(
+      hostedRpcErrorDetails(
+        { code: -32001, message: `forbidden https://private.example/path?token=SECRET bearer ${bearer}` },
+        bearer,
+      ),
+    ).toBe("code -32001; message forbidden «redacted-url» bearer «redacted»");
+  });
+
+  it("does not report a failed hosted notification as delivered", async () => {
+    const profile = { url: "https://bot.example", bearer: "f".repeat(64) };
+    const line = '{"jsonrpc":"2.0","method":"notifications/initialized"}';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("PRIVATE_BODY", { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(proxyHostedMcp(profile, line)).rejects.toThrow("MCP HTTP 503");
+    expect(await proxyHostedMcp(profile, line)).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports hosted MCP transport failure without exposing the endpoint or bearer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("POST https://bot.example/mcp?token=PRIVATE failed");
+      }),
+    );
+    const profile = { url: "https://bot.example", bearer: "f".repeat(64) };
+    await expect(hostedMcpCall(profile, "tools/list")).rejects.toThrow("MCP transport failed before a response");
+  });
+
+  it("keeps the observed status when a successful hosted response is malformed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("PRIVATE_BODY", { status: 200 })),
+    );
+    const profile = { url: "https://bot.example", bearer: "f".repeat(64) };
+    await expect(proxyHostedMcp(profile, '{"jsonrpc":"2.0","id":7,"method":"tools/list"}')).rejects.toThrow(
+      "MCP HTTP 200 response was invalid",
+    );
+    await expect(hostedMcpCall(profile, "tools/list")).rejects.toThrow("MCP HTTP 200 response was invalid");
   });
 
   it("answers a failed stdio request by id and leaves notifications unanswered", () => {
