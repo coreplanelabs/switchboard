@@ -3097,6 +3097,72 @@ describe("resident workload admission", () => {
     });
     expect(await instance.recoverNativeOperation(operation.key, operation.recordHash)).toEqual(result);
   });
+  it("recovers an exact old operator scope after its container sleeps without claiming the original result", async () => {
+    const { instance, rows, native } = workloadResident();
+    const owner = { opOwner: "op:original" };
+    const key = "native-operation:op:original";
+    const journal = new NativeOperationJournal(instance.ctx.storage);
+    await journal.open(key, owner, undefined, {
+      producer: "resident-call",
+      resource: "repo:acme/api",
+      sourceId: "attach",
+      callId: "22222222-2222-4222-8222-222222222222",
+      actor: "operator",
+      traceId: null,
+      parentSourceId: null,
+      build: "a".repeat(40),
+      workerVersion: "33333333-3333-4333-8333-333333333333",
+      startedAt: 1000,
+    });
+    const originalTransport = instance.nativeScopeTransport();
+    const scopes = new NativeRunScopes(instance.ctx.storage, originalTransport);
+    await scopes.reserveOperator(owner);
+    await journal.bindScope(key, await scopes.ensureOperator(owner, async () => {}));
+    await journal.close(key);
+    const recordHash = (await instance.getNativeOperations()).operations[0].recordHash;
+
+    instance.ctx.container.running = false;
+    let starts = 0;
+    instance.start = async () => {
+      starts++;
+      instance.ctx.container.running = true;
+    };
+    instance.nativeScopeTransport = () => ({
+      request: async (value: Record<string, unknown>, timeout: number) => {
+        if (!instance.ctx.container.running) throw new Error("native-scope runtime unavailable");
+        if (value.mode === "inspect")
+          return {
+            stdout: JSON.stringify({ version: 1, boot: "44444444-4444-4444-8444-444444444444" }),
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+          };
+        return originalTransport.request(value, timeout);
+      },
+    });
+
+    rows.set("cleanup", "repo:acme/api");
+    await expect(instance.recoverNativeOperation(key, recordHash, true)).rejects.toThrow(
+      "native-scope runtime unavailable",
+    );
+    expect(starts).toBe(0);
+    expect((await journal.list()).operations).toMatchObject([{ key, recordHash }]);
+    rows.delete("cleanup");
+
+    expect(await instance.recoverNativeOperation(key, recordHash, true)).toEqual({
+      key,
+      recordHash,
+      outcome: "operator-scope-ended",
+      originalOperationOutcome: "unknown",
+      requestEnd: "unobserved",
+    });
+    expect(starts).toBe(1);
+    expect(native.sdkExecCount).toBe(0);
+    expect((await journal.list()).operations).toEqual([]);
+    expect(rows.get("native-operation-ending:" + key)).toMatchObject({
+      receipt: { originalOperationOutcome: "unknown" },
+    });
+  });
   it("lists legacy native operations without inspecting a runtime", async () => {
     const { instance, rows } = workloadResident();
     rows.set("native-operation:op:unknown", { opOwner: "op:unknown" });
