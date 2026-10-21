@@ -3,9 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAppConfigText } from "../src/config.js";
-import { loadProfileOnHost, readConfigForPush } from "../src/deploy/run.js";
+import { hostAffectedProbe, loadProfileOnHost, readConfigForPush } from "../src/deploy/run.js";
 import { stagingProblems, waitForStagingMaintenanceRelease } from "../src/deploy/staging.js";
 import { systemClock } from "../src/core/trace/clock.js";
+import { workersFor } from "../src/deploy/plan.js";
 
 if (process.argv[2] === "--recover-resident") {
   process.argv.splice(2, 1);
@@ -31,10 +32,19 @@ let check = false;
 let initialize = false;
 let retainMaintenance = false;
 let receiptPath: string | undefined;
+let selectionReceiptPath: string | undefined;
 let resumeMemory: string | undefined;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   if (
+    arg === "--selection-receipt" &&
+    !selectionReceiptPath &&
+    !initialize &&
+    args[i + 1] &&
+    !args[i + 1].startsWith("--")
+  )
+    selectionReceiptPath = args[++i];
+  else if (
     (arg === "--receipt" || arg === "--resume-memory") &&
     selection.length === 0 &&
     args[i + 1] &&
@@ -61,6 +71,7 @@ for (let i = 0; i < args.length; i++) {
     );
 }
 if (retainMaintenance && initialize) throw new Error("retained maintenance cannot initialize a new installation");
+if (selectionReceiptPath && (initialize || check)) throw new Error("staging selection receipt requires a deployment");
 if (!process.env.SWITCHBOARD_DEPLOY_PROFILE) throw new Error("SWITCHBOARD_DEPLOY_PROFILE must explicitly name staging");
 const loaded = await loadProfileOnHost();
 if (retainMaintenance && !loaded.profile.residentMaintenance)
@@ -108,14 +119,41 @@ if (!check && initialize) {
           ...selection,
           "--allow-branch",
           ...(retainMaintenance ? ["--retain-maintenance"] : []),
+          ...(verb === "all" && selectionReceiptPath ? ["--json"] : []),
         ],
         {
           env,
-          stdio: "inherit",
+          stdio: verb === "all" && selectionReceiptPath ? ["inherit", "pipe", "inherit"] : "inherit",
+          encoding: "utf8",
         },
       );
       if (result.error) throw result.error;
       if (result.status !== 0) throw new Error(`staging deploy ${verb} failed (${result.status})`);
+      if (verb === "all" && selectionReceiptPath) {
+        const output = JSON.parse(result.stdout) as {
+          plan: {
+            steps: { name: string }[];
+            affected?: { workers: { name: string; base: { kind: string; commit?: string } }[] };
+          };
+        };
+        const botSelected = output.plan.steps.some((step) => step.name === "bot");
+        const base = output.plan.affected?.workers.find((worker) => worker.name === "bot")?.base;
+        const live =
+          botSelected || base?.kind === "live"
+            ? undefined
+            : await hostAffectedProbe(workersFor(loaded.profile), env).liveCommit("bot");
+        const botBaseCommit = botSelected
+          ? undefined
+          : base?.kind === "live"
+            ? base.commit
+            : live && "commit" in live
+              ? live.commit
+              : undefined;
+        if (!botSelected && !/^[0-9a-f]{40}$/.test(botBaseCommit ?? ""))
+          throw new Error("staging acceptance cannot read the skipped Bot's exact live commit");
+        writeFileSync(selectionReceiptPath, JSON.stringify({ botSelected, botBaseCommit }), { mode: 0o600 });
+        console.log(`Staging deployment completed; Bot ${botSelected ? "selected" : "skipped"}.`);
+      }
     }
     if (retainMaintenance && loaded.profile.residentMaintenance) {
       const policy = loaded.profile.residentMaintenance;

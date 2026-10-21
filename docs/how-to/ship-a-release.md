@@ -20,7 +20,7 @@ The sticky comment marks each Worker **deploy** or skip, with the commit it serv
 | Phase | Checks | What a pass proves |
 |---|---|---|
 | Ordinary PR | Selected source tests, type checks, security scans, Worker/image checks and installed-package smoke | The changed code and shipped package satisfy their local contracts. No deployed runtime is claimed. |
-| Release PR | The same validation, then all four staging Workers and bounded answer, workspace-read and posted Review scenarios | The exact candidate runs through real providers, repository execution and the fixture GitHub integration before production. |
+| Release PR | The same validation, then staging Workers selected from their live inputs and bounded answer, workspace-read and posted Review scenarios | The exact candidate runs through real providers, repository execution and the fixture GitHub integration before production. |
 | Before production upload | Candidate routing (the “Door”) with the configured model and synthetic inputs | Routing decisions satisfy representative cases. No agent or deployed Worker is exercised. |
 | During and after production deploy | Native image/process/config checks, execution probe, selected build readback and an undrained Resident fleet | The selected production services actually run the expected code and configuration. Upload success alone is insufficient. |
 | After production readiness | Configured live answer, workspace and posted Review smoke | Production credentials, routing and integrations work in the authorized disposable scope. Disabled smoke is reported as skipped. |
