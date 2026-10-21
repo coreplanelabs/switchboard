@@ -540,7 +540,7 @@ export function buildCoreCommands(
         runDeployPlanOnHost(plan, {
           log: (l) => console.log(l),
           warn: (l) => console.error(l),
-          stream: (c) => process.stdout.write(c),
+          stream: (c) => process.stderr.write(c),
         }),
       restart: (plan) => runBotRestart(plan, { log: (l) => console.log(l), warn: (l) => console.error(l) }),
       host: deployHostOnHost(),

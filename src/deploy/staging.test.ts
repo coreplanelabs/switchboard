@@ -187,6 +187,107 @@ describe("isolated staging deployment", () => {
 });
 
 describe("staging workflow isolation", () => {
+  it.each([
+    {
+      previousStatus: "success",
+      previousDeploy: "success",
+      previousEvent: "pull_request_target",
+      expectedTarget: "--affected",
+      expectedBot: "b".repeat(40),
+    },
+    {
+      previousStatus: "failure",
+      previousDeploy: "success",
+      previousEvent: "pull_request_target",
+      expectedTarget: "--affected",
+      expectedBot: "b".repeat(40),
+    },
+    {
+      previousStatus: "failure",
+      previousDeploy: "failure",
+      previousEvent: "pull_request_target",
+      expectedTarget: "all",
+      expectedBot: "c".repeat(40),
+    },
+    {
+      previousStatus: "success",
+      previousDeploy: "success",
+      previousEvent: "workflow_dispatch",
+      expectedTarget: "all",
+      expectedBot: "c".repeat(40),
+    },
+  ])(
+    "uses live targeting after a $previousDeploy staging upload and binds skipped Bot smoke",
+    ({ previousStatus, previousDeploy, previousEvent, expectedTarget, expectedBot }) => {
+      const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+      const steps = workflow.jobs.deploy.steps as {
+        id?: string;
+        name: string;
+        run?: string;
+        env?: Record<string, string>;
+      }[];
+      const baseline = steps.find((step) => step.id === "baseline")!;
+      const deploy = steps.find((step) => step.id === "deploy")!;
+      expect(workflow.on.workflow_dispatch.inputs.targets.default).toBe("affected");
+      expect(deploy.env?.GH_TOKEN).toBeUndefined();
+      expect(steps.find((step) => step.id === "e2e")?.env?.SMOKE_EXPECTED_COMMIT).toBe(
+        "${{ steps.deploy.outputs.expected_bot }}",
+      );
+      const directory = mkdtempSync(join(tmpdir(), "staging-targets-"));
+      try {
+        writeFileSync(
+          join(directory, "gh"),
+          `#!${process.execPath}\nconst path=process.argv[3]; if(path.includes("deployments?")) process.stdout.write(JSON.stringify([{id:11},{id:10}])); else if(path.includes("/11/")) process.stdout.write("https://github.com/acme/repo/actions/runs/123/job/1"); else if(path.includes("/10/")) process.stdout.write(JSON.stringify([{state:${JSON.stringify(previousStatus)},log_url:"https://github.com/acme/repo/actions/runs/122/job/1"}])); else if(path.includes("/jobs/")) process.stdout.write(JSON.stringify({steps:[{name:"deploy the captured commit to staging",conclusion:${JSON.stringify(previousDeploy)}}]})); else process.stdout.write(${JSON.stringify(previousEvent)});\n`,
+          { mode: 0o700 },
+        );
+        writeFileSync(
+          join(directory, "npm"),
+          `#!${process.execPath}\nconst fs=require("node:fs"); const args=process.argv.slice(2); fs.appendFileSync(process.env.STAGING_TEST_RECEIPT,JSON.stringify(args)+"\\n"); const i=args.indexOf("--selection-receipt"); if(i>=0) fs.writeFileSync(args[i+1],JSON.stringify(args.includes("--affected")?{botSelected:false,botBaseCommit:"${"b".repeat(40)}"}:{botSelected:true}));\n`,
+          { mode: 0o700 },
+        );
+        const output = join(directory, "output");
+        const env = {
+          ...process.env,
+          PATH: `${directory}:${process.env.PATH}`,
+          GITHUB_REPOSITORY: "acme/repo",
+          GITHUB_SERVER_URL: "https://github.com",
+          GITHUB_RUN_ID: "123",
+          GITHUB_OUTPUT: output,
+          RUNNER_TEMP: directory,
+          STAGING_TEST_RECEIPT: join(directory, "calls.jsonl"),
+          TARGETS: "affected",
+          COMMIT: "c".repeat(40),
+          STAGING_RETAIN_MAINTENANCE: "false",
+          REVIEW_ACCEPTANCE: "true",
+        };
+        const checked = spawnSync("bash", ["-eo", "pipefail", "-c", baseline.run!], { encoding: "utf8", env });
+        expect(checked.status, checked.stderr).toBe(0);
+        const safe = readFileSync(output, "utf8").includes("safe_affected=true");
+        const deployed = spawnSync("bash", ["-eo", "pipefail", "-c", deploy.run!], {
+          encoding: "utf8",
+          env: { ...env, SAFE_AFFECTED: String(safe) },
+        });
+        expect(deployed.status, deployed.stderr).toBe(0);
+        const calls = readFileSync(env.STAGING_TEST_RECEIPT, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(calls.at(-1)).toEqual([
+          "run",
+          "--silent",
+          "staging:deploy",
+          "--",
+          ...(safe ? ["--affected"] : []),
+          "--selection-receipt",
+          join(directory, "staging-selection.json"),
+        ]);
+        expect(readFileSync(output, "utf8")).toContain(`expected_bot=${expectedBot}`);
+        expect(safe ? "--affected" : "all").toBe(expectedTarget);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
   it("passes only staging Access credentials to configuration and live acceptance", () => {
     const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
     const readers = workflow.jobs.deploy.steps.filter((step: { run?: string }) => step.run?.includes("smoke:ingress"));
@@ -355,7 +456,7 @@ globalThis.fetch = async (url, init) => {
               PATH: `${directory}:${process.env.PATH}`,
               RUNNER_TEMP: directory,
               STAGING_TEST_RECEIPT: receipt,
-              TARGETS: "all",
+              TARGETS: retain ? "affected" : "all",
               GITHUB_OUTPUT: join(directory, "output"),
             },
           });
@@ -396,6 +497,43 @@ globalThis.fetch = async (url, init) => {
       }
     },
   );
+  it("does not read an unrelated Bot for a manual Sandbox deploy without Review acceptance", () => {
+    const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+    const deploy = workflow.jobs.deploy.steps.find((step: { id?: string }) => step.id === "deploy");
+    const directory = mkdtempSync(join(tmpdir(), "staging-sandbox-workflow-"));
+    try {
+      const receipt = join(directory, "calls.jsonl");
+      writeFileSync(
+        join(directory, "npm"),
+        `#!${process.execPath}\nrequire("node:fs").appendFileSync(process.env.STAGING_TEST_RECEIPT,JSON.stringify(process.argv.slice(2))+"\\n");\n`,
+        { mode: 0o700 },
+      );
+      const result = spawnSync("bash", ["-eo", "pipefail", "-c", deploy.run], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${directory}:${process.env.PATH}`,
+          RUNNER_TEMP: directory,
+          STAGING_TEST_RECEIPT: receipt,
+          TARGETS: "sandbox",
+          SAFE_AFFECTED: "false",
+          REVIEW_ACCEPTANCE: "false",
+          STAGING_RETAIN_MAINTENANCE: "false",
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(receipt, "utf8"))).toEqual([
+        "run",
+        "--silent",
+        "staging:deploy",
+        "--",
+        "--only",
+        "sandbox",
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it("uses Luna and medium effort in automatic HTTP acceptance even when deployment inputs are absent", () => {
     const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
     const steps = workflow.jobs.deploy.steps.filter((step: { run?: string }) => step.run?.includes("smoke:ingress"));
@@ -794,14 +932,13 @@ globalThis.fetch = async (url, init) => {
     expect(steps.slice(0, recheck + 1).some((step: object) => JSON.stringify(step).includes("secrets."))).toBe(false);
     const deploy = steps.findIndex((step: { id?: string }) => step.id === "deploy");
     expect(steps[deploy].if).toContain("steps.recheck.outputs.eligible == 'true'");
-    expect(steps[deploy].env.TARGETS).toContain(
-      "github.event_name == 'pull_request_target' || inputs.pr != '' || inputs.review_e2e",
-    );
+    expect(steps[deploy].env.TARGETS).toBe("${{ inputs.reset_e2e && 'all' || inputs.targets || 'affected' }}");
+    expect(steps[deploy].env.SAFE_AFFECTED).toBe("${{ steps.baseline.outputs.safe_affected }}");
     const e2e = steps.findIndex((step: { id?: string }) => step.id === "e2e");
     expect(e2e).toBeGreaterThan(deploy);
     expect(steps[e2e].if).toContain("steps.deploy.outcome == 'success'");
     expect(steps[e2e].run).toContain("npm run --silent smoke:ingress");
-    expect(steps[e2e].env.SMOKE_EXPECTED_COMMIT).toBe("${{ needs.authorize.outputs.commit }}");
+    expect(steps[e2e].env.SMOKE_EXPECTED_COMMIT).toBe("${{ steps.deploy.outputs.expected_bot }}");
     expect(steps[e2e].env.SMOKE_INGRESS_TOKEN).toBe("${{ secrets.STAGING_SMOKE_TOKEN }}");
     expect(steps[e2e].if).toContain("inputs.pr != ''");
     expect(workflow.jobs.acceptance.name).toBe("staging / live Review");
@@ -956,6 +1093,56 @@ globalThis.fetch = async (url, init) => {
 });
 
 describe("staging inherited force protection", () => {
+  it("records the Bot selection from the executed deployment for Review acceptance", () => {
+    const { profile, config } = fixture();
+    const directory = mkdtempSync(join(tmpdir(), "staging-selection-"));
+    try {
+      const configPath = join(directory, "config.yaml");
+      const profilePath = join(directory, "profile.json");
+      const receipt = join(directory, "selection.json");
+      const bin = join(directory, "bin");
+      mkdirSync(bin);
+      writeFileSync(
+        configPath,
+        stringify({
+          ...parse(readFileSync("config/config.example.yaml", "utf8")),
+          ...config,
+          grants: { "http:staging": { actions: ["dispatch"], channels: ["http:staging"] } },
+        }),
+      );
+      writeFileSync(profilePath, JSON.stringify({ ...profile, configSource: configPath }));
+      writeFileSync(
+        join(bin, "npm"),
+        `#!${process.execPath}\nconst args=process.argv.slice(2); if(args.includes("all")) process.stdout.write(JSON.stringify({plan:{steps:process.env.SELECT_BOT==="true"?[{name:"bot"}]:[],affected:{workers:[{name:"bot",base:{kind:"live",commit:"${"b".repeat(40)}"}}]}}}));\n`,
+        { mode: 0o700 },
+      );
+      for (const [selected, expected] of [
+        ["true", { botSelected: true }],
+        ["false", { botSelected: false, botBaseCommit: "b".repeat(40) }],
+      ] as const) {
+        const result = spawnSync(
+          process.execPath,
+          ["--import", "tsx", "scripts/staging-deploy.ts", "--affected", "--selection-receipt", receipt],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              SWITCHBOARD_DEPLOY_PROFILE: profilePath,
+              SWITCHBOARD_STAGING_ACCOUNT: accounts.staging,
+              SWITCHBOARD_PRODUCTION_ACCOUNT: accounts.production,
+              SELECT_BOT: selected,
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(readFileSync(receipt, "utf8"))).toEqual(expected);
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("the real CLI disables exported and file-loaded bypasses before all, affected and selected deploys", () => {
     const { profile, config } = fixture();
     const directory = mkdtempSync(join(tmpdir(), "staging-force-"));

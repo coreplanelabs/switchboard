@@ -17,7 +17,7 @@ on: # zizmor: ignore[dangerous-triggers]
       targets:
         description: all, affected, or comma-separated Worker names
         type: string
-        default: all
+        default: affected
       pr:
         description: Pull request to validate before a branch test deployment
         type: string
@@ -59,6 +59,7 @@ env:
 
 permissions:
   contents: read
+  deployments: read
   pull-requests: read
   checks: read
   actions: read
@@ -163,7 +164,7 @@ jobs:
           STAGING_ACTOR: ${{ github.actor }}
 
   deploy:
-    name: staging / full stack
+    name: staging / selected stack
     outputs:
       accepted: ${{ steps.e2e.outputs.accepted }}
     needs: [authorize, validate]
@@ -286,6 +287,35 @@ jobs:
             selected=$(jq -er '.hash' "$preview")
             npm run --silent staging:deploy -- --recover-resident --run "$GITHUB_RUN_ID" --attempt "$((GITHUB_RUN_ATTEMPT - 1))" --receipt "$preview" --apply "$selected"
           fi
+      - name: check the prior staging rollout
+        id: baseline
+        if: steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')
+        working-directory: controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deployments=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=staging&per_page=2") || deployments='[]'
+          current=$(jq -r '.[0].id // empty' <<< "$deployments")
+          previous=$(jq -r '.[1].id // empty' <<< "$deployments")
+          current_log=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$current/statuses" --jq '.[0].log_url // empty' 2>/dev/null) || current_log=''
+          previous_status=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$previous/statuses" 2>/dev/null) || previous_status='[]'
+          previous_log=$(jq -r '.[0].log_url // empty' <<< "$previous_status")
+          previous_run=${previous_log#*"/actions/runs/"}
+          previous_run=${previous_run%%/*}
+          previous_job=${previous_log#*"/job/"}
+          previous_event=''
+          previous_deploy=''
+          if [[ "$previous_log" == "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/"* && "$previous_run" =~ ^[0-9]+$ && "$previous_job" =~ ^[0-9]+$ ]]; then
+            previous_event=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$previous_run" --jq .event 2>/dev/null) || previous_event=''
+            previous_steps=$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$previous_job" 2>/dev/null) || previous_steps='{}'
+            previous_deploy=$(jq -r '[.steps[]? | select(.name == "deploy the captured commit to staging" and .conclusion == "success")] | length == 1' <<< "$previous_steps")
+          fi
+          if [[ "$current_log" == *"/actions/runs/$GITHUB_RUN_ID/"* && "$previous_deploy" == true && "$previous_event" == pull_request_target ]]; then
+            echo 'safe_affected=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'safe_affected=false' >> "$GITHUB_OUTPUT"
+            echo 'Prior staging rollout is not proven successful; the next affected request will deploy all Workers.'
+          fi
       - name: deploy the captured commit to staging
         id: deploy
         if: steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')
@@ -299,10 +329,22 @@ jobs:
           RESIDENT_DRAIN_TOKEN: ${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}
           SANDBOX_TOKEN: ${{ secrets.STAGING_SANDBOX_TOKEN }}
           CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
-          TARGETS: ${{ (github.event_name == 'pull_request_target' || inputs.pr != '' || inputs.review_e2e) && 'all' || inputs.targets || 'all' }}
+          COMMIT: ${{ needs.authorize.outputs.commit }}
+          TARGETS: ${{ inputs.reset_e2e && 'all' || inputs.targets || 'affected' }}
+          SAFE_AFFECTED: ${{ steps.baseline.outputs.safe_affected }}
+          REVIEW_ACCEPTANCE: ${{ github.event_name == 'pull_request_target' || inputs.pr != '' || inputs.review_e2e || inputs.reset_e2e }}
           CI: "1"
           WRANGLER_SEND_METRICS: "false"
         run: |
+          # /healthz can advance before a container rollout finishes.
+          if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then
+            echo 'Retained maintenance requires the full Resident deployment path; selecting all Workers.'
+            TARGETS=all
+          fi
+          if [ "$TARGETS" = affected ] && [ "$SAFE_AFFECTED" != true ]; then
+            echo 'Previous staging rollout is unproven; selecting all Workers.'
+            TARGETS=all
+          fi
           case "$TARGETS" in
             all) args=() ;;
             affected) args=(--affected) ;;
@@ -311,8 +353,13 @@ jobs:
               args=(--only "$TARGETS") ;;
           esac
           if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then args+=(--retain-maintenance); fi
+          if [ "$REVIEW_ACCEPTANCE" = true ]; then args+=(--selection-receipt "$RUNNER_TEMP/staging-selection.json"); fi
           set -o pipefail
           npm run --silent staging:deploy -- "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/staging-deploy.log"
+          if [ "$REVIEW_ACCEPTANCE" = true ]; then
+            expected_bot=$(jq -er --arg commit "$COMMIT" 'if .botSelected then $commit else .botBaseCommit end | select(test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/staging-selection.json")
+            echo "expected_bot=$expected_bot" >> "$GITHUB_OUTPUT"
+          fi
       - name: prepare the original staging reset secret source
         if: github.event_name == 'workflow_dispatch' && inputs.reset_e2e && steps.deploy.outcome == 'success'
         env:
@@ -357,7 +404,7 @@ jobs:
           SMOKE_ACCESS_CLIENT_ID: ${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_ID }}
           SMOKE_ACCESS_CLIENT_SECRET: ${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_SECRET }}
           SMOKE_INGRESS_THREAD: staging-${{ github.run_id }}-${{ github.run_attempt }}
-          SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
+          SMOKE_EXPECTED_COMMIT: ${{ steps.deploy.outputs.expected_bot }}
           SMOKE_REQUIRE_SLACK_CONNECTION: "true"
           SMOKE_MODEL: ${{ env.STAGING_ACCEPTANCE_MODEL }}
           SMOKE_REVIEW_TRANSPORT: ${{ env.STAGING_REVIEW_TRANSPORT }}

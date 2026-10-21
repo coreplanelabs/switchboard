@@ -34,7 +34,7 @@ const controller = (id: number, overrides = {}) => ({
 });
 const live = (conclusion = "success") => [
   {
-    name: "staging / full stack",
+    name: "staging / selected stack",
     status: "completed",
     conclusion,
     steps: [
@@ -242,7 +242,7 @@ describe("PR staging acceptance status", () => {
     const skippedRun = controller(21, { id: 21 });
     const skippedJobs = [
       {
-        name: "staging / full stack",
+        name: "staging / selected stack",
         status: "completed",
         conclusion: "success",
         steps: [
@@ -293,7 +293,7 @@ describe("PR staging acceptance status", () => {
       jobs: {
         "31": [
           {
-            name: "staging / full stack",
+            name: "staging / selected stack",
             status: "completed",
             conclusion: "success",
             steps: [

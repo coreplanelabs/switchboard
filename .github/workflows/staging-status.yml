@@ -86,17 +86,17 @@ jobs:
             const refuse = description => ({ state: 'failure', description });
             if (!Array.isArray(jobs.jobs) || !Number.isInteger(jobs.total_count) || jobs.total_count !== jobs.jobs.length)
               return refuse('Live Review outcome evidence is incomplete');
-            const fullStackJobs = jobs.jobs.filter(job => job.name === 'staging / full stack');
+            const deploymentJobs = jobs.jobs.filter(job => job.name === 'staging / selected stack');
             const acceptanceJobs = jobs.jobs.filter(job => job.name === 'staging / live Review');
-            if (fullStackJobs.length !== 1 || acceptanceJobs.length !== 1)
+            if (deploymentJobs.length !== 1 || acceptanceJobs.length !== 1)
               return refuse('Live Review outcome evidence is incomplete');
-            const fullStack = fullStackJobs[0];
+            const deploymentJob = deploymentJobs[0];
             const acceptance = acceptanceJobs[0];
-            if (fullStack.status === 'completed' && fullStack.conclusion === 'skipped')
+            if (deploymentJob.status === 'completed' && deploymentJob.conclusion === 'skipped')
               return refuse('Live Review acceptance did not run');
-            if (!Array.isArray(fullStack.steps)) return refuse('Live Review outcome evidence is incomplete');
-            const deploySteps = fullStack.steps.filter(step => step.name === 'deploy the captured commit to staging');
-            const reviewSteps = fullStack.steps.filter(step => step.name === 'run live Review acceptance on the deployed stack');
+            if (!Array.isArray(deploymentJob.steps)) return refuse('Live Review outcome evidence is incomplete');
+            const deploySteps = deploymentJob.steps.filter(step => step.name === 'deploy the captured commit to staging');
+            const reviewSteps = deploymentJob.steps.filter(step => step.name === 'run live Review acceptance on the deployed stack');
             if (deploySteps.length !== 1 || reviewSteps.length !== 1)
               return refuse('Live Review outcome evidence is incomplete');
             const deployment = deploySteps[0];
@@ -111,8 +111,8 @@ jobs:
             if (review.conclusion !== 'success') return refuse('Live Review acceptance did not complete');
             if (
               deployment.status !== 'completed' || deployment.conclusion !== 'success' ||
-              fullStack.status !== 'completed' || fullStack.conclusion !== 'success'
-            ) return refuse('Full-stack staging did not complete successfully');
+              deploymentJob.status !== 'completed' || deploymentJob.conclusion !== 'success'
+            ) return refuse('Selected staging deploy did not complete successfully');
             if (acceptance.status === 'completed' && acceptance.conclusion === 'failure')
               return refuse('Live Review step passed; final acceptance gate failed');
             if (acceptance.status !== 'completed' || acceptance.conclusion !== 'success')
