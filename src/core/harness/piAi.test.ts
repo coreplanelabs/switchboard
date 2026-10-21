@@ -151,21 +151,41 @@ describe("PiAiProviders — the provider table config.yaml names, built on pi's 
     const { fetchImpl } = fakeFetch(anthropicToolCallStream(), 200, { "request-id": "req_routing" });
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
     const ids: string[] = [];
+    const responses: Array<{ status: number; requestId?: string }> = [];
     const completed = await table.get("anthropic").complete({
       ...routeRequest(),
       observer: {
+        onHttpResponse: (status, requestId) => {
+          responses.push({ status, requestId });
+          throw new Error("diagnostic sink failed");
+        },
         onResponse: (id) => {
           ids.push(id);
           throw new Error("diagnostic sink failed");
         },
       },
     });
+    expect(responses).toEqual([{ status: 200, requestId: "req_routing" }]);
     expect(ids).toEqual(["req_routing"]);
     expect(completed).toMatchObject({
       stopReason: "tool_use",
       usage: { inputTokens: 12, outputTokens: 9 },
       content: [{ type: "tool_use", name: "route", input: { preset: "review", reason: "a PR" } }],
     });
+  });
+  it("observes an HTTP failure even when the provider sends no request ID", async () => {
+    const { fetchImpl } = fakeFetch('{"error":{"message":"bad request"}}', 400);
+    const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
+    const responses: Array<{ status: number; requestId?: string }> = [];
+
+    await expect(
+      table.get("anthropic").complete({
+        ...routeRequest(),
+        observer: { onHttpResponse: (status, requestId) => responses.push({ status, requestId }) },
+      }),
+    ).rejects.toMatchObject({ cause: "request-rejected", status: 400 });
+
+    expect(responses).toEqual([{ status: 400, requestId: undefined }]);
   });
   it("redacts the configured key from direct HTTP 200 Responses stream errors", async () => {
     const { fetchImpl } = fakeFetch(

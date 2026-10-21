@@ -349,6 +349,16 @@ describe("cardActivity", () => {
     });
     expect(
       cardActivity({
+        type: "run_title_diagnostic",
+        outcome: "failed",
+        reason: "provider_error",
+        stage: "generation",
+        model: "openai/gpt-6-luna",
+        ms: 23,
+      }),
+    ).toEqual({ kind: "line", text: "Title unavailable" });
+    expect(
+      cardActivity({
         type: "publication_push_authorized",
         callId: "push",
         ref: "fix/a",

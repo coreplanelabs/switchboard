@@ -78,6 +78,8 @@ export interface CompletionObserver {
   onResponseHeaders?(status: number): void;
   /** The provider's correlation ID, observed at headers even if the stream later aborts. */
   onResponse?(requestId: string): void;
+  /** One HTTP response, including failures and responses without a request ID. */
+  onHttpResponse?(status: number, requestId?: string): void;
   onFirstToken?(): void;
   /** A content block began / ended, by kind (`text`, `thinking`, `redacted_thinking`,
    *  `tool_use`, …) and stream index: the span layer sums a turn's thinking and

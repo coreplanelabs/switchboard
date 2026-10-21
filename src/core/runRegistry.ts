@@ -1,5 +1,13 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { redactAndCap, sanitizeActor, type RunActor, type RunEvent, type StopMode, isSpanRecord } from "./runEvents.js";
+import {
+  redactAndCap,
+  sanitizeActor,
+  type RunActor,
+  type RunEvent,
+  type RunTitleDiagnosticFields,
+  type StopMode,
+  isSpanRecord,
+} from "./runEvents.js";
 import type { RunStatus, RunRecord } from "./runRecord.js";
 import { RunControl } from "./runRegistry/runControl.js";
 import {
@@ -208,12 +216,22 @@ export class RunRegistry {
   private readonly now: () => number;
   /** Monotonic creation counter; stamps each run's `seq` for stable ordering. */
   private seq = 0;
-  private titleGenerator?: (prompt: string, signal?: AbortSignal, runId?: string) => Promise<string | undefined>;
+  private titleGenerator?: (
+    prompt: string,
+    signal?: AbortSignal,
+    runId?: string,
+    report?: (diagnostic: RunTitleDiagnosticFields) => Promise<void>,
+  ) => Promise<string | undefined>;
   private readonly titleJobs = new Map<string, { done: Promise<void>; pending: boolean }>();
 
   /** Installed once at the composition root. A title never blocks run work. */
   configureTitles(
-    generate: (prompt: string, signal?: AbortSignal, runId?: string) => Promise<string | undefined>,
+    generate: (
+      prompt: string,
+      signal?: AbortSignal,
+      runId?: string,
+      report?: (diagnostic: RunTitleDiagnosticFields) => Promise<void>,
+    ) => Promise<string | undefined>,
   ): void {
     this.titleGenerator = generate;
   }
@@ -239,23 +257,29 @@ export class RunRegistry {
   private startTitle(run: RunState): void {
     if (
       !this.titleGenerator ||
-      !run.prompt?.trim() ||
+      privateMainRun(run.meta) ||
       run.title ||
       this.titleJobs.has(run.id) ||
-      privateMainRun(run.meta)
+      !run.prompt?.trim()
     )
       return;
     // Keep the completed promise until eviction. Later inputs cannot buy another call.
     const generate = this.titleGenerator;
     const startedAt = this.now();
+    let generatedMs: number | undefined;
     let stage: "generation" | "publication" = "generation";
     const job: { done: Promise<void>; pending: boolean } = {
       pending: true,
       done: Promise.resolve()
-        .then(() => generate(run.prompt!, run.control.hardSignal, run.id))
+        .then(() =>
+          generate(run.prompt!, run.control.hardSignal, run.id, (diagnostic) => {
+            if (diagnostic.outcome === "generated") generatedMs = diagnostic.ms;
+            return this.recordTitleDiagnostic(run, diagnostic);
+          }),
+        )
         .then((title) => {
           if (!title?.trim()) return;
-          const generatedAt = this.now();
+          const generatedAt = generatedMs === undefined ? this.now() : startedAt + generatedMs;
           stage = "publication";
           return run.eventLane.write(() => {
             const timing = {
@@ -273,7 +297,7 @@ export class RunRegistry {
             console.info(JSON.stringify({ event: "run.title.saved", ...timing }));
           });
         })
-        .catch((error: unknown) => {
+        .catch(async (error: unknown) => {
           // Exception messages can contain request or provider data.
           const errorKind =
             error instanceof TypeError
@@ -284,12 +308,27 @@ export class RunRegistry {
                   ? "error"
                   : "non_error";
           console.warn(JSON.stringify({ event: "run.title.job_failed", runId: run.id, stage, errorKind }));
+          await this.recordTitleDiagnostic(run, {
+            outcome: "failed",
+            reason: "job_failed",
+            stage,
+            errorKind,
+            ms: Math.max(0, this.now() - startedAt),
+          });
         })
         .finally(() => {
           job.pending = false;
         }),
     };
     this.titleJobs.set(run.id, job);
+  }
+
+  private recordTitleDiagnostic(run: RunState, diagnostic: RunTitleDiagnosticFields): Promise<void> {
+    return run.eventLane.write(() => {
+      const current = this.runs.get(run.id);
+      if (current !== run || run.sealedAt !== undefined) return;
+      this.publish(run.id, { type: "run_title_diagnostic", ...diagnostic, at: this.now() });
+    });
   }
 
   constructor(opts: RunRegistryOptions = {}) {
@@ -436,7 +475,7 @@ export class RunRegistry {
     if (!run || run.sealedAt !== undefined) return;
     if (privateMainRun(run.meta)) event = privateMainEvent(event);
     const span = isSpanRecord(event);
-    if (run.finished && !span && event.type !== "run_title") return;
+    if (run.finished && !span && event.type !== "run_title" && event.type !== "run_title_diagnostic") return;
     // ONE counter: `eventCount` is the monotonic published total AND the `seq`
     // stamped on the event — the SSE `id:` a client resumes from.
     const seq = ++run.eventCount;

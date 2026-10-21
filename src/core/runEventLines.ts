@@ -1,7 +1,19 @@
 import { storageFailureDiagnosticOf } from "./storageFailureDiagnostic.js";
 import { isPublicationSettlement } from "./publicationSettlement.js";
 import { typedExecutionDiagnosticFrom } from "../execution/typedExecutionDiagnostic.js";
-import { RUN_NOTE_KINDS, type RunEvent, type RunNoteKind } from "./runEvents.js";
+import { PROVIDER_FAILURE_CAUSES } from "./provider.js";
+import {
+  RUN_NOTE_KINDS,
+  RUN_TITLE_DIAGNOSTIC_ERROR_KINDS,
+  RUN_TITLE_DIAGNOSTIC_OUTCOMES,
+  RUN_TITLE_DIAGNOSTIC_REASONS,
+  RUN_TITLE_DIAGNOSTIC_STAGES,
+  RUN_TITLE_INVALID_OUTPUT_KINDS,
+  RUN_TITLE_PRICE_SOURCES,
+  RUN_TITLE_STOP_REASONS,
+  type RunEvent,
+  type RunNoteKind,
+} from "./runEvents.js";
 import { RUN_LIVE_STATE_NAMES, type RunLiveStateName } from "./runLiveState.js";
 import { PLANE_ENDING_CAUSES, type PlaneEndingCause } from "./plane/decide.js";
 
@@ -65,6 +77,10 @@ function isTransportFrame(v: unknown): boolean {
   return typeof v === "object" && v !== null && !Array.isArray(v) && typeof (v as { type?: unknown }).type !== "string";
 }
 
+const nonnegative = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0;
+const nonnegativeCount = (value: unknown): value is number => nonnegative(value) && Number.isSafeInteger(value);
+
 /** Structural check of the fields the analyzer actually relies on — a recognized
  *  `type` alone is not enough, since this input is external (a hand-edited or
  *  corrupted capture must be skipped, never crash the analysis). */
@@ -75,6 +91,44 @@ function isRunEvent(v: unknown): v is RunEvent {
   switch (o.type) {
     case "run_title":
       return typeof o.title === "string";
+    case "run_title_diagnostic":
+      return (
+        RUN_TITLE_DIAGNOSTIC_OUTCOMES.includes(o.outcome as (typeof RUN_TITLE_DIAGNOSTIC_OUTCOMES)[number]) &&
+        RUN_TITLE_DIAGNOSTIC_REASONS.includes(o.reason as (typeof RUN_TITLE_DIAGNOSTIC_REASONS)[number]) &&
+        (o.outcome === "generated") === (o.reason === "generated") &&
+        RUN_TITLE_DIAGNOSTIC_STAGES.includes(o.stage as (typeof RUN_TITLE_DIAGNOSTIC_STAGES)[number]) &&
+        nonnegative(o.ms) &&
+        (o.model === undefined || typeof o.model === "string") &&
+        (o.errorKind === undefined ||
+          RUN_TITLE_DIAGNOSTIC_ERROR_KINDS.includes(
+            o.errorKind as (typeof RUN_TITLE_DIAGNOSTIC_ERROR_KINDS)[number],
+          )) &&
+        (o.providerCause === undefined ||
+          PROVIDER_FAILURE_CAUSES.includes(o.providerCause as (typeof PROVIDER_FAILURE_CAUSES)[number])) &&
+        (o.providerStatus === undefined ||
+          (typeof o.providerStatus === "number" &&
+            Number.isInteger(o.providerStatus) &&
+            o.providerStatus >= 100 &&
+            o.providerStatus <= 599)) &&
+        (o.providerInvoked === undefined || typeof o.providerInvoked === "boolean") &&
+        (o.sendAttempts === undefined || nonnegativeCount(o.sendAttempts)) &&
+        (o.requestId === undefined ||
+          (typeof o.requestId === "string" && o.requestId.length <= 128 && !/[\r\n]/.test(o.requestId))) &&
+        (o.responseMs === undefined || nonnegative(o.responseMs)) &&
+        (o.stopReason === undefined ||
+          RUN_TITLE_STOP_REASONS.includes(o.stopReason as (typeof RUN_TITLE_STOP_REASONS)[number])) &&
+        ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "outputChars"].every(
+          (key) => o[key] === undefined || nonnegativeCount(o[key]),
+        ) &&
+        (o.cacheOverReported === undefined || typeof o.cacheOverReported === "boolean") &&
+        (o.priceSource === undefined ||
+          RUN_TITLE_PRICE_SOURCES.includes(o.priceSource as (typeof RUN_TITLE_PRICE_SOURCES)[number])) &&
+        (o.usd === undefined || nonnegative(o.usd)) &&
+        (o.invalidOutputKind === undefined ||
+          RUN_TITLE_INVALID_OUTPUT_KINDS.includes(
+            o.invalidOutputKind as (typeof RUN_TITLE_INVALID_OUTPUT_KINDS)[number],
+          ))
+      );
     case "tool_call":
       return typeof o.summary === "string" && typeof o.tool === "string";
     case "tool_input":
