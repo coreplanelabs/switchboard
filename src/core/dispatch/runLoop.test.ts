@@ -36,6 +36,7 @@ import { ConfigStore } from "../../config.js";
 import { secretsFrom } from "../../secrets.js";
 import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { reissueSteerSentence } from "../plane/decide.js";
+import { classifyError } from "../trace/classify.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
@@ -112,6 +113,7 @@ import { deliverAnswer } from "./reply.js";
 import { resumeMessage } from "../resumeLaunch.js";
 import { windDownAnswer } from "../harness/windDown.js";
 import { recoveredPrivateAudienceLatch, type PrivateAudienceLatch } from "./privateAudience.js";
+import { sourceCheckError } from "./sourceCheckError.js";
 
 /** The loop's answered outcome; an interruption fails the test naming its note. */
 function answered(out: RunLoopOutcome): RunOutcome {
@@ -610,11 +612,24 @@ describe("runLoop — the model turn and everything that rides on it", () => {
   it("rechecks admitted context before native model calls from a public run", async () => {
     let context = githubRepositoryDependencies([]);
     let canRead = true,
-      unavailable = false;
+      unavailable = false,
+      transient = false,
+      githubTimeout = false;
     const check = () =>
       revalidateAdmittedContext(
         () => context,
         async (snapshot) => {
+          if (transient) {
+            transient = false;
+            throw new TransientStoreError("temporary source read failure");
+          }
+          if (githubTimeout) {
+            githubTimeout = false;
+            throw sourceCheckError(
+              "github-repositories",
+              classifyError(new Error("PRIVATE_SOURCE_BYTES"), { kind: "timeout", code: "installation_repositories" }),
+            );
+          }
           if (unavailable) throw new Error("PRIVATE_SOURCE_BYTES");
           return snapshot.githubRepos?.length && !canRead
             ? {
@@ -676,6 +691,10 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       await proxy("PUBLIC_SEED");
       context = mergeContextDependencies(context, githubRepositoryDependencies(["acme/private"]));
       await proxy("APPROVED_PRIVATE_SOURCE");
+      transient = true;
+      await proxy("RECOVERED_SOURCE");
+      githubTimeout = true;
+      await proxy("RECOVERED_GITHUB_ACCESS");
       canRead = false;
       await proxy("PRIVATE_SOURCE_BYTES");
       unavailable = true;
@@ -700,11 +719,13 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const token = mintFor(bearers, s);
     const loopContext: RunLoopContext = { ...s.ctx, admittedContextCheck: check };
     await runLoop(s.deps, loopContext);
-    expect(statuses).toEqual([200, 200, 403, 403, 403]);
-    expect(bearers.grantOf(s.run.id)?.turns).toBe(2);
+    expect(statuses).toEqual([200, 200, 200, 200, 403, 403, 403]);
+    expect(bearers.grantOf(s.run.id)?.turns).toBe(4);
     expect(upstream.map((body) => body.messages)).toEqual([
       [{ role: "user", content: [{ type: "text", text: "PUBLIC_SEED" }] }],
       [{ role: "user", content: [{ type: "text", text: "APPROVED_PRIVATE_SOURCE" }] }],
+      [{ role: "user", content: [{ type: "text", text: "RECOVERED_SOURCE" }] }],
+      [{ role: "user", content: [{ type: "text", text: "RECOVERED_GITHUB_ACCESS" }] }],
     ]);
     expect(refused.map((body) => JSON.parse(body).error.type)).toEqual([
       "source_unavailable",

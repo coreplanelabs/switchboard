@@ -1,4 +1,4 @@
-import { sourceCheckError } from "./sourceCheckError.js";
+import { retryTransientSourceCheck, sourceCheckError } from "./sourceCheckError.js";
 import {
   audienceRefusalText,
   type AudienceCheck,
@@ -117,7 +117,7 @@ export async function savedSlackSourcesStillValid(latch: PrivateAudienceLatch): 
   if (latch.revoked) return false;
   if (!latch.revalidateSources) return true;
   try {
-    const checked = await latch.revalidateSources();
+    const checked = await retryTransientSourceCheck(latch.revalidateSources, () => !latch.revoked);
     if (checked.ok && !latch.revoked) return true;
     if (!checked.ok && latch.code === undefined) {
       latch.code = checked.code;

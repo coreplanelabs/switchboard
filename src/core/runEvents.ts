@@ -138,6 +138,7 @@ export type RunNoteKind =
   /** The PR head moved while a review ran and the same run is re-reviewing at
    *  the new head (agent-review.md item 12). Published by the dispatcher. */
   | "head_moved"
+  | "model_source_refused"
   /** The run loop threw and the run finishes `failed`: the summary is the
    *  error's message, redacted and capped, so the run page says why a failed
    *  run failed even when the reply is never delivered (run-history.md).
@@ -386,6 +387,7 @@ export const RUN_NOTE_KINDS = [
   "stop_landed",
   "spans_dropped",
   "head_moved",
+  "model_source_refused",
   "run_failed",
   "provider_failure",
   "storage_failure",

@@ -1,4 +1,4 @@
-import { sourceCheckError } from "./sourceCheckError.js";
+import { retryTransientSourceCheck, sourceCheckError } from "./sourceCheckError.js";
 import { closedStage } from "../trace/closedStage.js";
 import {
   privateDestinationOf,
@@ -2582,7 +2582,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           }
           stage = "context";
           const check = ctx.admittedContextCheck;
-          if (!check || !accessAllowed(await closedStage(span, "run.source_check.context", check)))
+          if (!check) return refused("context_unavailable");
+          if (
+            !accessAllowed(
+              await retryTransientSourceCheck(
+                () => closedStage(span, "run.source_check.context", check),
+                () => registry.isActive(run.id, run.control) && !privateAudienceLatch.revoked,
+              ),
+            )
+          )
             return refused("context_unavailable");
           if (!registry.isActive(run.id, run.control)) return refused("owner_inactive");
           if (privateAudienceLatch.revoked) return refused("audience_revoked");
