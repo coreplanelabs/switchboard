@@ -129,7 +129,7 @@ export function sourceInputIntentsOf(value: unknown): SourceInputIntents | undef
 
 type InputOwner = Pick<LiveRunRow, "runId" | "ownerGen" | "meta">;
 
-function nativeMatches(prior: RunState, entry: SourceInputIntent): boolean {
+export function sourceInputNativeMatches(prior: RunState, entry: SourceInputIntent): boolean {
   const launch = harnessLaunchIntentOf(prior.harnessLaunch),
     facts = prior.harness;
   return (
@@ -181,7 +181,7 @@ export function preserveSourceInputIntents(
       next.owner.requester !== owner.meta.userId ||
       next.owner.channelId !== owner.meta.channelId ||
       next.owner.threadKey !== owner.meta.threadKey ||
-      !nativeMatches(prior, next)
+      !sourceInputNativeMatches(prior, next)
     )
       return refuse("owner-or-session");
     if (!old && (next.phase !== "prepared" || next.owner.gen !== owner.ownerGen)) return refuse("new-intent");
