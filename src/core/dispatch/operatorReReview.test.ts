@@ -317,7 +317,14 @@ describe("required context shares the operator deadline", () => {
         })
         .find((line) => line?.type === "routing_timeout");
       expect(result).toMatchObject({ outcome: "non_decision", reason: "operator_timeout" });
-      expect(event).toMatchObject({ type: "routing_timeout", phase: "model", budgetMs: 60_000, elapsedMs: 61_000 });
+      expect(event).toMatchObject({
+        type: "routing_timeout",
+        phase: "model",
+        budgetMs: 60_000,
+        elapsedMs: 61_000,
+        transportStage: "before_send",
+        transportAttempts: 0,
+      });
       expect(JSON.stringify(event)).not.toContain(url);
     } finally {
       log.mockRestore();

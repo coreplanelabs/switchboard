@@ -210,7 +210,17 @@ export class PiAiProvider implements Provider {
         }
         delete failureContext.headers;
         try {
+          try {
+            req.observer?.onRequestStart?.();
+          } catch {
+            /* Diagnostics cannot fail a completion. */
+          }
           const response = await (this.fetchImpl ?? globalThis.fetch)(input, init);
+          try {
+            req.observer?.onResponseHeaders?.(response.status);
+          } catch {
+            /* Diagnostics cannot fail a completion. */
+          }
           failureContext.headers = Object.fromEntries(response.headers);
           const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
           if (requestId) {

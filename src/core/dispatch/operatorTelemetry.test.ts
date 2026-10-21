@@ -6,6 +6,24 @@ import { analyzeRunFriction } from "../runFriction.js";
 import { normalizeSpans, spansFromEvents } from "../normalizeSpans.js";
 
 describe("routing telemetry retention", () => {
+  it("retains the latest transport stage across provider sends", async () => {
+    let clock = 1_000;
+    const recorder = new RoutingRecorder(() => clock, clock, 61_000, new AbortController().signal);
+    await recorder.during("model", async (observe) => {
+      clock = 1_100;
+      observe({ transport: "request_send" });
+      clock = 1_200;
+      observe({ transport: "response_headers", status: 503 });
+      clock = 1_300;
+      observe({ transport: "request_send" });
+      return "no action";
+    });
+    const step = recorder.snapshot().steps[0];
+    expect(step).toMatchObject({ transportAttempts: 2, requestSentAt: 1_300 });
+    expect(step.responseHeadersAt).toBeUndefined();
+    expect(step.responseStatus).toBeUndefined();
+  });
+
   it.each(["proposed", "selected", "rejected"] as const)(
     "redacts original strings on a %s scripted proposal",
     async (outcome) => {
