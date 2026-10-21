@@ -5029,6 +5029,50 @@ describe("executor provisioning by agent resources", () => {
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
     const registry = new RunRegistry();
     deps.runRegistry = registry;
+    const ledger = new InMemoryRunLedger();
+    const store = new InMemoryRunStore();
+    deps.runLedger = createLedgerWriteThrough({ ledger, gen: "gen-setup", fallback: store, warn: () => {} });
+    deps.runStore = ledgerBackedStore(ledger, store);
+    const writer = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
+    deps.runHistoryWriter = writer;
+    const commit = registry.commitLiveState.bind(registry);
+    vi.spyOn(registry, "commitLiveState").mockImplementation((id, assignment) =>
+      assignment.liveState.state === "preparing" ? false : commit(id, assignment),
+    );
+    const release = vi.fn(async () => ({ released: ledger.finished.size === 1 }));
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
+    });
+
+    await dispatch(deps, msg("agent:review look at it", "slack:UADMIN"), fakeIO().io);
+    await writer.settled();
+
+    expect(release).toHaveBeenCalledExactlyOnceWith("always", undefined);
+    expect(await release.mock.results[0]?.value).toEqual({ released: true });
+    expect(provider.requests).toEqual([]);
+  });
+
+  it("keeps a setup workspace when its original terminal write cannot be confirmed", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const registry = new RunRegistry();
+    deps.runRegistry = registry;
+    const inner = new InMemoryRunLedger();
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "finish")
+          return async () => {
+            throw new TransientStoreError("run ledger /runs/finish: HTTP 503");
+          };
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as InMemoryRunLedger;
+    const store = new InMemoryRunStore();
+    deps.runLedger = createLedgerWriteThrough({ ledger, gen: "gen-setup", fallback: store, warn: () => {} });
+    deps.runStore = ledgerBackedStore(ledger, store);
+    const writer = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
+    deps.runHistoryWriter = writer;
     const commit = registry.commitLiveState.bind(registry);
     vi.spyOn(registry, "commitLiveState").mockImplementation((id, assignment) =>
       assignment.liveState.state === "preparing" ? false : commit(id, assignment),
@@ -5039,8 +5083,11 @@ describe("executor provisioning by agent resources", () => {
     });
 
     await dispatch(deps, msg("agent:review look at it", "slack:UADMIN"), fakeIO().io);
+    await writer.settled();
 
-    expect(release).toHaveBeenCalledExactlyOnceWith("always", undefined);
+    expect(release).not.toHaveBeenCalled();
+    expect(inner.live.size).toBe(1);
+    expect(inner.finished.size).toBe(0);
     expect(provider.requests).toEqual([]);
   });
 
