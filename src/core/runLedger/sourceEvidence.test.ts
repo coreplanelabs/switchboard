@@ -5,6 +5,7 @@ import { InMemoryRunLedger } from "./inMemory.js";
 import { LEASE_MS } from "./types.js";
 import { sourceHash } from "../references/receipts.js";
 import { sourceSnapshot } from "./sourceEvents.js";
+import { testSourceInputIntent } from "../testing/sourceInputs.js";
 
 const destination = {
   runId: "child-one",
@@ -603,6 +604,47 @@ describe("source notice and fold messages", () => {
         message: { ...folded, receipt: { ...folded.receipt, sequence: 99 } },
       }),
     ).toEqual({ kind: "refused", reason: "invalid-delivery" });
+    const policy = { version: 1, commandRoute: "native", identity: "write" };
+    const launch = { version: 1, harness: "pi", phase: "prepared", ordinal: 0, sessionPolicy: policy };
+    expect(await ledger.setState("child", "g2", { ...child.state, harnessLaunch: launch })).toEqual({ ok: true });
+    expect(
+      await ledger.setState("child", "g2", { ...child.state, harnessLaunch: { ...launch, phase: "begun" } }),
+    ).toEqual({ ok: true });
+    expect(
+      await ledger.setState("child", "g2", {
+        ...child.state,
+        harness: { harness: "pi", launchOrdinal: 0, sessionFile: "original-native-session", sessionPolicy: policy },
+      }),
+    ).toEqual({ ok: true });
+    const input = testSourceInputIntent(),
+      entry = input.entries[0]!;
+    entry.owner = {
+      runId: "child",
+      gen: "g2",
+      requester: owner.requesterId,
+      channelId: owner.channelId,
+      threadKey: childThread,
+    };
+    entry.reference = {
+      ...entry.reference,
+      receipt: message.receipt,
+      root: {
+        runId: owner.runId,
+        requester: owner.requesterId,
+        channelId: owner.channelId,
+        threadKey: owner.threadKey,
+      },
+      routing: { kind: "fold", decision: { id: decision.id, hash: await sourceHash(sourceSnapshot(decision)) } },
+      inputHash: decision.inputHash,
+    };
+    const peek = await ledger.peekInbox("child", "g2", 0);
+    if (!peek.ok) throw new Error("Expected original fold row");
+    entry.witness = peek.items[0]!.witness;
+    expect(await ledger.setState("child", "g2", { ...child.state, sourceInputIntents: input })).toEqual({ ok: true });
+    expect(await ledger.peekInbox("child", "g2", 0)).toMatchObject({
+      ok: true,
+      boundary: { state: { sourceInputIntents: input } },
+    });
   });
 
   it("preserves first notices through keyed delivery and reclaim only under their root custody", async () => {

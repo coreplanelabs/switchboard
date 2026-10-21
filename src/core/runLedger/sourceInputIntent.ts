@@ -7,7 +7,9 @@ import {
 } from "../references/sourceInputReference.js";
 import { sourceSnapshot } from "./sourceEvents.js";
 import { DURABLE_INBOX_MAX_BYTES } from "./inboxMessage.js";
-import type { InboxRowWitness, LiveRunRow, RunState } from "./types.js";
+import { prepareSourceEvidenceMessage } from "./sourceEvidence.js";
+import { sourceHash } from "../references/receipts.js";
+import type { InboxItem, InboxRowWitness, LiveRunRow, RunState } from "./types.js";
 
 /** An original submission identity, not native acceptance or permission to send.
  * The host ID is carried in typed native input data. Pi's generated entry ID
@@ -25,6 +27,80 @@ export interface SourceInputIntent {
 export interface SourceInputIntents {
   version: 1;
   entries: SourceInputIntent[];
+}
+
+export interface SourceInputRowBinding {
+  seq: number;
+  json: string;
+}
+
+/** State custody can change while hashing waits. Passive lease and progress
+ * counters do not change the owner, native session, task or state being saved. */
+export function sourceInputWriteSnapshot(row: LiveRunRow | undefined): string | undefined {
+  return (
+    row && JSON.stringify({ runId: row.runId, gen: row.ownerGen, phase: row.phase, meta: row.meta, state: row.state })
+  );
+}
+
+/** Bind only new or advancing intents. Existing unresolved metadata survives
+ * row loss. This is row evidence, not source access, native admission or ACK. */
+export async function prepareSourceInputRows(
+  prior: RunState,
+  incoming: RunState,
+  readRow: (seq: number) => InboxItem | undefined,
+): Promise<SourceInputRowBinding[] | undefined> {
+  const before = sourceInputIntentsOf(prior.sourceInputIntents);
+  const after = sourceInputIntentsOf(incoming.sourceInputIntents);
+  if (!after) return;
+  const bindings: SourceInputRowBinding[] = [];
+  for (const entry of after.entries) {
+    if (before?.entries.some((old) => old.id === entry.id && old.phase === entry.phase)) continue;
+    const raw = readRow(entry.witness.seq);
+    if (!raw) return;
+    sourceSnapshot(raw);
+    // A row witness hashes stored JSON order; source input hashes use the
+    // existing canonical source form. Do not exchange those two byte domains.
+    const item: unknown = JSON.parse(JSON.stringify(raw));
+    if (!object(item) || item.seq !== entry.witness.seq || !object(item.message)) return;
+    const message = await prepareSourceEvidenceMessage(item.message, {
+      runId: entry.owner.runId,
+      requester: entry.owner.requester,
+      channelId: entry.owner.channelId,
+      threadKey: entry.owner.threadKey,
+    });
+    if (message?.version !== 2) return;
+    const root = entry.reference.root,
+      routing = message.routing;
+    if (
+      (await sourceHash(item.message)) !== entry.witness.digest ||
+      (await sourceHash(sourceSnapshot(message))) !== entry.reference.inputHash ||
+      JSON.stringify(sourceSnapshot(message.receipt)) !== JSON.stringify(sourceSnapshot(entry.reference.receipt)) ||
+      root.runId !== routing.owner.runId ||
+      root.requester !== routing.owner.requesterId ||
+      root.channelId !== routing.owner.channelId ||
+      root.threadKey !== routing.owner.threadKey ||
+      entry.reference.routing.kind !== routing.kind ||
+      (entry.reference.routing.kind === "fold" &&
+        routing.kind === "fold" &&
+        entry.reference.routing.decision.id !== routing.decision.id)
+    )
+      return;
+    bindings.push({ seq: entry.witness.seq, json: JSON.stringify(item) });
+  }
+  return bindings;
+}
+
+/** The store calls this inside its final commit boundary, without an await. */
+export function sourceInputRowsUnchanged(
+  bindings: SourceInputRowBinding[],
+  readRow: (seq: number) => InboxItem | undefined,
+): boolean {
+  return bindings.every((binding) => {
+    const current = readRow(binding.seq);
+    if (!current) return false;
+    sourceSnapshot(current);
+    return JSON.stringify(current) === binding.json;
+  });
 }
 
 const object = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);

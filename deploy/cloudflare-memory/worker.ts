@@ -287,6 +287,11 @@ import {
 } from "../../src/core/personalToken.js";
 import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
 import {
+  prepareSourceInputRows,
+  sourceInputRowsUnchanged,
+  sourceInputWriteSnapshot,
+} from "../../src/core/runLedger/sourceInputIntent.js";
+import {
   checkpointMembersOf,
   checkpointMemberHashesOf,
   ORDINARY_CONTEXT_HISTORY_RUNS,
@@ -8996,6 +9001,15 @@ export class RunHistoryDO extends DurableObject<Env> {
         const preserved = preserveCheckpointState(row.state, state, mintSeed, row);
         if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }, row.meta))
           return { ok: false, reason: "fenced" };
+        const inputBefore = preserved.sourceInputIntents !== undefined ? sourceInputWriteSnapshot(row) : undefined;
+        const bindings =
+          inputBefore !== undefined
+            ? await prepareSourceInputRows(row.state, preserved, (seq) => this.sourceInputRow(runId, seq))
+            : [];
+        if (!bindings) {
+          console.warn("[runs/state] source input intent refused", { runId, reason: "row-binding" });
+          return { ok: false, reason: "fenced" };
+        }
         // A retry may follow a committed write with a lost RPC reply. An exact
         // current snapshot needs no mutation; a moved prior state is never reset.
         if (before !== undefined) {
@@ -9035,6 +9049,15 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.ctx.storage.transactionSync(() => {
           if (this.promotionHeld(runId, gen)) {
             promotionRefused = true;
+            return;
+          }
+          if (
+            inputBefore !== undefined &&
+            (sourceInputWriteSnapshot(this.liveRow(runId)) !== inputBefore ||
+              !sourceInputRowsUnchanged(bindings, (seq) => this.sourceInputRow(runId, seq)))
+          ) {
+            stateMoved = true;
+            console.warn("[runs/state] source input intent refused", { runId, reason: "row-changed" });
             return;
           }
           if (before !== undefined) {
@@ -9087,6 +9110,22 @@ export class RunHistoryDO extends DurableObject<Env> {
         job: parseStoredJson(row.job_json),
       }
     );
+  }
+
+  private sourceInputRow(runId: string, seq: number) {
+    const owner = this.liveRow(runId);
+    if (!owner) return;
+    const floor = inboxSegmentFloor(this.inboxSegmentArchive(runId), owner);
+    if (floor === undefined || seq <= floor) return;
+    const raw = this.sql
+      .exec<{ seq: number; json: string }>("SELECT seq,json FROM run_inbox WHERE run_id=? AND seq=?", runId, seq)
+      .toArray()[0];
+    if (!raw) return;
+    const item = { seq: raw.seq, message: parseStoredJson(raw.json) as Record<string, unknown> };
+    const last = this.sql
+      .exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step>=0 ORDER BY step DESC LIMIT 1", runId)
+      .toArray()[0];
+    if (unreadInbox(last ? (parseStoredJson(last.json) as StepRecord) : null)(item)) return item;
   }
 
   /** Any generation: a steer arrives on whichever container is up. */
