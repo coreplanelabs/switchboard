@@ -50,6 +50,7 @@ import type { ChatMessage, ContentPart, ToolResultContent } from "../chatMessage
 import { shapeToolSchemasForWire } from "../providerToolSchemas.js";
 import { processSecrets, type Secrets } from "../../secrets.js";
 import { systemClock } from "../trace/clock.js";
+import { nativeHttpFetch, observeHttpRequest } from "../trace/httpTransport.js";
 import type { Clock } from "../trace/types.js";
 
 /** The three APIs pi speaks for the three wires `config.yaml` knows. */
@@ -210,17 +211,17 @@ export class PiAiProvider implements Provider {
         }
         delete failureContext.headers;
         try {
-          try {
-            req.observer?.onRequestStart?.();
-          } catch {
-            /* Diagnostics cannot fail a completion. */
-          }
-          const response = await (this.fetchImpl ?? globalThis.fetch)(input, init);
-          try {
-            req.observer?.onResponseHeaders?.(response.status);
-          } catch {
-            /* Diagnostics cannot fail a completion. */
-          }
+          const response = await observeHttpRequest(
+            input,
+            init,
+            () => nativeHttpFetch(this.fetchImpl ?? globalThis.fetch)(input, init),
+            {
+              observer: {
+                onSend: (id) => req.observer?.onRequestStart?.(id),
+                onHeaders: (status) => req.observer?.onResponseHeaders?.(status),
+              },
+            },
+          );
           failureContext.headers = Object.fromEntries(response.headers);
           const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
           if (requestId) {

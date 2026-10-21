@@ -72,7 +72,7 @@ describe("the readers' router is retired", () => {
     const provider: Provider = {
       name: "fake",
       complete: async (request) => {
-        request.observer?.onRequestStart?.();
+        request.observer?.onRequestStart?.("transport-fixture");
         request.observer?.onResponseHeaders?.(200);
         return { content: [], stopReason: "end_turn" };
       },
@@ -81,7 +81,7 @@ describe("the readers' router is retired", () => {
       { system: "system", user: "review", tool: { name: "bind_preset", description: "review", inputSchema: {} } },
       { maxTokens: 50, signal: new AbortController().signal, observe: (value) => observations.push(value) },
     );
-    expect(observations).toContainEqual({ transport: "request_send" });
+    expect(observations).toContainEqual({ transport: "request_send", transportId: "transport-fixture" });
     expect(observations).toContainEqual({ transport: "response_headers", status: 200 });
   });
 });

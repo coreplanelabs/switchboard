@@ -1,7 +1,9 @@
 // Controlled fixture reads only. No provider API, production config or deployment is wired here.
 import { MINUTE_MS, SOURCE_READ_ELIGIBILITY_MS } from "../../src/core/budgets.js";
 import { systemClock } from "../../src/core/trace/clock.js";
+import { bindingFetch, installHttpTransport } from "../../src/core/trace/httpTransport.js";
 import { MCP_PROTOCOL_VERSION } from "../../src/mcp/client.js";
+installHttpTransport();
 const DELAY_MS = 35_000; // Beyond the client's 30 s timeout; the alarm survives its disconnect.
 const RETENTION_MS = SOURCE_READ_ELIGIBILITY_MS;
 const RETRY_WINDOW_MS = MINUTE_MS;
@@ -346,7 +348,8 @@ export default {
     if (url.pathname.startsWith("/diagnostic/") && request.method === "GET") {
       const actionId = url.pathname.slice("/diagnostic/".length);
       if (!actionIdValid(actionId)) return new Response(null, { status: 404 });
-      return stub.fetch(
+      return bindingFetch(
+        stub,
         new Request("https://internal.invalid/", {
           method: "POST",
           headers: { "mcp-session-id": request.headers.get("mcp-session-id") ?? "" },
@@ -371,7 +374,8 @@ export default {
     const id = message.id;
     if (message.jsonrpc !== "2.0" || (id !== undefined && typeof id !== "number" && typeof id !== "string"))
       return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid request" } }, 400);
-    const reply = await stub.fetch(
+    const reply = await bindingFetch(
+      stub,
       new Request("https://internal.invalid/", {
         method: "POST",
         headers: { "mcp-session-id": request.headers.get("mcp-session-id") ?? "" },
@@ -395,7 +399,8 @@ export default {
       // The DO has already committed the entry and armed its alarm. A canceled
       // HTTP request can only cancel this wait, not that durable work.
       await new Promise<void>((resolve) => setTimeout(resolve, DELAY_MS + 1_000));
-      const inspection = await stub.fetch(
+      const inspection = await bindingFetch(
+        stub,
         new Request("https://internal.invalid/", {
           method: "POST",
           headers: { "mcp-session-id": request.headers.get("mcp-session-id") ?? "" },

@@ -356,7 +356,7 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
         const upstream = await tracedFetch(apiSpan, githubUrl("api.github.com", path, url.search), init, {
           route: graphql ? "graphql" : "rest",
           name: "github.rest",
-          fetchImpl: (input, options) => fetcher(String(input), options),
+          fetchImpl: deps.fetcher ? (input, options) => fetcher(String(input), options) : fetch,
         });
         const requestId = upstream.headers.get("x-github-request-id");
         if (requestId && /^[0-9A-Fa-f:]{1,64}$/.test(requestId)) apiSpan?.setAttrs({ githubRequestId: requestId });

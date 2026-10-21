@@ -1,4 +1,5 @@
 import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
+import { installHttpTransport } from "../../src/core/trace/httpTransport.js";
 import {
   readCancellationPreparation,
   cancellationFailure,
@@ -1468,6 +1469,7 @@ const BUILD = injectedBuildStamp();
 // root per command, joining the bot's trace (the bearer checked out before the
 // header is read).
 const tracer = createTracer({ clock: systemClock });
+installHttpTransport();
 const traceSinks = [workerLogSink((line) => console.log(line))];
 
 function execRoot(startedAt: number, traceparent: string | undefined) {

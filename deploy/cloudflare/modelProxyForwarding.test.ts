@@ -20,11 +20,11 @@ describe("the shim forwards the model proxy's paths to the container blind", () 
     expect(source).toMatch(/statusId !== undefined\s*\?\s*await handleCoordinatorInstanceStatus\(/);
     // The container's answer passes through with its length declared (knownLength.ts) — nothing else touches it.
     expect(source).toMatch(
-      /withDashboardFallback\(forwarded,\s*async \(\) =>\s*withLength\(await getContainer\(env\.SWITCHBOARD, INSTANCE\)\.fetch\(forwarded\)\)/,
+      /withDashboardFallback\(forwarded,\s*async \(\) =>\s*withLength\(await bindingFetch\(getContainer\(env\.SWITCHBOARD, INSTANCE\), forwarded\)\)/,
     );
     // A path the shim's own route table gives no root to is forwarded as it came.
     expect(source).toMatch(
-      /if \(route === undefined\)\s+return withDashboardFallback\(inbound,\s*async \(\) =>\s*withLength\(await getContainer\(env\.SWITCHBOARD, INSTANCE\)\.fetch\(inbound\)\)/,
+      /if \(route === undefined\)\s+return withDashboardFallback\(inbound,\s*async \(\) =>\s*withLength\(await bindingFetch\(getContainer\(env\.SWITCHBOARD, INSTANCE\), inbound\)\)/,
     );
     // Nothing in the shim knows the proxy's paths: no route of its own, no rewrite, no read of a body.
     expect(source).not.toContain("/v1/");

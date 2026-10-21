@@ -3435,6 +3435,7 @@ export async function operatorStage(
         ...(step?.provider ? { provider: step.provider } : {}),
         ...(step?.model ? { model: step.model } : {}),
         ...(step?.requestId ? { requestId: step.requestId } : {}),
+        ...(step?.transportId ? { transportId: step.transportId } : {}),
         ...(step?.phase === "model"
           ? {
               transportStage:

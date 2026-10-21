@@ -73,7 +73,7 @@ export interface CompletionRequest {
 
 export interface CompletionObserver {
   /** A provider HTTP attempt began after the pre-send check. */
-  onRequestStart?(): void;
+  onRequestStart?(transportId: string): void;
   /** HTTP response headers arrived, even when they lack a request ID. */
   onResponseHeaders?(status: number): void;
   /** The provider's correlation ID, observed at headers even if the stream later aborts. */

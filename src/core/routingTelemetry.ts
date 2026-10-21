@@ -5,6 +5,7 @@ export interface RoutingModelObservation {
   /** Transient provider transport events; the recorder stamps them with its clock. */
   transport?: "request_send" | "response_headers";
   status?: number;
+  transportId?: string;
   provider?: string;
   model?: string;
   effort?: string;

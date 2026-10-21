@@ -1,4 +1,5 @@
 import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
+import { bindingFetch, installHttpTransport } from "../../src/core/trace/httpTransport.js";
 import { WriteReceipts } from "./writeReceipts.js";
 import {
   emptyWriteComponents,
@@ -681,6 +682,7 @@ const BUILD = injectedBuildStamp();
 // per authenticated request, joining the bot's trace, on a `slow` log sink
 // whose filter drops the line a refusal would leave.
 const tracer = createTracer({ clock: systemClock });
+installHttpTransport();
 const traceSinks = [workerLogSink((line) => console.log(line))];
 
 // Memory Worker: the durable backend behind the bot's WorkerMemoryStore
@@ -4547,7 +4549,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!bot) return;
     const delivery = Promise.resolve()
       .then(() =>
-        bot.fetch("https://bot/plane/effects", {
+        bindingFetch(bot, "https://bot/plane/effects", {
           method: "POST",
           headers: {
             "content-type": "application/json",

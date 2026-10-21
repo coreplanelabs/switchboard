@@ -103,6 +103,9 @@ export class RoutingRecorder {
       if (value.transport === "request_send") {
         step.transportAttempts = (step.transportAttempts ?? 0) + 1;
         step.requestSentAt = this.now();
+        delete step.transportId;
+        if (value.transportId) step.transportId = safe(value.transportId, 128);
+        delete step.requestId;
         delete step.responseHeadersAt;
         delete step.responseStatus;
       } else if (
