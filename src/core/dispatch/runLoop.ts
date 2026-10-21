@@ -71,7 +71,7 @@ import {
 } from "../publicationSettlement.js";
 import { createCheckExecution } from "../checkExecution.js";
 import { typedExecutionDiagnosticOf } from "../../execution/typedExecutionDiagnostic.js";
-import { executionContextOf } from "../../execution/executor.js";
+import { executionContextOf, type Executor } from "../../execution/executor.js";
 import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
 import { MINUTE_MS, GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import { operatorModeOf, type ResolvedRequest } from "../../config.js";
@@ -599,67 +599,69 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // A restart restores that same receipt; reading the advanced branch would
   // otherwise exempt the run's own earlier commits from the identity audit.
   const identitySeam = deps.identityRewrite;
-  const startStateRead:
+  let startStateRead:
     | Promise<{ branch: string; state: BranchStartState; receipt?: BranchIdentityBaseline; invalid?: true } | undefined>
-    | undefined =
-    identitySeam !== undefined && isCodingPrRun && repoCtx.repo !== undefined
-      ? (async () => {
-          const repo = repoCtx.repo;
-          if (repo === undefined) return undefined;
-          const seeded = round.selection.seeded;
-          const seedMatches = seeded?.slug.toLowerCase() === repo.toLowerCase();
-          const attachment = binding ?? (seedMatches ? seeded : undefined) ?? round.selection.cold;
-          const branch = attachment?.ref ?? repoCtx.ref;
-          if (branch === undefined) return undefined;
-          if (!binding && seeded && !seedMatches)
-            return { branch, state: { kind: "unknown" as const }, invalid: true as const };
-          const base = repoCtx.baseRef ?? (await coordinatorBase) ?? branch;
-          const identity = {
-            runId: run.id,
-            requester: msg.userId,
-            threadKey: msg.threadKey,
-            repo,
-            branch,
-            base,
-            ...(coordinator ? { instanceId: coordinator.parentInstanceId, step: coordinator.idempotencyKey } : {}),
-          };
-          const saved =
-            resume?.row.state.branchIdentityBaseline !== undefined
-              ? resume.row.state.branchIdentityBaseline
-              : ctx.restartBranchIdentityBaseline;
-          if (saved !== undefined) {
-            const receipt = branchIdentityBaselineFor(saved, identity);
-            return receipt
-              ? { branch, state: receipt.state, receipt }
-              : { branch, state: { kind: "unknown" as const }, invalid: true as const };
-          }
-          const preRestartPush = resume?.row.state.pushedBranch ?? ctx.restartPushedBranch;
-          const recordedPush = resume?.events.some((event) => event.type === "pushed_head" && event.ref === branch);
-          if (
-            ctx.restartIdentityUncertain ||
-            branchIdentityCaptureBlocked(resume?.row.state ?? {}, repo, branch) ||
-            recordedPush ||
-            (typeof preRestartPush === "string" && preRestartPush === branch)
-          )
-            return {
+    | undefined;
+  const readStartState = () =>
+    (startStateRead ??=
+      identitySeam !== undefined && isCodingPrRun && repoCtx.repo !== undefined
+        ? (async () => {
+            const repo = repoCtx.repo;
+            if (repo === undefined) return undefined;
+            const seeded = round.selection.seeded;
+            const seedMatches = seeded?.slug.toLowerCase() === repo.toLowerCase();
+            const attachment = binding ?? (seedMatches ? seeded : undefined) ?? round.selection.cold;
+            const branch = attachment?.ref ?? repoCtx.ref;
+            if (branch === undefined) return undefined;
+            if (!binding && seeded && !seedMatches)
+              return { branch, state: { kind: "unknown" as const }, invalid: true as const };
+            const base = repoCtx.baseRef ?? (await coordinatorBase) ?? branch;
+            const identity = {
+              runId: run.id,
+              requester: msg.userId,
+              threadKey: msg.threadKey,
+              repo,
               branch,
-              state: {
-                kind: "unknown" as const,
-                reason: `prior writes or uncertain history for ${branch} from before a restart cannot establish the original identity baseline`,
-              },
+              base,
+              ...(coordinator ? { instanceId: coordinator.parentInstanceId, step: coordinator.idempotencyKey } : {}),
             };
-          const head = attachment?.ref === branch ? attachment.sha : undefined;
-          if (typeof head !== "string" || !/^[a-f0-9]{40}$/.test(head))
-            return { branch, state: { kind: "unknown" as const } };
-          const state = await identitySeam
-            .readStartState(repo, base, head)
-            .catch((): BranchStartState => ({ kind: "unknown" }));
-          const receipt = branchIdentityBaselineFor({ version: 1, binding: { ...identity, head }, state }, identity);
-          return receipt
-            ? { branch, state, receipt }
-            : { branch, state: { kind: "unknown" as const }, invalid: true as const };
-        })()
-      : undefined;
+            const saved =
+              resume?.row.state.branchIdentityBaseline !== undefined
+                ? resume.row.state.branchIdentityBaseline
+                : ctx.restartBranchIdentityBaseline;
+            if (saved !== undefined) {
+              const receipt = branchIdentityBaselineFor(saved, identity);
+              return receipt
+                ? { branch, state: receipt.state, receipt }
+                : { branch, state: { kind: "unknown" as const }, invalid: true as const };
+            }
+            const preRestartPush = resume?.row.state.pushedBranch ?? ctx.restartPushedBranch;
+            const recordedPush = resume?.events.some((event) => event.type === "pushed_head" && event.ref === branch);
+            if (
+              ctx.restartIdentityUncertain ||
+              branchIdentityCaptureBlocked(resume?.row.state ?? {}, repo, branch) ||
+              recordedPush ||
+              (typeof preRestartPush === "string" && preRestartPush === branch)
+            )
+              return {
+                branch,
+                state: {
+                  kind: "unknown" as const,
+                  reason: `prior writes or uncertain history for ${branch} from before a restart cannot establish the original identity baseline`,
+                },
+              };
+            const head = attachment?.ref === branch ? attachment.sha : undefined;
+            if (typeof head !== "string" || !/^[a-f0-9]{40}$/.test(head))
+              return { branch, state: { kind: "unknown" as const } };
+            const state = await identitySeam
+              .readStartState(repo, base, head)
+              .catch((): BranchStartState => ({ kind: "unknown" }));
+            const receipt = branchIdentityBaselineFor({ version: 1, binding: { ...identity, head }, state }, identity);
+            return receipt
+              ? { branch, state, receipt }
+              : { branch, state: { kind: "unknown" as const }, invalid: true as const };
+          })()
+        : Promise.resolve(undefined));
   let branchIdentityBaseline: BranchIdentityBaseline | undefined;
   let reviewHead = ctx.reviewHead;
   let lastActivityAt = ctx.loopStartedAt;
@@ -763,8 +765,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   deps.runBearers?.bindRecovery(run.id, recovery);
   const checkRecovery = async () => {
     await recovery.settled(false);
-    if (run.control.requested !== "hard" || recovery.stopped?.reason === "checkpoint_unavailable")
-      recovery.throwIfStopped();
+    if (run.control.requested !== "hard" || recovery.hasUnconfirmedEffects) recovery.throwIfStopped();
   };
   let reviewPublication = restored.reviewPublication as ReviewPublicationReceipt | undefined;
   let branchPublication: BranchPublication | undefined = branchPublicationOf(restored.branchPublication, repoCtx.repo);
@@ -985,7 +986,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     for (const latest of byRef.values()) restoreAcceptedHead(latest);
   };
   let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
-  const pendingToolCalls = new Set<string>();
+  // A true value keeps an observed cut monotonic across late result rows.
+  const pendingToolCalls = new Map<string, boolean>();
   let incompleteToolEffects = false;
   /** A cut retains workspace custody synchronously, even if display history
    * drops it. The ending also folds remaining calls into this same state;
@@ -993,15 +995,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let commandInFlight = false;
   const observeToolEffect = (event: RunEvent) => {
     if (event.type === "tool_call" && event.tool !== "update_status" && event.callId)
-      pendingToolCalls.add(event.callId);
+      if (!pendingToolCalls.has(event.callId)) pendingToolCalls.set(event.callId, false);
     if (event.type === "tool_result") {
       // A settled error is a known result. Only a cut or typed refusal leaves
       // the effect unverified; failed searches can be recovered in the run.
       if (event.cut) {
         incompleteToolEffects = true;
         commandInFlight = true;
+        if (event.callId) pendingToolCalls.set(event.callId, true);
       }
-      if (event.callId) pendingToolCalls.delete(event.callId);
+      if (event.callId && pendingToolCalls.get(event.callId) !== true && !recovery.isOutcomeHeld(event.callId))
+        pendingToolCalls.delete(event.callId);
     }
     if (
       event.type === "run_note" &&
@@ -1810,14 +1814,59 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // redirect its observation, completion checkpoint, or PR post-step.
   const coordinatorBranch =
     coordinator?.publication?.publicationRef ?? (coordinator !== undefined ? (binding?.ref ?? repoCtx.ref) : undefined);
+  // Check at each operation, not just before the asynchronous observation or
+  // checkpoint. A concurrent tool can lose its outcome during any wait.
+  let workspaceCallSequence = 0;
+  const workspaceExecutor = (): Pick<Executor, "exec" | "publishBranch" | "publishBranchResult"> => {
+    const current = executor;
+    const invoke = async <T>(tool: string, operation: () => Promise<T>): Promise<T> => {
+      if (recovery.hasUnconfirmedEffects) recovery.throwIfStopped();
+      if (commandInFlight)
+        throw new RefusalError(
+          refusalOf("setup_failed", "Workspace preservation was refused because an earlier command remains in flight."),
+        );
+      const callId = `runner-workspace:${++workspaceCallSequence}`;
+      try {
+        return await operation();
+      } catch (error) {
+        const detail = toolFailureOf(error);
+        if (detail?.code === "outcome_unknown")
+          await recovery.record(
+            callId,
+            tool,
+            {},
+            { text: error instanceof Error ? error.message : "workspace operation outcome unknown", detail },
+          );
+        throw error;
+      }
+    };
+    return {
+      exec: (...args) => invoke("workspace_exec", () => current.exec(...args)),
+      ...(current.publishBranch
+        ? {
+            publishBranch: async (...args: Parameters<NonNullable<Executor["publishBranch"]>>) => {
+              return invoke("workspace_publish", () => current.publishBranch!(...args));
+            },
+          }
+        : {}),
+      ...(current.publishBranchResult
+        ? {
+            publishBranchResult: async (...args: Parameters<NonNullable<Executor["publishBranchResult"]>>) => {
+              return invoke("workspace_publish", () => current.publishBranchResult!(...args));
+            },
+          }
+        : {}),
+    };
+  };
   const observeWorkspaceNow = async () => {
+    if (commandInFlight || recovery.hasUnconfirmedEffects) return;
     // The accepted recorder owns the ref even when the model checked out
     // another branch and the tool result's display block was truncated.
     const pushedBranch =
       coordinator !== undefined ? coordinatorBranch : (branchReceipts.at(-1)?.ref ?? pushes.branch());
     const observed = await root.span("run.observe_workspace", (span) =>
       observeCodingWorkspace(
-        executor,
+        workspaceExecutor(),
         {
           probeRemote: repoCtx.repo === undefined,
           ...(coordinator !== undefined ? { includeUntracked: true } : {}),
@@ -1827,6 +1876,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         span,
       ),
     );
+    if (commandInFlight || recovery.hasUnconfirmedEffects) return;
     workspaceObserved = true;
     observedHead = observed.head;
     observedBranch = observed.branch;
@@ -1856,6 +1906,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ? { publicationDoor: { repo: repoCtx.repo, origin: new URL(ctx.githubDoor.baseUrl).origin } }
         : {}),
       admitPush: async (next: string) => {
+        if (commandInFlight || recovery.hasUnconfirmedEffects) return;
         const callId = `runner-checkpoint:${branch}:${next}`;
         const issued = deps.runBearers?.issue(run.id);
         const hash = issued && bearerHashOf(issued.token);
@@ -1899,12 +1950,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     };
   };
   const preserveCodingChildWork = async (cue: "budget" | "ending" | "completion"): Promise<void> => {
-    if (run.control.destructive) return;
+    if (run.control.destructive || recovery.hasUnconfirmedEffects) return;
     if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined || commandInFlight || gateBypassed) return;
     await events.drain();
-    if (commandInFlight) return;
+    if (commandInFlight || recovery.hasUnconfirmedEffects) return;
     retainPublicationReceipts();
     if (!workspaceObserved) await observeWorkspaceNow();
+    if (commandInFlight || recovery.hasUnconfirmedEffects) return;
     const target =
       coordinatorBranch === undefined
         ? { skipped: "the ending checkpoint was skipped: the unit's branch is unavailable" }
@@ -1914,6 +1966,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ownedBranch: coordinatorBranch,
             base: repoCtx.baseRef ?? (await coordinatorBase),
           });
+    if (commandInFlight || recovery.hasUnconfirmedEffects) return;
     // The checkpoint measures again immediately before creating the commit,
     // including new non-ignored files even if the earlier observation was clean.
     const salvaged =
@@ -1921,7 +1974,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ? { pushed: false, summary: target.skipped }
         : await root.span(cue === "budget" ? "run.budget_salvage" : "run.work_salvage", (span) =>
             salvageBudgetPush(
-              executor,
+              workspaceExecutor(),
               {
                 branch: target.branch,
                 cue,
@@ -1968,6 +2021,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               span,
             ),
           );
+    if (commandInFlight || recovery.hasUnconfirmedEffects) return;
     if ("publicationBlocked" in salvaged && salvaged.publicationBlocked !== undefined)
       blockExistingPrPublication(salvaged.publicationBlocked);
     const cleanCompletion =
@@ -2060,7 +2114,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  admit another task turn or publication. Re-latch at every boundary, since a
    *  soft pre-review stop can land while the preceding tail step awaits. */
   const tailSkipped = (): boolean =>
-    run.control.requested === "hard" || relaunchEndedRun || latchReviewStoppedBeforeStart() || commandInFlight;
+    run.control.requested === "hard" ||
+    relaunchEndedRun ||
+    latchReviewStoppedBeforeStart() ||
+    commandInFlight ||
+    recovery.hasUnconfirmedEffects;
   const originalPublicationOwner = async () => {
     if (!ledgerRun?.tracked() || !deps.runLedger) return undefined;
     const rows = (await deps.runLedger.readLiveRuns()).filter((row) => row.runId === run.id);
@@ -2132,6 +2190,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let workspaceRelease: Promise<void> | undefined;
   const releaseWorkspace = (span?: Span): Promise<void> =>
     (workspaceRelease ??= (async () => {
+      // A model-facing error or an empty restored mirror cannot settle an
+      // operation whose command outcome or checkpoint remains unknown.
+      if (recovery.hasUnconfirmedEffects) return;
       // Failed control or record collection leaves the original custody standing.
       // A hard stop is not authority to release an unconfirmed producer.
       if (harnessEndState === "unconfirmed") {
@@ -2186,6 +2247,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       )
         return;
       const pushed = branchPublication?.branches ?? [];
+      if (recovery.hasUnconfirmedEffects) return;
       const result = await round
         .release({
           hardStopped: run.control.requested === "hard",
@@ -3168,7 +3230,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   }
   try {
     await checkRecovery();
-    const identityBaseline = await startStateRead;
+    const identityBaseline = await readStartState();
     if (identityBaseline?.invalid)
       throw new Error("The original branch identity baseline is invalid; publication remains held.");
     if (identityBaseline?.receipt) {
@@ -4027,10 +4089,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(isCodingPrRun && ownBranch !== undefined && !protectedBranches.includes(ownBranch)
               ? {
                   onCompactionFailed: async (why: string) => {
+                    if (commandInFlight || recovery.hasUnconfirmedEffects) return;
                     const branch = ownBranch;
                     const salvaged = await root.span("run.compaction_salvage", (span) =>
                       salvageBudgetPush(
-                        executor,
+                        workspaceExecutor(),
                         {
                           branch,
                           cue: "compaction",
@@ -4042,6 +4105,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                         span,
                       ),
                     );
+                    if (commandInFlight || recovery.hasUnconfirmedEffects) return;
                     if (salvaged.publicationBlocked !== undefined)
                       blockExistingPrPublication(salvaged.publicationBlocked);
                     onEvent({
@@ -5547,7 +5611,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     planeReadUnknown,
     runDiagnosis,
     checklistAsLeft,
-    hasIncompleteToolEffects: () => incompleteToolEffects || pendingToolCalls.size > 0,
+    hasIncompleteToolEffects: () =>
+      recovery.hasUnconfirmedEffects || incompleteToolEffects || pendingToolCalls.size > 0,
     answerOutcome,
     releaseWorkspace: async (span) => {
       // The final writer starts after the reply seal. Ordinary detach must
@@ -5624,4 +5689,4 @@ function unknownHarnessWordOf(state: unknown): { word: string; pid: string; cont
     container: typeof container === "string" ? container : "unknown",
   };
 }
-import { ToolRecovery, ToolRecoveryStoppedError } from "../harness/toolRecovery.js";
+import { ToolRecovery, ToolRecoveryStoppedError, toolFailureOf } from "../harness/toolRecovery.js";

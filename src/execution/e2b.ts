@@ -229,6 +229,7 @@ export class E2BExecutor implements Executor {
           "e2b command outcome is unavailable",
           error instanceof TimeoutError ? "deadline-passed" : "transport-lost",
         );
+        failure.commandOutcome = "unknown";
         Object.defineProperty(failure, "cause", { value: error });
         throw failure;
       }
@@ -241,7 +242,9 @@ export class E2BExecutor implements Executor {
       result.exitCode < 0 ||
       result.exitCode > 255
     )
-      throw new ExecInfraError("e2b command outcome is invalid", "worker-unavailable");
+      throw Object.assign(new ExecInfraError("e2b command outcome is invalid", "worker-unavailable"), {
+        commandOutcome: "unknown" as const,
+      });
     return {
       stdout: result.stdout,
       stderr: result.stderr,

@@ -1324,6 +1324,40 @@ describe("CloudflareSandboxExecutor runtime-busy wait", () => {
 
 // Feature: execution.md — the first coding baseline consumes typed outcomes.
 describe("Cloudflare typed command outcome", () => {
+  it("keeps environment preparation outside the unknown command boundary", async () => {
+    const original = new ExecInfraError("environment unavailable", "transport-lost");
+    const effects: string[] = [];
+    vi.stubGlobal("fetch", async () => {
+      effects.push("send");
+      return Response.json({ stdout: "ok", stderr: "", exitCode: 0, truncated: false });
+    });
+    const error = await new CloudflareSandboxExecutor({
+      ...OPTS,
+      resolveEnvs: async () => {
+        throw original;
+      },
+    })
+      .execResult("command")
+      .catch((failure: unknown) => failure);
+    expect(error).toBe(original);
+    expect(original.commandOutcome).toBeUndefined();
+    expect(effects).toEqual([]);
+    expect(await new CloudflareSandboxExecutor(OPTS).execResult("command")).toEqual({
+      stdout: "ok",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    });
+    expect(effects).toEqual(["send"]);
+  });
+  it("keeps a null native command response typed and unknown", async () => {
+    const { calls } = stubFetch(null);
+    await expect(new CloudflareSandboxExecutor(OPTS).execResult("command")).rejects.toMatchObject({
+      message: "sandbox /exec: invalid command result",
+      commandOutcome: "unknown",
+    });
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual(["/exec"]);
+  });
   it.each([500, 502, 503])("does not replay display commands after an unknown HTTP response (%s)", async (status) => {
     vi.useFakeTimers();
     try {
@@ -1387,6 +1421,7 @@ describe("Cloudflare typed command outcome", () => {
         .catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(ExecInfraError);
       expect(failure instanceof Error && failure.cause).toBe(original);
+      expect(failure).toMatchObject({ commandOutcome: "unknown" });
       expect(effects).toEqual(["native attempt"]);
     },
   );
@@ -1399,6 +1434,7 @@ describe("Cloudflare typed command outcome", () => {
     });
     await expect(new CloudflareSandboxExecutor(OPTS).execResult("effectful command")).rejects.toMatchObject({
       message: "sandbox /exec: dispatch refusal could not be verified",
+      commandOutcome: "unknown",
       reason: "answered",
     });
     expect(effects).toEqual(["native attempt"]);
@@ -1410,6 +1446,7 @@ describe("Cloudflare typed command outcome", () => {
       const { calls } = stubFetch({ stdout: "successful output", stderr: "", exitCode, truncated: false });
       await expect(new CloudflareSandboxExecutor(OPTS).exec("command")).rejects.toMatchObject({
         message: "sandbox /exec: invalid command result",
+        commandOutcome: "unknown",
         reason: "worker-unavailable",
       });
       expect(calls).toHaveLength(1);

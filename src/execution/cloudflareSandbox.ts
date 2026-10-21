@@ -324,7 +324,9 @@ export class CloudflareSandboxExecutor implements Executor {
         !(answer.executionDiagnostic && (logObservation ? answer.knownLogWait === true : waitForKnownBusy))
       ) {
         if (!answer.executionDiagnostic)
-          throw new ExecInfraError("sandbox /exec: dispatch refusal could not be verified", "answered");
+          throw Object.assign(new ExecInfraError("sandbox /exec: dispatch refusal could not be verified", "answered"), {
+            commandOutcome: "unknown" as const,
+          });
         throw new ExecCapacityError(
           "The typed command was refused before execution.",
           undefined,
@@ -391,6 +393,10 @@ export class CloudflareSandboxExecutor implements Executor {
         knownLogWait?: true;
       }
   > {
+    const unconfirmed = (failure: ExecInfraError): ExecInfraError => {
+      if (route === "/exec") failure.commandOutcome = "unknown";
+      return failure;
+    };
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
     const delays = singleSend ? [0] : [0, 3000, 6000, 12000];
     let lastErr = "";
@@ -435,13 +441,15 @@ export class CloudflareSandboxExecutor implements Executor {
             ? new ExecInfraError(sandboxNoAnswerMessage(route, budgetMs), "deadline-passed")
             : new ExecInfraError(requestFailedMessage("sandbox", route, err), infraReasonOfRequestFailure(err, signal));
         Object.defineProperty(failure, "cause", { value: err });
-        throw failure;
+        throw unconfirmed(failure);
       }
       // Heartbeat whitespace around one JSON document parses unchanged; a
       // non-JSON body (an edge error page) is {} and the status speaks below.
       let data: Record<string, unknown> = {};
       try {
-        data = JSON.parse(text.trim() || "{}") as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(text.trim() || "{}");
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed))
+          data = parsed as Record<string, unknown>;
       } catch {
         // fall through with {} — the HTTP status decides
       }
@@ -497,7 +505,7 @@ export class CloudflareSandboxExecutor implements Executor {
       // exit 127 with no output and NO error key is not
       // this: `foo 2>/dev/null` is a legitimate silent 127.
       if (res.ok && "error" in data && data.error === "") {
-        throw new ExecInfraError(sandboxEmptyFailureMessage(route), "empty-failure");
+        throw unconfirmed(new ExecInfraError(sandboxEmptyFailureMessage(route), "empty-failure"));
       }
       // /exec streams its response (heartbeat whitespace + one JSON document,
       // always HTTP 200 since headers are sent before the outcome is known),
@@ -510,7 +518,7 @@ export class CloudflareSandboxExecutor implements Executor {
         // even a bare echo). Infra, not a command exit — counts toward fail-fast.
         // The Worker's own words: their meaning is in the words (the harness's
         // seam reads the container-down ones), so no wait on the type alone.
-        throw new ExecInfraError(`sandbox worker ${route}: ${data.error}`, "answered");
+        throw unconfirmed(new ExecInfraError(`sandbox worker ${route}: ${data.error}`, "answered"));
       }
       if (res.ok) return { kind: "ok", data };
       lastErr = `sandbox worker ${route} HTTP ${res.status}: ${String(data.error ?? "")}`;
@@ -519,7 +527,8 @@ export class CloudflareSandboxExecutor implements Executor {
     }
     // Exhausted retries against an unreachable worker — infra, not a command
     // exit; a 5xx the Worker may yet clear, a 4xx a refusal.
-    throw new ExecInfraError(lastErr, infraReasonOfStatus(lastStatus));
+    const failure = new ExecInfraError(lastErr, infraReasonOfStatus(lastStatus));
+    throw lastStatus >= 500 ? unconfirmed(failure) : failure;
   }
 
   /** Facts for runner-owned effects. A possibly executed command is never replayed. */
@@ -559,7 +568,9 @@ export class CloudflareSandboxExecutor implements Executor {
       r.exitCode > 255 ||
       typeof r.truncated !== "boolean"
     )
-      throw new ExecInfraError("sandbox /exec: invalid command result", "worker-unavailable");
+      throw Object.assign(new ExecInfraError("sandbox /exec: invalid command result", "worker-unavailable"), {
+        commandOutcome: "unknown" as const,
+      });
     return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode, truncated: r.truncated };
   }
 

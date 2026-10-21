@@ -28,9 +28,8 @@ import type { RunnableTool, ToolContext } from "../../../tools/runnableTool.js";
 import { sleepUnlessAborted } from "../../dispatch/awaitChildren.js";
 import type { Backend } from "../../trace/attrs.js";
 import { redactAndCap, toolTextFailed, type RunEvent } from "../../runEvents.js";
-import type { ToolFailure } from "../toolRecovery.js";
+import { toolFailureOf, type ToolFailure } from "../toolRecovery.js";
 import { ToolRecoveryStoppedError } from "../toolRecovery.js";
-import { UncertainStoreError } from "../../storeFailure.js";
 import type { Span } from "../../trace/types.js";
 import { pointerSummary, type CompactionAnswer, type CompactionAsk } from "./compactionFallback.js";
 import { judgeToolCall, literalPushSource, publicationAttributionRefusal, type ToolRuleContext } from "./toolRules.js";
@@ -531,12 +530,7 @@ export async function runRelayedTool(
     );
     return { content, isError };
   } catch (err) {
-    const detail: ToolFailure | undefined =
-      err instanceof UncertainStoreError
-        ? { code: "outcome_unknown", recovery: "stop" }
-        : failure?.recovery === "stop"
-          ? failure
-          : undefined;
+    const detail = toolFailureOf(err, failure);
     await base.recovery?.record(ask.toolCallId, ask.tool, ask.input, {
       text: err instanceof Error ? err.message : String(err),
       detail,

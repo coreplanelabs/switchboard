@@ -63,6 +63,7 @@ describe("E2B typed command outcome", () => {
       const failure = await ex.execResult("change files").catch((error: unknown) => error);
       expect(failure).toMatchObject({
         message: "e2b command outcome is unavailable",
+        commandOutcome: "unknown",
         reason: "transport-lost",
         cause: original,
       });
@@ -78,6 +79,7 @@ describe("E2B typed command outcome", () => {
       const { ex } = e2bWith(async () => ({ stdout: "exit 0: successful", stderr: "", exitCode }));
       await expect(ex.execResult("command")).rejects.toMatchObject({
         message: "e2b command outcome is invalid",
+        commandOutcome: "unknown",
         reason: "worker-unavailable",
       });
     },
@@ -370,6 +372,7 @@ describe("E2BExecutor per-call timeout", () => {
     });
     await expect(ex.exec("sleep 9999", { timeoutMs: 60_000 })).rejects.toMatchObject({
       message: "e2b command outcome is unavailable",
+      commandOutcome: "unknown",
       reason: "deadline-passed",
       cause: original,
     });

@@ -6053,6 +6053,96 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     },
   );
 
+  it.each([
+    "observation",
+    "checkpoint",
+    "compaction",
+    "cut observation",
+    "producer observation",
+    "producer checkpoint",
+    "ordinary probe failure",
+    "known result",
+  ] as const)("holds coding-child preservation after a result arrives during %s", async (phase) => {
+    const ref = "unit-work",
+      head = "a".repeat(40);
+    let recovery: ToolRecovery | undefined;
+    let activeRun: HarnessRun | undefined;
+    let cutObserved = false;
+    let statusReads = 0;
+    const mutations: string[] = [];
+    const afterUnknown: string[] = [];
+    const s = endingIn(
+      async (_deps, request) => {
+        recovery = request.toolContext.recovery;
+        activeRun = request;
+        if (phase === "compaction") await request.onCompactionFailed!("the provider refused the summary");
+        return sessionAnswering("Partial work");
+      },
+      {
+        coding: true,
+        repoCtx: { repo: "o/r", ref, baseRef: "main" },
+        binding: { ref, sha: head, workspace: "/srv/wt/u1" },
+        coordinator: WIP_COORDINATOR,
+        executor: {
+          exec: async (command) => {
+            if (recovery?.hasUnconfirmedEffects || cutObserved) afterUnknown.push(command);
+            if (/ (add|commit|push) /.test(command)) mutations.push(command.match(/ (add|commit|push) /)![1]);
+            if (command.includes("status --porcelain")) {
+              statusReads++;
+              if (statusReads === (phase.endsWith("checkpoint") ? 2 : 1)) {
+                await Promise.resolve();
+                if (phase === "ordinary probe failure") throw new Error("probe unavailable");
+                if (phase.startsWith("producer"))
+                  throw Object.assign(new ExecInfraError("controller result lost", "transport-lost"), {
+                    commandOutcome: "unknown" as const,
+                  });
+                if (phase === "cut observation") {
+                  openToolCall(activeRun!);
+                  abortOpenCall(activeRun!);
+                  cutObserved = true;
+                } else {
+                  await recovery!.record(
+                    "original",
+                    "operation",
+                    {},
+                    phase === "known result"
+                      ? undefined
+                      : {
+                          text: "response lost",
+                          detail: { code: "outcome_unknown", recovery: "stop" },
+                        },
+                  );
+                }
+              }
+              return " M work.ts";
+            }
+            if (command.includes("rev-parse --abbrev-ref") || command.includes("symbolic-ref")) return ref;
+            if (command.includes("rev-parse")) return head;
+            if (command.includes("rev-list --count")) return "1";
+            return "";
+          },
+        },
+      },
+    );
+    const result = await runLoop(s.deps, s.ctx).catch((error: unknown) => error);
+    if (phase === "known result" || phase === "ordinary probe failure") {
+      expect(answered(result as Awaited<ReturnType<typeof runLoop>>).answer).toContain("Published");
+      expect(mutations).toEqual(["add", "commit", "push"]);
+      expect(recovery?.hasUnconfirmedEffects).toBe(false);
+    } else {
+      expect({ mutations, afterUnknown, held: recovery?.hasUnconfirmedEffects }).toEqual({
+        mutations: [],
+        afterUnknown: [],
+        held: phase !== "cut observation",
+      });
+      if (phase === "cut observation")
+        expect(s.registry.snapshot(s.run.id, s.run.token)?.events).toContainEqual(
+          expect.objectContaining({ type: "tool_result", callId: "c-open", cut: true }),
+        );
+      expect(s.releases).toEqual([]);
+    }
+  });
+
   it("a coding child that ends with an unpushed commit checkpoints it before release and its card never says discarded", async () => {
     const HEAD = "d1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const BRANCH = "unit-work";
@@ -12429,6 +12519,62 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       inbox: [],
     };
   }
+  it.each(["outcome_unknown", "checkpoint_unavailable", "unsupported"] as const)(
+    "holds a restored %s before native entry, publication or workspace release with an empty mirror",
+    async (reason) => {
+      const post = vi.fn(async () => ({ state: "accepted" as const }));
+      const s = setup("", { agent: "review", provider: neverCalled(), ...prThread, review: { head: HEAD, post } });
+      let checkpoint: unknown = {
+        version: 1,
+        settled: [],
+        failures: [],
+        stopped: { tool: "operation", attempts: 1, reason },
+      };
+      if (reason === "unsupported") {
+        checkpoint = { version: "unsupported" };
+        for (let restart = 0; restart < 2; restart++)
+          checkpoint = JSON.parse(JSON.stringify(new ToolRecovery(checkpoint).snapshot()));
+      }
+      const resume = finishing("Saved answer", {
+        agent: "review",
+        repoCtx: prThread.repoCtx,
+        state: {
+          verdict: VERDICT,
+          toolRecovery: checkpoint,
+        },
+      });
+      expect(resume.lastStep.inFlight).toEqual([]);
+      const ctx = { ...s.ctx, resume, messages: resume.plan.messages };
+      if (reason === "outcome_unknown") await expect(runLoop(s.deps, ctx)).rejects.toThrow(ToolRecoveryStoppedError);
+      else expect(await runLoop(s.deps, ctx)).toMatchObject({ kind: "paused", reason: "checkpoint_unavailable" });
+      expect({ releases: s.releases, publications: post.mock.calls.length }).toEqual({ releases: [], publications: 0 });
+    },
+  );
+
+  it("keeps a replayed cut call incomplete after a later ordinary result", async () => {
+    const s = setup("", { agent: "general", provider: neverCalled() });
+    const resume = finishing("Partial answer", {
+      events: [
+        { type: "tool_call", tool: "operation", summary: "write", callId: "original", seq: 1 },
+        {
+          type: "tool_result",
+          tool: "operation",
+          ok: false,
+          summary: "unknown",
+          callId: "original",
+          cut: true,
+          seq: 2,
+        },
+        { type: "tool_result", tool: "operation", ok: true, summary: "late display", callId: "original", seq: 3 },
+      ],
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect({ answer: out.answer, incomplete: out.hasIncompleteToolEffects() }).toEqual({
+      answer: "Partial answer",
+      incomplete: true,
+    });
+    expect(resume.events[1]).toMatchObject({ callId: "original", cut: true });
+  });
   it.each([
     "accepted",
     "metadata only",
@@ -14638,6 +14784,71 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     };
     return { BRANCH, description, s, reads, startStates, opened };
   };
+
+  it("does not observe or checkpoint a restored held coding child without pending provider calls", async () => {
+    const commands: string[] = [];
+    const ref = "unit-work";
+    const head = "a".repeat(40);
+    const s = setup("", {
+      agent: "coding",
+      coding: true,
+      provider: neverCalled(),
+      coordinator: checkpointCoordinator,
+      repoCtx: { repo: "o/r", ref, baseRef: "main" },
+      binding: { ref, sha: head, workspace: "/srv/wt/u1" },
+      executor: {
+        exec: async (command) => {
+          commands.push(command);
+          if (command.includes("rev-parse --abbrev-ref") || command.includes("symbolic-ref")) return ref;
+          if (command.includes("rev-parse")) return head;
+          if (command.includes("status --porcelain")) return " M work.ts";
+          if (command.includes("rev-list --count")) return "1";
+          return "";
+        },
+      },
+    });
+    const resume = finishing("Partial work", {
+      agent: "coding",
+      repoCtx: s.ctx.repoCtx,
+      state: {
+        toolRecovery: {
+          version: 1,
+          settled: [],
+          failures: [],
+          stopped: { tool: "operation", attempts: 1, reason: "outcome_unknown" },
+        },
+      },
+    });
+    expect(resume.lastStep.inFlight).toEqual([]);
+    await expect(runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages })).rejects.toThrow(
+      ToolRecoveryStoppedError,
+    );
+    expect({ commands, releases: s.releases }).toEqual({ commands: [], releases: [] });
+  });
+
+  it("blocks restored unknown work before starting the identity baseline read", async () => {
+    const { s, reads, opened } = startStateFixture();
+    const resume = finishing("Partial answer", {
+      agent: "coding",
+      repoCtx: s.ctx.repoCtx,
+      state: {
+        toolRecovery: {
+          version: 1,
+          settled: [],
+          failures: [],
+          stopped: { tool: "operation", attempts: 1, reason: "outcome_unknown" },
+        },
+      },
+    });
+    await expect(runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages })).rejects.toThrow(
+      ToolRecoveryStoppedError,
+    );
+    expect({ identityReads: reads, publications: opened, releases: s.releases }).toEqual({
+      identityReads: [],
+      publications: [],
+      releases: [],
+    });
+  });
 
   it.each(["seeded", "cold"] as const)(
     "refuses a receipt-only legacy %s checkout without recapturing its published head",
