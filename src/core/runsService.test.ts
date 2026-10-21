@@ -1,4 +1,5 @@
 import { homeOverview } from "./home/overview.js";
+import { testSourceInputIntent } from "./testing/sourceInputs.js";
 import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { UncertainStoreError, TransientStoreError } from "./storeFailure.js";
 import { storeRequestWitness } from "./storeResponse.js";
@@ -513,7 +514,24 @@ describe("RunsService.getRun", () => {
         recordTaskKey: null,
       },
     };
-    await store!.put({ ...base, sourceTask });
+    const inputs = testSourceInputIntent(),
+      entry = inputs.entries[0]!;
+    entry.owner = {
+      ...entry.owner,
+      runId: base.id,
+      requester: base.userId,
+      channelId: base.channelId,
+      threadKey: base.threadKey,
+    };
+    entry.reference.root = {
+      runId: base.id,
+      requester: base.userId,
+      channelId: base.channelId,
+      threadKey: base.threadKey,
+    };
+    entry.witness.runId = base.id;
+    entry.native.sessionId = "private-native-proof-only";
+    await store!.put({ ...base, sourceTask, sourceInputIntents: inputs });
     expect(await store!.get(base.id)).toMatchObject({
       id: base.id,
       sourceTask: { task: { ref: "private-task-proof-only" } },
@@ -525,6 +543,8 @@ describe("RunsService.getRun", () => {
       await svc.listRuns({ status: "all", visibleTo: ALL }),
     ]) {
       expect(JSON.stringify(view)).not.toContain("sourceTask");
+      expect(JSON.stringify(view)).not.toContain("sourceInputIntents");
+      expect(JSON.stringify(view)).not.toContain("private-native-proof-only");
       expect(JSON.stringify(view)).not.toContain("private-task-proof-only");
     }
   });

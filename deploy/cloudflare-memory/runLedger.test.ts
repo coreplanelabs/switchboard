@@ -20656,6 +20656,126 @@ describe("terminal native retirement authority", () => {
 });
 
 describe("source-input context readers in SQLite", () => {
+  it.each(["prepared", "begun"] as const)(
+    "finishes or settles an unresolved %s input privately and preserves it through trimming",
+    async (phase) => {
+      const key = storeKey(),
+        id = "source-consumer",
+        thread = "cli:thread";
+      const options = {
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: (input: RequestInfo | URL, init?: RequestInit) => fetchMemoryTest(String(input), init),
+      };
+      const ledger = new WorkerRunLedger(options),
+        store = new WorkerRunStore(options);
+      const policy = { version: 1, commandRoute: "native", identity: "write" };
+      const launch = { version: 1, harness: "pi", phase: "prepared", ordinal: 0, sessionPolicy: policy };
+      expect(
+        (
+          await post(
+            "/runs/claim",
+            claimBody(key, id, thread, "g1", {
+              meta: { agent: "orchestrator", userId: "cli:alice", channelId: "cli:main", threadKey: thread },
+              state: { harnessLaunch: launch },
+            }),
+          )
+        ).status,
+      ).toBe(200);
+      expect(await ledger.setState(id, "g1", { harnessLaunch: { ...launch, phase: "begun" } })).toEqual({ ok: true });
+      expect(
+        await ledger.setState(id, "g1", {
+          harness: { harness: "pi", launchOrdinal: 0, sessionFile: "original-native-session", sessionPolicy: policy },
+        }),
+      ).toEqual({ ok: true });
+      const original = await seedSourceInputIntent(ledger, testSourceInputIntent());
+      expect(await ledger.setState(id, "g1", { sourceInputIntents: original })).toEqual({ ok: true });
+      if (phase === "begun") {
+        original.entries[0]!.phase = phase;
+        expect(await ledger.setState(id, "g1", { sourceInputIntents: original })).toEqual({ ok: true });
+      }
+      const row = (await ledger.listLive()).find((value) => value.runId === id)!;
+      expect(await ledger.abandon(id, "g1")).toEqual({ ok: false, reason: "fenced" });
+      expect(await ledger.abandon(id, "g1", { settleTerminal: true })).toEqual({ ok: false, reason: "fenced" });
+      const terminal = {
+        ...record(id, thread),
+        agent: "orchestrator",
+        userId: "cli:alice",
+        channelId: "cli:main",
+        startedAt: row.startedAt,
+        finishedAt: row.startedAt + 1,
+        events: [],
+        eventCount: 0,
+        storedEventCount: 0,
+      };
+      const changed = structuredClone(original);
+      changed.entries[0]!.id = "replacement";
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const refused = await post("/runs/finish", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          record: { ...terminal, sourceInputIntents: changed },
+        });
+        expect(refused.status).toBe(500);
+        expect((await ledger.listLive()).find((value) => value.runId === id)?.state.sourceInputIntents).toEqual(
+          original,
+        );
+        expect(warn.mock.calls.filter(([line]) => line === "[runs/archive] source input refused")).toEqual([
+          ["[runs/archive] source input refused", { runId: id, operation: "archive", reason: "original-changed" }],
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+      if (phase === "begun") {
+        expect(await store.put(terminal)).toMatchObject({ stored: true });
+        expect(await ledger.abandon(id, "g1")).toEqual({ ok: false, reason: "fenced" });
+        expect(await ledger.abandon(id, "g1", { settleTerminal: true })).toEqual({ ok: true });
+        expect((await post("/runs/claim", claimBody(key, "next-run", thread, "g2"))).status).toBe(200);
+      } else {
+        expect(await ledger.finish(id, "g1", terminal)).toMatchObject({ ok: true, stored: true });
+      }
+      expect((await store.get(id))?.sourceInputIntents).toEqual(original);
+      await store.put({ ...terminal, label: "later presentation" });
+      expect((await store.get(id))?.sourceInputIntents).toEqual(original);
+      const rewriteWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await expect(store.put({ ...terminal, sourceInputIntents: changed })).rejects.toThrow();
+        expect(rewriteWarn.mock.calls.filter(([line]) => line === "[runs/archive] source input refused")).toEqual([
+          ["[runs/archive] source input refused", { runId: id, operation: "put", reason: "original-changed" }],
+        ]);
+      } finally {
+        rewriteWarn.mockRestore();
+      }
+      expect((await store.get(id))?.sourceInputIntents).toEqual(original);
+      expect(await store.getSummary(id)).not.toHaveProperty("sourceInputIntents");
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+        const raw = state.storage.sql
+          .exec<{ summary_json: string; work_evidence_json: string }>(
+            "SELECT summary_json,work_evidence_json FROM runs WHERE run_id=?",
+            id,
+          )
+          .one();
+        expect(JSON.parse(raw.summary_json)).not.toHaveProperty("sourceInputIntents");
+        expect(JSON.parse(raw.work_evidence_json).sourceInputIntents).toEqual(original);
+        state.storage.sql.exec("UPDATE runs SET finished_at=1 WHERE run_id=?", id);
+        (owner as unknown as { trim(policy: Record<string, number>, now: number, fence: undefined): unknown }).trim(
+          { retentionDays: 1, maxRuns: 0, maxBytes: 0 },
+          Date.now(),
+          undefined,
+        );
+        expect(state.storage.sql.exec("SELECT run_id FROM runs WHERE run_id=?", id).toArray()).toEqual([
+          { run_id: id },
+        ]);
+        expect(
+          state.storage.sql.exec<{ seq: number }>("SELECT seq FROM run_inbox WHERE run_id=?", id).toArray(),
+        ).toEqual([{ seq: original.entries[0]!.witness.seq }]);
+      });
+      expect((await store.get(id))?.sourceInputIntents).toEqual(original);
+    },
+  );
   it.each(["pi", "opencode"] as const)("retains %s input intent through owner changes in SQLite", async (harness) => {
     const key = storeKey(),
       id = "source-consumer",

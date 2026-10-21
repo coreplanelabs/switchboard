@@ -1,5 +1,6 @@
 import { isOrchestratorCommandDecision, orchestratorDecisionsOf } from "./dispatch/orchestratorDecisions.js";
 import { isSlackProfileId } from "./names.js";
+import { sourceInputIntentsOf, type SourceInputIntents } from "./runLedger/sourceInputIntent.js";
 import {
   captureSourceTaskSnapshot,
   sourceTaskSnapshotOf,
@@ -311,6 +312,8 @@ export interface RunRecord {
   githubSource?: GithubPullSourceContext;
   /** Exact original task data. Internal proof only; omitted from normal views. */
   sourceTask?: SourceTaskSnapshot;
+  /** Unresolved original inputs. Private retention data, never replay authority. */
+  sourceInputIntents?: SourceInputIntents;
   /** How the review run's post-step ended (docs/reference/specs/agent-review.md
    *  item 18): the verdict posted to a named pull request at a pinned head, or
    *  not posted with the reason — what a coordinator's `read-record` answers
@@ -933,6 +936,7 @@ export type RunListItem = Omit<
   | "sourceReads"
   | "githubSource"
   | "sourceTask"
+  | "sourceInputIntents"
   | "orchestratorDecisions"
   | "branchIdentityBaseline"
   | "workReads"
@@ -1405,6 +1409,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
         unitSeedReceipt: r.unitSeedReceipt,
         branchIdentityBaseline: r.branchIdentityBaseline,
         sourceTask: r.sourceTask,
+        sourceInputIntents: r.sourceInputIntents,
       },
       r as unknown as RunRecord,
     )
@@ -1642,6 +1647,7 @@ export function isRunListItem(v: unknown): v is RunListItem {
     r.sourceReads !== undefined ||
     r.githubSource !== undefined ||
     r.sourceTask !== undefined ||
+    r.sourceInputIntents !== undefined ||
     r.branchIdentityBaseline !== undefined ||
     r.workReads !== undefined ||
     r.unitSeedReceipt !== undefined ||
@@ -1766,11 +1772,31 @@ export function isRunWorkOwner(value: unknown): value is RunWorkOwner {
 }
 
 export function workEvidenceBelongsToRun(
-  evidence: { workReads?: unknown; unitSeedReceipt?: unknown; branchIdentityBaseline?: unknown; sourceTask?: unknown },
+  evidence: {
+    workReads?: unknown;
+    unitSeedReceipt?: unknown;
+    branchIdentityBaseline?: unknown;
+    sourceTask?: unknown;
+    sourceInputIntents?: unknown;
+  },
   owner: RunWorkOwner,
   liveTask?: LiveRunMeta,
 ): boolean {
   if (!isRunWorkEvidence(evidence)) return false;
+  if (evidence.sourceInputIntents !== undefined) {
+    const inputs = sourceInputIntentsOf(evidence.sourceInputIntents);
+    if (
+      !inputs ||
+      inputs.entries.some(
+        (entry) =>
+          entry.owner.runId !== owner.id ||
+          entry.owner.requester !== owner.userId ||
+          entry.owner.channelId !== owner.channelId ||
+          entry.owner.threadKey !== owner.threadKey,
+      )
+    )
+      return false;
+  }
   if (evidence.sourceTask !== undefined) {
     const task = sourceTaskSnapshotOf(evidence.sourceTask);
     if (
@@ -1834,8 +1860,10 @@ export function isRunWorkEvidence(value: {
   unitSeedReceipt?: unknown;
   branchIdentityBaseline?: unknown;
   sourceTask?: unknown;
+  sourceInputIntents?: unknown;
 }): boolean {
   if (value.sourceTask !== undefined && !sourceTaskSnapshotOf(value.sourceTask)) return false;
+  if (value.sourceInputIntents !== undefined && !sourceInputIntentsOf(value.sourceInputIntents)) return false;
   if (
     value.workReads !== undefined &&
     (!Array.isArray(value.workReads) ||
@@ -1853,6 +1881,7 @@ export function isRunWorkEvidence(value: {
         unitSeedReceipt: value.unitSeedReceipt,
         branchIdentityBaseline: value.branchIdentityBaseline,
         sourceTask: value.sourceTask,
+        sourceInputIntents: value.sourceInputIntents,
       }),
     ) <= MAX_RECORD_BYTES
   );

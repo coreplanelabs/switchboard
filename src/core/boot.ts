@@ -19,6 +19,7 @@ import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import type { RunRecord, RunStatus } from "./runRecord.js";
 import { RouteMissingError } from "./runStoreWorker.js";
 import type { RunLedger } from "./runLedger/ledger.js";
+import { pendingSourceInputRetentionRequired } from "./runLedger/sourceInputIntent.js";
 import { matchesStoredTerminal, transcriptCompleteness } from "./runLedger/decisions.js";
 import { transcriptSource } from "./runLedger/resume.js";
 import type { AssembledTranscript } from "./runLedger/transcript.js";
@@ -414,7 +415,11 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
             }
           }
           if (stored === "completed" || stored === "failed") {
-            const gone = await ledger.abandon(row.runId, gen);
+            const gone = await ledger.abandon(
+              row.runId,
+              gen,
+              pendingSourceInputRetentionRequired(row.state) ? { settleTerminal: true } : undefined,
+            );
             if (!gone.ok) {
               outcome.failed.push({ runId: row.runId, error: `abandon refused (${gone.reason})` });
               warn(`[reclaim] ${row.runId} ${row.threadKey}: abandon refused (${gone.reason})`);

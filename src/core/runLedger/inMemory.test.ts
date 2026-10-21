@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { checkStateFixture } from "../testing/checkState.js";
+import { testSourceInputIntent } from "../testing/sourceInputs.js";
 import type { CheckExecutionState } from "../checkExecutionTypes.js";
 import { reclaimedRunRecord } from "../dispatch/record.js";
 import { MAX_RECORD_BYTES } from "../runRecord.js";
@@ -168,6 +169,32 @@ describe("cancelled check terminal custody", () => {
     expect(ledger.live.has(id)).toBe(false);
     expect(ledger.finished.get(id)).not.toHaveProperty("checkArchive");
     expect(await ledger.finishCancellation(cancellation, ending)).toEqual({ ok: true, stored: true });
+  });
+  it("keeps pending input metadata when cancellation closes its original owner", async () => {
+    const checks = await checkStateFixture(owner, { unknown: true });
+    const { ledger, cancellation, ending } = await prepared(checks);
+    const input = testSourceInputIntent(),
+      entry = input.entries[0]!;
+    entry.owner = {
+      ...entry.owner,
+      runId: id,
+      requester: ending.userId,
+      channelId: ending.channelId,
+      threadKey: ending.threadKey,
+    };
+    entry.reference.root = {
+      runId: id,
+      requester: ending.userId,
+      channelId: ending.channelId,
+      threadKey: ending.threadKey,
+    };
+    entry.witness.runId = id;
+    // This retained metadata fixture tests cancellation custody, not source admission.
+    ledger.live.get(id)!.state.sourceInputIntents = input;
+    expect(await ledger.finishCancellation(cancellation, ending)).toEqual({ ok: true, stored: true });
+    expect(ledger.finished.get(id)?.sourceInputIntents).toEqual(input);
+    expect(ledger.finished.get(id)?.contextDependencies).toMatchObject({ version: 4, sourceInputs: [entry.reference] });
+    expect(ledger.live.has(id)).toBe(false);
   });
   it.each(["malformed", "oversized"] as const)(
     "refuses %s check evidence without deleting live custody",

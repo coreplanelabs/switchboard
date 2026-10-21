@@ -256,6 +256,11 @@ export function reclaimedRunRecord(input: {
   const { row, events, status, finishedAt } = input;
   const saved = row.state;
   if (
+    saved.sourceInputIntents !== undefined &&
+    !workEvidenceBelongsToRun({ sourceInputIntents: saved.sourceInputIntents }, { id: row.runId, ...row.meta })
+  )
+    throw new Error("The retained source input could not be verified.");
+  if (
     saved.sourceTask !== undefined &&
     !workEvidenceBelongsToRun({ sourceTask: saved.sourceTask }, { id: row.runId, ...row.meta }, row.meta)
   )
@@ -362,6 +367,9 @@ export function reclaimedRunRecord(input: {
       : {}),
     ...(row.state.sourceTask !== undefined
       ? { sourceTask: structuredClone(row.state.sourceTask) as RunRecord["sourceTask"] }
+      : {}),
+    ...(row.state.sourceInputIntents !== undefined
+      ? { sourceInputIntents: structuredClone(row.state.sourceInputIntents) as RunRecord["sourceInputIntents"] }
       : {}),
     ...(row.state.sourceReads !== undefined ? { sourceReads: row.state.sourceReads as RunRecord["sourceReads"] } : {}),
     ...(row.state.branchPushReceipts !== undefined
@@ -537,6 +545,7 @@ export function assembleRunRecord(input: {
   parentRunId?: string;
   childHandoff?: RunRecord["childHandoff"];
   sourceTask?: RunRecord["sourceTask"];
+  sourceInputIntents?: RunRecord["sourceInputIntents"];
   sourceReads?: RunRecord["sourceReads"];
   workReads?: RunRecord["workReads"];
   branchIdentityBaseline?: RunRecord["branchIdentityBaseline"];
@@ -683,6 +692,9 @@ export function assembleRunRecord(input: {
       ? { contextCheckpointReceipt: structuredClone(input.contextCheckpointReceipt) }
       : {}),
     ...(input.sourceTask !== undefined ? { sourceTask: structuredClone(input.sourceTask) } : {}),
+    ...(input.sourceInputIntents !== undefined
+      ? { sourceInputIntents: structuredClone(input.sourceInputIntents) }
+      : {}),
     ...(input.sourceReads !== undefined ? { sourceReads: structuredClone(input.sourceReads) } : {}),
     ...(input.branchIdentityBaseline !== undefined
       ? { branchIdentityBaseline: structuredClone(input.branchIdentityBaseline) }

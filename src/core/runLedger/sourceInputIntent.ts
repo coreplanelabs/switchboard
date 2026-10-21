@@ -10,6 +10,12 @@ import { DURABLE_INBOX_MAX_BYTES } from "./inboxMessage.js";
 import { prepareSourceEvidenceMessage } from "./sourceEvidence.js";
 import { sourceHash } from "../references/receipts.js";
 import type { InboxItem, InboxRowWitness, LiveRunRow, RunState } from "./types.js";
+import {
+  isContextDependencies,
+  mergeContextDependencies,
+  UNKNOWN_CONTEXT_DEPENDENCIES,
+  type ContextDependencies,
+} from "../references/contextDependencies.js";
 
 /** An original submission identity, not native acceptance or permission to send.
  * The host ID is carried in typed native input data. Pi's generated entry ID
@@ -102,6 +108,80 @@ export function sourceInputRowsUnchanged(
     return JSON.stringify(current) === binding.json;
   });
 }
+type ArchiveOperation = "archive" | "finish" | "cancel" | "put" | "rewrite" | "abandon";
+type ArchiveRefusal =
+  | "unexpected-input"
+  | "invalid-metadata"
+  | "original-changed"
+  | "invalid-context"
+  | "context-capacity"
+  | "record-capacity"
+  | "pending-input";
+
+/** One owning boundary reports fixed labels and its canonical run ID only. */
+export function sourceInputArchiveRefusal(
+  owner: { runId: string; operation: ArchiveOperation } | undefined,
+  reason: ArchiveRefusal,
+): undefined {
+  if (owner)
+    console.warn("[runs/archive] source input refused", { runId: owner.runId, operation: owner.operation, reason });
+  return undefined;
+}
+
+/** A terminal lease may close only after the exact original input is archived. */
+export function sourceInputArchiveMatches(canonical: unknown, archived: unknown): boolean {
+  const original = sourceInputIntentsOf(canonical);
+  const saved = sourceInputIntentsOf(archived);
+  return !!original && !!saved && JSON.stringify(original) === JSON.stringify(saved);
+}
+
+/** Retention data only. A terminal copy cannot mint, replace or advance an
+ * original input. Pending source roots join the existing context index; an
+ * unrepresentable union holds the archive instead of losing a dependency. */
+export function sourceInputArchiveState(
+  canonical: unknown,
+  incoming: unknown,
+  dependencies: unknown,
+  owner?: { runId: string; operation: ArchiveOperation },
+):
+  | {
+      sourceInputIntents?: SourceInputIntents;
+      contextDependencies?: ContextDependencies;
+    }
+  | undefined {
+  const refuse = (reason: ArchiveRefusal) => sourceInputArchiveRefusal(owner, reason);
+  if (canonical === undefined) return incoming === undefined ? {} : refuse("unexpected-input");
+  const original = sourceInputIntentsOf(canonical);
+  const supplied = incoming === undefined ? original : sourceInputIntentsOf(incoming);
+  if (!original || !supplied) return refuse("invalid-metadata");
+  if (JSON.stringify(original) !== JSON.stringify(supplied)) return refuse("original-changed");
+  if (dependencies !== undefined && !isContextDependencies(dependencies)) return refuse("invalid-context");
+  const references = original.entries.map((entry) => entry.reference);
+  const required: ContextDependencies = {
+    version: 4,
+    status: "known",
+    revision: 0,
+    origins: [],
+    slack: [],
+    mcp: [],
+    sourceInputs: references,
+  };
+  if (!isContextDependencies(required)) return refuse("context-capacity");
+  const retains = (context: ContextDependencies) =>
+    references.every((reference) =>
+      context.sourceInputs?.some(
+        (saved) => JSON.stringify(sourceSnapshot(saved)) === JSON.stringify(sourceSnapshot(reference)),
+      ),
+    );
+  const context = mergeContextDependencies(dependencies ?? UNKNOWN_CONTEXT_DEPENDENCIES, required);
+  if (!retains(context)) return refuse("context-capacity");
+  return { sourceInputIntents: original, contextDependencies: context };
+}
+
+/** Both supported phases are unresolved. Unsupported retained data also stays
+ * protected; a decoder failure is never proof that the obligation ended. */
+export const pendingSourceInputRetentionRequired = (record: { sourceInputIntents?: unknown }): boolean =>
+  record.sourceInputIntents !== undefined;
 
 const object = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const closed = (v: Record<string, unknown>, keys: readonly string[]) =>
