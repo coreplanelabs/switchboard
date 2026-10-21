@@ -1,5 +1,6 @@
 import { operatorSettingsEvidence } from "../testing/operatorSettings.js";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { ConfigStore, InMemoryOverridesBacking } from "../../config.js";
 import {
   OPERATOR_ASK_TOOL,
@@ -9,6 +10,7 @@ import {
   operatorPresets,
   operatorProjection,
   operatorStage,
+  operatorTools,
   pendingQuestionOf,
   joinedAnswerRequest,
   runOperator,
@@ -57,6 +59,52 @@ const config = (restricted = false) =>
   );
 
 describe("typed re-review and consumed source custody", () => {
+  it("constrains formal settings before the model can propose a missing or changed value", async () => {
+    const request = input(`agent:review model:${modelRef} effort:high budget:15 Review ${url}`);
+    const tools = operatorTools(request);
+    const proposal = bind({
+      model: modelRef,
+      effort: "high",
+      budget: 15,
+      settingsEvidence: {
+        effort: { intent: "requested", quote: "effort:high" },
+        budget: { intent: "requested", quote: "budget:15" },
+      },
+    });
+    const { preset: _preset, repo: _repo, prTarget: _target, reason: _reason, ...settings } = proposal.input;
+    for (const name of [OPERATOR_BIND_TOOL, OPERATOR_ASK_TOOL]) {
+      const schema = z.fromJSONSchema(tools.find((candidate) => candidate.name === name)!.inputSchema);
+      const payload = (value: Record<string, unknown>) =>
+        name === OPERATOR_BIND_TOOL
+          ? value
+          : {
+              text: "Review this pull request?",
+              reason: "Confirm the target",
+              proposal: `agent:review Review ${url}`,
+              proposalSettings: value,
+            };
+      const original = name === OPERATOR_BIND_TOOL ? proposal.input : settings;
+      for (const field of ["model", "effort", "budget"] as const) {
+        const missing: Record<string, unknown> = { ...original };
+        delete missing[field];
+        expect(schema.safeParse(payload(missing)).success).toBe(false);
+        const changed = {
+          ...original,
+          [field]: field === "budget" ? 16 : field === "effort" ? "low" : "openai/other",
+        };
+        expect(schema.safeParse(payload(changed)).success).toBe(false);
+      }
+      expect(schema.parse(payload(original))).toEqual(payload(original));
+    }
+    const answer = await runOperator(request, async () => proposal);
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [
+        { preset: "review", model: modelRef, effort: "high", budget: 15, prTarget: { source: "request", quote: url } },
+      ],
+    });
+  });
   it.each([url, `<${url}|github.com/acme/api/pull/7>`])(
     "binds the model-selected review and model at its authored target: %s",
     async (link) => {
