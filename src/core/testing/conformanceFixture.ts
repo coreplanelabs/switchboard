@@ -897,7 +897,37 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       }),
     },
     credentials: { runs },
-    review: { abridger: async () => s.abridger, runs },
+    review: {
+      abridger: async () => s.abridger,
+      runs,
+      checks: {
+        read: async (repo, number) => ({
+          repo,
+          number,
+          headSha: REVIEW_HEAD,
+          checkedSha: REVIEW_HEAD,
+          state: "OPEN",
+          checkedAt: NOW,
+          checks: [
+            {
+              id: "ci",
+              name: PLANTED_TEXT,
+              description: PLANTED_TEXT,
+              provider: PLANTED_TEXT,
+              status: "success",
+              required: true,
+            },
+            {
+              id: "expected:58a91cf0cfd812f3f46dddfbb06f1f24eab4ccf3d63385bd967aea92a34da173",
+              name: PLANTED_TEXT,
+              status: "expected",
+              required: true,
+            },
+          ],
+          warnings: [],
+        }),
+      },
+    },
     friction: {
       ledger: async () => new RunStoreFrictionLedger(s.store),
       tracker: s.tracker,

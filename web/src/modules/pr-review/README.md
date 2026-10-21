@@ -77,6 +77,9 @@ fills it, scrolling the content under the header and the tabs.
   markdown through `MarkdownText`; a muted note when the copy was read back
   from the PR body and came up short, or was cut before it was read
   (`descriptionNote`).
+- **Checks** — optional `ChecksControl` from the host. The tab groups current GitHub checks and commit statuses, marks required checks and expected checks that have not started, and shows the selected commit and update time. Failed and running groups open by default. When no work is active, the pending group or first completed result group opens. Updates preserve manual toggles. The first Checks selection calls `start()`. The host keeps its SSE stream across tab changes and disposes it when the modal closes or the page unmounts. A read failure retains the last confirmed snapshot with a warning. Merge and CI writes stay on GitHub. The recorded diff and current checks can refer to different heads; the panel states this difference.
+
+  Status indicators use GitHub Primer's light and dark foreground colors. Check runs and commit statuses come from GitHub's status-check rollup; required flags come from `isRequired`. Expected rows come only from explicit branch-protection or active-ruleset requirements. Required workflows without named check contexts remain a stated gap. This is an API view, not a copy of GitHub's private UI model.
 - **Empty states** — no diffs and no description: one sentence; a diff that
   parses to no files says so.
 

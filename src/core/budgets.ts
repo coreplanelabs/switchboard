@@ -783,3 +783,8 @@ export const HOME_PRIVATE_READ_CONCURRENCY = 8;
 
 /** Background run metadata has a short, independent budget. */
 export const RUN_TITLE_TIMEOUT_MS = 10_000;
+
+/** Shared CI reads and the total budget for one paged GitHub snapshot. */
+export const PR_CHECKS_CACHE_MS = 30_000;
+export const PR_CHECKS_REQUEST_MS = 30_000;
+export const PR_CHECKS_RATE_LIMIT_MS = 60_000;

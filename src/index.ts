@@ -32,7 +32,7 @@ import { workViewScopeOf } from "./channels/workViewScope.js";
 import { isIdentityPath } from "./channels/identityRuntime.js";
 import { createSlackNativeMedia } from "./channels/slack/nativeMedia.js";
 import { originalOrganizationDispatchOf } from "./core/dispatch/privateDestination.js";
-import { DAY_MS } from "./core/budgets.js";
+import { DAY_MS, PR_CHECKS_CACHE_MS } from "./core/budgets.js";
 import type { PageSender } from "./channels/webShell.js";
 import { handleAdminReplyProbe, REPLY_PROBE_PATH } from "./channels/adminReplyProbe.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
@@ -2070,6 +2070,40 @@ export async function runBot(): Promise<void> {
     // SAME gate as /runs* (gated on `isCommandPath`). The handler claims
     // all of /api/* and answers its own 404. ---
     const commandHttp = createCommandHttpHandler(commands, {
+      readStreams: {
+        intervals: { "review.checks": PR_CHECKS_CACHE_MS },
+        caller: async (req) => {
+          // A stream is a series of new reads. The initial page actor is not
+          // current proof after a session expires or its grants change.
+          const gate = await dashboardAuth.verify(req);
+          if (!gate.ok) return;
+          let actor: Actor;
+          if (dashboardAuth.mode === "token" || gate.identity.commonName) {
+            const raw = accessActor(gate.identity, (id) => config.grantsFor(id));
+            actor = dashboardAuth.mode === "token" ? { ...raw, kind: "service", self: [raw.id] } : raw;
+          } else {
+            const home = await browserWiring?.context(req, gate.identity);
+            const installed = browserWiring?.current();
+            if (!home || !installed) return;
+            const source = await installed.organization.resolve(home.authentication);
+            if (
+              !source ||
+              !(await installed.host.authorize({
+                ...source,
+                source: home.authentication.source,
+                sourceReference: home.authentication.sourceReference,
+                action: "read",
+                destination: { kind: "broad" },
+                target: null,
+                context: [],
+              }))
+            )
+              return;
+            actor = home.actor;
+          }
+          return { kind: "access", id: actor.id, actor };
+        },
+      },
       core: deps,
       browserApprovals: capabilities.dashboardAuth === "access",
       resolveCaller: async (identity) => {

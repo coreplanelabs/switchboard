@@ -27,7 +27,7 @@ import type { Actor } from "../core/authz/types.js";
  *  only (a run's video or audio file plays from the artifact route,
  *  live-view.md item 26), and no framing. */
 export const PAGE_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://avatars.slack-edge.com; media-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://avatars.slack-edge.com https://avatars.githubusercontent.com; media-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /** Account verification permits only protected local forms and the pinned Slack provider. */
 export const GREEN_PAGE_CSP = PAGE_CSP.replace("form-action 'none'", "form-action 'self' https://slack.com");

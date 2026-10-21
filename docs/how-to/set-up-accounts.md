@@ -48,6 +48,9 @@ providers:
    | Contents | Read and write | Cloning; branches and pushes |
    | Pull requests | Read and write | Reading a PR; opening one; posting the review |
    | Issues | Read and write | Reading tasks; creating, commenting, labelling |
+   | Actions | Read-only | Reading CI jobs and workflow runs |
+   | Checks | Read-only | Reading check runs and their conclusions |
+   | Commit statuses | Read-only | Reading CI results reported through the commit-status API |
    | Metadata | Read-only | Set automatically |
 
 3. *Private keys* → *Generate a private key*: the `.pem` is `GITHUB_APP_PRIVATE_KEY`.

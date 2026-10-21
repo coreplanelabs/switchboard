@@ -16,7 +16,7 @@ import {
   prLinks,
   truncatedExplanation,
 } from "./types";
-import type { AbridgeState, PrDescriptionData, PrReviewData, ReadingDiff } from "./types";
+import type { AbridgeState, CheckRow, PrDescriptionData, PrReviewData, ReadingDiff } from "./types";
 
 // Feature: docs/reference/specs/reading-diff.md item 12 — the pr-review module renders the
 // change as a reviewer reads it, from props alone (the module is liftable; the
@@ -259,6 +259,77 @@ describe("files", () => {
 });
 
 describe("PrReviewPanel", () => {
+  it("shows GitHub status groups and expected required checks only on the Checks tab", async () => {
+    const starts: string[] = [];
+    const checks = reactive({
+      snapshot: {
+        headSha: "a".repeat(40),
+        checkedSha: "b".repeat(40),
+        state: "OPEN",
+        checkedAt: 1000,
+        warnings: [] as string[],
+        rows: [
+          {
+            id: "run",
+            name: "ci / test",
+            status: "in_progress" as const,
+            required: true,
+            url: "https://ci.example.com/job/1",
+            provider: "CI",
+          },
+          {
+            id: "missing",
+            name: "approve",
+            status: "expected" as const,
+            required: true,
+            description: "Expected — Waiting for status to be reported",
+          },
+          { id: "success", name: "ci / lint", status: "success" as const, required: false },
+        ] as CheckRow[],
+      },
+      loading: false,
+      error: "",
+      start: () => {
+        starts.push("checks");
+      },
+    });
+    const w = await mountPanel({ data: data({ readingDiffs: [gitDiff] }), checks });
+    expect(w.find('[data-testid="pr-checks"]').exists()).toBe(false);
+    await pickTab(w, "panel-tabs", "Checks");
+    const panel = w.get('[data-testid="pr-checks"]');
+    expect(panel.get('[data-testid="checks-summary"]').text()).toBe("Some checks haven't completed yet");
+    expect(panel.get('[data-status="pending"] summary').text()).toBe("1 pending check");
+    expect(panel.get('[data-status="in_progress"]').attributes("open")).toBe("");
+    expect(panel.get('[data-status="pending"]').attributes("open")).toBeUndefined();
+    expect(panel.get('[data-check="missing"]').text()).toContain("Expected — Waiting for status to be reported");
+    expect(panel.get('[data-check="run"] a').attributes("href")).toBe("https://ci.example.com/job/1");
+    expect(panel.findAll("[data-check] span").filter((s) => s.text() === "Required")).toHaveLength(2);
+    expect(panel.text()).toContain("Showing checks for the merge commit");
+    expect(panel.text()).toContain("PR head changed since this diff was recorded");
+    expect(starts).toEqual(["checks"]);
+    checks.snapshot.rows.push({ id: "failed", name: "ci / build", status: "failure", required: true });
+    await nextTick();
+    expect(panel.get('[data-testid="checks-summary"]').text()).toBe("Some checks were not successful");
+    expect(panel.get("header > svg").classes()).toContain("text-(--gh-check-danger)");
+    expect(panel.get('[data-status="failure"]').attributes("open")).toBe("");
+    checks.snapshot.rows = checks.snapshot.rows.filter((row) => row.status === "success");
+    await nextTick();
+    expect(panel.get('[data-status="success"]').attributes("open")).toBe("");
+    await panel.get('[data-status="success"] summary').trigger("click");
+    checks.snapshot.checkedAt = 2000;
+    await nextTick();
+    expect(panel.get('[data-status="success"]').attributes("open")).toBeUndefined();
+    checks.snapshot.rows = [{ id: "expected", name: "ci / test", status: "expected", required: true }];
+    await nextTick();
+    expect(panel.get('[data-status="pending"]').attributes("open")).toBe("");
+
+    checks.error = "GitHub is unavailable";
+    await nextTick();
+    expect(panel.get('[role="alert"]').text()).toContain("last confirmed checks");
+    expect(panel.get('[data-testid="checks-summary"]').text()).toBe("Some check data is unavailable");
+    await pickTab(w, "panel-tabs", "Files changed");
+    expect(starts).toEqual(["checks"]);
+  });
   it("renders the title, the facts (reference, head, base, producer, truncation), the preferred (reading) diff with its notes, its files with counts, and hands the files to the renderer", async () => {
     const w = await mountPanel({ data: data() });
     expect(w.find('[data-testid="pr-title"]').text()).toBe("acme/api#42");

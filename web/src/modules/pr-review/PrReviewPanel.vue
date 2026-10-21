@@ -4,7 +4,8 @@ import MarkdownText from "../../components/MarkdownText.vue";
 import FilesChanged from "./FilesChanged.vue";
 import LabelTip from "./LabelTip.vue";
 import meatIcon from "./meatdev.png";
-import type { AbridgeControl, PrReviewData, ReadingDiff } from "./types";
+import PrChecks from "./PrChecks.vue";
+import type { AbridgeControl, ChecksControl, PrReviewData, ReadingDiff } from "./types";
 import {
   descriptionNote,
   panelTitle,
@@ -36,8 +37,9 @@ const props = withDefaults(
     /** The abridging of the full diff, when the host can ask for one; absent
      *  when the deployment cannot — nothing then renders. */
     abridge?: AbridgeControl;
+    checks?: ChecksControl;
   }>(),
-  { closable: false, abridge: undefined },
+  { closable: false, abridge: undefined, checks: undefined },
 );
 const emit = defineEmits<{ close: [] }>();
 
@@ -49,17 +51,22 @@ const gitDiff = computed(() => diffs.value.find((d) => d.poweredBy === "git"));
 const meatDiff = computed(() => diffs.value.find((d) => d.poweredBy === "meat"));
 const shortSha = computed(() => props.data.pr.headSha?.slice(0, 7));
 
-type Tab = "files" | "reading" | "description";
+type Tab = "files" | "reading" | "description" | "checks";
 const tabs = computed<Array<{ label: string; value: Tab }>>(() => {
   const items: Array<{ label: string; value: Tab }> = [];
   if (gitDiff.value) items.push({ label: "Files changed", value: "files" });
   if (meatDiff.value) items.push({ label: "Reading diff", value: "reading" });
   if (description.value?.tldr || description.value?.why) items.push({ label: "Description", value: "description" });
+  if (props.checks) items.push({ label: "Checks", value: "checks" });
   return items;
 });
 /** The abridged diff is the reader's first stop when a producer made one. */
 const preferredTab = (): Tab => (preferredDiff(diffs.value)?.poweredBy === "meat" ? "reading" : "files");
 const tab = ref<Tab>(preferredTab());
+function selectTab(value: string | number) {
+  tab.value = value as Tab;
+  if (value === "checks") props.checks?.start();
+}
 watch(
   () => preferredDiff(diffs.value),
   () => (tab.value = preferredTab()), // new data → back to the preferred view
@@ -67,7 +74,8 @@ watch(
 watch(
   tabs,
   (items) => {
-    if (!items.some((item) => item.value === tab.value)) tab.value = items[0]?.value ?? "files";
+    if (!items.some((item) => item.value === tab.value))
+      tab.value = items.find((item) => item.value !== "checks")?.value ?? "files";
   },
   { immediate: true },
 );
@@ -266,7 +274,15 @@ const ABRIDGE_EXPLANATION =
       class="flex shrink-0 items-center justify-between gap-3 border-b border-(--ui-border) px-4 py-2 sm:px-6"
     >
       <div class="tabs-scroll min-w-0 overflow-x-auto">
-        <UTabs v-model="tab" :items="tabs" size="sm" class="w-fit gap-0" :content="false" data-testid="panel-tabs" />
+        <UTabs
+          :model-value="tab"
+          :items="tabs"
+          size="sm"
+          class="w-fit gap-0"
+          :content="false"
+          data-testid="panel-tabs"
+          @update:model-value="selectTab"
+        />
       </div>
       <UTabs
         v-if="shown"
@@ -294,6 +310,7 @@ const ABRIDGE_EXPLANATION =
         </ol>
       </details>
       <FilesChanged v-if="shown" :key="shown.poweredBy" :diff="shown.diff" :notes="notes" :diff-style="diffStyle" />
+      <PrChecks v-else-if="tab === 'checks' && checks" :control="checks" :recorded-head="data.pr.headSha" />
       <div
         v-else-if="tab === 'description' && description"
         class="mx-auto max-w-3xl p-4 sm:p-6"

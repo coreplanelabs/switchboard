@@ -99,6 +99,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 |---|---|---|
 | `review abridge <id> [--model <string>] [--force] [--wait]` | Abridge a finished PR review's reading diff with meat.dev on the bot host (a paid model job) and store it on the run; idempotent — a stored one is answered, not recomputed. | admins |
 | `review status <id>` | Read the progress of an abridged review diff without starting or recomputing it. | admins |
+| `review checks <id>` | Read current GitHub checks for the pull request recorded on a run you may view. | admins |
 
 ### `friction`
 

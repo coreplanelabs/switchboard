@@ -2190,7 +2190,7 @@ describe("PR-review panel wiring", { timeout: PANEL_BUDGET_MS }, () => {
     const panel = document.querySelector('[data-testid="pr-review-panel"]')!;
     expect(panel.querySelector('[data-testid="pr-title"]')?.textContent).toContain("Retry webhook deliveries");
     const tabs = Array.from(panel.querySelectorAll<HTMLElement>('[data-testid="panel-tabs"] [role="tab"]'));
-    expect(tabs.map((t) => t.textContent?.trim())).toEqual(["Files changed", "Description"]);
+    expect(tabs.map((t) => t.textContent?.trim())).toEqual(["Files changed", "Description", "Checks"]);
     tabs[1].dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
     await wrapper.vm.$nextTick();
     expect(panel.querySelector('[data-testid="description-tldr"]')?.textContent?.trim()).toBe("The TL;DR.");

@@ -81,6 +81,32 @@ export interface AbridgeControl {
   refresh?(): void;
 }
 
+/** Presentation contract. The host owns GitHub reads and their lifecycle. */
+export interface CheckRow {
+  id: string;
+  name: string;
+  status: "pending" | "in_progress" | "success" | "failure" | "neutral" | "skipped" | "cancelled" | "expected";
+  required: boolean;
+  description?: string;
+  url?: string;
+  provider?: string;
+  icon?: string;
+}
+export interface ChecksSnapshot {
+  headSha: string;
+  checkedSha: string;
+  state: string;
+  checkedAt: number;
+  rows: CheckRow[];
+  warnings: string[];
+}
+export interface ChecksControl {
+  readonly snapshot?: ChecksSnapshot;
+  readonly loading: boolean;
+  readonly error: string;
+  start(): void;
+}
+
 /** The header's title text: the PR's own title, else its reference. */
 export function panelTitle(data: Pick<PrReviewData, "pr" | "description">): string {
   if (data.description?.title) return data.description.title;

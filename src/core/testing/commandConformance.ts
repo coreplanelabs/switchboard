@@ -657,6 +657,10 @@ export const COMMAND_FIXTURES: Readonly<
     hints: { id: FIXTURE.reviewRun },
     why: "the panel polls the existing finished review without starting an abridgement",
   },
+  "review.checks": {
+    hints: { id: FIXTURE.reviewRun },
+    why: "the PR reference comes from this visible review run, never from caller-supplied repository input",
+  },
   "review.abridge": {
     hints: { id: FIXTURE.reviewRun },
     why: "the run must be a finished PR review that recorded a git reading diff — the generic `id` hint is a live coding run",
