@@ -2612,6 +2612,7 @@ export async function dispatch(
     const agent = configuredAgent(deps.config.config, resolved.agentName);
     // A confirmed or joined request is the admitted work, not the transport
     // answer. Keep its pin and review intent in setup custody and restarts.
+    const sourceMessage = msg;
     if (agent.name === "review" && operatorRequest !== undefined && reviewHeadOf(directives.text) !== undefined)
       msg = {
         ...msg,
@@ -5406,6 +5407,7 @@ export async function dispatch(
       ...(sourceReads ? { sourceReads } : {}),
       ...(runSetup !== undefined ? { runSetup } : {}),
       msg,
+      sourceMessage,
       io,
       addressSeverity,
       agent,

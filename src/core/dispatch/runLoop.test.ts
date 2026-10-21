@@ -789,6 +789,44 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(JSON.stringify(spans)).not.toContain("private-session-key");
   });
 
+  it("checks the authored private input after Review routing changes the run text", async () => {
+    const authoredText = "review-head:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa review the whole change";
+    const decisions: boolean[] = [];
+    const harness = watched(piHarness);
+    harness.harness.open = async () => {
+      decisions.push(await bearers.sourceGuardFor(s.run.id).check());
+      return { answer: "Guard checked.", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      io: {
+        authoritativePrivateHistory: async (message) => {
+          if (message?.text !== authoredText) throw new Error("The original private input is unavailable.");
+          return [];
+        },
+      },
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    s.deps.runBearers = bearers;
+    mintFor(bearers, s);
+    const trace = startRequestRoot({ clock: () => NOW }, { channel: "mcp", receivedAt: NOW });
+    trace.bindRun(s.run.id, (event) => s.registry.publish(s.run.id, event));
+    const sourceMessage = markPrivateConversation({ ...s.ctx.msg, text: authoredText });
+    await runLoop(s.deps, {
+      ...s.ctx,
+      root: trace.root,
+      msg: { ...sourceMessage, text: `agent:review ${authoredText.split(" ")[0]}` },
+      sourceMessage,
+    });
+    expect(decisions).toEqual([true]);
+  });
+
   it.each(["Error", "TypeError", "string"] as const)(
     "retains the failed model source check without copying private exception text: %s",
     async (failureClass) => {
