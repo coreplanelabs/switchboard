@@ -4,7 +4,7 @@
 # Node at the exact tag every image in this repository shares (the execution
 # images copy theirs from the same one); its major is .nvmrc's, and
 # src/deploy/imageNode.test.ts holds both.
-FROM node:24.21.0-slim AS build
+FROM node:24.22.1-slim AS build
 WORKDIR /app
 # One lockfile covers every workspace. npm needs each workspace's manifest on
 # disk to resolve the tree, so the manifests are copied before the install;
@@ -34,7 +34,7 @@ RUN npm run check:dist
 # Runtime dependencies alone: the bot's production dependencies, no dev tools,
 # no web toolchain — a clean install rather than a prune, so nothing hoisted
 # for the build survives into the image.
-FROM node:24.21.0-slim AS deps
+FROM node:24.22.1-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY web/package.json ./web/
@@ -56,7 +56,7 @@ RUN npm ci --omit=dev --workspaces=false --include-workspace-root
 # no release assets, and `@latest` would make the binary a property of the
 # build date — the pnpm lesson in src/deploy/imagePins.test.ts. Bumping the sha
 # is a reviewable commit; src/deploy/botImageMeat.test.ts holds this shape.
-FROM docker.io/library/golang:1.27.2-bookworm AS meat
+FROM docker.io/library/golang:1.27.3-bookworm AS meat
 RUN CGO_ENABLED=0 go install meat.dev/cmd/meat@f39f41dfe7b5b37a12b35fdfbaecc7e779855bd3
 # JSON stays on stdout; the existing turn/tool callback writes progress to stderr.
 COPY scripts/meat-progress.patch /tmp/meat-progress.patch
@@ -65,7 +65,7 @@ RUN cp -a /go/pkg/mod/meat.dev@* /tmp/meat \
   && cd /tmp/meat && git apply --unidiff-zero /tmp/meat-progress.patch \
   && CGO_ENABLED=0 go install ./cmd/meat
 
-FROM node:24.21.0-slim
+FROM node:24.22.1-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
