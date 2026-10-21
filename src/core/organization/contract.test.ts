@@ -1177,7 +1177,7 @@ function organizationContract(
         await store.execute({ ...query, actor: { ...query.actor, identity: { ...identity, subject: "bob" } } }),
       ).toEqual({ status: "fenced" });
       now = 500;
-      expect(await store.execute(query)).toEqual({ status: "source-catalogue", accessRevision: 1, entries: [] });
+      expect(await store.execute(query)).toEqual({ status: "source-catalogue", accessRevision: 2, entries: [] });
     });
     it("preserves bounded own-source history and deletion after linking without inheriting another source's old history", async () => {
       const store = factory(() => 1);

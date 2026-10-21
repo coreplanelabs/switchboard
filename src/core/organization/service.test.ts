@@ -102,6 +102,127 @@ async function sendBrowser(service: OrganizationService, authentication = browse
 }
 
 describe("organization authenticated service", () => {
+  it("checks retained history in bounded parallel work and returns its original order", async () => {
+    const store = new InMemoryOrganizationStore(() => 1);
+    let active = 0;
+    let peak = 0;
+    const service = new OrganizationService({
+      store,
+      directory: store.directory,
+      mappings,
+      limits: { ...limits, pendingPerActor: 20, pendingPerSource: 20, pendingPerOrganization: 20 },
+      authorize: async () => true,
+      currentIdentityRead: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        return "allowed";
+      },
+    });
+    for (let i = 0; i < 12; i++)
+      expect(await sendBrowser(service, browser, { ...input(`entry-${i}`), content: `entry ${i}` })).toMatchObject({
+        status: "receipt",
+      });
+
+    const result = await service.streamTail(browser);
+    expect(result.status === "stream_tail" ? result.entries.map((entry) => entry.content) : result).toEqual([
+      "entry 0",
+      "entry 1",
+      "entry 2",
+      "entry 3",
+      "entry 4",
+      "entry 5",
+      "entry 6",
+      "entry 7",
+      "entry 8",
+      "entry 9",
+      "entry 10",
+      "entry 11",
+    ]);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(8);
+  });
+
+  it("withholds a history read when stored source access changes after native checks", async () => {
+    const { store, service } = setup();
+    expect(
+      await sendBrowser(service, browser, { ...input("revision-race"), content: "private before revocation" }),
+    ).toMatchObject({
+      status: "receipt",
+    });
+    const execute = store.execute.bind(store);
+    let snapshots = 0;
+    store.execute = async (command) => {
+      if (command.action === "get" && ++snapshots === 2)
+        await execute({ action: "access", organization: "org:test", identity, allowed: false });
+      return execute(command);
+    };
+
+    expect(await service.streamTail(browser)).toEqual({ status: "unavailable" });
+    expect(await execute({ action: "access", organization: "org:test", identity, allowed: true })).toEqual({
+      status: "ok",
+      removed: 0,
+    });
+    const fresh = await service.streamTail(browser);
+    expect(fresh.status === "stream_tail" ? fresh.entries.map((entry) => entry.content) : fresh).toEqual([
+      "private before revocation",
+    ]);
+  });
+
+  it("withholds an identity-selected stream when access changes during its source check", async () => {
+    const store = new InMemoryOrganizationStore(() => 1);
+    let revoke = false;
+    const service = new OrganizationService({
+      store,
+      directory: store.directory,
+      mappings,
+      limits,
+      authorize: async () => true,
+      currentIdentityRead: async () => {
+        if (revoke) await store.execute({ action: "access", organization: "org:test", identity, allowed: false });
+        return "allowed";
+      },
+    });
+    expect(
+      await sendBrowser(service, browser, { ...input("selected-race"), content: "selected private entry" }),
+    ).toMatchObject({
+      status: "receipt",
+    });
+
+    const initial = await service.streamForIdentities(browser, [identity]);
+    expect(initial.status === "stream" ? initial.entries.map((entry) => entry.content) : initial).toEqual([
+      "selected private entry",
+    ]);
+    revoke = true;
+    expect(await service.streamForIdentities(browser, [identity])).toEqual({ status: "unavailable" });
+  });
+
+  it("withholds an entry that expires after its source check", async () => {
+    let now = 1;
+    const store = new InMemoryOrganizationStore(() => now);
+    const service = new OrganizationService({
+      store,
+      directory: store.directory,
+      mappings,
+      limits,
+      authorize: async () => true,
+      currentIdentityRead: async () => {
+        now = 92;
+        return "allowed";
+      },
+    });
+    expect(
+      await sendBrowser(service, browser, { ...input("expiry-race"), content: "expired private entry" }),
+    ).toMatchObject({
+      status: "receipt",
+    });
+
+    expect(await service.streamTail(browser)).toEqual({ status: "unavailable" });
+    const fresh = await service.streamTail(browser);
+    expect(fresh.status === "stream_tail" ? fresh.entries.map((entry) => entry.content) : fresh).toEqual([]);
+  });
+
   it("finds scoped MCP history beyond a full page of newer unrelated conversations", async () => {
     const store = new InMemoryOrganizationStore(() => 1);
     const service = new OrganizationService({

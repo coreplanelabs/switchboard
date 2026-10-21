@@ -2,6 +2,8 @@ import type { ExternalIdentity, PersonDirectory } from "../identity/contract.js"
 import { identitySchema } from "../identity/contract.js";
 import { identityKey } from "../identity/engine.js";
 import { redactSecrets } from "../redact.js";
+import { mapLimit } from "../mapLimit.js";
+import { HOME_PRIVATE_READ_CONCURRENCY } from "../budgets.js";
 import {
   envelopeSchema,
   type OrganizationActor,
@@ -360,39 +362,40 @@ export class OrganizationService {
   ): Promise<OrganizationResult> {
     if (result.status !== "stream" && result.status !== "stream_tail") return result;
     if (!this.options.currentIdentityRead) return { status: "unavailable" };
-    const entries: typeof result.entries = [];
-    let scopeExcluded = 0;
-    for (const entry of result.entries) {
+    const currentIdentityRead = this.options.currentIdentityRead;
+    const checked = await mapLimit(result.entries, HOME_PRIVATE_READ_CONCURRENCY, async (entry) => {
       const original = await this.options.store.execute({
         action: "provenance",
         ...resolved,
         receiptId: entry.receiptId,
       });
-      if (original.status !== "provenance") return { status: "unavailable" };
+      if (original.status !== "provenance") return { status: "unavailable" } as const;
       if (
         this.options.sourceInReadScope?.(
           original.provenance.actor.identity,
           original.provenance.sourceReference,
           reader,
         ) === false
-      ) {
-        scopeExcluded++;
-        continue;
-      }
-      const decision = await this.options.currentIdentityRead(
+      )
+        return { status: "excluded" } as const;
+      const decision = await currentIdentityRead(
         original.provenance.actor.identity,
         original.provenance.sourceReference,
         original.provenance.actor.onBehalfOf,
         reader,
       );
       const status = typeof decision === "string" ? decision : decision.status;
-      if (status === "unavailable") return { status: "unavailable" };
+      if (status === "unavailable") return { status: "unavailable" } as const;
       if (status === "allowed") {
         const { authorId: _suppliedAuthor, ...stored } = entry;
         const authorId = entry.role === "user" ? original.provenance.sourceReference?.userId : undefined;
-        entries.push({ ...stored, ...(authorId ? { authorId } : {}) });
+        return { status: "allowed", entry: { ...stored, ...(authorId ? { authorId } : {}) } } as const;
       }
-    }
+      return { status: "denied" } as const;
+    });
+    if (checked.some((entry) => entry.status === "unavailable")) return { status: "unavailable" };
+    const entries = checked.flatMap((entry) => (entry.status === "allowed" ? [entry.entry] : []));
+    const scopeExcluded = checked.filter((entry) => entry.status === "excluded").length;
     return { ...result, entries, ...(scopeExcluded ? { scopeExcluded } : {}) };
   }
   async stream(authentication: OrganizationAuthentication, after = 0, limit = 100): Promise<OrganizationResult> {
@@ -404,6 +407,11 @@ export class OrganizationService {
     before?: number,
   ): Promise<OrganizationResult> {
     return this.readStream(authentication, "tail", before, limit);
+  }
+  /** Store-owned access changes fence a read; native source proof is always fresh. */
+  private async accessRevision(organization: string): Promise<number | undefined> {
+    const current = await this.options.store.execute({ action: "get", organization });
+    return current.status === "state" ? current.state.accessRevision : undefined;
   }
   private async readStream(
     authentication: OrganizationAuthentication,
@@ -424,6 +432,9 @@ export class OrganizationService {
       }))
     )
       return { status: "not_found" };
+    const accessRevision = await this.accessRevision(resolved.organization);
+    if (accessRevision === undefined) return { status: "unavailable" };
+    const currentAccess = async () => (await this.accessRevision(resolved.organization)) === accessRevision;
     let identities = [authentication.onBehalfOf ?? authentication.identity];
     if (resolved.actor.bindingRevision > 0 && resolved.actor.stream !== resolved.actor.principal) {
       const result = await this.options.store.execute({
@@ -452,7 +463,9 @@ export class OrganizationService {
       identities,
     });
     const first = await this.filterSources(resolved, result, authentication);
-    if (!scopedTail || result.status !== "stream_tail" || first.status !== "stream_tail") return first;
+    if (first.status !== "stream_tail" && first.status !== "stream") return first;
+    if (!scopedTail || result.status !== "stream_tail" || first.status !== "stream_tail")
+      return (await currentAccess()) ? first : { status: "unavailable" };
     const entries = [...first.entries];
     let scopeExcluded = first.scopeExcluded ?? 0;
     let page = result;
@@ -476,6 +489,7 @@ export class OrganizationService {
       page = older;
     }
     const kept = entries.slice(-limit);
+    if (!(await currentAccess())) return { status: "unavailable" };
     return {
       ...first,
       entries: kept,
@@ -503,6 +517,8 @@ export class OrganizationService {
       }))
     )
       return { status: "not_found" };
+    const accessRevision = await this.accessRevision(resolved.organization);
+    if (accessRevision === undefined) return { status: "unavailable" };
     const eligible: ExternalIdentity[] = [];
     for (const identity of identities) {
       const binding = await this.options.directory.resolve(identity);
@@ -523,7 +539,9 @@ export class OrganizationService {
       limit,
       identities: eligible,
     });
-    return this.filterSources(resolved, result, authentication);
+    const checked = await this.filterSources(resolved, result, authentication);
+    if (checked.status !== "stream") return checked;
+    return (await this.accessRevision(resolved.organization)) === accessRevision ? checked : { status: "unavailable" };
   }
   async delete(authentication: OrganizationAuthentication, receiptId: string): Promise<OrganizationResult> {
     const resolved = await this.resolve(authentication);
