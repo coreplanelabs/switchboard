@@ -1247,8 +1247,14 @@ export class ExecHarnessContainer implements HarnessContainer {
         logObservation ? "harness_log" : undefined,
       );
     };
+    let rereadCause: "answered-resident" | "exit-137" | undefined;
     try {
-      return await send();
+      const result = await send();
+      // A container stop can return a normal exit 137 on a log read. The
+      // original byte range is an observation, so ask for it once more. The
+      // exit code does not identify why the command was killed.
+      if (!logObservation || result.exitCode !== 137 || result.truncated) return result;
+      rereadCause = "exit-137";
     } catch (error) {
       annotateExecutionDiagnostic(error, {
         caller: "harness",
@@ -1261,25 +1267,40 @@ export class ExecHarnessContainer implements HarnessContainer {
       if (reread) console.warn("[harness] a log observation is re-read once after an answered resident failure");
       if (!(error instanceof ExecControlResetError) && !reread) throw error;
       if (!idempotent) throw new HarnessContainerControlResetError(input.kind, error.message);
-      const runId = redactAndCap(this.scope?.runId ?? "unknown", 80);
-      if (reread) console.warn("[harness-log-read]", { outcome: "retrying", runId });
-      try {
-        const result = await send();
-        if (reread) {
-          stdoutOf("read", result);
-          console.info("[harness-log-read]", { outcome: "recovered", runId });
-        }
-        return result;
-      } catch (again) {
-        if (reread) console.warn("[harness-log-read]", { outcome: "failed", runId });
-        annotateExecutionDiagnostic(again, {
-          caller: "harness",
-          operation: input.kind === "http" ? (input.observation ? "http_observation" : "http_control") : input.kind,
+      if (reread) rereadCause = "answered-resident";
+    }
+    const runId = redactAndCap(this.scope?.runId ?? "unknown", 80);
+    if (rereadCause)
+      console.warn("[harness-log-read]", {
+        outcome: "retrying",
+        runId,
+        ...(rereadCause === "exit-137" ? { cause: "exit-137" } : {}),
+      });
+    try {
+      const result = await send();
+      if (rereadCause) {
+        stdoutOf("read", result);
+        console.info("[harness-log-read]", {
+          outcome: "recovered",
+          runId,
+          ...(rereadCause === "exit-137" ? { cause: "exit-137" } : {}),
         });
-        if (again instanceof ExecControlResetError)
-          throw new HarnessContainerControlResetError(input.kind, again.message);
-        throw again;
       }
+      return result;
+    } catch (again) {
+      if (rereadCause)
+        console.warn("[harness-log-read]", {
+          outcome: "failed",
+          runId,
+          ...(rereadCause === "exit-137" ? { cause: "exit-137" } : {}),
+        });
+      annotateExecutionDiagnostic(again, {
+        caller: "harness",
+        operation: input.kind === "http" ? (input.observation ? "http_observation" : "http_control") : input.kind,
+      });
+      if (again instanceof ExecControlResetError)
+        throw new HarnessContainerControlResetError(input.kind, again.message);
+      throw again;
     }
   }
 

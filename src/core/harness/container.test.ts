@@ -1181,6 +1181,37 @@ describe("ExecHarnessContainer — log observation recovery", () => {
     ]);
   });
 
+  it("re-reads the same log bytes when the observation exits 137", async () => {
+    const { executor, calls } = recordingExecutor([
+      failed(137, ""),
+      Buffer.from("original event\n").toString("base64"),
+    ]);
+    const container = new ExecHarnessContainer(executor, { runId: "review-run", clock: () => 0 });
+    expect(Buffer.from(await container.readLog(paths.log, 17, 128)).toString("utf8")).toBe("original event\n");
+    expect(calls.map((call) => call.command)).toEqual([
+      `tail -c +18 '${paths.log}' | head -c 128 | base64 | tr -d '\\n'`,
+      `tail -c +18 '${paths.log}' | head -c 128 | base64 | tr -d '\\n'`,
+    ]);
+    expect(vi.mocked(console.warn).mock.calls).toContainEqual([
+      "[harness-log-read]",
+      { outcome: "retrying", runId: "review-run", cause: "exit-137" },
+    ]);
+    expect(vi.mocked(console.info).mock.calls).toContainEqual([
+      "[harness-log-read]",
+      { outcome: "recovered", runId: "review-run", cause: "exit-137" },
+    ]);
+  });
+
+  it("reports a second exit 137 without another observation", async () => {
+    const { executor, calls } = recordingExecutor([failed(137, ""), failed(137, "")]);
+    await expect(new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).rejects.toMatchObject({
+      name: "HarnessCommandOutcomeError",
+      operation: "read",
+      result: { exitCode: 137 },
+    });
+    expect(calls).toHaveLength(2);
+  });
+
   it("propagates a second failed log observation without a third attempt", async () => {
     const second = new ExecInfraError("original observation still unavailable", "answered", "resident");
     const { executor, calls } = recordingExecutor([
