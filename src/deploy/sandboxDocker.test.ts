@@ -45,7 +45,7 @@ describe("the cold sandbox image ships a Docker engine", () => {
   });
 
   it("keeps the pinned sandbox base, Node stage and complete base tool package set", () => {
-    expect(lines).toContain("FROM --platform=linux/amd64 docker.io/library/node:24.21.0-slim AS node");
+    expect(lines).toContain("FROM --platform=linux/amd64 docker.io/library/node:24.22.1-slim AS node");
     expect(lines).toContain("FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1");
     expect(packages).toEqual([
       "git",

@@ -10,7 +10,7 @@
 # amd64 too — a bare FROM on an arm64 host resolves it to arm64 and the copied
 # binary cannot run in the base (check:image on Apple silicon failed exactly
 # so). src/deploy/imageNode.test.ts holds the tag, its major and the platform.
-FROM --platform=linux/amd64 docker.io/library/node:24.21.0-slim AS node
+FROM --platform=linux/amd64 docker.io/library/node:24.22.1-slim AS node
 
 # The tag MUST match the @cloudflare/sandbox version in package.json exactly
 # (no 'latest' tag exists on the @next line) — bump both together. The same
@@ -106,7 +106,7 @@ RUN rm -rf /usr/local/lib/node_modules /usr/local/include/node
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 COPY --from=node /usr/local/include/node /usr/local/include/node
-RUN node --version | grep -qx 'v24.21.0' \
+RUN node --version | grep -qx 'v24.22.1' \
   && npm --version >/dev/null \
   && npx --version >/dev/null
 
