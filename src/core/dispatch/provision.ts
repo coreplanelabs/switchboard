@@ -1294,6 +1294,8 @@ async function attachRound(
       throw err;
     }
     if (attached.selection.backend) span.setAttrs({ backend: attached.selection.backend });
+    if (attached.selection.backend === "sandbox")
+      span.setAttrs({ sandboxKey: attached.selection.sandboxKey ?? threadKey });
     if (attached.selection.trace) graft(attached.selection.trace, attached.selection.attachMs);
     return attached;
   });

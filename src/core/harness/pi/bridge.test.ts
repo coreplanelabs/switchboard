@@ -37,6 +37,7 @@ function harness(
     clock?: () => number;
     textFailing?: ReadonlySet<string>;
     recovery?: ToolRecovery;
+    loopRemainingMs?: () => number;
   } = {},
 ) {
   const events: RunEvent[] = [];
@@ -50,6 +51,7 @@ function harness(
     onProgress: (n) => void notes.push(n),
     agentSpan,
     clock,
+    ...(opts.loopRemainingMs ? { loopRemainingMs: opts.loopRemainingMs } : {}),
     ...(opts.recovery ? { recovery: opts.recovery } : {}),
     ...(opts.textFailing ? { textFailing: opts.textFailing } : {}),
   });
@@ -165,7 +167,7 @@ describe("the bridge speaks the loop's vocabulary — the same turn, the same ev
   // signal judges a call against the bound it declared, so the tool_call event
   // carries it: pi's bash `timeout` is seconds, stamped as `boundMs`.
   it("a bash call's declared timeout rides the tool_call as boundMs (seconds → ms); a call without one carries none", () => {
-    const { bridge, events } = harness();
+    const { bridge, events } = harness({ loopRemainingMs: () => 701_000 });
     bridge.observe({
       type: "tool_execution_start",
       toolCallId: "b1",
@@ -185,7 +187,13 @@ describe("the bridge speaks the loop's vocabulary — the same turn, the same ev
       toolName: "read",
       args: { path: "x", timeout: 9 },
     });
-    expect(events[0]).toMatchObject({ type: "tool_call", tool: "bash", callId: "b1", boundMs: 600_000 });
+    expect(events[0]).toMatchObject({
+      type: "tool_call",
+      tool: "bash",
+      callId: "b1",
+      boundMs: 600_000,
+      timeout: { value: 600, unit: "seconds", milliseconds: 600_000, loopRemainingMs: 701_000 },
+    });
     expect(events[1]).not.toHaveProperty("boundMs");
     expect(events[2]).not.toHaveProperty("boundMs");
     expect(events[3]).not.toHaveProperty("boundMs"); // only bash declares a bound
@@ -422,6 +430,22 @@ describe("the bridge speaks the loop's vocabulary — the same turn, the same ev
 });
 
 describe("the bridge's spans — one tool.<name> per call under run.agent, ended with the call's outcome", () => {
+  it("keeps supplied timeout units and remaining loop time on the completed tool span", () => {
+    const { bridge, sink } = harness({ withSpans: true, loopRemainingMs: () => 701_000 });
+    for (const event of piStream)
+      bridge.observe(
+        event.type === "tool_execution_start" ? { ...event, args: { command: COMMAND, timeout: 120 } } : event,
+      );
+    expect(sink.ended("tool.bash")?.attrs).toEqual({
+      timeoutValue: 120,
+      timeoutUnit: "seconds",
+      timeoutMs: 120_000,
+      loopRemainingMs: 701_000,
+      callId: "call_0",
+      ok: true,
+      exitCode: 0,
+    });
+  });
   it("opens the span at the start, stamps its id on both events, ends it with callId, ok and exitCode", () => {
     const { bridge, events, sink, agentSpan } = harness({ withSpans: true });
     for (const e of piStream) bridge.observe(e);

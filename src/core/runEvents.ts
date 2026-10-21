@@ -666,6 +666,8 @@ export type RunEvent =
        *  The stall signal (docs/reference/specs/live-view.md item 32) marks a
        *  call past it; absent when the call declared none. */
       boundMs?: number;
+      /** The tool schema's unit, not inferred model intent. */
+      timeout?: { value: number; unit: "seconds"; milliseconds: number; loopRemainingMs?: number };
       seq?: number;
       at?: number;
     }

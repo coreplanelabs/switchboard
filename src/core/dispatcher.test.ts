@@ -25205,7 +25205,7 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     expect(p.toolsMs).toBe(1000);
     expect(p.finishingUpMs).toBeGreaterThan(0);
     expect(p.overheadMs).toBe(0);
-    expect(log.ended("dispatch.workspace.attach")!.attrs).toEqual({ backend: "sandbox" });
+    expect(log.ended("dispatch.workspace.attach")!.attrs).toEqual({ backend: "sandbox", sandboxKey: "slack:CX:1.0" });
   });
 
   it("a refusal (the agent allowlist): the reply is a dispatch.refuse span carrying the code and its cause, the root ends refused carrying both, no run", async () => {

@@ -165,6 +165,7 @@ export interface BridgeObservation {
 }
 
 export interface BridgeDeps {
+  loopRemainingMs?: () => number;
   recovery?: ToolRecovery;
   /** The run whose proxy evidence this bridge may consume. */
   runId?: string;
@@ -587,8 +588,23 @@ export class PiBridge {
     // ms so the stall signal can mark a call that outran it.
     const bound =
       tool === "bash" && typeof input?.timeout === "number" && Number.isFinite(input.timeout) && input.timeout > 0
-        ? { boundMs: Math.round(input.timeout * 1000) }
+        ? {
+            boundMs: Math.round(input.timeout * 1000),
+            timeout: {
+              value: input.timeout,
+              unit: "seconds" as const,
+              milliseconds: Math.round(input.timeout * 1000),
+              ...(this.deps.loopRemainingMs ? { loopRemainingMs: Math.max(0, this.deps.loopRemainingMs()) } : {}),
+            },
+          }
         : {};
+    if (bound.timeout)
+      span?.setAttrs({
+        timeoutMs: bound.timeout.milliseconds,
+        timeoutValue: bound.timeout.value,
+        timeoutUnit: bound.timeout.unit,
+        ...(bound.timeout.loopRemainingMs !== undefined ? { loopRemainingMs: bound.timeout.loopRemainingMs } : {}),
+      });
     this.emit({
       type: "tool_call",
       tool,

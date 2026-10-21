@@ -492,6 +492,8 @@ export function provisionalBearerExpiresAt(now: number, leaseMinutes: number): n
  *  still failing fast when the micro-VM is wedged
  *  (docs/reference/specs/execution.md item 5). */
 export const SANDBOX_CREDENTIAL_WRITE_TIMEOUT_MS = MINUTE_MS;
+/** Auxiliary provider reads during acceptance never consume a run's full lease. */
+export const SANDBOX_OBSERVATION_TIMEOUT_MS = 30_000;
 
 /** The per-command bash budget's rows: the default when a call names none, the
  *  ceiling a call may raise it to, and the floor under which a number is a

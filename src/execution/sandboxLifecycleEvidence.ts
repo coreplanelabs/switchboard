@@ -4,6 +4,7 @@ import { DESTROY_GRACE_MS } from "./sandboxIdle.js";
 interface MonitoredContainer {
   readonly running: boolean;
   monitor(): Promise<void>;
+  inspect?(): Promise<{ image: string } | null>;
 }
 
 interface LifecycleEvidenceHost {
@@ -13,6 +14,7 @@ interface LifecycleEvidenceHost {
   log(event: Record<string, unknown>): void;
   reportLogFailure(error: unknown): void;
   supervise(promise: Promise<void>): void;
+  newObservationId?(): string;
 }
 
 function failure(err: unknown): Record<string, unknown> {
@@ -36,6 +38,7 @@ function failure(err: unknown): Record<string, unknown> {
 export class SandboxLifecycleEvidence {
   private static readonly INTENT_WINDOW_MS = 2 * DESTROY_GRACE_MS;
   private watching = false;
+  private observationId: string | undefined;
   private lastGuardIntent: { why: "idle" | "stuck"; source: "sweep" | "sdk-expiry"; at: number } | undefined;
 
   constructor(private readonly host: LifecycleEvidenceHost) {}
@@ -58,16 +61,61 @@ export class SandboxLifecycleEvidence {
       return;
     }
     this.watching = true;
+    const observationId = this.host.newObservationId?.();
+    this.observationId = observationId;
+    let inspected: Promise<void> | undefined;
+    const inspectionStartedAt = this.host.now();
+    if (container.inspect) {
+      inspected = Promise.resolve()
+        .then(() => container.inspect!())
+        .then(
+          (info) =>
+            this.emit({
+              event: "sandbox.container.observed",
+              sandboxId: this.host.sandboxId,
+              build: this.host.build,
+              observationId,
+              inspectionStartedAt,
+              observedAt: this.host.now(),
+              source,
+              imageState: info ? "observed" : "unavailable",
+              ...(info ? { image: redactAndCap(stripAnsi(info.image), 1024) } : {}),
+            }),
+          (err: unknown) =>
+            this.emit({
+              event: "sandbox.container.observed",
+              sandboxId: this.host.sandboxId,
+              build: this.host.build,
+              observationId,
+              inspectionStartedAt,
+              observedAt: this.host.now(),
+              source,
+              imageState: "unavailable",
+              ...failure(err),
+            }),
+        );
+    } else if (observationId) {
+      this.emit({
+        event: "sandbox.container.observed",
+        sandboxId: this.host.sandboxId,
+        build: this.host.build,
+        observationId,
+        inspectionStartedAt,
+        observedAt: this.host.now(),
+        source,
+        imageState: "unsupported",
+      });
+    }
     const observed = stopped
       .then(
-        () => this.stopObserved("clean"),
-        (err: unknown) => this.stopObserved("error", err),
+        () => this.stopObserved("clean", undefined, observationId),
+        (err: unknown) => this.stopObserved("error", err, observationId),
       )
       .finally(() => {
         this.watching = false;
       });
     try {
-      this.host.supervise(observed);
+      this.host.supervise(inspected ? Promise.all([observed, inspected]).then(() => {}) : observed);
     } catch (err) {
       this.emit({
         event: "sandbox.container.monitor-supervise-failed",
@@ -94,13 +142,40 @@ export class SandboxLifecycleEvidence {
     }
   }
 
-  private stopObserved(outcome: "clean" | "error", err?: unknown): void {
+  /** Preserve the provider's bounded discriminator before the HTTP adapter
+   * reduces it to prose. No command, environment or error context is copied. */
+  executionFailed(err: unknown): void {
+    const shape =
+      err && typeof err === "object"
+        ? (err as { code?: unknown; processId?: unknown; pid?: unknown; operation?: unknown })
+        : {};
+    const identifier = (value: unknown) =>
+      typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value) ? value : null;
+    this.emit({
+      event: "sandbox.execution.lifecycle-failure",
+      sandboxId: this.host.sandboxId,
+      build: this.host.build,
+      observationId: this.observationId ?? null,
+      observedAt: this.host.now(),
+      ...failure(err),
+      errorCode: typeof shape.code === "string" && /^[A-Z_]{1,80}$/.test(shape.code) ? shape.code : null,
+      processId: identifier(shape.processId),
+      pid: typeof shape.pid === "number" && Number.isSafeInteger(shape.pid) && shape.pid > 0 ? shape.pid : null,
+      operation:
+        typeof shape.operation === "string" && /^[A-Za-z][A-Za-z0-9_.]{0,63}$/.test(shape.operation)
+          ? shape.operation
+          : null,
+    });
+  }
+
+  private stopObserved(outcome: "clean" | "error", err?: unknown, observationId?: string): void {
     const intent = this.lastGuardIntent;
     const observedAt = this.host.now();
     this.emit({
       event: "sandbox.container.stop-observed",
       sandboxId: this.host.sandboxId,
       build: this.host.build,
+      ...(observationId ? { observationId } : {}),
       outcome,
       observedAt,
       ...(intent && observedAt - intent.at >= 0 && observedAt - intent.at <= SandboxLifecycleEvidence.INTENT_WINDOW_MS

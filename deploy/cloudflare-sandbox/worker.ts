@@ -355,7 +355,15 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       now: systemClock,
       sandboxId: this.ctx.id.toString(),
       build: buildId(BUILD),
-      log: (event) => console.log(JSON.stringify({ ...event, thread: this.ctx.id.name ?? this.ctx.id.toString() })),
+      newObservationId: () => crypto.randomUUID(),
+      log: (event) =>
+        console.log(
+          JSON.stringify({
+            ...event,
+            workerVersionId: this.env.CF_VERSION_METADATA?.id ?? null,
+            thread: this.ctx.id.name ?? this.ctx.id.toString(),
+          }),
+        ),
       reportLogFailure: (err) =>
         console.error(
           JSON.stringify({
@@ -1299,6 +1307,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     // The runtime changed under the command (item 9): the process, if it
     // started, is gone with its output. Certain — the SDK said so by type.
     if (isRuntimeReplacement(err)) {
+      this.lifecycleEvidence.executionFailed(err);
       const msg = recycledMidCommandMessage(systemClock() - startedAt, raw, true);
       return { error: msg, stdout: "", stderr: msg, exitCode: 127 };
     }
@@ -1434,6 +1443,7 @@ function timeoutNote(execTimeoutSecs: number): string {
 }
 
 interface Env {
+  CF_VERSION_METADATA?: { id: string };
   Sandbox: DurableObjectNamespace<SwitchboardSandbox>;
   SANDBOX_TOKEN: string;
   STATE_WORKER_URL?: string;

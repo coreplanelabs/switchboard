@@ -3,6 +3,7 @@
   "name": "{{script}}",
   "main": "worker.ts",
   "compatibility_date": "2026-08-01",
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
   // @cloudflare/sandbox imports Node built-ins (wrangler's dry run names
   // sandbox-*.js and warns the Worker "may throw errors at runtime" without
   // this); the resident Worker on the same 0.13 line carries the same flag.

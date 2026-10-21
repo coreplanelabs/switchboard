@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { checkExecutionReceiptSchema } from "../core/checkExecution.js";
+import { sandboxRunTargetOf, type SandboxRunTarget, type SandboxRunObservation } from "./sandboxRunEvidence.js";
 import {
   AGENT_SMOKE_POLL_MS,
   AGENT_SMOKE_REVIEW_MINUTES,
@@ -208,6 +209,7 @@ interface SmokeIntakeReceipt {
   response?: SmokeCapture & { status?: number; format: "json" | "non-json" };
 }
 interface ScenarioReceipt {
+  sandbox?: { first?: SandboxRunObservation; ended?: SandboxRunObservation; observationError?: "unavailable" };
   id: SmokeScenario["id"];
   outcome: Outcome;
   reason: string;
@@ -454,6 +456,7 @@ export async function runAgentSmoke(input: {
   thread: string;
   transport: SmokeTransport;
   onReceipt?: (receipt: AgentSmokeReceipt) => Promise<void>;
+  observeSandbox?: (target: SandboxRunTarget) => Promise<SandboxRunObservation>;
 }): Promise<AgentSmokeReceipt> {
   const config = parseSmokeConfig(input.config);
   component.parse(input.thread);
@@ -595,6 +598,7 @@ export async function runAgentSmoke(input: {
         row.reason = "served_build_mismatch";
         break;
       }
+      const sandboxObserved = new Set<"first" | "ended">();
       const retainRun = async (value: unknown) => {
         const raw = value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
         const identityVerified =
@@ -632,7 +636,27 @@ export async function runAgentSmoke(input: {
         } else {
           row.evidence = { identityVerified, record: safeSmokeRecord(record) };
         }
+        // Save the run before auxiliary provider reads. Observation failure
+        // must never erase the original identity or turn acceptance green.
         await save();
+        if (identityVerified && scenario.id !== "answer" && input.observeSandbox) {
+          const phase = raw.finished === true ? "ended" : "first";
+          row.sandbox ??= {};
+          if (!sandboxObserved.has(phase)) {
+            const target = sandboxRunTargetOf({ threadKey: String(raw.threadKey), events: raw.events });
+            if (
+              phase === "ended" ||
+              (target.backend !== null && (target.backend !== "sandbox" || target.sandboxKey !== null))
+            )
+              sandboxObserved.add(phase);
+            try {
+              row.sandbox[phase] = await input.observeSandbox(target);
+            } catch {
+              row.sandbox.observationError = "unavailable";
+            }
+            await save();
+          }
+        }
       };
       const originalRecord = await input.transport.readRun(response.run.id, retainRun);
       await retainRun(originalRecord);

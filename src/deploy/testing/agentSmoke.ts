@@ -69,6 +69,16 @@ export function fixture() {
         ...(directives.model ? { model: directives.model } : {}),
         ...(directives.effort ? { effort: directives.effort } : {}),
       });
+      if (scenario.id !== "answer")
+        registry.publish(id, {
+          type: "span_end",
+          name: "dispatch.workspace.attach",
+          spanId: "fixture-attach",
+          startedAt: 10,
+          durationMs: 0,
+          status: "ok",
+          attrs: { backend: "sandbox", sandboxKey: scenario.id === "review" ? `review:${id}` : identity.threadKey },
+        });
       registry.publish(id, { type: "answer", text: scenario.id === "answer" ? "4" : "smoke fixture" });
       registry.publish(id, { type: "tool_call", tool: "read", callId: "read-1", summary: "fixture read" });
       registry.publish(id, { type: "tool_result", tool: "read", callId: "read-1", ok: true, summary: "fixture read" });
