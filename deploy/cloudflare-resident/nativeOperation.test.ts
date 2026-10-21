@@ -1925,6 +1925,7 @@ function httpFixture(
     RESIDENT_READ_TOKEN: "reader",
     RESIDENT_OPERATOR_TOKEN: "operator",
     RESIDENT_DRAIN_TOKEN: "drain",
+    RESIDENT_RETIRE_TOKEN: "retire",
   };
   return {
     request: (path: string, token: string | null, body: unknown) =>
@@ -2278,8 +2279,15 @@ describe("terminal native scope retirement", () => {
     h.rows.set("resident:resource", "repo:acme/app");
     const api = httpFixture(h, false, undefined, false, { native: h.native, permit: h.permit });
     expect((await api.request("/retire-native-operation", "reader", h.target)).status).toBe(401);
+    expect((await api.request("/retire-native-operation", "drain", h.target)).status).toBe(401);
+    expect(
+      (await api.request("/debug", "retire", { op: "native-operations", resource: h.target.resource })).status,
+    ).toBe(401);
+    expect((await api.request("/recover-native-operation", "retire", h.target)).status).toBe(401);
+    expect((await api.request("/drain", "retire", { minutes: 1 })).status).toBe(401);
+    expect((await api.request("/rebuild", "retire", { resource: h.target.resource })).status).toBe(401);
     expect(api.memoryRequests).toEqual([]);
-    const response = await api.request("/retire-native-operation", "admin", h.target);
+    const response = await api.request("/retire-native-operation", "retire", h.target);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ state: "closed", originalOperationOutcome: "unknown" });
     expect(api.memoryRequests).toEqual([{ storeKey: "runs:default", target: h.target }]);

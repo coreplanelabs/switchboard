@@ -38,6 +38,40 @@ Nothing runs: it prints which Workers are stale, why, and each preflight. `GET /
 npx --yes @coreplane/switchboard@<version> deploy all --affected
 ```
 
+### Deploy current main without a release
+
+Use the idle manual workflow when the release path is too slow and the change is already merged to `main`:
+
+```bash
+gh workflow run deploy-main-fast.yml --ref main -f targets=all
+```
+
+In GitHub, open **Actions → deploy main fast → Run workflow**, select `main`, and keep `targets=all` and `force=false`. The run captures one `main` commit. It installs dependencies, checks the bot and web build and all four Worker types, then probes candidate Door routing. It checks that `main` still names the captured commit before the first production write. It builds container images from that checkout, deploys under the normal production lock and environment, and requires each selected Worker to report that exact commit.
+
+Merge the code change's ordinary PR into `main` first. The skipped release PR is the separate release-please version and tag PR. This path deploys the captured `main` commit, never a feature branch. It does not wait for the release PR, staging Review E2E, npm publication or GHCR image publication. It does not create a release tag or publish images for operators. A later routine release can deploy again. The predeploy checks do not prove a complete agent request; this workflow sets the optional postdeploy ingress smoke off. The live receipt proves selected Worker uptake and readiness only.
+
+Use `targets=affected` or a comma-separated Worker list only when you have checked the plan and know that the omitted Workers need no update. `--affected` can fall back to a release tag when a live commit cannot be read. The default `all` avoids that uncertainty. If a normal deploy already holds the shared lock, this run waits; inspect its state before cancelling it. If `main` has moved when the predeploy check runs, this run fails before deployment. Start a new run for the new head.
+
+`force=true` bypasses the bot and resident preflights and permits a superseded commit to deploy. It can interrupt in-flight work. A protected closed Resident operation can still refuse the full-fleet deploy before any Worker upload, even with `force=true`. An active operation may lose its final reply or be killed during container reconciliation. Its files may remain, and an external write may have happened without a known result. The early native-record check and postdeploy readiness gates still apply; a forced upload can end as a partial deploy. [Worker topology](../explanation/worker-topology.md#why-a-fast-resident-deploy-can-stop) explains the drain, fence and loss. Use force only for a deliberate rollout after checking the captured commit and current production state:
+
+```bash
+gh workflow run deploy-main-fast.yml --ref main -f targets=all -f force=true
+```
+
+If a closed native record blocks upload, read its exact repository resource, key and 64-character hash from the refusal. Confirm the run is ended and sealed. Start a new fast run from the current `main`, and fill `retire-resource`, `retire-key` and `retire-record-hash` with those exact values. The protected production job reads the saved scope, asks Resident to retire that one terminal scope, confirms every original record has a closed receipt, then starts the normal deploy. It sends one retirement request and never repeats the original command. An incomplete selector, missing retirement bearer, changed record, live run or missing closure receipt stops before Worker upload. `force=true` still controls the later preflight; retirement does not set it. If the run is still live, stop it through run control and wait for a sealed terminal record before dispatch. A stop request alone is not terminal proof.
+
+### Credentials for the fast path
+
+The manual workflow calls the same production deploy job as a release and inherits its existing GitHub Actions secrets. An ordinary fast deploy needs no new credential or repository variable. `CLOUDFLARE_DEPLOY_TOKEN` uploads Workers; `RESIDENT_DRAIN_TOKEN` drains and fences the resident fleet; `RESIDENT_READ_TOKEN` reads its inventory and readiness; `MEMORY_TOKEN` and `SANDBOX_TOKEN` serve the selected Worker gates. The existing `SWITCHBOARD_DEPLOY_PROFILE` variable names the installation profile, and `CONFIG_REPO_APP_CLIENT_ID` and `CONFIG_REPO_APP_PRIVATE_KEY` read a private profile when configured. Check the secret **names**, not their values, under **Repository Settings → Secrets and variables → Actions** before an incident. A missing drain or read token is a setup failure; `force` does not supply one.
+
+The optional retirement step needs one new bearer, `RESIDENT_RETIRE_TOKEN`. It has access only to `POST /retire-native-operation`; the existing read token supplies the inventory. The called deploy job reads the new bearer only in the optional retirement step under the `production` environment. No new repository variable or broad CI admin token is needed. The bearer can retire any sealed terminal run whose exact key and hash are known, so keep its production environment restriction.
+
+The Resident Worker already has `RESIDENT_ADMIN_TOKEN` for repo management, but GitHub Actions does not need it. The admin bearer can also rebuild and offboard repositories. Do not copy it into Actions to clear one native hold.
+
+Before the updated Resident Worker serves, its terminal retirement route still requires the existing admin bearer. Adding the narrow Actions secret alone cannot change an old Worker's authorization. If a native hold already prevents the Worker update, use the existing admin bearer from the trusted installation secret source for the local procedure below. Do not rotate that admin bearer to make CI work; the bot also uses it for repository management.
+
+Prepare the narrow bearer in this order: merge the change that adds `RESIDENT_RETIRE_TOKEN` to `deploy/secrets.manifest.json`; deploy the updated Resident Worker and confirm its serving commit; mint a distinct value in the installation's secret source; then run `npm run cli -- deploy secrets resident --only RESIDENT_RETIRE_TOKEN` from a checkout containing that manifest entry. Last, set the matching GitHub `production` **environment secret** in **Repository Settings → Environments → production → Environment secrets**. If `deploy secrets` says the name is not a resident secret, the local checkout still has the old manifest. Stop there. A GitHub secret already set at that point can stay stored, but it has no effect on the old Worker. After the Worker accepts the new bearer, set the Actions secret again from the same source if you cannot verify that its earlier value matches. Do not retry the Worker secret write from the old checkout.
+
 `deploy all` is the normal runner: memory, resident, bot, sandbox, never the four by hand. A refusing preflight is retried every 60 s (`--wait-max` minutes), then the deploy fails by name — it never rolls over what refused; re-run it once it clears (`gh run rerun RUN_ID --failed` for a CI job). In-flight bot runs never refuse: they hand off to the next container. `--force` can bypass the bot preflight but cannot bypass the Resident's native-owner evidence or the early native-record check. A newer release cut while an older run's re-run is pending supersedes it — cancel the older run; if it runs anyway, `deploy all` refuses a Worker whose live `/healthz` commit already contains the commit being deployed (`refused: … this release is superseded — re-run nothing, the newer release carries it`), and only `--force` / `SWITCHBOARD_DEPLOY_FORCE=1` deploys over it, as a deliberate rollback.
 
 After upload, the runner confirms that the exact Worker version serves 100% in the Cloudflare Workers deployments API. For a changed container image or configuration, it selects the rollout for this upload and pins its ID. Status lines report the rollout status, current and target versions, step, updated container count and health error count. A replaced or reverted rollout fails. A Worker-only upload requires no container rollout. A Bot rollback can reuse an earlier application target without a new rollout; its selected image, runtime and exact health must still agree. These API checks share the existing readiness deadline with the service checks. A completed rollout still needs the applicable Worker health, resident registry, container inventory and exec proof. The memory Worker has no container rollout; its API check proves activation, and its separate functional check remains required.
@@ -393,6 +427,15 @@ For `callback-ending-unverified`, an administrator needs independent evidence th
 ### Clean up native work after a run ends
 
 For an ended run with an unresolved native operation, the existing Read `native-operations` report supplies the original key, `recordHash` and `journal.scope`. An administrator can send those exact values, plus `resource` and the selected resident number when needed, to `POST /retire-native-operation`. Use the complete original scope object. This route requires updated Memory and Resident workers; an older worker refuses it.
+
+From a trusted source checkout, the operator command reads that record and fills in its saved scope. Use the Resident origin from the deployment profile and the original key named by the deployment refusal. Set `RESIDENT_READ_TOKEN` in the operator's environment before preview; set `RESIDENT_RETIRE_TOKEN` before apply. The existing admin bearer also works for an administrator, but the narrow bearer is the CI credential. Do not paste bearer values into the command line or GitHub Actions output.
+
+```bash
+npm run resident:retire -- --url 'https://<resident-hostname>' --resource repo:owner/repo --key '<exact-native-operation-key>'
+npm run resident:retire -- --url 'https://<resident-hostname>' --resource repo:owner/repo --key '<exact-native-operation-key>' --record-hash '<hash-from-preview>' --apply
+```
+
+For a replica, add `--resident <number>` to both commands. The preview makes no admin request and lists every saved operation in the selected scope. Apply rereads the record, refuses a changed hash, and sends one control request. It then reads the saved retirement receipt. A lost reply with no closure receipt stays unverified; the command does not send another control request. The Worker checks terminal authority and can refuse a live or unsealed run. Stop that run through the normal run control first, then confirm its sealed terminal record before a new preview. Do not treat a stop request alone as that proof.
 
 Memory prepares terminal authority only after the run has a canonical sealed outcome and no live or restart state. That authority also prevents the same run ID from starting again. Resident checks the original scope and current owner, freezes its journal, and closes only that scope. It keeps the workspace, saved run and original unknown command outcomes. Other runs on the same container remain separate. The request accepts at most 64 original journal rows and a 64 KiB preparation; it refuses a larger or incomplete inventory before control.
 

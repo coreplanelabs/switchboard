@@ -1,0 +1,50 @@
+name: deploy main fast
+run-name: fast production deploy ${{ github.sha }} (${{ inputs.targets }})
+
+# Manual emergency path. The called workflow owns the production environment,
+# deploy lock, preflights and exact-commit live checks.
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "all (default), affected, or comma-separated Worker names"
+        type: string
+        default: all
+      force:
+        description: "Bypass preflights and allow a superseded commit to deploy; can interrupt work"
+        type: boolean
+        default: false
+      retire-resource:
+        description: "Optional exact repo:owner/name from a blocked native operation"
+        type: string
+        default: ""
+      retire-key:
+        description: "Optional exact native-operation key from the refusal"
+        type: string
+        default: ""
+      retire-record-hash:
+        description: "Optional 64-character record hash from the same refusal"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/deploy-production.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+    with:
+      targets: ${{ inputs.targets }}
+      force: ${{ inputs.force }}
+      cli: checkout
+      copy-images: never
+      image-source: build
+      quick-checks: true
+      require-current-main: true
+      retire-resource: ${{ inputs.retire-resource }}
+      retire-key: ${{ inputs.retire-key }}
+      retire-record-hash: ${{ inputs.retire-record-hash }}
+      smoke: false
+    secrets: inherit # zizmor: ignore[secrets-inherit]

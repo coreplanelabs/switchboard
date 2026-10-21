@@ -31,6 +31,8 @@ export const PROFILE_PATH = "deploy/profile.json";
 export const PROFILE_EXAMPLE_PATH = "deploy/profile.example.json";
 /** Overrides the profile's location — a second installation's profile, a test fixture. */
 export const PROFILE_ENV = "SWITCHBOARD_DEPLOY_PROFILE";
+/** The emergency checkout builds images from its selected source commit. */
+export const DEPLOY_IMAGE_MODE_ENV = "SWITCHBOARD_DEPLOY_IMAGE_MODE";
 
 const hostname = z
   .string()

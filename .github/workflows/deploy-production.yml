@@ -127,6 +127,30 @@ on:
         description: "After deploy, require three bounded capability checks in the configured disposable smoke scope"
         type: boolean
         default: false
+      image-source:
+        description: "profile (default) or build from the checked-out commit"
+        type: string
+        default: profile
+      quick-checks:
+        description: "Compile and typecheck the checked-out source before any production write"
+        type: boolean
+        default: false
+      require-current-main:
+        description: "Refuse if main moved after the workflow captured its commit"
+        type: boolean
+        default: false
+      retire-resource:
+        description: "Optional exact repository resource for terminal native cleanup before upload"
+        type: string
+        default: ""
+      retire-key:
+        description: "Optional exact saved native operation key for terminal cleanup before upload"
+        type: string
+        default: ""
+      retire-record-hash:
+        description: "Optional saved record hash for terminal cleanup before upload"
+        type: string
+        default: ""
     secrets:
       CLOUDFLARE_DEPLOY_TOKEN:
         required: false
@@ -143,6 +167,9 @@ on:
       RESIDENT_DRAIN_TOKEN:
         required: false
         description: the resident fleet's drain/reconcile bearer (POST /drain, /reconcile, /undrain) — without it a selected resident step cannot prove image readiness and ends as a partial deployment
+      RESIDENT_RETIRE_TOKEN:
+        required: false
+        description: single-purpose exact terminal native-scope retirement bearer
       SANDBOX_TOKEN:
         required: false
         description: the sandbox live gate's bearer
@@ -193,6 +220,14 @@ on:
         description: "`auto` (default): run `deploy images` before the plan — it copies what a `registry`-mode profile lacks and does nothing for a `build`-mode one; `never`: skip it and leave the copy to `deploy all`"
         type: string
         default: auto
+      image-source:
+        description: "profile (default) or build from the checked-out commit"
+        type: string
+        default: profile
+      quick-checks:
+        description: "Compile and typecheck the checked-out source before any production write"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -236,6 +271,7 @@ jobs:
       # `profile` input, else the calling repository's variable. A `github://`
       # profile is read with CONFIG_REPO_TOKEN, the App token minted below.
       SWITCHBOARD_DEPLOY_PROFILE: ${{ inputs.profile || vars.SWITCHBOARD_DEPLOY_PROFILE }}
+      SWITCHBOARD_DEPLOY_IMAGE_MODE: ${{ inputs.image-source == 'build' && 'build' || '' }}
       # The App is handed in as two secrets. No client id means a `github://`
       # profile has no App to read it with: refused by name below, before the
       # mint step fails on an empty client id.
@@ -252,6 +288,24 @@ jobs:
         run: |
           echo "::error::deploy-production runs only from main — got ${GITHUB_REF}. Nothing was deployed."
           exit 1
+      - name: validate optional native retirement
+        env:
+          RETIRE_RESOURCE: ${{ inputs.retire-resource }}
+          RETIRE_KEY: ${{ inputs.retire-key }}
+          RETIRE_HASH: ${{ inputs.retire-record-hash }}
+          CLI_MODE: ${{ inputs.cli }}
+          QUICK_CHECKS: ${{ inputs.quick-checks }}
+          CURRENT_MAIN: ${{ inputs.require-current-main }}
+        run: |
+          if [ -z "$RETIRE_RESOURCE$RETIRE_KEY$RETIRE_HASH" ]; then exit 0; fi
+          if [ -z "$RETIRE_RESOURCE" ] || [ -z "$RETIRE_KEY" ] || [ -z "$RETIRE_HASH" ]; then
+            echo "::error::native retirement requires resource, key and record hash together. Nothing was deployed."
+            exit 1
+          fi
+          if [ "$CLI_MODE" != "checkout" ] || [ "$QUICK_CHECKS" != "true" ] || [ "$CURRENT_MAIN" != "true" ]; then
+            echo "::error::native retirement requires the checked, current-main deploy. Nothing was deployed."
+            exit 1
+          fi
       # One command word for every step below: the checked-out tree's CLI, or
       # the published package at one version. `label` names what this run
       # deploys in the job summary — the commit, or the package at its version.
@@ -261,6 +315,8 @@ jobs:
           MODE: ${{ inputs.cli }}
           VERSION: ${{ inputs.version }}
           COPY_IMAGES: ${{ inputs.copy-images }}
+          IMAGE_SOURCE: ${{ inputs.image-source }}
+          QUICK_CHECKS: ${{ inputs.quick-checks }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
@@ -268,6 +324,14 @@ jobs:
             auto|never|"") ;;
             *) echo "::error::copy-images must be auto or never — got '$COPY_IMAGES'. Nothing was deployed."; exit 1 ;;
           esac
+          case "$IMAGE_SOURCE" in
+            profile|build) ;;
+            *) echo "::error::image-source must be profile or build. Nothing was deployed."; exit 1 ;;
+          esac
+          if [ "$MODE" = "package" ] && { [ "$IMAGE_SOURCE" = "build" ] || [ "$QUICK_CHECKS" = "true" ]; }; then
+            echo "::error::build images and quick checks need a checked-out commit. Nothing was deployed."
+            exit 1
+          fi
           case "$MODE" in
             checkout|"")
               echo "cli=npm run --silent cli --" >> "$GITHUB_OUTPUT"
@@ -319,6 +383,15 @@ jobs:
           node-version: 24
       - run: npm ci
         if: inputs.cli != 'package'
+      - name: quick source checks
+        if: inputs.quick-checks && inputs.cli != 'package'
+        run: |
+          npm run check:dist
+          npm run typecheck
+          npm run typecheck -w deploy/cloudflare-memory
+          npm run typecheck -w deploy/cloudflare
+          npm run typecheck -w deploy/cloudflare-resident
+          npm run typecheck -w deploy/cloudflare-sandbox
       # The profile and config are read from the configuration repository with
       # an App token that can read exactly that repository — the same App
       # release-please.yml acts as, minted here so a dispatched run has it too.
@@ -396,6 +469,16 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.DOOR_SMOKE_OPENAI_API_KEY }}
           DOOR_SMOKE_TRUSTED_ORIGIN: ${{ vars.DOOR_SMOKE_TRUSTED_ORIGIN }}
         run: npm run load -- route --smoke --profile-model
+      - name: main still points at this commit
+        if: inputs.require-current-main && inputs.cli != 'package'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current_main=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$current_main" != "$GITHUB_SHA" ]; then
+            echo "::error::main moved after this run captured $GITHUB_SHA; current main is $current_main. Nothing was deployed."
+            exit 1
+          fi
       # Once per target tag, before the plan: the release's images into the account
       # registry, registry to registry over HTTPS. `deploy all` below would make
       # the same copy itself; running it here first lets the plan read `present`.
@@ -446,6 +529,20 @@ jobs:
       - name: the tree is the commit
         if: inputs.cli != 'package'
         run: git status --porcelain
+      - name: retire exact ended native scope
+        if: inputs.retire-key != '' && inputs.cli != 'package'
+        env:
+          RETIRE_RESOURCE: ${{ inputs.retire-resource }}
+          RETIRE_KEY: ${{ inputs.retire-key }}
+          RETIRE_HASH: ${{ inputs.retire-record-hash }}
+          RESIDENT_RETIRE_TOKEN: ${{ secrets.RESIDENT_RETIRE_TOKEN }}
+        run: |
+          if [ -z "$RESIDENT_RETIRE_TOKEN" ] || [ -z "$RESIDENT_READ_TOKEN" ]; then
+            echo "::error::native retirement needs RESIDENT_RETIRE_TOKEN and RESIDENT_READ_TOKEN. Nothing was deployed."
+            exit 1
+          fi
+          resident_url=$(jq -er 'if .profile.origin == "example" then empty else .profile.selection.workers.resident.hostname | "https://" + . end' "$RUNNER_TEMP/plan.json")
+          npm run --silent resident:retire -- --url "$resident_url" --resource "$RETIRE_RESOURCE" --key "$RETIRE_KEY" --record-hash "$RETIRE_HASH" --apply
       - name: deploy
         id: deploy
         env:

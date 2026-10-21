@@ -125,6 +125,7 @@ import { parseConfigSource, readConfigSource, type ConfigSourceIO } from "./conf
 import { publishedImagesFrom, type PublishedImages } from "./images.js";
 import { executionImageInputTags } from "./imageInputs.js";
 import {
+  DEPLOY_IMAGE_MODE_ENV,
   isExampleProfile,
   parseProfile,
   PROFILE_ENV,
@@ -488,7 +489,12 @@ export function deployHostOnHost(): DeployHost {
 }
 
 /** Parse + validate profile JSON read from `where` (a path or a source reference — what errors name). */
-function profileFromJson(text: string, where: string, origin: LoadedProfile["origin"]): LoadedProfile {
+function profileFromJson(
+  text: string,
+  where: string,
+  origin: LoadedProfile["origin"],
+  imageMode?: "build",
+): LoadedProfile {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -499,7 +505,11 @@ function profileFromJson(text: string, where: string, origin: LoadedProfile["ori
   if (!parsed.ok) throw new Error(`${where}: invalid deployment profile —\n  - ${parsed.problems.join("\n  - ")}`);
   // The example is the example wherever it was read from — a copy of it
   // pointed at by the env var, too — so the runner's refusal holds.
-  return { profile: parsed.profile, origin: isExampleProfile(parsed.profile) ? "example" : origin, path: where };
+  return {
+    profile: imageMode ? { ...parsed.profile, images: imageMode } : parsed.profile,
+    origin: isExampleProfile(parsed.profile) ? "example" : origin,
+    path: where,
+  };
 }
 
 /**
@@ -517,13 +527,16 @@ export async function loadProfileOnHost(
   env: Record<string, string | undefined> = process.env,
   sourceIO: ConfigSourceIO = hostConfigSourceIO(),
 ): Promise<LoadedProfile> {
+  const requestedImageMode = env[DEPLOY_IMAGE_MODE_ENV];
+  if (requestedImageMode && requestedImageMode !== "build") throw new Error(`${DEPLOY_IMAGE_MODE_ENV} must be build`);
+  const imageMode = requestedImageMode === "build" ? "build" : undefined;
   const override = env[PROFILE_ENV];
   if (override) {
     const source = parseConfigSource(override);
     if (source.ok && source.source.kind !== "path") {
       const read = await readConfigSource(source.source, sourceIO);
       if (!read.ok) throw new Error(`${PROFILE_ENV}=${override}: ${read.problem}`);
-      return profileFromJson(read.text, override, "profile");
+      return profileFromJson(read.text, override, "profile", imageMode);
     }
   }
   // The installation's own profile (or the path the env var names) is under the root — the checkout,
@@ -546,7 +559,7 @@ export async function loadProfileOnHost(
       if (c.origin === "profile" && override) throw new Error(`${PROFILE_ENV}=${override}: no such file`);
       continue;
     }
-    return profileFromJson(readFileSync(abs, "utf8"), c.path, c.origin);
+    return profileFromJson(readFileSync(abs, "utf8"), c.path, c.origin, imageMode);
   }
   throw new Error(`no deployment profile: write ${PROFILE_PATH} (see ${PROFILE_EXAMPLE_PATH}) or set ${PROFILE_ENV}`);
 }
