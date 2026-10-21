@@ -686,7 +686,7 @@ describe("resolveTarget — the vet a machine class gets", () => {
     expect(out.needsRepo).toBe(true);
     expect(await out.repoCtxP).toEqual({ repo: "acme/api" });
     expect(calls).toEqual(["https://api.github.com/repos/acme/api"]);
-    expect(resolveGithubToken).toHaveBeenCalledWith("write"); // coding's identity is `write`: the credential the sandbox gets
+    expect(vi.mocked(resolveGithubToken).mock.calls[0]?.[0]).toBe("write"); // coding's identity is `write`: the credential the sandbox gets
   });
 
   it("repo-cold on a `read` identity vets with a read token; on `none` it vets anonymously and mints nothing", async () => {
@@ -694,7 +694,7 @@ describe("resolveTarget — the vet a machine class gets", () => {
     vi.mocked(resolveGithubToken).mockClear();
     stubFetch(() => new Response("{}", { status: 200 }));
     expect(await target("repo-cold", "read").repoCtxP).toEqual({ repo: "acme/api" });
-    expect(resolveGithubToken).toHaveBeenCalledWith("read");
+    expect(vi.mocked(resolveGithubToken).mock.calls[0]?.[0]).toBe("read");
     vi.mocked(resolveGithubToken).mockClear();
     const calls = stubFetch(() => new Response("{}", { status: 200 }));
     expect(await target("repo-cold", "none").repoCtxP).toEqual({ repo: "acme/api" });

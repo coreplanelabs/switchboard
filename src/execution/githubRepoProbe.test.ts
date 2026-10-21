@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { createTracer } from "../core/trace/tracer.js";
+import { recordingSink } from "../core/testing/recordingSink.js";
 import { githubRepoProbe } from "./githubRepoProbe.js";
 
 // Feature: docs/reference/specs/execution.md item 18 — a `repo-cold` run's
@@ -61,6 +63,51 @@ describe("githubRepoProbe", () => {
     await expect(
       githubRepoProbe({ scope: "read", fetch: fetchAnswering(200), token: noMint })("acme/api"),
     ).resolves.toBe("unreachable");
+  });
+
+  it("records which GitHub boundary failed without recording a credential or response body", async () => {
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
+    const token = vi.fn(async () => {
+      throw new Error("private-token-mint-detail");
+    });
+    await expect(githubRepoProbe({ scope: "read", span: root, token })("acme/private")).resolves.toBe("unreachable");
+    expect(log.ended("github.repo_probe")).toMatchObject({
+      attrs: { scope: "read", outcome: "credential_unverified" },
+    });
+    expect(log.ends.some((entry) => entry.name === "github.rest")).toBe(false);
+
+    const response = vi.fn(
+      async () => new Response("private-response-body", { status: 503 }),
+    ) as unknown as typeof fetch;
+    await expect(
+      githubRepoProbe({ scope: "read", span: root, token: async () => "private-token", fetch: response })(
+        "acme/private",
+      ),
+    ).resolves.toBe("unreachable");
+    expect(log.ends.filter((entry) => entry.name === "github.repo_probe").at(-1)).toMatchObject({
+      attrs: { scope: "read", outcome: "http_unverified" },
+    });
+    expect(log.ends.filter((entry) => entry.name === "github.rest").at(-1)).toMatchObject({
+      attrs: { host: "api.github.com", route: "repository", method: "GET", httpStatus: 503 },
+    });
+
+    const failing = vi.fn(async () => {
+      throw new DOMException("private-timeout-detail", "TimeoutError");
+    }) as unknown as typeof fetch;
+    await expect(
+      githubRepoProbe({ scope: "read", span: root, token: async () => "private-token", fetch: failing })(
+        "acme/private",
+      ),
+    ).resolves.toBe("unreachable");
+    expect(log.ends.filter((entry) => entry.name === "github.repo_probe").at(-1)).toMatchObject({
+      attrs: { scope: "read", outcome: "timeout_unverified" },
+    });
+    expect(log.ends.filter((entry) => entry.name === "github.rest").at(-1)).toMatchObject({
+      status: "error",
+      errorKind: "timeout",
+    });
+    expect(JSON.stringify(log.ends)).not.toMatch(/private-token|private-response-body|private-timeout-detail/);
   });
 
   it("without a credential the vet is anonymous: no authorization header, so a private repository reads as 404", async () => {
