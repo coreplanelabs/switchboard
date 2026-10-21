@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.307.2](https://github.com/coreplanelabs/switchboard/compare/v1.307.1...v1.307.2) (2026-10-21)
+
+
+### Bug fixes
+
+* **core:** fence private history with current source access ([#3396](https://github.com/coreplanelabs/switchboard/issues/3396)) ([d832b5f](https://github.com/coreplanelabs/switchboard/commit/d832b5f2089d62ad508d127f1e7eaac869db9e65))
+* **core:** use the live base for PR review ([#3398](https://github.com/coreplanelabs/switchboard/issues/3398)) ([1cf2518](https://github.com/coreplanelabs/switchboard/commit/1cf25184f41c4dac82eb3d4ef5ba9500de3c5045))
+* **deploy:** update runtimes after the emSign key compromise ([#3406](https://github.com/coreplanelabs/switchboard/issues/3406)) ([5a91432](https://github.com/coreplanelabs/switchboard/commit/5a91432bc5877a4bfd2abf8972a47e729a0c940e))
+* **resident:** explain private tree preservation failures ([#3405](https://github.com/coreplanelabs/switchboard/issues/3405)) ([a8d46f1](https://github.com/coreplanelabs/switchboard/commit/a8d46f1356e3e7c0b20b3898c6490d6c5958b366))
+* **resident:** settle reviews that fail during setup ([#3404](https://github.com/coreplanelabs/switchboard/issues/3404)) ([8fb2be3](https://github.com/coreplanelabs/switchboard/commit/8fb2be3153d9a0cb5ee6862b9ac2b86f29a48e5a))
+
 ## [1.307.1](https://github.com/coreplanelabs/switchboard/compare/v1.307.0...v1.307.1) (2026-10-21)
 
 
