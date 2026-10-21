@@ -40,7 +40,7 @@ import { classifyError } from "../trace/classify.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
-import { InMemoryGithubApi } from "../../execution/githubApi.js";
+import { InMemoryGithubApi, RestGithubApi } from "../../execution/githubApi.js";
 import { githubPullGetTool } from "../../tools/github.js";
 import { submitVerdictTool } from "../../tools/submit.js";
 import { diffDigestTool } from "../../tools/diffDigest.js";
@@ -734,6 +734,60 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     ]);
     expect(JSON.stringify([refused, logs])).not.toContain("PRIVATE_SOURCE_BYTES");
     expect(context.githubRepos).toEqual(["acme/private"]);
+  });
+
+  it("retains a redacted GitHub 403 message on the source-check run", async () => {
+    let requests = 0;
+    const api = new RestGithubApi({
+      token: async () => "read-token",
+      fetch: (async () => {
+        requests++;
+        return Response.json({ message: "Resource not accessible by integration" }, { status: 403 });
+      }) as typeof fetch,
+    });
+    const decisions: boolean[] = [];
+    const harness = watched(piHarness);
+    harness.harness.open = async () => {
+      decisions.push(await bearers.sourceGuardFor(s.run.id).check());
+      return { answer: "Guard checked.", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      harness: {
+        harnesses: roster(harness.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    s.deps.runBearers = bearers;
+    mintFor(bearers, s);
+    const trace = startRequestRoot({ clock: () => NOW }, { channel: "slack", receivedAt: NOW });
+    trace.bindRun(s.run.id, (event) => s.registry.publish(s.run.id, event));
+    await runLoop(s.deps, {
+      ...s.ctx,
+      root: trace.root,
+      admittedContextCheck: async () => {
+        await api.listRepos();
+        return { ok: true };
+      },
+    });
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = (await s.store.get(s.run.id))!;
+    const source = record.events.find((event) => event.type === "span_end" && event.name === "run.model_source_check");
+    expect(requests).toBe(2);
+    expect(decisions).toEqual([false]);
+    expect(source).toMatchObject({
+      status: "error",
+      attrs: {
+        httpStatus: 403,
+        githubResponseReason: "permission-indicated",
+        githubResponseMessage: "Resource not accessible by integration",
+        outcome: "context_exception",
+      },
+    });
   });
 
   it("retains an exhausted source read on the run and refuses the next model call", async () => {
@@ -13509,6 +13563,12 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       route: "pull_reviews",
       httpStatus: 403,
       requestId: "A1:B2",
+      rateLimitRemaining: 0,
+      rateLimitResetEpochSeconds: 1792700000,
+      rateLimitResource: "core",
+      retryAfterSeconds: 120,
+      responseReason: "primary-rate-limit-indicated",
+      responseMessage: "API rate limit exceeded",
       sourceCallHash: "a".repeat(64),
     } as const;
     const s = setup("", {
@@ -13573,6 +13633,12 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         sourceCallHash: "a".repeat(64),
         httpStatus: 403,
         githubRequestId: "A1:B2",
+        githubRateLimitRemaining: 0,
+        githubRateLimitResetEpochSeconds: 1792700000,
+        githubRateLimitResource: "core",
+        githubRetryAfterSeconds: 120,
+        githubResponseReason: "primary-rate-limit-indicated",
+        githubResponseMessage: "API rate limit exceeded",
       },
     ]);
     expect(out.answer).toBe(

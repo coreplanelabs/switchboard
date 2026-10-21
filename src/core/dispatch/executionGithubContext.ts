@@ -14,6 +14,7 @@ import {
   GITHUB_ACCESS_OPERATIONS,
   GITHUB_ACCESS_ROUTES,
   GITHUB_ACCESS_TOOLS,
+  githubAccessDiagnosticOf,
   type GithubAccessDiagnostic,
 } from "../references/githubAccessDiagnostic.js";
 import {
@@ -122,11 +123,10 @@ async function currentGithubReadCapabilityOnce(
   let operation: GithubAccessDiagnostic["operation"] = "none";
   const denied = (
     reason: GithubAccessDiagnostic["reason"],
-    facts: Pick<GithubAccessDiagnostic, "httpStatus" | "requestId" | "route"> = {},
+    facts: Partial<GithubAccessDiagnostic> = {},
     failedOperation = operation,
-  ) => ({
-    ok: false as const,
-    githubAccess: {
+  ) => {
+    const base: GithubAccessDiagnostic = {
       tool: (GITHUB_ACCESS_TOOLS as readonly string[]).includes(receipt.tool)
         ? (receipt.tool as GithubAccessDiagnostic["tool"])
         : ("unknown" as const),
@@ -134,9 +134,9 @@ async function currentGithubReadCapabilityOnce(
       operation: failedOperation,
       reason,
       sourceCallHash,
-      ...facts,
-    },
-  });
+    };
+    return { ok: false as const, githubAccess: githubAccessDiagnosticOf({ ...base, ...facts }) ?? base };
+  };
   const failedRead = (error: unknown, failedOperation = operation) => {
     if (error instanceof GithubCredentialUnavailable)
       return denied(error.reason === "missing" ? "credential-missing" : "credential-failed", {}, failedOperation);
@@ -181,6 +181,18 @@ async function currentGithubReadCapabilityOnce(
           : {}),
         ...(requestId && /^[0-9A-Fa-f:]{1,64}$/.test(requestId) ? { requestId } : {}),
         ...(route ? { route } : {}),
+        ...(error instanceof GithubApiError
+          ? {
+              ...(error.rateLimit?.remaining !== undefined ? { rateLimitRemaining: error.rateLimit.remaining } : {}),
+              ...(error.rateLimit?.reset !== undefined ? { rateLimitResetEpochSeconds: error.rateLimit.reset } : {}),
+              ...(error.rateLimit?.resource ? { rateLimitResource: error.rateLimit.resource } : {}),
+              ...(error.rateLimit?.retryAfterSeconds !== undefined
+                ? { retryAfterSeconds: error.rateLimit.retryAfterSeconds }
+                : {}),
+              ...(error.responseReason ? { responseReason: error.responseReason } : {}),
+              ...(error.responseMessage ? { responseMessage: error.responseMessage } : {}),
+            }
+          : {}),
       },
       failedOperation,
     );

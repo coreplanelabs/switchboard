@@ -12,6 +12,14 @@ import { MINUTE_MS } from "../core/budgets.js";
 import { validRef } from "../core/residentAdmin.js";
 import { preferRefTip } from "./githubPulls.js";
 import type { PrSize } from "../core/digestCoverage.js";
+import {
+  GithubApiError,
+  GithubCredentialUnavailable,
+  type GithubRateLimitFacts,
+  type GithubResponseReason,
+} from "./githubError.js";
+
+export { GithubApiError, GithubCredentialUnavailable } from "./githubError.js";
 
 // The GitHub capability behind the `github_*` agent tools
 // (docs/reference/specs/github-tools.md): repository reads (files, trees, code search, the
@@ -308,20 +316,6 @@ export interface ActionsJobLog {
 /** The most of a job log the bot keeps: its tail, where a failed job's failure
  *  is — a multi-MB log costs this much memory and no more. */
 export const ACTIONS_LOG_MAX_CHARS = 2_000_000;
-
-/** Thrown for every non-success GitHub answer; `status` lets a tool word 404s
- *  ("outside the installation, or no such path") apart from the rest. */
-export class GithubApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    readonly requestId?: string,
-    readonly route?: GithubRoute,
-  ) {
-    super(message);
-    this.name = "GithubApiError";
-  }
-}
 
 /** Missing IDs stay unknown. Never coerce malformed source identity. */
 function nativeIdOf(value: unknown): number | undefined {
@@ -1082,23 +1076,34 @@ export class RestGithubApi implements GithubApi {
     });
     const redirected = opts.redirect === "manual" && res.status >= 300 && res.status < 400;
     if (!res.ok && !redirected) {
+      const rateLimit = githubRateLimitFacts(res);
       const text = await res.text().catch(() => "");
       // Item 62: a GitHub error body is remote text — redact BEFORE the slice.
       let detail = redactAndCap(text, 300);
+      let responseReason: GithubResponseReason | undefined = githubResponseReason(res.status, "", rateLimit);
+      let responseMessage: string | undefined;
       try {
         const j = JSON.parse(text) as { message?: string };
-        if (typeof j.message === "string") detail = redactAndCap(j.message, 300);
+        if (typeof j.message === "string") {
+          detail = redactAndCap(j.message, 300);
+          responseReason = githubResponseReason(res.status, j.message, rateLimit);
+          responseMessage = j.message;
+        }
       } catch {
         /* keep the raw slice */
       }
-      // Classified for the spans above it (docs/reference/specs/tracing.md item 2): the
-      // status is the peer's own discriminator, the body never an attr.
+      // Classified for the spans above it (docs/reference/specs/tracing.md item 2):
+      // status is the peer's discriminator. The source-check translator may add
+      // one redacted, capped JSON message as a diagnostic attr (item 3).
       throw classifyError(
         new GithubApiError(
           res.status,
           `GitHub ${method} ${path} failed: HTTP ${res.status} ${detail}`.trim(),
           githubRequestId(res),
           route,
+          rateLimit,
+          responseReason,
+          responseMessage,
         ),
         { kind: "http", code: String(res.status) },
       );
@@ -1120,18 +1125,6 @@ function credentialSourceOf(source: GithubCredentialSource): GithubCredentialSou
 
 function sameCredentialSource(a?: GithubCredentialSource, b?: GithubCredentialSource): boolean {
   return a?.host === b?.host && a?.appId === b?.appId && a?.installationId === b?.installationId;
-}
-
-/** Distinguishes a missing local credential from a GitHub HTTP 401. */
-export class GithubCredentialUnavailable extends GithubApiError {
-  constructor(readonly reason: "missing" | "failed" = "missing") {
-    super(
-      reason === "missing" ? 401 : 503,
-      reason === "missing"
-        ? "no GitHub credential available (configure the GitHub App or GH_TOKEN)"
-        : "GitHub credential resolution failed",
-    );
-  }
 }
 
 /** Retains only header-time facts when the PR response cannot be decoded. */
@@ -1186,6 +1179,44 @@ function githubTransportError<E>(error: E, route: GithubRoute): E {
 function githubRequestId(res: Response): string | undefined {
   const id = res.headers.get("x-github-request-id");
   return id && /^[0-9A-Fa-f:]{1,64}$/.test(id) ? id : undefined;
+}
+
+/** GitHub's documented message shapes become indications, never recovery authority. */
+function githubResponseReason(
+  status: number,
+  message: string,
+  rateLimit: Readonly<GithubRateLimitFacts>,
+): GithubResponseReason | undefined {
+  if (status !== 403 && status !== 429) return undefined;
+  const text = message.trim();
+  if (/^(?:(?:You have exceeded|You have reached) a )?secondary rate limit\b/i.test(text))
+    return "secondary-rate-limit-indicated";
+  if (rateLimit.remaining === 0) return "primary-rate-limit-indicated";
+  if (/^API rate limit exceeded\b/i.test(text)) return "primary-rate-limit-indicated";
+  if (/^Resource not accessible by (?:integration|personal access token)\.?$/i.test(text))
+    return "permission-indicated";
+  return status === 429 ? "rate-limit-indicated" : undefined;
+}
+
+/** Retain only bounded, typed rate-limit facts. Raw headers never cross this boundary. */
+function githubRateLimitFacts(res: Response): Readonly<GithubRateLimitFacts> {
+  const boundedNumber = (name: string, max: number): number | undefined => {
+    const value = res.headers.get(name);
+    if (!value || !/^(0|[1-9][0-9]{0,9})$/.test(value)) return undefined;
+    const number = Number(value);
+    return number <= max ? number : undefined;
+  };
+  const remaining = boundedNumber("x-ratelimit-remaining", 1_000_000_000);
+  const reset = boundedNumber("x-ratelimit-reset", 4_102_444_800);
+  const rawResource = res.headers.get("x-ratelimit-resource");
+  const resource = rawResource && /^[a-z][a-z0-9_]{0,31}$/.test(rawResource) ? rawResource : undefined;
+  const retryAfterSeconds = boundedNumber("retry-after", 604_800);
+  return Object.freeze({
+    ...(remaining !== undefined ? { remaining } : {}),
+    ...(reset !== undefined ? { reset } : {}),
+    ...(resource ? { resource } : {}),
+    ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+  });
 }
 
 /** Counts describe one complete PR object, never a partial or stale size. */

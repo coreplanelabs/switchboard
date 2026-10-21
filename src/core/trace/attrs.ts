@@ -16,8 +16,9 @@ import type { ErrorKind } from "./types.js";
  *  `command`, `agent`, `model`) come from closed tables at the emitter — a
  *  model is the parsed `<provider>/<model>` ref the registry resolved, never
  *  the typed directive — and are validated as sanitized identifiers here.
- *  `traceId` and free text are not attrs — an error's message has its own
- *  field. */
+ *  `traceId` and general free text are not attrs — an error's message has its
+ *  own field. The GitHub source response message is a bounded, redacted
+ *  exception so a source 403 has useful evidence on its original run. */
 
 export type Backend = "local" | "resident" | "sandbox" | "e2b";
 export type Channel = "slack" | "http" | "mcp" | "cli" | "web";
@@ -36,6 +37,13 @@ export interface AttrDomain {
   storageRequestId: string;
   sourceReadAttempts: number;
   sourceReadStop: "attempts-exhausted" | "deadline" | "permanent";
+  githubRateLimitRemaining: number;
+  githubRateLimitResetEpochSeconds: number;
+  githubRateLimitResource: string;
+  githubRetryAfterSeconds: number;
+  githubResponseReason: import("../../execution/githubError.js").GithubResponseReason;
+  /** One redacted, capped line from GitHub's JSON `message`, when present. */
+  githubResponseMessage: string;
   // request
   channel: Channel;
   status: "completed" | "failed" | "refused" | "stopped";
@@ -236,6 +244,8 @@ const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "githubOperation",
   "sourceCallHash",
   "githubRequestId",
+  "githubRateLimitResource",
+  "githubResponseReason",
   "refusal",
   "requestContextGate",
   "requestContextReason",
@@ -276,6 +286,11 @@ export function invalidAttrKeys(attrs: SpanAttrs): string[] {
       else if (IDENTIFIER_KEYS.has(key as SpanAttrKey) && !IDENTIFIER_RE.test(value)) bad.push(key);
       else if (key === "instanceId" && !INSTANCE_ID_RE.test(value)) bad.push(key);
       else if (key === "reviewPinnedHead" && !/^[a-f0-9]{40}$/i.test(value)) bad.push(key);
+      else if (
+        key === "githubResponseMessage" &&
+        (value.length > 241 || [...value].some((ch) => ch.charCodeAt(0) < 32))
+      )
+        bad.push(key);
     } else if (typeof value !== expected) {
       bad.push(key);
     } else if (typeof value === "number" && !Number.isFinite(value)) {
@@ -306,6 +321,12 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   githubOperation: "string",
   sourceCallHash: "string",
   githubRequestId: "string",
+  githubRateLimitRemaining: "number",
+  githubRateLimitResetEpochSeconds: "number",
+  githubRateLimitResource: "string",
+  githubRetryAfterSeconds: "number",
+  githubResponseReason: "string",
+  githubResponseMessage: "string",
   channel: "string",
   status: "string",
   queuedBeforeMs: "number",

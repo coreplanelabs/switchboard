@@ -3,10 +3,167 @@ import { retryTransientSourceCheck, sourceCheckError } from "./sourceCheckError.
 import { classificationOf, classifyError } from "../trace/classify.js";
 import { rememberStorageFailure } from "../storageFailureDiagnostic.js";
 import { noteStoreReadFailure, TransientStoreError } from "../storeFailure.js";
+import { RestGithubApi } from "../../execution/githubApi.js";
+import { invalidAttrKeys } from "../trace/attrs.js";
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("source check failure reporting", () => {
+  it.each([
+    [
+      "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+      "secondary-rate-limit-indicated",
+    ],
+    ["Resource not accessible by integration", "permission-indicated"],
+    ["API rate limit exceeded for user ID PRIVATE_USER", "primary-rate-limit-indicated"],
+  ] as const)("keeps a closed GitHub reason for %s", async (message, reason) => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const api = new RestGithubApi({
+      token: async () => "read-token",
+      fetch: (async () => new Response(JSON.stringify({ message }), { status: 403 })) as typeof fetch,
+    });
+    const cause = await api.listRepos().catch((error: unknown) => error);
+    const failure = sourceCheckError("github-repositories", cause);
+
+    expect(failure.refusal).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "context_validation_exception",
+    });
+    expect(failure.diagnostic).toMatchObject({
+      sourceCheckStage: "github-repositories",
+      httpStatus: 403,
+      githubResponseReason: reason,
+    });
+    expect(invalidAttrKeys(failure.diagnostic)).toEqual([]);
+    expect(log.mock.calls.map(([line]) => JSON.parse(line))).toMatchObject([
+      { event: "source_check.failed", httpStatus: 403, githubResponseReason: reason },
+    ]);
+    expect(JSON.stringify([failure.diagnostic, log.mock.calls])).not.toContain("PRIVATE_USER");
+    if (reason === "primary-rate-limit-indicated")
+      expect(failure.diagnostic.githubResponseMessage).toBe("API rate limit exceeded for user ID «redacted»");
+  });
+
+  it("keeps one redacted, capped GitHub message without a URL or later lines", async () => {
+    const message =
+      "Denied for https://github.com/private/repo?token=secret with ghp_123456789012345678901234567890 and user@example.com\nPRIVATE_SECOND_LINE";
+    const api = new RestGithubApi({
+      token: async () => "read-token",
+      fetch: (async () => new Response(JSON.stringify({ message }), { status: 403 })) as typeof fetch,
+    });
+    const cause = await api.listRepos().catch((error: unknown) => error);
+    const failure = sourceCheckError("github-repositories", cause);
+
+    expect(failure.diagnostic).toMatchObject({
+      httpStatus: 403,
+      githubResponseMessage: "Denied for «redacted-url» with «redacted-github-token» and «redacted-email»",
+    });
+    expect(invalidAttrKeys(failure.diagnostic)).toEqual([]);
+    expect(JSON.stringify(failure.diagnostic)).not.toMatch(
+      /private\/repo|PRIVATE_SECOND_LINE|user@example.com|ghp_1234/,
+    );
+  });
+
+  it("caps the retained GitHub message before it enters a run span", async () => {
+    const api = new RestGithubApi({
+      token: async () => "read-token",
+      fetch: (async () => new Response(JSON.stringify({ message: "A".repeat(300) }), { status: 403 })) as typeof fetch,
+    });
+    const cause = await api.listRepos().catch((error: unknown) => error);
+    const failure = sourceCheckError("github-repositories", cause);
+    expect(failure.diagnostic.githubResponseMessage).toBe(`${"A".repeat(240)}…`);
+    expect(invalidAttrKeys(failure.diagnostic)).toEqual([]);
+  });
+
+  it("retains bounded GitHub response facts on a permanent source refusal", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    let requests = 0;
+    const api = new RestGithubApi({
+      token: async () => "read-token",
+      fetch: (async () => {
+        requests++;
+        return new Response("PRIVATE_GITHUB_RESPONSE", {
+          status: 403,
+          headers: {
+            "x-github-request-id": "A1:B2",
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": "1792620000",
+            "x-ratelimit-resource": "core",
+            "retry-after": "120",
+          },
+        });
+      }) as typeof fetch,
+    });
+    const cause = await retryTransientSourceCheck(
+      async () => {
+        await api.listRepos();
+        return { ok: true };
+      },
+      () => true,
+    ).catch((error: unknown) => error);
+    const failure = sourceCheckError("github-repositories", cause);
+
+    expect(requests).toBe(1);
+    expect(failure.cause).toBe(cause);
+    expect(failure.refusal).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "context_validation_exception",
+    });
+    expect(failure.diagnostic).toMatchObject({
+      sourceCheckStage: "github-repositories",
+      httpStatus: 403,
+      githubRequestId: "A1:B2",
+      githubRateLimitRemaining: 0,
+      githubRateLimitResetEpochSeconds: 1792620000,
+      githubRateLimitResource: "core",
+      githubRetryAfterSeconds: 120,
+    });
+    expect(invalidAttrKeys(failure.diagnostic)).toEqual([]);
+    expect(log.mock.calls.map(([line]) => JSON.parse(line))).toMatchObject([
+      {
+        event: "source_check.failed",
+        sourceCheckStage: "github-repositories",
+        httpStatus: 403,
+        githubRequestId: "A1:B2",
+        githubRateLimitRemaining: 0,
+        githubRateLimitResetEpochSeconds: 1792620000,
+        githubRateLimitResource: "core",
+        githubRetryAfterSeconds: 120,
+      },
+    ]);
+    expect(JSON.stringify([failure.diagnostic, log.mock.calls])).not.toContain("PRIVATE_GITHUB_RESPONSE");
+  });
+
+  it("omits untrusted GitHub header text while retaining the HTTP refusal", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const api = new RestGithubApi({
+      token: async () => "read-token",
+      fetch: (async () =>
+        new Response("PRIVATE_GITHUB_RESPONSE", {
+          status: 403,
+          headers: {
+            "x-github-request-id": "PRIVATE/path?token=secret",
+            "x-ratelimit-remaining": "-1",
+            "x-ratelimit-reset": "9999999999",
+            "x-ratelimit-resource": "PRIVATE/path?token=secret",
+            "retry-after": "Wed, 21 Oct 2026 23:00:00 GMT",
+          },
+        })) as typeof fetch,
+    });
+    const cause = await api.listRepos().catch((error: unknown) => error);
+    const failure = sourceCheckError("github-repositories", cause);
+
+    expect(failure.diagnostic).toMatchObject({ sourceCheckStage: "github-repositories", httpStatus: 403 });
+    expect(failure.diagnostic).not.toHaveProperty("githubRequestId");
+    expect(failure.diagnostic).not.toHaveProperty("githubRateLimitRemaining");
+    expect(failure.diagnostic).not.toHaveProperty("githubRateLimitResetEpochSeconds");
+    expect(failure.diagnostic).not.toHaveProperty("githubRateLimitResource");
+    expect(failure.diagnostic).not.toHaveProperty("githubRetryAfterSeconds");
+    expect(failure.diagnostic).not.toHaveProperty("githubResponseReason");
+    expect(JSON.stringify(failure.diagnostic)).not.toContain("PRIVATE");
+  });
+
   it("records a recovered raw source read without copying private bytes", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     let checks = 0;

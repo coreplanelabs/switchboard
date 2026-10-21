@@ -3,6 +3,7 @@ import { classificationOf, classifyError } from "../trace/classify.js";
 import type { SpanAttrs } from "../trace/attrs.js";
 import { originalStorageFailure } from "../storageFailureDiagnostic.js";
 import { PermanentStoreError, TransientStoreError, UncertainStoreError, storeReadFailureOf } from "../storeFailure.js";
+import { GithubApiError, GithubCredentialUnavailable } from "../../execution/githubError.js";
 
 export type SourceCheckStage =
   | "owner"
@@ -84,6 +85,15 @@ export class SourceCheckError extends Error {
     );
     const storage = originalStorageFailure(cause);
     const read = storeReadFailureOf(cause);
+    const github =
+      cause instanceof GithubApiError &&
+      !(cause instanceof GithubCredentialUnavailable) &&
+      cause.route &&
+      Number.isInteger(cause.status) &&
+      cause.status >= 100 &&
+      cause.status <= 599
+        ? cause
+        : undefined;
     const errorClass =
       cause instanceof UncertainStoreError
         ? "UncertainStoreError"
@@ -114,6 +124,26 @@ export class SourceCheckError extends Error {
           }
         : {}),
       ...(read ? { sourceReadAttempts: read.attempts, sourceReadStop: read.stop } : {}),
+      ...(github
+        ? {
+            httpStatus: github.status,
+            ...(github.requestId && /^[0-9A-Fa-f:]{1,64}$/.test(github.requestId)
+              ? { githubRequestId: github.requestId }
+              : {}),
+            ...(github.rateLimit?.remaining !== undefined
+              ? { githubRateLimitRemaining: github.rateLimit.remaining }
+              : {}),
+            ...(github.rateLimit?.reset !== undefined
+              ? { githubRateLimitResetEpochSeconds: github.rateLimit.reset }
+              : {}),
+            ...(github.rateLimit?.resource ? { githubRateLimitResource: github.rateLimit.resource } : {}),
+            ...(github.rateLimit?.retryAfterSeconds !== undefined
+              ? { githubRetryAfterSeconds: github.rateLimit.retryAfterSeconds }
+              : {}),
+            ...(github.responseReason ? { githubResponseReason: github.responseReason } : {}),
+            ...(github.responseMessage ? { githubResponseMessage: github.responseMessage } : {}),
+          }
+        : {}),
     });
     classifyError(this, classificationOf(cause) ?? { kind: "infra", code: "source_check_failed" });
   }
