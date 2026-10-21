@@ -2373,6 +2373,25 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "action": "runs:read",
     "args": [
       {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "runs.request",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
+    "args": [
+      {
         "name": "session",
         "required": true,
         "type": "string",

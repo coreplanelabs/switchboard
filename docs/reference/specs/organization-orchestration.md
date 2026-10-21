@@ -153,9 +153,12 @@ The additive runtime preserves authenticated source facts and the original durab
 
 A caught owner-task exception reports the original ingress run, receipt and request digest, the selected dispatch/answer/confirm branch, the last operation stage and a closed error classification. Private-history refusals attach allowlisted codes without changing their messages or guards. Unknown exceptions supply no message, stack, name, actor, source key, body or epoch. An execution result and its later settlement have distinct stages; a failed uncertain settlement retains the first failure metadata. Synchronous, asynchronous and trace-sink reporting failures cannot change authority, the saved outcome or no-replay behavior.
 
+The original owner also stores the direct handler outcome, its last stage, latest settlement time and any closed failure class on its existing record. These fields are observations of that owner. Later proof of a completed original run can settle an uncertain owner while its earlier direct-handler uncertainty and failure class remain as history. A `dispatching` record does not prove that an agent started; a completed owner does not prove that an agent run record exists. The process trace remains the detailed failure signal. Its export cannot change owner settlement or authorize a second dispatch.
+
 | Criterion | Proof |
 |---|---|
 | Owner-task and scheduling failures retain exact original identity and closed metadata, distinguish execution from settlement, omit exception prose and arbitrary codes, preserve the first failure and never authorize replay | `[unit]` `src/core/organization/runtime.test.ts::organization runtime::owner failure diagnostics::*` |
+| Original owner settlement keeps a typed outcome, stage, time and closed failure on the same durable record; private exception text is absent | `[unit]` `src/core/runLedger/ingress.test.ts::original ingress owner::retains a closed dispatch outcome and failure stage beside the original receipt`, `src/core/organization/runtime.test.ts::organization runtime::owner failure diagnostics::keeps safe failure output readable through the authorized trace reader before an agent run exists` |
 
 ## Temporary verification loss
 

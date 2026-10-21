@@ -572,6 +572,10 @@ export const COMMAND_FIXTURES: Readonly<
     baseline: { gen: "g1" },
     why: "the read selects the fixture original generation rather than a generic sample",
   },
+  "runs.request": {
+    hints: { id: FIXTURE.persistedRun },
+    why: "the original request status is planted under the fixture's saved run id",
+  },
   "metrics.reviews": {
     // Two whole UTC days a week apart, `--from` first: the generic string sample is no day.
     hints: {

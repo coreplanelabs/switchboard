@@ -4549,6 +4549,155 @@ describe("RunsService — a queued ask on the plane (record 0064)", () => {
   });
 });
 
+describe("RunsService — original organization admission", () => {
+  it("reports a closed read failure phase without exposing the source or changing the unavailable result", async () => {
+    const { reg, store } = setup();
+    const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    const transport = new Error("private review request token=secret");
+    const shape = new Error("private malformed response");
+    for (const [error, phase] of [
+      [transport, "transport"],
+      [shape, "response-shape"],
+    ] as const)
+      rememberStorageFailure(error, {
+        version: 1,
+        operation: "/runs/ingress/by-run",
+        requestDigest: "a".repeat(64),
+        phase,
+      });
+    const failures = [transport, shape];
+    const warnings: string[] = [];
+    const ledger = new InMemoryRunLedger(() => NOW);
+    vi.spyOn(ledger, "readIngressByRun").mockImplementation(async () => {
+      throw failures.shift();
+    });
+    const svc = createRunsService({
+      registry: reg,
+      store,
+      ledger,
+      warn: (line) => warnings.push(line),
+    });
+    expect(await svc.getAdmission(id)).toEqual({ kind: "unavailable" });
+    expect(await svc.getAdmission(id)).toEqual({ kind: "unavailable" });
+    expect(warnings).toEqual([
+      `[runs] original request status unavailable for ${id} stage=source-read phase=transport`,
+      `[runs] original request status unavailable for ${id} stage=source-read phase=response-shape`,
+    ]);
+    expect(warnings.join(" ")).not.toContain("private");
+    const failedLoggerLedger = new InMemoryRunLedger(() => NOW);
+    vi.spyOn(failedLoggerLedger, "readIngressByRun").mockRejectedValue(new Error("private source"));
+    const failedLogger = createRunsService({
+      registry: reg,
+      store,
+      ledger: failedLoggerLedger,
+      warn: () => {
+        throw new Error("log sink failed");
+      },
+    });
+    expect(await failedLogger.getAdmission(id)).toEqual({ kind: "unavailable" });
+  });
+
+  it("reads the accepted original under its assigned id before any agent run exists", async () => {
+    const { reg, store } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const sourceReference = {
+      actorId: "access:alice",
+      userId: "access:alice",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:review-7",
+    };
+    const digest = "a".repeat(64);
+    const request = {
+      effectKey: "organization:acme:7",
+      digest,
+      requester: "access:alice",
+      threadKey: sourceReference.threadKey,
+      request: { text: "private review request" },
+      contentExpiresAt: NOW + DAY,
+      originExpiresAt: NOW + DAY,
+      receiptId: "organization:acme:7",
+      origin: {
+        version: 1 as const,
+        organization: "acme",
+        source: "mcp" as const,
+        sourceEvent: "mcp:review-7",
+        key: "mcp:review-7",
+        digest,
+        actor: {
+          identity: { issuer: "mcp:test", tenant: null, subject: "alice" },
+          kind: "human" as const,
+          principal: "access:alice",
+          stream: null,
+          bindingRevision: 0,
+          onBehalfOf: null,
+        },
+        destination: { kind: "broad" as const },
+        workload: "message" as const,
+        target: null,
+        content: "",
+        context: [],
+        sourceReference,
+      },
+    };
+    const owned = await ledger.consumeIngress(request);
+    if (owned.status !== "claimed") throw new Error("original owner not claimed");
+    const svc = createRunsService({ registry: reg, store, ledger });
+    const id = owned.record.runId;
+    expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getAdmission(id)).toEqual({
+      kind: "known",
+      resource: {
+        type: "run",
+        id,
+        channelId: "mcp:default",
+        userId: "access:alice",
+        channelVisibility: "unknown",
+      },
+      value: {
+        runId: id,
+        receiptId: "organization:acme:7",
+        ownerStatus: "dispatching",
+        createdAt: NOW,
+      },
+    });
+    expect(JSON.stringify(await svc.getAdmission(id))).not.toContain("private review request");
+    await ledger.finishIngress({
+      effectKey: request.effectKey,
+      digest,
+      runId: id,
+      status: "uncertain",
+      outcome: "The original owner could not be scheduled.",
+      handlerOutcome: "uncertain",
+      ownerStage: "schedule",
+      failure: { stage: "schedule", kind: "transport" },
+    });
+    expect(await svc.getAdmission(id)).toMatchObject({
+      kind: "known",
+      value: {
+        ownerStatus: "uncertain",
+        settledAt: NOW,
+        handlerOutcome: "uncertain",
+        ownerStage: "schedule",
+        failure: { stage: "schedule", kind: "transport" },
+      },
+    });
+    expect(await svc.getAdmission("f3e13f45-5801-49f5-a024-01db96685eca")).toEqual({ kind: "not_found" });
+    const forged = await ledger.consumeIngress({
+      ...request,
+      effectKey: "organization:acme:8",
+      receiptId: "organization:acme:8",
+      origin: {
+        ...request.origin,
+        sourceReference: { ...sourceReference, userId: "access:rival" },
+      },
+    });
+    if (forged.status !== "claimed") throw new Error("forged owner not claimed");
+    expect(await svc.getAdmission(forged.record.runId)).toEqual({ kind: "not_found" });
+    vi.spyOn(ledger, "readIngressByRun").mockRejectedValueOnce(new Error("storage unavailable"));
+    expect(await svc.getAdmission(id)).toEqual({ kind: "unavailable" });
+  });
+});
+
 describe("original coordinator child internal final evidence", () => {
   it("exposes the original private seed only to the internal final-record reader, never ordinary reads or listings", async () => {
     const { store, svc } = setup();

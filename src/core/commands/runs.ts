@@ -457,6 +457,33 @@ export const runsOriginal = defineCommand({
   },
 });
 
+export const runsRequest = defineCommand({
+  id: "runs.request",
+  args: [idArg],
+  surfaces: { chat: false },
+  enabledWhen: (caps) => caps.runLedger,
+  action: "runs:read",
+  effect: "read",
+  describe:
+    "Read the original request and dispatch status assigned to this id, even before an agent run exists. This does not prove execution or permit replay.",
+  handler: async ({ args, caller, deps }) => {
+    const read = await (await deps.runs()).getAdmission(args.id);
+    if (read.kind === "unavailable") throw new CommandError("unavailable", "Request status is temporarily unavailable");
+    if (read.kind === "not_found") throw new CommandError("not_found", "no request found");
+    const decision = authorize(caller.actor, "runs:read", read.resource);
+    if (!decision.allow) {
+      (deps.denied ?? logDenied)({
+        commandId: "runs.request",
+        actorId: caller.actor.id,
+        action: "runs:read",
+        reason: decision.reason,
+      });
+      throw new CommandError("not_found", "no request found");
+    }
+    return asJson(read.value);
+  },
+});
+
 export const runsClaims = defineCommand({
   id: "runs.claims",
   surfaces: { chat: false },
@@ -983,6 +1010,7 @@ export const runsSearch = defineCommand({
 export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [
   runsList,
   runsOriginal,
+  runsRequest,
   runsReceipt,
   runsClaims,
   runsGet,

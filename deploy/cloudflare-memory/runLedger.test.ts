@@ -1864,6 +1864,9 @@ describe("original ingress SQLite owner", () => {
         runId: first.record.runId,
         status: "uncertain",
         outcome: "Owner admission interrupted",
+        handlerOutcome: "uncertain",
+        ownerStage: "schedule",
+        failure: { stage: "schedule", kind: "transport" },
       }),
     ).toMatchObject({ status: "record", record: { status: "uncertain", runId: first.record.runId } });
     expect(await client().readIngress(request.effectKey)).toMatchObject({
@@ -1885,6 +1888,9 @@ describe("original ingress SQLite owner", () => {
       record: {
         request: null,
         origin: { sourceReference: { credentialDigest: "c".repeat(64) }, content: "", context: [] },
+        handlerOutcome: "uncertain",
+        ownerStage: "schedule",
+        failure: { stage: "schedule", kind: "transport" },
       },
     });
     await runInDurableObject(stub, async (_instance, state) => {

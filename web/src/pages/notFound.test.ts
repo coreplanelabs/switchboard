@@ -20,6 +20,33 @@ describe("NotFoundPage (run 404, item 19)", () => {
 });
 
 describe("RunRoutePage (the /runs/:id dispatch)", () => {
+  it.each([
+    ["dispatching", "Request recorded", "does not confirm receipt acceptance or agent start"],
+    ["uncertain", "Request outcome unknown", "No agent run record is available"],
+    ["completed", "Request result recorded", "does not establish the agent result"],
+  ] as const)("shows the original %s status when its assigned run has no record", (ownerStatus, title, detail) => {
+    const w = mountApp(RunRoutePage, {
+      seed: {
+        page: "runAdmission",
+        id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+        admission: {
+          runId: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+          receiptId: "organization:acme:7",
+          ownerStatus,
+          createdAt: 1_700_000_000_000,
+          ...(ownerStatus === "uncertain"
+            ? { ownerStage: "schedule" as const, failure: { stage: "schedule" as const, kind: "transport" as const } }
+            : {}),
+        },
+      },
+    });
+    expect(w.find("h3").text()).toBe(title);
+    expect(w.text()).toContain(detail);
+    expect(w.text()).toContain("organization:acme:7");
+    expect(w.find("#actions").exists()).toBe(false);
+    expect(w.find("#tail").exists()).toBe(false);
+  });
+
   it("renders the 404 for a runNotFound seed — never an empty live scaffold", () => {
     const w = mountApp(RunRoutePage, { seed: { page: "runNotFound", retentionDays: 7 } });
     expect(w.text()).toContain("This page is unavailable");
