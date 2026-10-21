@@ -576,7 +576,7 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
         {
           name: "sandbox",
           decision: "skip",
-          base: { kind: "release", tag: "v0.1.0", commit: "c".repeat(40) },
+          base: { kind: "live", commit: "c".repeat(40) },
           reasons: [],
         },
       ],

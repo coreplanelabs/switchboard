@@ -3607,7 +3607,7 @@ async function git(args: string[]): Promise<string | undefined> {
 
 /**
  * The `AffectedProbe` over this checkout and the live Workers: git for HEAD,
- * ancestry, the last `v*` tag before HEAD, diffs and file contents at a ref
+ * diffs and file contents at a ref
  * (`git show`, after one `ls-tree` per ref so a candidate path that does not
  * exist costs no spawn — the import crawler tries up to three per specifier);
  * `GET /healthz` per Worker for the commit it serves, with the sandbox's
@@ -3649,14 +3649,6 @@ export function hostAffectedProbe(
         ? { commit }
         : { error: `GET ${w.healthUrl} carries no build.commit` };
     },
-    isAncestor: async (commit, head) =>
-      (await run("git", ["merge-base", "--is-ancestor", commit, head], { cwd: OPERATOR_ROOT.root })).code === 0,
-    lastRelease: async () => {
-      const tag = (await git(["describe", "--tags", "--match", "v*", "--abbrev=0", "HEAD^"]))?.trim();
-      if (!tag) return undefined;
-      const commit = (await git(["rev-parse", `${tag}^{commit}`]))?.trim();
-      return commit ? { tag, commit } : undefined;
-    },
     // `undefined` on a git failure (an unknown base) — the pure half reads that as unsure, never as "nothing changed".
     changedPaths: async (base, head) =>
       (await git(["diff", "--name-only", "--no-renames", base, head, "--"]))?.split("\n").filter(Boolean),
@@ -3673,16 +3665,13 @@ export function hostAffectedProbe(
  * diff: HEAD is the commit the package was built from, and a live Worker is
  * read as the host probe reads it. A Worker serving that commit has nothing
  * to deploy (the pure half compares before it asks anything else); every other
- * Worker is unsure — no ancestry, no release tag, no diff — and deploys with
+ * Worker is unsure — no diff — and deploys with
  * the reason named. Honest, never narrower than the truth.
  */
 export function packageAffectedProbe(host: Pick<AffectedProbe, "liveCommit">, commit: string): AffectedProbe {
   return {
     head: async () => commit,
     liveCommit: host.liveCommit,
-    // A commit is its own ancestor — the one ancestry a package can vouch for; every other is unknown.
-    isAncestor: async (c, head) => head.startsWith(c),
-    lastRelease: async () => undefined,
     changedPaths: async () => undefined,
     fileAt: async () => undefined,
   };

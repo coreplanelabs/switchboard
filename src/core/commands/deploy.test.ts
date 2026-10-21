@@ -68,7 +68,7 @@ const REPORT: AffectedReport = {
     {
       name: "resident",
       decision: "deploy",
-      base: { kind: "release", tag: "v0.1.0", commit: "c".repeat(40) },
+      base: { kind: "live", commit: "c".repeat(40) },
       reasons: ["deploy/cloudflare-resident/Dockerfile"],
     },
     { name: "sandbox", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
@@ -411,7 +411,7 @@ describe("deploy.plan", () => {
     expect(text.startsWith("Affected: resident, bot (HEAD fffffff; judged per Worker against what it serves)")).toBe(
       true,
     );
-    expect(text).toContain("  - resident: deploy — release v0.1.0 — deploy/cloudflare-resident/Dockerfile");
+    expect(text).toContain("  - resident: deploy — live ccccccc — deploy/cloudflare-resident/Dockerfile");
     const skipped = await commands.invoke("deploy.plan", { options: { affected: true, skip: "resident" } }, cli);
     expect(skipped.ok && (skipped.value as unknown as DeployPlan).steps.map((s) => s.name)).toEqual(["bot"]);
     const bound = parseInvocation(commands.get("deploy.plan")!, ["--affected", "--base", "HEAD^"]);
