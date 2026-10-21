@@ -134,3 +134,50 @@ export function sourceCheckError(stage: SourceCheckStage, cause: unknown): Sourc
   }
   return error;
 }
+
+function reportSourceCheckRetry(error: unknown, outcome: "allowed" | "refused" | "failed"): void {
+  const storage =
+    error instanceof TransientStoreError ||
+    (error instanceof SourceCheckError && error.cause instanceof TransientStoreError);
+  try {
+    console.warn(
+      JSON.stringify({
+        event: "source_check.retry",
+        trigger: storage ? "storage" : "timeout",
+        outcome,
+        ...(error instanceof SourceCheckError ? { sourceCheckStage: error.stage } : {}),
+      }),
+    );
+  } catch {
+    try {
+      console.error(JSON.stringify({ event: "source_check.retry_telemetry_failed" }));
+    } catch {
+      // Failed reporters cannot change the fresh source decision.
+    }
+  }
+}
+
+/** Recheck all current sources after one transient read failure. A refusal is final. */
+export async function retryTransientSourceCheck(
+  check: () => Promise<AudienceCheck>,
+  active: () => boolean,
+): Promise<AudienceCheck> {
+  try {
+    return await check();
+  } catch (error) {
+    const transient =
+      error instanceof TransientStoreError ||
+      (error instanceof SourceCheckError && error.cause instanceof TransientStoreError) ||
+      classificationOf(error)?.kind === "timeout";
+    if (!transient || !active()) throw error;
+    let retried: AudienceCheck;
+    try {
+      retried = await check();
+    } catch (retryError) {
+      reportSourceCheckRetry(error, "failed");
+      throw retryError;
+    }
+    reportSourceCheckRetry(error, retried.ok ? "allowed" : "refused");
+    return retried;
+  }
+}

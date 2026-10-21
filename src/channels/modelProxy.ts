@@ -1137,6 +1137,14 @@ async function handleAdmittedCall(
   const { schemaShaped, payload, offered } = consumer ? await consumer.withParsing(async () => prepare()) : prepare();
   await deps.bearers.settleRecovery(grant.runId, false);
   const sourceRefused = (code: "revoked" | "expired" | "source_unavailable") => {
+    if (code === "source_unavailable")
+      grant.publish({
+        type: "run_note",
+        kind: "model_source_refused",
+        summary:
+          "Switchboard could not verify access to this run's source. The model did not receive this request. Check source access before you retry.",
+        at: deps.clock(),
+      });
     log(`[model-proxy] 403 ${code} run=${grant.runId}`);
     return refusalResponse(shape, 403, code, "The run's current model source could not be verified.");
   };

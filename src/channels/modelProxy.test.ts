@@ -1984,6 +1984,15 @@ describe("current model source guard", () => {
         wire === "anthropic-messages" ? "claude-opus-5" : wire === "openai-chat" ? "llama-3" : "gpt-5.4",
       );
       expect(h.bearers.grantOf("private")?.turns).toBe(1);
+      expect(
+        h.published.flatMap((event) =>
+          event.type === "run_note" && event.kind === "model_source_refused" ? [event.summary] : [],
+        ),
+      ).toEqual([
+        "Switchboard could not verify access to this run's source. The model did not receive this request. Check source access before you retry.",
+        "Switchboard could not verify access to this run's source. The model did not receive this request. Check source access before you retry.",
+        "Switchboard could not verify access to this run's source. The model did not receive this request. Check source access before you retry.",
+      ]);
       expect(levels).toEqual(["up", "up"]);
       expect(parks).toEqual([]);
       expect(JSON.stringify([failed.body, h.logs, h.published])).not.toContain("private source content");

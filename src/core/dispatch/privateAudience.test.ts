@@ -16,6 +16,8 @@ import {
   savedSlackContextNeedsRecheck,
 } from "./privateAudience.js";
 import { bindSlackContext } from "./slackContextBinding.js";
+import { sourceCheckError } from "./sourceCheckError.js";
+import { TransientStoreError } from "../storeFailure.js";
 
 const msg: IncomingMessage = {
   channelId: "slack:DMAIN",
@@ -31,6 +33,66 @@ const msg: IncomingMessage = {
 };
 
 describe("private audience publication gate", () => {
+  it("continues after a transient source read when fresh proof succeeds", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const io: ChannelIO = {
+        reply: async () => {},
+        history: async () => [],
+        status: async () => ({ update: async () => {}, done: async () => {} }),
+        directAudience: () => msg.directAudience,
+        verifyDirectAudience: async () => ({ ok: true }),
+      };
+      let checks = 0;
+      const latch = {
+        revoked: false,
+        revalidateSources: async () => {
+          if (++checks === 1) throw sourceCheckError("origins", new TransientStoreError("temporary read failure"));
+          return { ok: true as const };
+        },
+      };
+      expect(await privateRunAudienceDecision(msg, io, latch)).toEqual({ ok: true });
+      expect(latch.revoked).toBe(false);
+      expect(checks).toBe(2);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("withholds source data when a fresh retry is also unavailable", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const io: ChannelIO = {
+        reply: async () => {},
+        history: async () => [],
+        status: async () => ({ update: async () => {}, done: async () => {} }),
+        directAudience: () => msg.directAudience,
+        verifyDirectAudience: async () => ({ ok: true }),
+      };
+      let checks = 0;
+      const latch = {
+        revoked: false,
+        revalidateSources: async () => {
+          checks++;
+          throw sourceCheckError("origins", new TransientStoreError("temporary read failure"));
+        },
+      };
+      await expect(privateRunAudienceDecision(msg, io, latch)).rejects.toMatchObject({
+        name: "SourceCheckError",
+        stage: "origins",
+      });
+      expect(latch.revoked).toBe(true);
+      expect(checks).toBe(2);
+      expect(await privateRunAudienceDecision(msg, io, latch)).toEqual({
+        ok: false,
+        code: "saved-context-unproved",
+        check: "context_validation_exception",
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("propagates a failed saved-source check and keeps the audience revoked", async () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -77,13 +139,17 @@ describe("private audience publication gate", () => {
       directAudience: () => msg.directAudience,
       verifyDirectAudience: async () => ({ ok: true }),
     };
+    let checks = 0;
     const latch = {
       revoked: false,
-      revalidateSources: async () => ({
-        ok: false as const,
-        code: "saved-context-unproved" as const,
-        check: "execution_receipt_missing" as const,
-      }),
+      revalidateSources: async () => {
+        if (++checks > 1) return { ok: true as const };
+        return {
+          ok: false as const,
+          code: "saved-context-unproved" as const,
+          check: "execution_receipt_missing" as const,
+        };
+      },
     };
     expect(await privateRunAudienceDecision(msg, io, latch)).toEqual({
       ok: false,
@@ -95,6 +161,7 @@ describe("private audience publication gate", () => {
       code: "saved-context-unproved",
       check: "execution_receipt_missing",
     });
+    expect(checks).toBe(1);
   });
   it("keeps a verified private answer after three reads and one recovered unavailable check", async () => {
     let checks = 0;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { sourceCheckError } from "./sourceCheckError.js";
+import { retryTransientSourceCheck, sourceCheckError } from "./sourceCheckError.js";
 import { classificationOf, classifyError } from "../trace/classify.js";
 import { rememberStorageFailure } from "../storageFailureDiagnostic.js";
 import { noteStoreReadFailure, TransientStoreError } from "../storeFailure.js";
@@ -7,6 +7,87 @@ import { noteStoreReadFailure, TransientStoreError } from "../storeFailure.js";
 afterEach(() => vi.restoreAllMocks());
 
 describe("source check failure reporting", () => {
+  it("records a recovered raw source read without copying private bytes", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let checks = 0;
+    const checked = await retryTransientSourceCheck(
+      async () => {
+        if (++checks === 1) throw new TransientStoreError("PRIVATE_SOURCE_BYTES");
+        return { ok: true } as const;
+      },
+      () => true,
+    );
+    expect(checked).toEqual({ ok: true });
+    expect(checks).toBe(2);
+    expect(warn.mock.calls.map(([line]) => JSON.parse(line))).toEqual([
+      { event: "source_check.retry", trigger: "storage", outcome: "allowed" },
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("PRIVATE_SOURCE_BYTES");
+  });
+
+  it("keeps a recovered source check valid when both retry reporters fail", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      throw new Error("warning reporter unavailable");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {
+      throw new Error("error reporter unavailable");
+    });
+    let checks = 0;
+    const checked = await retryTransientSourceCheck(
+      async () => {
+        if (++checks === 1) throw new TransientStoreError("PRIVATE_SOURCE_BYTES");
+        return { ok: true } as const;
+      },
+      () => true,
+    );
+    expect(checked).toEqual({ ok: true });
+    expect(checks).toBe(2);
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("records a fresh refusal after a classified timeout", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const timeout = sourceCheckError(
+      "github-repositories",
+      classifyError(new Error("PRIVATE_SOURCE_BYTES"), { kind: "timeout", code: "installation_repositories" }),
+    );
+    let checks = 0;
+    const checked = await retryTransientSourceCheck(
+      async () => {
+        if (++checks === 1) throw timeout;
+        return { ok: false, code: "saved-context-unproved", check: "github_repository_unproved" } as const;
+      },
+      () => true,
+    );
+    expect(checked).toEqual({ ok: false, code: "saved-context-unproved", check: "github_repository_unproved" });
+    expect(checks).toBe(2);
+    expect(warn.mock.calls.map(([line]) => JSON.parse(line))).toEqual([
+      { event: "source_check.retry", trigger: "timeout", outcome: "refused", sourceCheckStage: "github-repositories" },
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("PRIVATE_SOURCE_BYTES");
+  });
+
+  it("keeps the second failure and records a failed retry", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const second = new Error("PRIVATE_SECOND_FAILURE");
+    let checks = 0;
+    await expect(
+      retryTransientSourceCheck(
+        async () => {
+          if (++checks === 1) throw new TransientStoreError("PRIVATE_FIRST_FAILURE");
+          throw second;
+        },
+        () => true,
+      ),
+    ).rejects.toBe(second);
+    expect(checks).toBe(2);
+    expect(warn.mock.calls.map(([line]) => JSON.parse(line))).toEqual([
+      { event: "source_check.retry", trigger: "storage", outcome: "failed" },
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("PRIVATE_");
+  });
+
   it("keeps the original cause and reports closed storage evidence once across translations", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     const cause = new TransientStoreError("PRIVATE_RESPONSE_BYTES");
