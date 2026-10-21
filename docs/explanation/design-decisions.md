@@ -128,6 +128,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0109 | [Follow-ups keep a continuation checkpoint](../decisions/0109-follow-ups-keep-a-continuation-checkpoint.md) | Snapshot and bounded log projection | proposed | 2026-10-16 |
 | 0110 | [Engineering rules compose before work](../decisions/0110-engineering-rules-compose-before-work.md) | Composition and ports and adapters | proposed | 2026-10-18 |
 | 0111 | [Explicit native disposal requires a confirmed full reset](../decisions/0111-explicit-native-disposal-requires-confirmed-full-reset.md) | Exact selection and retained unknown outcome | proposed | 2026-10-19 |
+| 0112 | [Fence private source reads with the durable access revision](../decisions/0112-private-source-reads-use-a-durable-access-revision-fence.md) | Causal revision fence with current source proof | proposed | 2026-10-21 |
 
 <!-- /generated:decision-records -->
 

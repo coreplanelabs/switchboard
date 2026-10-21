@@ -1128,6 +1128,7 @@ export function executeOrganization(
     return { status: "ok", removed };
   }
   let removed = 0;
+  let expiredStream = false;
   for (const value of rows.list("reply-address", org, { expiresBefore: now, limit: 1000 }))
     rows.remove("reply-address", org, replyAddressSchema.parse(value).receiptId);
   for (const value of rows.list("reply-key", org, { expiresBefore: now, limit: 1000 }))
@@ -1137,6 +1138,7 @@ export function executeOrganization(
     .map((v) => streamEntrySchema.parse(v))) {
     rows.remove("stream", org, String(entry.sequence));
     removed++;
+    expiredStream = true;
   }
   for (const issued of rows.list("issued", org, { expiresBefore: now, limit: 1000 }) as {
     actor: OrganizationEnvelope["actor"];
@@ -1164,6 +1166,7 @@ export function executeOrganization(
   }
   if (removed > 0) {
     s.revision++;
+    if (expiredStream) s.accessRevision++;
     save();
   }
   let expiredPolicies = false;
