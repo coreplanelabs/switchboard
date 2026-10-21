@@ -12,6 +12,85 @@ import { githubFileTool } from "../../tools/github.js";
 import { sourceHash } from "../references/receipts.js";
 
 describe("current native execution read authority", () => {
+  it.each(["timeout", "transport"] as const)(
+    "rechecks current access after one %s GitHub source read",
+    async (kind) => {
+      let catalogueReads = 0;
+      let pullReads = 0;
+      const api = new RestGithubApi({
+        token: async () => "private token",
+        fetch: async (url) => {
+          const path = new URL(String(url)).pathname;
+          if (path === "/installation/repositories") {
+            catalogueReads++;
+            return Response.json({ repositories: [{ full_name: "acme/private", private: true }] });
+          }
+          if (path === "/repos/acme/private/pulls/7") {
+            if (++pullReads === 1)
+              throw kind === "timeout"
+                ? new DOMException("transient read timeout", "TimeoutError")
+                : new TypeError("transient transport failure");
+            return Response.json({
+              number: 7,
+              state: "closed",
+              head: { repo: { full_name: "acme/private" }, ref: "change", sha: "a".repeat(40) },
+              base: { repo: { full_name: "acme/private" }, ref: "main" },
+            });
+          }
+          return Response.json({}, { status: 404 });
+        },
+      });
+      const readResults = new Map<string, Promise<unknown>>();
+      const result = await currentGithubReadCapability(
+        {
+          version: 2,
+          runId: "run",
+          callId: "call",
+          tool: "github_pull_get",
+          repos: ["acme/private"],
+          resultHash: "a".repeat(64),
+          inputHash: "b".repeat(64),
+          admissionHash: "c".repeat(64),
+        },
+        { repo: "acme/private", number: 7 },
+        { api, canWrite: () => false },
+        "review",
+        readResults,
+      );
+      expect(result).toEqual({ ok: true });
+      expect([catalogueReads, pullReads]).toEqual([2, 2]);
+    },
+  );
+  it("refuses when repository access is removed before the retry", async () => {
+    const api = new InMemoryGithubApi({ "acme/private": { files: { "private.ts": "secret code" } } });
+    const listRepos = api.listRepos.bind(api);
+    let revoked = false;
+    let reads = 0;
+    api.listRepos = async () => (revoked ? [] : listRepos());
+    api.readFile = async () => {
+      reads++;
+      revoked = true;
+      throw new DOMException("transient read timeout", "TimeoutError");
+    };
+    const result = await currentGithubReadCapability(
+      {
+        version: 2,
+        runId: "run",
+        callId: "call",
+        tool: "github_file",
+        repos: ["acme/private"],
+        resultHash: "a".repeat(64),
+        inputHash: "b".repeat(64),
+        admissionHash: "c".repeat(64),
+      },
+      { repo: "acme/private", path: "private.ts" },
+      { api, canWrite: () => false },
+      "review",
+      new Map(),
+    );
+    expect(result).toMatchObject({ ok: false, githubAccess: { stage: "repository", reason: "repository-missing" } });
+    expect(reads).toBe(1);
+  });
   it("validates paged history with one history read and refuses revoked access in the next validation", async () => {
     let historyReads = 0;
     let revoked = false;
