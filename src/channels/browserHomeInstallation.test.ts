@@ -5009,10 +5009,18 @@ describe("browser installation", () => {
         },
       );
       expect(responseStatus).toBe(200);
-      expect.soft(JSON.parse(body)).toMatchObject({
+      const readback = JSON.parse(body) as { ok: boolean; lines: { traceId: string }[] };
+      expect.soft(readback).toMatchObject({
         ok: true,
-        lines: [{ span: "request", status: "ok", attrs: { admissionStage: "refresh" } }],
+        lines: expect.arrayContaining([
+          expect.objectContaining({
+            span: "request",
+            status: "ok",
+            attrs: expect.objectContaining({ admissionStage: "refresh" }),
+          }),
+        ]),
       });
+      expect(readback.lines.every((line) => line.traceId === latest.traceId)).toBe(true);
       expect(body).not.toContain("private trace input");
       for (const credential of s.credentials) expect(body).not.toContain(credential);
       expect(await s.ledger.readIngressByRun(id)).toMatchObject({

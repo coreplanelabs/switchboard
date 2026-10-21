@@ -287,13 +287,19 @@ export interface ConfirmationOffer {
 export interface ChannelIO {
   /** Re-read current retained private history for this exact original owned input. Never a cached seed. */
   /** Restore this exact consumed input's fresh Actor and receipt sink; absent proof holds it. */
-  rehostOrganizationInput?(request: IncomingMessage): Promise<{ msg: IncomingMessage; io: ChannelIO } | undefined>;
+  rehostOrganizationInput?(
+    request: IncomingMessage,
+    trace?: import("./trace/types.js").TraceOptions,
+  ): Promise<{ msg: IncomingMessage; io: ChannelIO } | undefined>;
   /** Reprove a server-minted saved read dependency without borrowing its actor or owner. */
   readSavedNativeMedia?(
     reference: import("./dispatch/originalOrganizationInput.js").SavedNativeMediaSource,
     request: IncomingMessage,
   ): Promise<Pick<IncomingMessage, "images" | "documents" | "staged"> | undefined>;
-  authoritativePrivateHistory?(request?: IncomingMessage): Promise<import("./dispatch/textTurns.js").TextTurn[]>;
+  authoritativePrivateHistory?(
+    request?: IncomingMessage,
+    trace?: import("./trace/types.js").TraceOptions,
+  ): Promise<import("./dispatch/textTurns.js").TextTurn[]>;
   /** Current source proof and retained history for an original source run. Missing proof holds. */
   authoritativePrivateSourceHistory?(
     sourceRunId: string,

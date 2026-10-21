@@ -1,4 +1,5 @@
 import { sourceCheckError } from "./sourceCheckError.js";
+import { closedStage } from "../trace/closedStage.js";
 import {
   privateDestinationOf,
   requesterMessageId,
@@ -2539,25 +2540,48 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         try {
           if (!registry.isActive(run.id, run.control)) return refused("owner_inactive");
           stage = "audience";
-          if (!accessAllowed(await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)))
+          if (
+            !accessAllowed(
+              await closedStage(span, "run.source_check.audience", () =>
+                privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext),
+              ),
+            )
+          )
             return false;
           stage = "media";
-          if (!(await prepareSourceMedia())) return refused("media_unavailable");
+          if (!(await closedStage(span, "run.source_check.media", prepareSourceMedia)))
+            return refused("media_unavailable");
           stage = "audience";
-          if (!accessAllowed(await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)))
+          if (
+            !accessAllowed(
+              await closedStage(span, "run.source_check.audience_recheck", () =>
+                privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext),
+              ),
+            )
+          )
             return false;
           const destination = privateDestinationOf(msg);
           if (destination) {
             stage = "destination";
-            if (!accessAllowed(await verifyPrivateDestination(io, destination))) return false;
+            if (
+              !accessAllowed(
+                await closedStage(span, "run.source_check.destination", () =>
+                  verifyPrivateDestination(io, destination),
+                ),
+              )
+            )
+              return false;
           } else if (isPrivateConversation(msg)) {
             stage = "history";
             if (!io.authoritativePrivateHistory) return refused("history_unavailable");
-            await io.authoritativePrivateHistory(msg);
+            await closedStage(span, "run.source_check.history", (child) =>
+              io.authoritativePrivateHistory!(msg, { span: child }),
+            );
           }
           stage = "context";
           const check = ctx.admittedContextCheck;
-          if (!check || !accessAllowed(await check())) return refused("context_unavailable");
+          if (!check || !accessAllowed(await closedStage(span, "run.source_check.context", check)))
+            return refused("context_unavailable");
           if (!registry.isActive(run.id, run.control)) return refused("owner_inactive");
           if (privateAudienceLatch.revoked) return refused("audience_revoked");
           span.setAttrs({ outcome: "allowed" });

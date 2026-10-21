@@ -823,7 +823,8 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       const bearers = new RunBearerStore({ clock: () => NOW });
       s.deps.runBearers = bearers;
       mintFor(bearers, s);
-      const trace = startRequestRoot({ clock: () => NOW }, { channel: "slack", receivedAt: NOW });
+      const spanLog = createSpanLog();
+      const trace = startRequestRoot({ clock: () => NOW, spanLog }, { channel: "slack", receivedAt: NOW });
       trace.bindRun(s.run.id, (event) => s.registry.publish(s.run.id, event));
       await runLoop(s.deps, { ...s.ctx, root: trace.root, msg: markPrivateConversation(s.ctx.msg) });
       expect(decisions).toEqual([true, false]);
@@ -838,6 +839,14 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       ]);
       expect(JSON.stringify(trace.spansSoFar())).not.toContain("PRIVATE_SOURCE_BYTES");
       expect(JSON.stringify(trace.spansSoFar())).not.toContain("PRIVATE_SOURCE_NAME");
+      expect(
+        spanLog
+          .read({ runId: s.run.id, span: "run.source_check.history" })
+          .lines.map((line) => [line.status, line.errorMessage, line.attrs]),
+      ).toEqual([
+        ["ok", undefined, {}],
+        ["error", undefined, {}],
+      ]);
       s.ending.drain(true);
       await s.writer.settled();
       const record = (await s.store.get(s.run.id))!;

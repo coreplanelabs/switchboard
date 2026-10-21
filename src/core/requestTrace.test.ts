@@ -80,6 +80,24 @@ describe("startRequestRoot", () => {
     expect(trace.root.record().attrs).toEqual({}); // no channel → no attr
   });
 
+  it("keeps a large source-check trace in the bounded log without growing the run shape or stream", () => {
+    const clock = createTickingClock(1_000);
+    const spanLog = createSpanLog({ maxLines: 8 });
+    const trace = startRequestRoot({ clock: clock.now, spanLog }, { channel: "mcp", receivedAt: 1_000 });
+    const events: RunEvent[] = [];
+    trace.bindRun("review", (event) => events.push(event));
+    const check = trace.root.start("run.model_source_check");
+    for (let i = 0; i < 1_000; i++) check.start("home.epoch.source_catalogue").end();
+    expect(trace.spansSoFar().map((span) => span.name)).toEqual(["run.model_source_check"]);
+    expect(events.map((event) => (event.type === "span_start" ? event.name : event.type))).toEqual([
+      "request",
+      "run.model_source_check",
+    ]);
+    expect(spanLog.read({ span: "home.epoch.source_catalogue" })).toMatchObject({ kept: 8, dropped: 992 });
+    check.end();
+    trace.root.end();
+  });
+
   it("with no injected sinks the log sink follows tracing.log: roots prints the root only", async () => {
     const lines: string[] = [];
     const orig = console.log;
