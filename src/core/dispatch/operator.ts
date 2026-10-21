@@ -180,6 +180,7 @@ export const OPERATOR_SCHEMA_REASKS_MAX = 4;
 /** The bound for the whole operator loop, including its reads and repairs.
  *  A local deadline is a transient no-lease failure, never a provider refusal. */
 export const OPERATOR_TIMEOUT_MS = MINUTE_MS;
+const ROUTING_TIMEOUT_TEXT = "This is a bug: Switchboard routing timed out before an agent or command started.";
 /** The question marker for confirmable preset proposals (record 0054).
  *  Registry proposals are display-only and never use this marker. */
 export const OPERATOR_QUESTION_MARKER = "Did you mean:";
@@ -2406,17 +2407,23 @@ export function operatorTurnContext(input: OperatorInput, offered = actionProjec
 
 async function withinOperatorDeadline<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
   let onAbort = () => {};
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       value,
       new Promise<T>((_resolve, reject) => {
-        onAbort = () => reject(new Error("operator_timeout"));
+        // Give an already-aborting provider one task turn to return its typed
+        // failure. An unsettled call cannot hold the door after that turn.
+        onAbort = () => {
+          timeout = setTimeout(() => reject(new DOMException("operator_timeout", "AbortError")), 0);
+        };
         if (signal.aborted) onAbort();
         else signal.addEventListener("abort", onAbort, { once: true });
       }),
     ]);
   } finally {
     signal.removeEventListener("abort", onAbort);
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
@@ -2594,17 +2601,19 @@ export async function runOperator(
     let answer: RouteToolCall | string;
     try {
       answer = await recorder.during("command_fulfillment", (observe) =>
-        model(
-          commandFulfillmentPrompt({
-            turns: sourceTurns,
-            command: {
-              id: invocation.id,
-              input: invocation.input,
-              tool: command.tool,
-              argumentNames: command.def.args?.map((arg) => arg.name) ?? [],
-            },
-          }),
-          { maxTokens: maxOutputTokens, signal, observe },
+        withinDeadline(
+          model(
+            commandFulfillmentPrompt({
+              turns: sourceTurns,
+              command: {
+                id: invocation.id,
+                input: invocation.input,
+                tool: command.tool,
+                argumentNames: command.def.args?.map((arg) => arg.name) ?? [],
+              },
+            }),
+            { maxTokens: maxOutputTokens, signal, observe },
+          ),
         ),
       );
       recorder.annotate(recorder.latestModel(), answer);
@@ -2644,7 +2653,7 @@ export async function runOperator(
       let answer: RouteToolCall | string;
       try {
         answer = await recorder.during("model", (observe) =>
-          model({ ...prompt, retries: turns }, { maxTokens: maxOutputTokens, signal, observe }),
+          withinDeadline(model({ ...prompt, retries: turns }, { maxTokens: maxOutputTokens, signal, observe })),
         );
       } catch (err) {
         if (err instanceof NativeMediaHeldError || err instanceof RefusalError) throw err;
@@ -2682,7 +2691,7 @@ export async function runOperator(
               kind: "refusal",
               cause: "timeout",
               reason: "operator_timeout",
-              text: "The routing request timed out; nothing started.",
+              text: ROUTING_TIMEOUT_TEXT,
             });
           }
           const rejected =
@@ -3413,18 +3422,37 @@ export async function operatorStage(
       }),
     ),
   );
+  const reportTimeout = (telemetry: RoutingTelemetry) => {
+    const step = telemetry.steps.at(-1);
+    console.log(
+      JSON.stringify({
+        type: "routing_timeout",
+        threadKey: msg.threadKey,
+        messageId: msg.messageId,
+        phase: telemetry.timeout?.phase ?? step?.phase ?? "unknown",
+        budgetMs: OPERATOR_TIMEOUT_MS,
+        elapsedMs: Math.max(0, telemetry.finishedAt - telemetry.startedAt),
+        ...(step?.provider ? { provider: step.provider } : {}),
+        ...(step?.model ? { model: step.model } : {}),
+        ...(step?.requestId ? { requestId: step.requestId } : {}),
+      }),
+    );
+  };
   const expired = () => signal.aborted || now() - startedAt >= OPERATOR_TIMEOUT_MS;
-  const timeout = () =>
-    operatorEventOf(
+  const timeout = () => {
+    const telemetry = recorder.snapshot();
+    reportTimeout(telemetry);
+    return operatorEventOf(
       mode,
       {
         decision: { kind: "non_decision", reason: "operator_timeout" },
         latencyMs: now() - startedAt,
         outputTokens: 0,
-        telemetry: recorder.snapshot(),
+        telemetry,
       },
       ctx.intake,
     );
+  };
   const cfg = deps.config.config;
   let model = deps.operatorModel;
   let maxOutputTokens: number | undefined;
@@ -3607,6 +3635,7 @@ export async function operatorStage(
     (targetStoreUnavailable ? undefined : requesterRepoContext(tail, msg.userId, requesterTarget).requesterRepo) ??
     newestFinishedRun?.repo;
   answer.telemetry ??= recorder.snapshot();
+  if (answer.decision.reason === "operator_timeout") reportTimeout(answer.telemetry);
   const event: OperatorEventFields = operatorEventOf(mode, answer, ctx.intake);
   event.repoContext = {
     organization: cfg.organization,
@@ -3851,7 +3880,11 @@ export async function executeOperatorDecision(
     const answered: OperatorExecution = { kind: "answered" };
     if (event.outcome === "non_decision") {
       io.requestFailed?.();
-      await reply("I couldn't bind this request to an action, so nothing started.");
+      await reply(
+        event.reason === "operator_timeout"
+          ? ROUTING_TIMEOUT_TEXT
+          : "I couldn't bind this request to an action, so nothing started.",
+      );
       await recordDecision();
       return answered;
     }
@@ -3890,7 +3923,7 @@ export async function executeOperatorDecision(
         event.refusalText ??
           (event.providerFailure !== undefined
             ? renderProviderFailure(event.providerFailure, "ended")
-            : "The routing request timed out; nothing started."),
+            : ROUTING_TIMEOUT_TEXT),
       );
       await recordDecision();
       return answered;
