@@ -247,6 +247,13 @@ export function resolveControlResetWrite(
   echoed: (id: string) => boolean = () => false,
   opts?: { failWithoutEcho?: boolean },
 ): WriteResolution {
+  // A handled extension command can still be a volatile queued input. Even
+  // its RPC echo is not a durable native receipt or permission to resubmit.
+  if (command?.sourceInput !== undefined)
+    return {
+      kind: "fail",
+      message: "Source input delivery is unresolved. Keep the original input for native reconciliation.",
+    };
   if (command === undefined || command.type === "abort") return { kind: "none" };
   if (command.type === "steer")
     return opts?.failWithoutEcho

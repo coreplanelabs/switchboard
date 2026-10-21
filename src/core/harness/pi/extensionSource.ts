@@ -1,4 +1,7 @@
 import type { ToolDef } from "../../provider.js";
+import { createHash } from "node:crypto";
+import { DURABLE_INBOX_MAX_BYTES } from "../../runLedger/inboxMessage.js";
+import { sourceInputIntentsOf, type SourceInputIntent } from "../../runLedger/sourceInputIntent.js";
 import { SEED_BUDGET_BYTES } from "../../runLedger/sessionLog.js";
 // The pi extension a run's container loads (docs/reference/specs/harness-pi.md
 // item 7), as the text the harness writes there before pi starts. Plain
@@ -33,10 +36,33 @@ export const CONTINUATION_COMPACTION = "switchboard: continuation checkpoint";
 export const BLOCKED_AT_DOOR_PREFIX = "authorization refused at the door: ";
 export const BLOCKED_UNAVAILABLE_PREFIX = "authorization unavailable: ";
 
-export function piExtensionSource(tools: readonly ToolDef[]): string {
+/** The trusted host formats an already-begun original. This is neither
+ * permission to submit nor a native receipt. No production caller is enabled.
+ * The typed tag prevents ordinary RPC echo recovery from resending it. */
+export function piSourceInputCommand(value: SourceInputIntent, text: string) {
+  const intent = sourceInputIntentsOf({ version: 1, entries: [value] })?.entries[0];
+  if (
+    !intent ||
+    intent.phase !== "begun" ||
+    intent.native.harness !== "pi" ||
+    createHash("sha256").update(text).digest("hex") !== intent.renderedHash
+  )
+    return;
+  const payload = JSON.stringify({ version: 1, intent, text });
+  if (Buffer.byteLength(payload, "utf8") > DURABLE_INBOX_MAX_BYTES) return;
+  return {
+    type: "prompt",
+    id: `source-input:${intent.id}`,
+    sourceInput: { version: 1, id: intent.id },
+    message: "/switchboard-source-input " + payload,
+  };
+}
+
+export function piExtensionSource(tools: readonly ToolDef[], options: { sourceInput?: true } = {}): string {
   return `// Switchboard's pi harness extension. Written into the run's directory by the
 // bot before pi starts; loaded with \`-e\`.
 import { constants } from "node:fs";
+${options.sourceInput ? 'import { createHash } from "node:crypto";' : ""}
 import { mkdir, mkdtemp, open, realpath, stat as fileStat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -443,6 +469,42 @@ export default async function switchboardHarness(pi) {
       return changed ? { ...payload, tools } : undefined;
     });
     pi.on("session_before_compact", compaction);
+    ${
+      options.sourceInput
+        ? `// Only a qualified host may enable this command. Source text is data;
+    // the host owns canonical admission, access checks and the input checkpoint.
+    const submitted = new Set();
+    pi.registerCommand("switchboard-source-input", {
+      description: "Receive source evidence from the owning host",
+      handler: async (args, ctx) => {
+        if (!initialized || Buffer.byteLength(args, "utf8") > ${DURABLE_INBOX_MAX_BYTES}) throw new Error("source input refused");
+        let input;
+        try { input = JSON.parse(args); } catch { throw new Error("source input refused"); }
+        const intent = input?.intent;
+        if (input?.version !== 1 ||
+          !intent || typeof intent.id !== "string" || !intent.id || intent.phase !== "begun" ||
+          !process.env.SWITCHBOARD_RUN_ID || intent.owner?.runId !== process.env.SWITCHBOARD_RUN_ID ||
+          intent.native?.harness !== "pi" || intent.native.sessionId !== ctx.sessionManager.getSessionFile() ||
+          typeof input.text !== "string" || createHash("sha256").update(input.text).digest("hex") !== intent.renderedHash)
+          throw new Error("source input refused");
+        const alreadySaved = ctx.sessionManager.getEntries().some((entry) =>
+          entry.type === "custom_message" && entry.customType === "switchboard-source-input" &&
+          entry.details?.version === 1 && entry.details.intent?.id === intent.id);
+        if (submitted.has(intent.id) || alreadySaved) throw new Error("source input already submitted");
+        if (submitted.size >= 64) throw new Error("source input capacity held");
+        // Retain the attempt even if native submission throws. An uncertain
+        // original stays held; an RPC response never permits inbox ACK.
+        submitted.add(intent.id);
+        try {
+          pi.sendMessage({ customType: "switchboard-source-input", content: input.text, display: false,
+            details: { version: 1, intent } }, { triggerTurn: false });
+        } catch (error) {
+          throw new Error("source input submission is unresolved", { cause: error });
+        }
+      },
+    });`
+        : ""
+    }
     initialized = true;
   } catch (err) {
     // Return the extension with its gate intact; pi discards extensions that throw.
