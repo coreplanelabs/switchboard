@@ -9,6 +9,7 @@ import {
 // row written by one generation is read the same way by the next.
 
 import type { IncomingMessage, SlackDirectAudience, StagedFile } from "../types.js";
+import { isSlackProfileId } from "../names.js";
 
 export interface InboxPushResult {
   ok: boolean;
@@ -205,6 +206,7 @@ export function durableInboxMessage(
     text,
     at,
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(msg.requesterProfileId !== undefined ? { requesterProfileId: msg.requesterProfileId } : {}),
     // The credential behind a bound person rides the row (authorization.md item
     // 15): a restart must dispatch under the credential's grants, not the person's.
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
@@ -341,6 +343,8 @@ export function messageFromInbox(
     return;
   if (m.mergedFollowUps !== undefined && m.mergedFollowUps !== true) return;
   const userName = str("userName");
+  const requesterProfileId = str("requesterProfileId");
+  if (requesterProfileId !== undefined && !isSlackProfileId(requesterProfileId)) return;
   const authenticatedAs = str("authenticatedAs");
   const postedBy = str("postedBy");
   const relayedBy = str("relayedBy");
@@ -382,6 +386,7 @@ export function messageFromInbox(
     ...(m.mergedFollowUps ? { mergedFollowUps: true as const } : {}),
     text: control ? inboxControlText(control) : note ? `${text}\n\n${note}` : text,
     ...(userName !== undefined ? { userName } : {}),
+    ...(requesterProfileId !== undefined ? { requesterProfileId } : {}),
     ...(authenticatedAs !== undefined ? { authenticatedAs } : {}),
     ...(postedBy !== undefined ? { postedBy } : {}),
     ...(relayedBy !== undefined ? { relayedBy } : {}),

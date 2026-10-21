@@ -1,4 +1,5 @@
 import { isOrchestratorCommandDecision, orchestratorDecisionsOf } from "./dispatch/orchestratorDecisions.js";
+import { isSlackProfileId } from "./names.js";
 import {
   captureSourceTaskSnapshot,
   sourceTaskSnapshotOf,
@@ -269,6 +270,8 @@ export interface RunRecord {
   /** Who started the run, resolved (`IncomingMessage.userName`) — the index's
    *  source mark says `via Slack · alice`, never a raw member id. */
   userName?: string;
+  /** Verified display profile reference; ownership stays with `userId`. */
+  requesterProfileId?: string;
   /** The thread that started the run (`IncomingMessage.sourceUrl`), for the
    *  index's hover link. Optional as above. */
   sourceUrl?: string;
@@ -1375,6 +1378,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (!isOptionalString(r.label) || !isOptionalString(r.agent) || !isOptionalString(r.model)) return false;
   if (!isOptionalString(r.prompt) || !isOptionalString(r.title)) return false;
   if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl) || !isOptionalString(r.userName)) return false;
+  if (r.requesterProfileId !== undefined && !isSlackProfileId(r.requesterProfileId)) return false;
   if (r.record !== undefined && (typeof r.record !== "string" || !/^\d{4}$/.test(r.record))) return false;
   if (r.recordTaskKey !== undefined && (typeof r.recordTaskKey !== "string" || !/^[0-9a-f]{16}$/.test(r.recordTaskKey)))
     return false;

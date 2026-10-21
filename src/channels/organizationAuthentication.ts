@@ -3,6 +3,7 @@ import { CLI_ACTOR, resolveActor, resolveChatActor } from "../core/authz/actor.j
 import { authorizeSteerOwner } from "../core/dispatch/authorize.js";
 import { holdsAll } from "../core/authz/viewAs.js";
 import { identityKey } from "../core/identity/engine.js";
+import { isSlackProfileId } from "../core/names.js";
 import { envelopeSchema, sourceReferenceSchema } from "../core/organization/contract.js";
 import { accessActor } from "./commandHttp.js";
 import { connectionIdentity, mcpRequester, type McpIdentity } from "./mcpApproval.js";
@@ -23,6 +24,8 @@ import type { IncomingMessage, SlackDirectAudience } from "../core/types.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import type { IngressConfig, IngressIdentity } from "./http.js";
 import type { PersonalTokenStore } from "../mcp/personalTokens.js";
+import type { PersonLookup } from "./requester.js";
+import { warnRequesterLabel } from "./runRequester.js";
 
 /** A current native authentication result. The host verifies the issuer and
  * membership; neither a saved subject nor a directory link can supply it. */
@@ -87,6 +90,8 @@ export interface OrganizationAuthenticationOptions {
   /** Fixed installation pin for protected standing device delegation. */
   personalApproval?: { issuer: string; audience: string };
   directory: PersonDirectory;
+  /** Current Slack profile lookup for an email proved by this MCP credential. */
+  personByEmail?: PersonLookup;
   store: OrganizationStore;
   ledger?: Pick<RunLedger, "readIngressByRun">;
   channelsOf?(actorId: string): Promise<ReadonlySet<string> | "unknown">;
@@ -235,7 +240,8 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
       let actor: Actor,
         kind: "human" | "service",
         privateSource: boolean,
-        nativeEpoch = "";
+        nativeEpoch = "",
+        requesterEmail: string | undefined;
       let token: McpIdentity | IngressIdentity | undefined;
       let approvedPrincipal: Actor | undefined;
       if (evidence.source === "mcp" && ("session" in evidence.identity || original?.actorId.startsWith("access:"))) {
@@ -250,6 +256,7 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         kind = proof.kind;
         privateSource = proof.privateSource;
         nativeEpoch = proof.epoch;
+        requesterEmail = proof.access?.email;
       } else if (evidence.source === "http" || evidence.source === "mcp") {
         const digest = evidence.credentialDigest;
         if (!digest || !/^[0-9a-f]{64}$/.test(digest)) return denied();
@@ -308,6 +315,7 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
           msg.postedBy
         )
           return denied();
+        requesterEmail = token.email;
         if (token.channel && msg.channelId !== `${evidence.source}:${token.channel}`) return denied();
         if (msg.authenticatedAs && msg.authenticatedAs !== reference.actorId) return denied();
         actor = resolveActor(
@@ -380,9 +388,16 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         if (!person) return denied("unavailable");
         if (evidence.source === "mcp") {
           const requester = verifiedUserId?.startsWith("access:")
-            ? await mcpRequester(token!, { auth: options.auth() })
+            ? await mcpRequester(token!, { auth: options.auth(), personByEmail: options.personByEmail })
             : { userId: person.id, authenticatedAs: actor.id };
           if (!requester || requester.userId !== person.id) return denied();
+          if (isSlackProfileId(requester.requesterProfileId)) {
+            msg = {
+              ...msg,
+              requesterProfileId: requester.requesterProfileId,
+              ...(requester.userName ? { userName: requester.userName } : {}),
+            };
+          }
           actor = { ...toCaller(token!, options.grantsFor, requester).actor, onBehalfOf: person };
         } else actor = { ...actor, onBehalfOf: person };
         actor = {
@@ -403,6 +418,18 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
       const binding = await options.directory.resolve(principalIdentity ?? identity);
       if (binding.status === "conflict") return denied();
       if (binding.status === "unavailable" || binding.status === "invalid") return denied("unavailable");
+      if (evidence.source === "mcp" && !isSlackProfileId(msg.requesterProfileId) && requesterEmail) {
+        const profile = await options.personByEmail?.(requesterEmail).catch(() => {
+          warnRequesterLabel(msg.channelId, "failed");
+          return undefined;
+        });
+        if (isSlackProfileId(profile?.id))
+          msg = {
+            ...msg,
+            requesterProfileId: profile.id,
+            ...(profile.name ? { userName: msg.userName ?? profile.name } : {}),
+          };
+      }
       const authentication: OrganizationAuthentication = {
         source: evidence.source,
         identity,

@@ -103,6 +103,7 @@ export class MainSourceTracker {
         ...(input.authenticatedAs !== undefined ? { authenticatedAs: input.authenticatedAs } : {}),
         ...(input.relayedBy !== undefined ? { relayedBy: input.relayedBy } : {}),
         ...(input.userName !== undefined ? { userName: input.userName } : {}),
+        ...(input.requesterProfileId !== undefined ? { requesterProfileId: input.requesterProfileId } : {}),
         ...(input.sourceUrl !== undefined ? { sourceUrl: input.sourceUrl } : {}),
       };
       const msg = copyChatActor(

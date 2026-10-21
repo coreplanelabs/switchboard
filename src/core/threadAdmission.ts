@@ -37,6 +37,7 @@ export interface FollowUpInput {
   text: string;
   userId: string;
   userName?: string;
+  requesterProfileId?: string;
   /** The bound credential behind the person and the app that relayed for them
    *  (authorization.md items 14 and 15): carried so the fresh turn a leftover
    *  becomes is gated on the actor they make, not the bare user id. */
@@ -353,6 +354,7 @@ export function mergeFollowUps(inputs: FollowUpInput[]):
       text: string;
       userId: string;
       userName?: string;
+      requesterProfileId?: string;
       authenticatedAs?: string;
       postedBy?: string;
       sourceUrl?: string;
@@ -370,6 +372,7 @@ export function mergeFollowUps(inputs: FollowUpInput[]):
     text: foldThreadEvents(inputs.map(attributed)),
     userId: first.userId,
     ...(first.userName !== undefined ? { userName: first.userName } : {}),
+    ...(first.requesterProfileId !== undefined ? { requesterProfileId: first.requesterProfileId } : {}),
     ...(first.authenticatedAs !== undefined ? { authenticatedAs: first.authenticatedAs } : {}),
     ...(first.postedBy !== undefined ? { postedBy: first.postedBy } : {}),
     ...(first.sourceUrl !== undefined ? { sourceUrl: first.sourceUrl } : {}),

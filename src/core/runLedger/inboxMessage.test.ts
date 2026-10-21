@@ -35,6 +35,21 @@ const base: IncomingMessage = {
 };
 
 describe("durable inbox continuity", () => {
+  it("keeps a verified display profile through a saved MCP request without changing its owner", () => {
+    const message: IncomingMessage = {
+      channelId: "mcp:default",
+      userId: "access:bob",
+      authenticatedAs: "access:bob",
+      requesterProfileId: "slack:UBOB",
+      userName: "Bob",
+      threadKey: "mcp:default:review",
+      text: "Review the pull request",
+    };
+    const saved = durableInboxMessage(message, message.text, 1);
+    expect(messageFromInbox(saved, 1)?.msg).toMatchObject(message);
+    expect(messageFromInbox({ ...saved, requesterProfileId: "access:alice" }, 1)).toBeUndefined();
+  });
+
   it("stores a saved A read leaf with B custody and no copied media or private URLs", () => {
     const pointer = {
       ingressRunId: "execution-B",

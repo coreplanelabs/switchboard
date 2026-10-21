@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createOrganizationAuthentication,
   type NativeOrganizationProof,
   type OrganizationQuestionOwner,
 } from "./organizationAuthentication.js";
 import { InMemoryOrganizationStore } from "../core/organization/memory.js";
+import { OrganizationService } from "../core/organization/service.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { NO_GRANTS } from "../core/authz/types.js";
@@ -160,6 +161,178 @@ describe("current organization authentication", () => {
     s.lookup.set("mcp:personal:alice", grants);
     await s.tokens.delete(first, "personal:alice");
     expect(await s.resolver.metadataPhase().resolveAuthorization(input)).toEqual({ status: "fenced" });
+  });
+  it("re-resolves the verified MCP requester profile and records lookup failure without storing it", async () => {
+    const s = setup();
+    s.lookup.set("access:alice", grants);
+    const requesterProfileId = "slack:UALICE";
+    const identity = { issuer: "installation:mcp", tenant: null, subject: "alice" };
+    const access = { sub: "alice", email: "alice@example.test" };
+    let lookupFails = false;
+    const resolver = createOrganizationAuthentication({
+      ...s.options,
+      personByEmail: async (email) => {
+        if (lookupFails) throw new Error("PRIVATE-PROFILE-LOOKUP");
+        return email === access.email ? { id: requesterProfileId, name: "Alice" } : undefined;
+      },
+      currentMcp: async () => ({
+        status: "verified",
+        identity,
+        actorId: "access:alice",
+        kind: "human",
+        organizationMember: true,
+        privateSource: true,
+        epoch: "mcp-sso-1",
+        access,
+      }),
+    });
+    const credentialDigest = digestBearer("mcp-sso-session");
+    const mcpIdentity = { subject: "alice", session: access };
+    const native = await resolver.resolveNative(
+      {
+        ...s.msg("access:alice"),
+        channelId: "mcp:default",
+        threadKey: "mcp:default:profile-roundtrip",
+        authenticatedAs: "access:alice",
+        approvalConnection: { id: credentialDigest, credentialId: "access:alice", requestHash: "a".repeat(64) },
+        requesterProfileId,
+      },
+      { source: "mcp", identity: mcpIdentity, credentialDigest },
+    );
+    if (native.status !== "resolved") throw new Error("No current MCP credential");
+    expect(native.authentication.sourceReference).not.toHaveProperty("requesterProfileId");
+    const service = new OrganizationService({
+      store: s.store,
+      directory: s.store.directory,
+      mappings: s.options.mappings,
+      limits: {
+        pendingPerActor: 5,
+        pendingPerSource: 10,
+        pendingPerOrganization: 20,
+        reservedReconciliation: 1,
+        contentTtlMs: 90,
+        receiptTtlMs: 365,
+      },
+      authorize: async () => true,
+    });
+    const admitted = await service.admit(native.authentication, {
+      sourceEvent: "profile-roundtrip",
+      key: "profile-roundtrip",
+      destination: { kind: "broad" },
+      workload: "message",
+      target: null,
+      content: "Review the pull request",
+      context: [],
+    });
+    if (admitted.status !== "receipt") throw new Error("MCP profile input was not saved");
+    const addressed = await service.resolve(native.authentication);
+    if (!addressed) throw new Error("No current saved source owner");
+    const saved = await s.store.execute({
+      action: "submission",
+      ...addressed,
+      source: "mcp",
+      key: "profile-roundtrip",
+    });
+    if (saved.status !== "submission") throw new Error("No saved MCP source envelope");
+    expect(JSON.stringify(saved.envelope)).not.toContain(requesterProfileId);
+    const restored = await resolver.resolveEnvelope(saved.envelope);
+
+    expect(restored).toMatchObject({
+      status: "resolved",
+      actor: { id: "access:alice" },
+      msg: { userId: "access:alice", authenticatedAs: "access:alice", requesterProfileId },
+    });
+    lookupFails = true;
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const degraded = await resolver.resolveEnvelope(saved.envelope);
+      expect(degraded).toMatchObject({
+        status: "resolved",
+        actor: { id: "access:alice" },
+        msg: { userId: "access:alice", authenticatedAs: "access:alice" },
+      });
+      if (degraded.status !== "resolved") throw new Error("MCP restore did not resolve");
+      expect(degraded.msg).not.toHaveProperty("requesterProfileId");
+      expect(warning.mock.calls).toContainEqual([
+        JSON.stringify({ event: "runs.requester_label.degraded", kind: "mcp", reason: "failed" }),
+      ]);
+      expect(JSON.stringify(warning.mock.calls)).not.toContain("PRIVATE-PROFILE-LOOKUP");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+  it("restores a personal MCP profile from its approved credential without storing it in the source", async () => {
+    const s = setup();
+    s.lookup.set("access:alice", grants);
+    const email = "display@example.test",
+      requesterProfileId = "slack:UALICE",
+      digest = digestBearer("approved-personal-mcp");
+    const resolver = createOrganizationAuthentication({
+      ...s.options,
+      personByEmail: async (value) => (value === email ? { id: requesterProfileId, name: "Alice" } : undefined),
+    });
+    await s.tokens.put({
+      digest,
+      subject: "personal:alice",
+      userId: "access:alice",
+      email,
+      createdAt: 1,
+      approval: { version: 1, issuer: accessIdentity.issuer, audience: "access-app", organization, subject: "alice" },
+    });
+    const native = await resolver.resolveNative(
+      {
+        ...s.msg("access:alice"),
+        channelId: "mcp:default",
+        threadKey: "mcp:default:personal-profile-roundtrip",
+        authenticatedAs: "mcp:personal:alice",
+        approvalConnection: { id: digest, credentialId: "mcp:personal:alice", requestHash: "b".repeat(64) },
+      },
+      { source: "mcp", identity: { subject: "personal:alice" }, credentialDigest: digest },
+    );
+    if (native.status !== "resolved") throw new Error("No approved personal MCP credential");
+    expect(native.msg).toMatchObject({ userId: "access:alice", requesterProfileId });
+    expect(native.authentication.sourceReference).not.toHaveProperty("requesterProfileId");
+    const service = new OrganizationService({
+      store: s.store,
+      directory: s.store.directory,
+      mappings: s.options.mappings,
+      limits: {
+        pendingPerActor: 5,
+        pendingPerSource: 10,
+        pendingPerOrganization: 20,
+        reservedReconciliation: 1,
+        contentTtlMs: 90,
+        receiptTtlMs: 365,
+      },
+      authorize: async () => true,
+    });
+    const admitted = await service.admit(native.authentication, {
+      sourceEvent: "personal-profile-roundtrip",
+      key: "personal-profile-roundtrip",
+      destination: { kind: "broad" },
+      workload: "message",
+      target: null,
+      content: "Review the pull request",
+      context: [],
+    });
+    if (admitted.status !== "receipt") throw new Error("Personal MCP input was not saved");
+    const addressed = await service.resolve(native.authentication);
+    if (!addressed) throw new Error("No current personal MCP source owner");
+    const saved = await s.store.execute({
+      action: "submission",
+      ...addressed,
+      source: "mcp",
+      key: "personal-profile-roundtrip",
+    });
+    if (saved.status !== "submission") throw new Error("No saved personal MCP source envelope");
+    expect(JSON.stringify(saved.envelope)).not.toContain(requesterProfileId);
+    const restored = await resolver.resolveEnvelope(saved.envelope);
+
+    expect(restored).toMatchObject({
+      status: "resolved",
+      actor: { id: "mcp:personal:alice" },
+      msg: { userId: "access:alice", authenticatedAs: "mcp:personal:alice", requesterProfileId },
+    });
   });
   it("uses an active pinned personal delegation after browser proof expires and fences changed realms and revoked rights", async () => {
     const s = setup();

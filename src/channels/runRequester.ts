@@ -1,4 +1,4 @@
-import type { PersonProfile } from "../core/names.js";
+import { isSlackProfileId, type PersonProfile } from "../core/names.js";
 import { WORK_VIEW_ENRICHMENT_TIMEOUT_MS } from "../core/budgets.js";
 import type { ExternalIdentity } from "../core/identity/contract.js";
 import type { OrganizationStore } from "../core/organization/contract.js";
@@ -21,13 +21,17 @@ interface RequesterNames {
 }
 
 /** Keep diagnostics queryable without logging identities or provider payloads. */
-function warnRequesterLabel(id: string, reason: "failed" | "timeout" | "unavailable"): void {
+export function warnRequesterLabel(id: string, reason: "failed" | "timeout" | "unavailable"): void {
   const kind = /^(slack|access|http|mcp|cli|web|person):/.exec(id)?.[1] ?? "unknown";
   console.warn(JSON.stringify({ event: "runs.requester_label.degraded", kind, reason }));
 }
 
 /** Display-only account grouping. Original ids still control access and attribution. */
-export async function requesterProfile(id: string, options: RequesterNames): Promise<PersonProfile | undefined> {
+export async function requesterProfile(
+  id: string,
+  options: RequesterNames,
+  requesterProfileId?: string,
+): Promise<PersonProfile | undefined> {
   const profileOf = async (userId: string): Promise<PersonProfile | undefined> => {
     if (options.profile) return options.profile(userId);
     const name = await options.name(userId);
@@ -59,6 +63,10 @@ export async function requesterProfile(id: string, options: RequesterNames): Pro
       bindings.flatMap((binding) => (binding.status === "bound" ? [binding.binding.personId] : [])),
     );
     if (people.size === 0) {
+      if (isSlackProfileId(requesterProfileId)) {
+        const profile = await profileOf(requesterProfileId);
+        if (profile) return profile;
+      }
       const email = await options.verifiedAccessEmail?.(id);
       const person = email ? await options.personByEmail?.(email) : undefined;
       if (!person?.id.startsWith("slack:")) return;

@@ -13,6 +13,8 @@ import type { IngressIdentity } from "./http.js";
 import type { McpOptions } from "./mcp.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { callerIdFor } from "./commandHttp.js";
+import { isSlackProfileId } from "../core/names.js";
+import { warnRequesterLabel } from "./runRequester.js";
 
 export type McpIdentity = IngressIdentity & { verifiedUserId?: string; session?: AccessIdentity };
 
@@ -25,8 +27,22 @@ export async function mcpRequester(
     return { ...(await boundRequester(id, identity.session.email, options.personByEmail)), authenticatedAs: id };
   }
   const credentialId = `mcp:${identity.subject}`;
-  if (identity.verifiedUserId?.startsWith("access:"))
-    return { userId: identity.verifiedUserId, authenticatedAs: credentialId };
+  const verifiedUserId = identity.verifiedUserId;
+  if (verifiedUserId?.startsWith("access:")) {
+    const person =
+      identity.email && options.personByEmail
+        ? await options.personByEmail(identity.email).catch(() => {
+            warnRequesterLabel(verifiedUserId, "failed");
+            return undefined;
+          })
+        : undefined;
+    return {
+      userId: verifiedUserId,
+      ...(person?.name ? { userName: person.name } : {}),
+      ...(isSlackProfileId(person?.id) ? { requesterProfileId: person.id } : {}),
+      authenticatedAs: credentialId,
+    };
+  }
   const requester = await boundRequester(credentialId, identity.email, options.personByEmail);
   if (
     !identity.verifiedUserId &&

@@ -191,6 +191,8 @@ export interface RunView {
   sourceUrl?: string;
   /** Who started it, resolved (`RunMeta.userName` / `RunRecord.userName`). */
   userName?: string;
+  /** Verified display profile reference. It never changes the run owner. */
+  requesterProfileId?: string;
   /** Current display-only profile, added after row visibility checks. */
   userProfile?: PersonProfile;
   /** The bound credential behind the person (`RunMeta.authenticatedAs` / `RunRecord.authenticatedAs`), when there was one. */
@@ -709,6 +711,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[], producerUnconf
     ...(activity !== undefined ? { activity } : {}),
     ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m.userName !== undefined ? { userName: m.userName } : {}),
+    ...(m.requesterProfileId !== undefined ? { requesterProfileId: m.requesterProfileId } : {}),
     ...(m.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
     ...(m.postedBy !== undefined ? { postedBy: m.postedBy } : {}),
     ...(m.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
@@ -762,6 +765,7 @@ function liveView(s: RunSummary): RunView {
     ...(s.inFlight !== undefined ? { inFlight: s.inFlight } : {}),
     ...(s.sourceUrl !== undefined ? { sourceUrl: s.sourceUrl } : {}),
     ...(s.userName !== undefined ? { userName: s.userName } : {}),
+    ...(s.requesterProfileId !== undefined ? { requesterProfileId: s.requesterProfileId } : {}),
     ...(s.authenticatedAs !== undefined ? { authenticatedAs: s.authenticatedAs } : {}),
     ...(s.postedBy !== undefined ? { postedBy: s.postedBy } : {}),
     ...(s.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
@@ -1245,6 +1249,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
               threadKey: m.threadKey,
               ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
               ...(m.userName !== undefined ? { userName: m.userName } : {}),
+              ...(m.requesterProfileId !== undefined ? { requesterProfileId: m.requesterProfileId } : {}),
               ...(m.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
               ...(m.postedBy !== undefined ? { postedBy: m.postedBy } : {}),
               ...(m.authoritativeHistory ? { authoritativeHistory: true as const } : {}),

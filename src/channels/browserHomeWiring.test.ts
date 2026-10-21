@@ -259,6 +259,17 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
+  it("shows another MCP requester's profile without their browser session", async () => {
+    const bob = { name: "Bob", avatarUrl: "https://avatars.slack-edge.com/bob.jpg" };
+    const s = await fixture(true, true, undefined, undefined, undefined, false, {
+      requesterProfile: async (id) => (id === "slack:UBOB" ? bob : undefined),
+    });
+    await s.wiring.initialize();
+    await s.wiring.context(s.request(), s.credential);
+    expect(await s.wiring.requesterProfile("access:bob", "slack:UBOB")).toEqual(bob);
+    expect(await s.wiring.requesterProfile("access:bob")).toBeUndefined();
+  });
+
   it("labels an unlinked Access run from only its current verified browser session", async () => {
     const profile = { name: "Alice", avatarUrl: "https://avatars.slack-edge.com/alice.jpg" };
     const s = await fixture(true, true, undefined, undefined, undefined, false, {

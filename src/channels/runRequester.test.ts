@@ -69,6 +69,25 @@ describe("requesterName", () => {
     expect(await requesterProfile("access:other", current)).toBeUndefined();
   });
 
+  it("uses each run's verified profile reference without a browser session for that requester", async () => {
+    const { options } = await fixture();
+    const profiles = new Map([
+      ["slack:UALICE", { name: "Alice", avatarUrl: "https://avatars.slack-edge.com/alice.jpg" }],
+      ["slack:UBOB", { name: "Bob", avatarUrl: "https://avatars.slack-edge.com/bob.jpg" }],
+    ]);
+    const current = {
+      ...options,
+      profile: async (id: string) => profiles.get(id),
+      verifiedAccessEmail: async (id: string) => (id === "access:viewer" ? "alice@example.test" : undefined),
+      personByEmail: async () => ({ id: "slack:UALICE", name: "Alice" }),
+    };
+    expect(await requesterProfile("access:other", current, "slack:UBOB")).toEqual({
+      name: "Bob",
+      avatarUrl: "https://avatars.slack-edge.com/bob.jpg",
+    });
+    expect(await requesterProfile("access:other", current)).toBeUndefined();
+  });
+
   it("does not use revoked or foreign-workspace profile links", async () => {
     const { store, options } = await fixture();
     expect(await requesterName("access:account-1", { ...options, slackTeam: "T2" })).toBeUndefined();
@@ -90,6 +109,7 @@ describe("requesterName", () => {
         personByEmail: async () => ({ id: "slack:UALICE", name: "Alice Chen" }),
       }),
     ).toBeUndefined();
+    expect(await requesterProfile("access:account-1", options, "slack:UALICE")).toBeUndefined();
     expect(await requesterName("slack:UALICE", options)).toBe("Alice Chen");
   });
 

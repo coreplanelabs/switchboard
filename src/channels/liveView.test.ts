@@ -1363,6 +1363,46 @@ describe("createLiveViewHandler (node:http)", () => {
     feed.fireClose();
   });
 
+  it("shows each MCP run's own saved profile on the same viewer's page and feed", async () => {
+    const reg = fixedRegistry();
+    const alice = reg.create("Alice's review", {
+      userId: "access:alice",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:alice",
+      requesterProfileId: "slack:UALICE",
+    });
+    const bob = reg.create("Bob's review", {
+      userId: "access:bob",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:bob",
+      requesterProfileId: "slack:UBOB",
+    });
+    const profiles = new Map([
+      ["slack:UALICE", { name: "Alice", avatarUrl: "https://avatars.slack-edge.com/alice.jpg" }],
+      ["slack:UBOB", { name: "Bob", avatarUrl: "https://avatars.slack-edge.com/bob.jpg" }],
+    ]);
+    const handler = liveOnlyHandler(reg, { requesterProfile: async (_id, profileId) => profiles.get(profileId ?? "") });
+    const page = fakeReqRes("GET", "/runs");
+    handler(page.req, page.res);
+    await page.finished;
+    const rows = indexSeedOf(page.body()).rows;
+    expect(rows.find((row) => row.id === alice.id)).toMatchObject({
+      userId: "access:alice",
+      userName: "Alice",
+      userProfile: { avatarUrl: "https://avatars.slack-edge.com/alice.jpg" },
+    });
+    expect(rows.find((row) => row.id === bob.id)).toMatchObject({
+      userId: "access:bob",
+      userName: "Bob",
+      userProfile: { avatarUrl: "https://avatars.slack-edge.com/bob.jpg" },
+    });
+    const feed = fakeReqRes("GET", "/runs?stream=1");
+    handler(feed.req, feed.res);
+    await vi.waitFor(() => expect(feed.body()).toContain('"avatarUrl":"https://avatars.slack-edge.com/bob.jpg"'));
+    expect(feed.body()).toContain('"avatarUrl":"https://avatars.slack-edge.com/alice.jpg"');
+    feed.fireClose();
+  });
+
   it.each(["/runs", "/runs?all=1"])("a slow requester label cannot block %s", async (url) => {
     vi.useFakeTimers();
     try {
@@ -2128,6 +2168,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       store?: InMemoryRunStore | null;
       retention?: { retentionDays: number } | null;
       audit?: LiveViewDeps["audit"];
+      requesterProfile?: LiveViewDeps["requesterProfile"];
       indexPageSize?: number;
       ledger?: InMemoryRunLedger;
     } = {},
@@ -2146,6 +2187,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
         now, // the seeds carry `serverNow`: two renders compared byte-for-byte need one clock
         retention: opts.retention === undefined ? { retentionDays: 30 } : opts.retention,
         ...(opts.audit ? { audit: opts.audit } : {}),
+        ...(opts.requesterProfile ? { requesterProfile: opts.requesterProfile } : {}),
         ...(opts.indexPageSize !== undefined ? { indexPageSize: opts.indexPageSize } : {}),
       }),
     );
@@ -2743,6 +2785,32 @@ describe("live view on RunsService: history pages + index toggle", () => {
       }
       expect(byId.get("p2")).toMatchObject({ status: "failed", finishedAt: NOW - 30_000 });
       expect(t.body()).not.toContain(fin.token);
+    });
+
+    it("shows a saved MCP requester's photo to another viewer after the run finishes", async () => {
+      const h = harness({
+        requesterProfile: async (_id, profileId) =>
+          profileId === "slack:UBOB" ? { name: "Bob", avatarUrl: "https://avatars.slack-edge.com/bob.jpg" } : undefined,
+      });
+      await h.store!.put(
+        record("mcp-bob", {
+          channelId: "mcp:default",
+          userId: "access:bob",
+          authenticatedAs: "access:bob",
+          requesterProfileId: "slack:UBOB",
+          userName: "Bob",
+          threadKey: "mcp:default:review",
+          channelVisibility: "machine",
+        }),
+      );
+      const page = fakeReqRes("GET", "/runs?all=1");
+      h.handler(page.req, page.res);
+      await done(page);
+      expect(indexSeedOf(page.body()).rows.find((row) => row.id === "mcp-bob")).toMatchObject({
+        userId: "access:bob",
+        userName: "Bob",
+        userProfile: { avatarUrl: "https://avatars.slack-edge.com/bob.jpg" },
+      });
     });
 
     it("the retention days ride the seed truthfully with run history off", async () => {

@@ -99,6 +99,8 @@ export interface IncomingMessage {
    * `channelName`: an optional adapter-provided hint, never required by the core.
    */
   userName?: string;
+  /** Verified person to display for an Access-owned run; never used for authority. */
+  requesterProfileId?: string;
   /**
    * A link back to the triggering message on its platform (a Slack permalink),
    * for human-facing surfaces such as the run page's Request block. Optional

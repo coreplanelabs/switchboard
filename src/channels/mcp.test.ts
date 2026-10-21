@@ -140,6 +140,136 @@ describe("native admission through the production process wrapper", () => {
     ]);
   });
 
+  it("keeps each SSO review requester's profile reference with their own Access account", async () => {
+    const messages: IncomingMessage[] = [];
+    const sso: DashboardVerifier = {
+      mode: "access",
+      credentialHeader: "authorization",
+      describe: () => "test SSO",
+      verify: async (req) => {
+        const subject = req.headers.authorization === "Bearer bob" ? "bob" : "alice";
+        return { ok: true, identity: { sub: subject, email: `${subject}@example.test` } };
+      },
+    };
+    for (const subject of ["alice", "bob"]) {
+      const response = await handleMcpRequest(
+        rpc("tools/call", { name: "dispatch", arguments: { text: "Review this pull request" } }, 1, bearer(subject)),
+        deps,
+        {
+          auth: { tokens: {} },
+          sso,
+          personByEmail: async (email) =>
+            email === "alice@example.test" ? { id: "slack:UALICE", name: "Alice" } : { id: "slack:UBOB", name: "Bob" },
+          admit: async (msg) => {
+            messages.push(msg);
+            return { status: "unavailable" };
+          },
+        },
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(
+      messages.map(({ userId, userName, requesterProfileId, authenticatedAs }) => ({
+        userId,
+        userName,
+        requesterProfileId,
+        authenticatedAs,
+      })),
+    ).toEqual([
+      {
+        userId: "access:alice",
+        userName: "Alice",
+        requesterProfileId: "slack:UALICE",
+        authenticatedAs: "access:alice",
+      },
+      {
+        userId: "access:bob",
+        userName: "Bob",
+        requesterProfileId: "slack:UBOB",
+        authenticatedAs: "access:bob",
+      },
+    ]);
+  });
+
+  it("keeps a personal MCP connection's verified profile without changing its Access owner", async () => {
+    const token = "b".repeat(64);
+    const store = new InMemoryPersonalTokenStore();
+    await store.put({
+      digest: digestBearer(token),
+      subject: "personal:bob",
+      email: "bob@example.test",
+      userId: "access:bob",
+      createdAt: 1,
+    });
+    grant("personal:bob", ["dispatch"]);
+    const messages: IncomingMessage[] = [];
+    const response = await handleMcpRequest(
+      rpc("tools/call", { name: "dispatch", arguments: { text: "Review this pull request" } }, 1, bearer(token)),
+      deps,
+      {
+        auth: { tokens: {} },
+        personalTokens: store,
+        personByEmail: async () => ({ id: "slack:UBOB", name: "Bob" }),
+        admit: async (msg) => {
+          messages.push(msg);
+          return { status: "unavailable" };
+        },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(messages).toEqual([
+      expect.objectContaining({
+        userId: "access:bob",
+        userName: "Bob",
+        requesterProfileId: "slack:UBOB",
+        authenticatedAs: "mcp:personal:bob",
+      }),
+    ]);
+  });
+
+  it("records a failed personal MCP profile lookup without changing the requester", async () => {
+    const token = "c".repeat(64);
+    const store = new InMemoryPersonalTokenStore();
+    await store.put({
+      digest: digestBearer(token),
+      subject: "personal:bob",
+      email: "bob@example.test",
+      userId: "access:bob",
+      createdAt: 1,
+    });
+    grant("personal:bob", ["dispatch"]);
+    const messages: IncomingMessage[] = [];
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const response = await handleMcpRequest(
+        rpc("tools/call", { name: "dispatch", arguments: { text: "Review this pull request" } }, 1, bearer(token)),
+        deps,
+        {
+          auth: { tokens: {} },
+          personalTokens: store,
+          personByEmail: async () => {
+            throw new Error("PRIVATE-PROFILE-LOOKUP");
+          },
+          admit: async (msg) => {
+            messages.push(msg);
+            return { status: "unavailable" };
+          },
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(messages).toEqual([
+        expect.objectContaining({ userId: "access:bob", authenticatedAs: "mcp:personal:bob" }),
+      ]);
+      expect(messages[0]).not.toHaveProperty("requesterProfileId");
+      expect(warning.mock.calls).toContainEqual([
+        JSON.stringify({ event: "runs.requester_label.degraded", kind: "access", reason: "failed" }),
+      ]);
+      expect(JSON.stringify(warning.mock.calls)).not.toContain("PRIVATE-PROFILE-LOOKUP");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it.each(["unavailable", "exception", "observer-failure"] as const)(
     "preserves the original %s result and diagnostic without replay",
     async (mode) => {

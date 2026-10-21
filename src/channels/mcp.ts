@@ -56,6 +56,7 @@ import { redactAndCap } from "../core/redact.js";
 import type { DashboardVerifier } from "./dashboardAuth.js";
 import { callerFor, callerIdFor, originAllowed, type CommandHttpOptions } from "./commandHttp.js";
 import { requesterOf } from "./web.js";
+import { isSlackProfileId } from "../core/names.js";
 import { dispatchSingleShot, SingleShotIO } from "./singleShotDispatch.js";
 import {
   authorizeRequest,
@@ -386,14 +387,20 @@ async function route(
           })
         : undefined;
       const sessionName = sessionCaller ? requesterOf(sessionCaller.actor, identity.session!).userName : undefined;
+      const sessionProfileId = sessionCaller?.actor.asUser?.id;
       const requester = sessionCaller
         ? options.admit && name === "dispatch"
           ? {
               userId: sessionCaller.id,
               ...(sessionName ? { userName: sessionName } : {}),
+              ...(isSlackProfileId(sessionProfileId) ? { requesterProfileId: sessionProfileId } : {}),
               authenticatedAs: sessionCaller.id,
             }
-          : { ...requesterOf(sessionCaller.actor, identity.session!), authenticatedAs: sessionCaller.id }
+          : {
+              ...requesterOf(sessionCaller.actor, identity.session!),
+              ...(isSlackProfileId(sessionProfileId) ? { requesterProfileId: sessionProfileId } : {}),
+              authenticatedAs: sessionCaller.id,
+            }
         : options.admit && name === "dispatch" && !identity.verifiedUserId
           ? { userId: `mcp:${identity.subject}` }
           : await mcpRequester(identity, options);
@@ -1000,6 +1007,10 @@ async function approvalResult(
           userId: saved.message.userId,
           channelId: saved.message.channelId,
           threadKey: saved.message.threadKey,
+          ...(saved.message.userName ? { userName: saved.message.userName } : {}),
+          ...(isSlackProfileId(saved.message.requesterProfileId)
+            ? { requesterProfileId: saved.message.requesterProfileId }
+            : {}),
           ...(saved.message.authenticatedAs ? { authenticatedAs: saved.message.authenticatedAs } : {}),
           ...(saved.message.postedBy ? { postedBy: saved.message.postedBy } : {}),
           ...(saved.message.approvalConnection ? { approvalConnection: { ...saved.message.approvalConnection } } : {}),

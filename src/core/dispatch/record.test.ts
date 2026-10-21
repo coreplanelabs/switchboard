@@ -773,6 +773,27 @@ describe("assembleRunRecord — the handoff on the record", () => {
     diagnosis: analyzeRunFriction([], { finished: true, truncated: false }),
   });
 
+  it("keeps a display profile in a saved run while the Access account remains its owner", async () => {
+    const record = assembleRunRecord({
+      ...base(),
+      msg: {
+        channelId: "mcp:default",
+        userId: "access:bob",
+        authenticatedAs: "access:bob",
+        requesterProfileId: "slack:UBOB",
+        userName: "Bob",
+        threadKey: "mcp:default:review",
+      },
+    });
+    const store = new InMemoryRunStore({ now: () => 10_000 });
+    await store.put(record);
+    expect(await store.getSummary(record.id)).toMatchObject({
+      userId: "access:bob",
+      requesterProfileId: "slack:UBOB",
+    });
+    expect(isRunRecord({ ...record, requesterProfileId: "access:alice" })).toBe(false);
+  });
+
   it("reconstructs retained request failure context on write and rejects malformed stored references", () => {
     const event: RunEvent = {
       type: "run_note",

@@ -88,6 +88,8 @@ export interface LiveRunMeta {
   operationTarget?: { repo: string; ref?: string };
   sourceUrl?: string;
   userName?: string;
+  /** Verified profile lookup for display only; the Access account remains the requester. */
+  requesterProfileId?: string;
   /** The bound credential behind the person (authorization.md item 15): a
    *  resume or restart dispatches under ITS grants again, never the person's. */
   authenticatedAs?: string;

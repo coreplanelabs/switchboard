@@ -119,6 +119,7 @@ export async function tellParent(
     {
       userId: msg.userId,
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.requesterProfileId !== undefined ? { requesterProfileId: msg.requesterProfileId } : {}),
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
       ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
       channelId: msg.channelId,

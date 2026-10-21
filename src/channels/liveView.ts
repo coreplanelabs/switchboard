@@ -260,7 +260,7 @@ export interface LiveViewDeps {
   people?: () => readonly ViewablePerson[];
   /** Current display label. This does not change the run's requester or authority. */
   requesterName?: (id: string) => Promise<string | undefined>;
-  requesterProfile?: (id: string) => Promise<PersonProfile | undefined>;
+  requesterProfile?: (id: string, requesterProfileId?: string) => Promise<PersonProfile | undefined>;
   /** Receives one entry per allowed page/events history read and per refused
    *  tokenless read. Default: console.log. */
   audit?: (entry: HistoryReadAudit) => void;
@@ -652,16 +652,36 @@ export function createLiveViewHandler(
       }
       const live = index.listActive().filter((s) => !privateWorkerRun(s) && matchesPredicate(visibleTo, s));
       const render = async (page: IndexPage) => {
-        const ids = [...new Set(page.rows.flatMap((row) => (row.userId ? [row.userId] : [])))];
+        const ids = [
+          ...new Map(
+            page.rows
+              .filter((row) => !!row.userId)
+              .map((row) => [JSON.stringify([row.userId, row.requesterProfileId]), row] as const),
+          ).entries(),
+        ];
         const profiles = new Map(
           await Promise.all(
             ids.map(
-              async (id) => [id, await readRequesterProfile(deps.requesterProfile ?? deps.requesterName, id)] as const,
+              async ([key, row]) =>
+                [
+                  key,
+                  row.userId
+                    ? await readRequesterProfile(
+                        async (id) =>
+                          deps.requesterProfile
+                            ? deps.requesterProfile(id, row.requesterProfileId)
+                            : deps.requesterName?.(id),
+                        row.userId,
+                      )
+                    : undefined,
+                ] as const,
             ),
           ),
         );
         const rows = page.rows.map((row) => {
-          const userProfile = row.userId ? profiles.get(row.userId) : undefined;
+          const userProfile = row.userId
+            ? profiles.get(JSON.stringify([row.userId, row.requesterProfileId]))
+            : undefined;
           return userProfile ? { ...row, userName: userProfile.name, userProfile } : row;
         });
         // A session holding `all` may view the dashboard as a person (record 0053): the picker
