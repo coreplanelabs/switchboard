@@ -376,6 +376,8 @@ export interface RunLoopContext {
   /** The run's setup result as it was claimed (record 0097), for its record. */
   runSetup?: RunSetup;
   msg: IncomingMessage;
+  /** The retained input text and owner for source rechecks when routing changes run text. */
+  sourceMessage?: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
   /** The run's effective profile: the budget the runner is handed is its minutes. */
@@ -2575,7 +2577,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             stage = "history";
             if (!io.authoritativePrivateHistory) return refused("history_unavailable");
             await closedStage(span, "run.source_check.history", (child) =>
-              io.authoritativePrivateHistory!(msg, { span: child }),
+              io.authoritativePrivateHistory!(ctx.sourceMessage ?? msg, { span: child }),
             );
           }
           stage = "context";
