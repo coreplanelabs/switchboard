@@ -541,6 +541,19 @@ describe("publication of an operator decision", () => {
     expect(event.binds![0]).toMatchObject({ preset: "general" });
   });
 
+  it("explains a routing timeout and records that no task started", async () => {
+    const f = fixture();
+    const event = eventOf({ outcome: "non_decision", reason: "operator_timeout" });
+    expect(await executeOperatorDecision(f.deps, { ...f.ctx, event })).toEqual({ kind: "answered" });
+    expect(f.reply).toHaveBeenCalledExactlyOnceWith(
+      "This is a bug: Switchboard routing timed out before an agent or command started.",
+    );
+    expect(f.requestFailed).toHaveBeenCalledOnce();
+    expect(f.registry.snapshotById("operator-run")?.events).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "operator", reason: "operator_timeout" })]),
+    );
+  });
+
   it.each([
     { name: "question", event: eventOf(), owner: undefined },
     { name: "refusal", event: eventOf({ outcome: "refusal", refusalText: "Confidential reason" }), owner: undefined },
@@ -4286,6 +4299,37 @@ describe("runOperator — the loop over a scripted model", () => {
       { timeoutMs: 5 },
     );
     expect(answer.decision).toMatchObject({ kind: "refusal", cause: "timeout", reason: "operator_timeout" });
+  });
+
+  it("ends a timed-out door while its model call remains unsettled", async () => {
+    const controller = new AbortController();
+    let finishModel!: (answer: RouteToolCall) => void;
+    let modelStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      modelStarted = resolve;
+    });
+    const answer = runOperator(
+      input(),
+      async () => {
+        modelStarted();
+        return new Promise<RouteToolCall>((resolve) => {
+          finishModel = resolve;
+        });
+      },
+      { signal: controller.signal, timeoutMs: 60_000 },
+    );
+    await started;
+    controller.abort();
+    try {
+      const first = await Promise.race([
+        answer,
+        new Promise<"held">((resolve) => setTimeout(() => resolve("held"), 50)),
+      ]);
+      expect(first).toMatchObject({ decision: { kind: "refusal", cause: "timeout", reason: "operator_timeout" } });
+    } finally {
+      finishModel({ tool: OPERATOR_ASK_TOOL, input: { text: "What next?" } });
+      await answer;
+    }
   });
 
   it("a deadline race preserves a typed provider failure", async () => {

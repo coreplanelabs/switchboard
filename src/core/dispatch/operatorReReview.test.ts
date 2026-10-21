@@ -292,6 +292,38 @@ describe("typed re-review and consumed source custody", () => {
 });
 
 describe("required context shares the operator deadline", () => {
+  it("records a safe routing timeout with its phase and budget", async () => {
+    let now = 0;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await operatorStage(
+        {
+          config: config(),
+          clock: () => now,
+          operatorModel: async () => {
+            now += 61_000;
+            return bind();
+          },
+        },
+        { mode: "on", msg: message(`agent:review Review ${url}`) },
+      );
+      const event = log.mock.calls
+        .map(([line]) => {
+          try {
+            return JSON.parse(String(line));
+          } catch {
+            return undefined;
+          }
+        })
+        .find((line) => line?.type === "routing_timeout");
+      expect(result).toMatchObject({ outcome: "non_decision", reason: "operator_timeout" });
+      expect(event).toMatchObject({ type: "routing_timeout", phase: "model", budgetMs: 60_000, elapsedMs: 61_000 });
+      expect(JSON.stringify(event)).not.toContain(url);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("cannot renew the clock after required attachment context consumes it", async () => {
     let now = 0;
     const model = vi.fn<RouteModel>(async () => bind());
