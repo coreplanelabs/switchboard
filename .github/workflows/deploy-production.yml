@@ -237,6 +237,8 @@ jobs:
     runs-on: depot-ubuntu-24.04-4
     permissions:
       contents: read
+      actions: read
+      deployments: read
     # One production deploy at a time, in order, never cancelled: a second
     # rollout landing on one in progress is refused by the bot preflight
     # (slack-channel.md item 8), so serialize here rather than wait there.
@@ -430,14 +432,44 @@ jobs:
           if [ "$SMOKE" = "true" ] && [ -n "$SMOKE_ACCESS_CLIENT_ID" ] && [ -z "$SMOKE_ACCESS_CLIENT_SECRET" ]; then echo "::error::SMOKE_ACCESS_CLIENT_SECRET is not set"; exit 1; fi
           if [ "$SMOKE" = "true" ] && [ -n "$SMOKE_ACCESS_CLIENT_SECRET" ] && [ -z "$SMOKE_ACCESS_CLIENT_ID" ]; then echo "::error::SMOKE_ACCESS_CLIENT_ID is not set"; exit 1; fi
           if [ "$SMOKE" = "true" ] && [ "$CLI_MODE" = "package" ]; then echo "::error::required capability smoke needs the checked-out runner; package mode cannot silently skip it"; exit 1; fi
+      - name: check the prior production rollout
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deployments=$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=production&per_page=2") || deployments='[]'
+          current=$(jq -r '.[0].id // empty' <<< "$deployments")
+          previous=$(jq -r '.[1].id // empty' <<< "$deployments")
+          current_log=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$current/statuses" --jq '.[0].log_url // empty' 2>/dev/null) || current_log=''
+          previous_status=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$previous/statuses" 2>/dev/null) || previous_status='[]'
+          previous_log=$(jq -r '.[0].log_url // empty' <<< "$previous_status")
+          previous_run=${previous_log#*"/actions/runs/"}
+          previous_run=${previous_run%%/*}
+          previous_job=${previous_log#*"/job/"}
+          previous_event=''
+          previous_ready=''
+          if [[ "$previous_log" == "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/"* && "$previous_run" =~ ^[0-9]+$ && "$previous_job" =~ ^[0-9]+$ ]]; then
+            previous_event=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$previous_run" --jq .event 2>/dev/null) || previous_event=''
+            previous_steps=$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$previous_job" 2>/dev/null) || previous_steps='{}'
+            previous_ready=$(jq -r '([.steps[]? | select(.name == "deploy" and .conclusion == "success")] | length == 1) and ([.steps[]? | select(.name == "what is live" and .conclusion == "success")] | length == 1) and ((.name | split(" / ") | last) as $target | $target == "deploy all" or ($target == "deploy affected" and $event == "push"))' --arg event "$previous_event" <<< "$previous_steps")
+          fi
+          if [[ "$current_log" == *"/actions/runs/$GITHUB_RUN_ID/"* && "$previous_ready" == true ]]; then
+            echo 'safe_affected=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'safe_affected=false' >> "$GITHUB_OUTPUT"
+            echo 'Prior production rollout readiness is unproven; the next affected request will deploy all Workers.'
+          fi
       - name: the selection
         id: selection
         env:
           TARGETS: ${{ inputs.targets }}
           FORCE: ${{ inputs.force }}
+          SAFE_AFFECTED: ${{ steps.baseline.outputs.safe_affected }}
         run: |
           case "$TARGETS" in
-            affected|"") args="--affected" ;;
+            affected|"")
+              if [ "$SAFE_AFFECTED" = true ]; then args="--affected";
+              else echo 'Prior production rollout is unproven; selecting all Workers.'; args=""; fi ;;
             all) args="" ;;
             *)
               if ! [[ "$TARGETS" =~ ^(memory|bot|resident|sandbox)(,(memory|bot|resident|sandbox))*$ ]]; then
@@ -551,8 +583,9 @@ jobs:
         run: |
           # Any non-zero exit is a real failure and fails here: since the
           # handoff (run-history item 39) a bot with runs in flight is not busy.
+          # Keep the executed plan private: it includes the runtime config document.
           # shellcheck disable=SC2086
-          $CLI deploy all $ARGS --allow-branch
+          $CLI deploy all $ARGS --allow-branch --json > "$RUNNER_TEMP/executed-deploy.json"
       - name: paging diagnostic artifact
         if: always() && steps.deploy.outcome != 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -573,14 +606,22 @@ jobs:
             echo "Readiness not read: deployment cancelled. Earlier completed uploads may remain; no new validation started." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # Freeze the selection BEFORE upload. Recomputing --affected now can
-          # erase a selected Worker from the receipt as soon as its health moves.
+          # A completed deploy returns its actual selection. Before it completes,
+          # the preview remains useful for partial-upload diagnosis.
           plan="$RUNNER_TEMP/plan.json"
           summary="$GITHUB_STEP_SUMMARY"
           printf '\n### Live after this run — `%s`\n\n' "$LABEL" >> "$summary"
+          if [ "$DEPLOY_OUTCOME" = success ]; then
+            if ! jq -e '.plan' "$RUNNER_TEMP/executed-deploy.json" > "$RUNNER_TEMP/executed-plan.json"; then
+              echo "::error::readiness unproven: the executed deployment plan is missing or unreadable"
+              echo "Readiness unproven: no valid executed deployment plan. This run is not a successful deployment." >> "$summary"
+              exit 1
+            fi
+            plan="$RUNNER_TEMP/executed-plan.json"
+          fi
           if ! jq -se 'length == 1 and (.[0] | (.steps | type == "array") and (.root.mode == "checkout" or .root.mode == "package"))' "$plan" > /dev/null; then
-            echo "::error::readiness unproven: the pre-deploy plan is missing or unreadable"
-            echo "Readiness unproven: no valid pre-deploy selection. This run is not a successful deployment." >> "$summary"
+            echo "::error::readiness unproven: the selection plan is missing or unreadable"
+            echo "Readiness unproven: no valid selection. This run is not a successful deployment." >> "$summary"
             exit 1
           fi
           if [ "$(jq -r '.root.mode' "$plan")" = package ]; then
@@ -654,9 +695,12 @@ jobs:
           SMOKE_INGRESS_THREAD: smoke-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           # A scoped release may leave the bot on an older build. Bind smoke to
-          # what that bot serves, and require the release commit only if selected.
-          if jq -e '.steps[] | select(.name == "bot")' "$RUNNER_TEMP/plan.json" > /dev/null; then
+          # the exact selection returned by the completed deployment.
+          if jq -e '.steps[] | select(.name == "bot")' "$RUNNER_TEMP/executed-plan.json" > /dev/null; then
             export SMOKE_EXPECTED_COMMIT="$GITHUB_SHA"
+          elif jq -e '.affected' "$RUNNER_TEMP/executed-plan.json" > /dev/null; then
+            expected_bot=$(jq -er '.affected.workers[] | select(.name == "bot") | .base.commit | select(test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/executed-plan.json")
+            export SMOKE_EXPECTED_COMMIT="$expected_bot"
           fi
           npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json"
       - name: deployment acceptance receipt

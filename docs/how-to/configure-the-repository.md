@@ -122,16 +122,7 @@ gh variable set CONFIG_REPO_OWNER --body "OWNER"
 gh variable set CONFIG_REPO_NAME --body "CONFIG-REPO"
 ```
 
-Automatic releases default to `targets=affected` and `cli=checkout`. Set
-`SWITCHBOARD_RELEASE_DEPLOY_TARGETS` to `affected`, `all`, or comma-separated
-Worker names (`memory`, `bot`, `resident`, `sandbox`), and
-`SWITCHBOARD_RELEASE_DEPLOY_CLI` to `checkout` or `package` to use the reusable
-workflow's existing selection. A scoped `memory,bot` selection preserves the
-execution Workers. Package mode waits for successful npm publication at the
-exact released tag's version; disabled, skipped or failed publication refuses
-package deployment. The manifest must match that version. Unset the selection
-variables to restore the defaults. Neither setting overrides the profile,
-preflights, smoke requirements or live readiness checks.
+Automatic releases select affected Workers. If the last production upload and readiness are not proven complete, the workflow deploys all four Workers. `SWITCHBOARD_RELEASE_DEPLOY_CLI` still selects `checkout` or `package`; package mode waits for successful npm publication at the exact released version. Disabled, skipped or failed publication refuses package deployment. The manifest must match that version. To hold an automatic deployment, set `SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG` to that release tag, then use `deploy-production.yml` with explicit `targets=all` or a comma-separated Worker list. For a planned automatic target choice, set `SWITCHBOARD_RELEASE_DEPLOY_TARGETS` to `all` or a comma-separated Worker list and set `SWITCHBOARD_RELEASE_DEPLOY_USE_TARGETS=true`. The preview and release use that choice. Unset `SWITCHBOARD_RELEASE_DEPLOY_USE_TARGETS` after the release. The existing `SWITCHBOARD_RELEASE_DEPLOY_TARGETS=all` setting alone no longer changes routine releases. Remove a tag hold after its scoped deployment. None of these settings overrides the profile, preflights, smoke requirements or live readiness checks.
 
 npm publishing uses no token. Once, before turning the variable on: an admin of the npm org publishes a placeholder `0.0.0` of the package from an empty directory (`npm init --scope=@OWNER -y`, `npm pkg set name=… version=0.0.0`, `npm publish --access public`), then on the package's npm settings adds a **Trusted Publisher**: GitHub Actions, this repository, workflow file `release-please.yml`. From then on every release cut from the default branch publishes with the workflow's own identity. No provenance attestation (`--provenance=false`): trusted publishing would generate one by default, npm accepts it from GitHub-hosted runners alone, and this project's CI runs on Namespace runners. A release line on another branch never publishes to npm; to skip one release, set the variable to `false` before merging its release PR (the run says so in a notice).
 

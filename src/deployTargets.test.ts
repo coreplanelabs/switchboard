@@ -128,7 +128,7 @@ describe("preview selector parity with captured runtime input", () => {
     try {
       const runtime = spawnSync("bash", ["-e", "-c", selection.run], {
         encoding: "utf8",
-        env: { ...process.env, TARGETS: targets, FORCE: "false", GITHUB_OUTPUT: output },
+        env: { ...process.env, TARGETS: targets, FORCE: "false", SAFE_AFFECTED: "true", GITHUB_OUTPUT: output },
       });
       if (runtime.status !== 0) {
         expect(() => parseTargetSelector(targets)).toThrow();
