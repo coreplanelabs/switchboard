@@ -108,6 +108,38 @@ describe("native admission through the production process wrapper", () => {
     return runInNewContext(code, { browserWiring }, { timeout: 100 }) as OrganizationIngress;
   }
 
+  it("keeps the verified person's name on an SSO request while the Access account owns it", async () => {
+    const messages: IncomingMessage[] = [];
+    const sso: DashboardVerifier = {
+      mode: "access",
+      credentialHeader: "authorization",
+      describe: () => "test SSO",
+      verify: async () => ({ ok: true, identity: { sub: "human", email: "alice@example.test" } }),
+    };
+    const res = await handleMcpRequest(
+      rpc("tools/call", { name: "dispatch", arguments: { text: "Review this pull request" } }),
+      deps,
+      {
+        auth: { tokens: {} },
+        sso,
+        personByEmail: async () => ({ id: "slack:UALICE", name: "Alice" }),
+        admit: async (msg) => {
+          messages.push(msg);
+          return { status: "unavailable" };
+        },
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(messages).toEqual([
+      expect.objectContaining({
+        userId: "access:human",
+        userName: "Alice",
+        authenticatedAs: "access:human",
+        channelId: "mcp:default",
+      }),
+    ]);
+  });
+
   it.each(["unavailable", "exception", "observer-failure"] as const)(
     "preserves the original %s result and diagnostic without replay",
     async (mode) => {

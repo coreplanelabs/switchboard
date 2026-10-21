@@ -721,7 +721,7 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     const viewAs = viewAsFromCookie(req.headers.cookie);
     const [viewed, profile] = await Promise.all([
       readProjection({ actor: actual.actor, authentication: actual.authentication }, viewAs),
-      readRequesterProfile(profileOfRequester, actual.actor.id),
+      readRequesterProfile((id) => profileOfRequester(id, false), actual.actor.id),
     ]);
     const ownProfile = profile ?? (credential.email ? { name: credential.email } : undefined);
     if (ownProfile) viewerProfiles.set(viewed.actor, ownProfile);
@@ -913,7 +913,7 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     };
     options.page(req, res, status, actor, title, enriched);
   }
-  const profileOfRequester = (id: string) =>
+  const profileOfRequester = (id: string, includeCurrentSession = true) =>
     requesterProfile(id, {
       organization: org,
       store: installationStore,
@@ -924,6 +924,21 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
       profile: options.requesterProfile,
       tokens: options.auth().tokens,
       personByEmail: options.personByEmail,
+      ...(includeCurrentSession
+        ? {
+            verifiedAccessEmail: async (id: string) => {
+              if (!native) return;
+              const proof = await native.currentBrowser({
+                issuer: native.browserIssuer,
+                tenant: null,
+                subject: id.slice("access:".length),
+              });
+              return proof.status === "verified" && proof.kind === "human" && proof.actorId === id
+                ? proof.access?.email
+                : undefined;
+            },
+          }
+        : {}),
     });
   return {
     initialize,

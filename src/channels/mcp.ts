@@ -385,9 +385,14 @@ async function route(
             channelsOf: options.channelsOf,
           })
         : undefined;
+      const sessionName = sessionCaller ? requesterOf(sessionCaller.actor, identity.session!).userName : undefined;
       const requester = sessionCaller
         ? options.admit && name === "dispatch"
-          ? { userId: sessionCaller.id, authenticatedAs: sessionCaller.id }
+          ? {
+              userId: sessionCaller.id,
+              ...(sessionName ? { userName: sessionName } : {}),
+              authenticatedAs: sessionCaller.id,
+            }
           : { ...requesterOf(sessionCaller.actor, identity.session!), authenticatedAs: sessionCaller.id }
         : options.admit && name === "dispatch" && !identity.verifiedUserId
           ? { userId: `mcp:${identity.subject}` }

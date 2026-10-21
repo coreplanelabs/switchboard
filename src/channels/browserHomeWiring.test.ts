@@ -259,6 +259,20 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
+  it("labels an unlinked Access run from only its current verified browser session", async () => {
+    const profile = { name: "Alice", avatarUrl: "https://avatars.slack-edge.com/alice.jpg" };
+    const s = await fixture(true, true, undefined, undefined, undefined, false, {
+      personByEmail: async (email) =>
+        email === "same-address@example.test" ? { id: "slack:UALICE", name: "Alice" } : undefined,
+      requesterProfile: async (id) => (id === "slack:UALICE" ? profile : undefined),
+    });
+    await s.wiring.initialize();
+    expect(await s.wiring.requesterProfile("access:opaque")).toBeUndefined();
+    await s.wiring.context(s.request(), s.credential);
+    expect(await s.wiring.requesterProfile("access:opaque")).toEqual(profile);
+    expect(await s.wiring.requesterProfile("access:foreign")).toBeUndefined();
+  });
+
   it("keeps the actual person's linked profile when another person's work is selected", async () => {
     const profile = { name: "Alice", avatarUrl: "https://avatars.slack-edge.com/alice.jpg" };
     const s = await fixture(true, true, undefined, undefined, undefined, false, {
