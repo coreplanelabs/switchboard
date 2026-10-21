@@ -1098,8 +1098,10 @@ export async function dispatch(
   const recordRefusalOnce = async (refusal: Refusal) => {
     if (refusalRecorded) return;
     refusalRecorded = true;
-    if (setupFinalizer && !runLoopStarted) {
-      setupRefusal ??= refusal;
+    if (setupFinalizer && (!runLoopStarted || opts.ingressRunId !== undefined)) {
+      // After the loop starts, the accepted ingress ID belongs to the run.
+      // A Door record with that ID would replace the original projection.
+      if (!runLoopStarted) setupRefusal ??= refusal;
       return;
     }
     await recordRefusal(deps, msg, io, refusal, ending, trace, operatorEvent, audienceTrace.refusal, {

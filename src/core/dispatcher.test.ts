@@ -17251,6 +17251,54 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     return { io, replies };
   }
 
+  it("keeps a checkpoint-held agent run under its accepted ingress ID", async () => {
+    const provider = capturingProvider("Finished checking");
+    const { deps, registry, store, ledger, writer } = wired(provider);
+    const runId = "12345678-1234-4234-8234-123456789012";
+    let answerReady = false;
+    const complete = provider.complete.bind(provider);
+    provider.complete = async (request) => {
+      const answer = await complete(request);
+      answerReady = true;
+      return answer;
+    };
+    const setState = ledger.setState.bind(ledger);
+    ledger.setState = async (id, gen, state) => {
+      if (answerReady && state.contextCheckpoint)
+        throw new TransientStoreError("private context checkpoint unavailable");
+      return setState(id, gen, state);
+    };
+    const { io, replies } = ioWithCard();
+
+    await dispatch(deps, msg("agent:general Check the run", "slack:UADMIN"), io, { ingressRunId: runId });
+    await writer.settled();
+
+    expect(replies.join("\n")).toContain("The saved run is ready for recovery");
+    expect(provider.requests).toHaveLength(1);
+    expect(ledger.live.get(runId)?.meta.agent).toBe("general");
+    expect(registry.getById(runId)?.agent).not.toBe("door");
+    expect(await store.get(runId)).not.toMatchObject({ agent: "door" });
+    const service = createRunsService({ registry, store, ledger });
+    const view = await service.getRun(runId, { include: "messages" });
+    expect(view).toMatchObject({
+      ok: true,
+      value: {
+        id: runId,
+        agent: "general",
+        finished: false,
+        events: expect.arrayContaining([
+          expect.objectContaining({ type: "run_meta", agent: "general" }),
+          expect.objectContaining({ type: "run_note", kind: "checkpoint_deferred" }),
+        ]),
+      },
+    });
+    expect(
+      await service.listRuns({ status: "all", visibleTo: { kind: "all" }, threadKey: "slack:CX:1.0" }),
+    ).toMatchObject({
+      runs: [{ id: runId, agent: "general", finished: false }],
+    });
+  });
+
   it.each(["wrapping_up", "ended"] as const)(
     "retains matching final states and title when the title completes during %s storage",
     async (boundary) => {
