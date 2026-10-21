@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.307.3](https://github.com/coreplanelabs/switchboard/compare/v1.307.2...v1.307.3) (2026-10-21)
+
+
+### Bug fixes
+
+* **core:** avoid unnecessary reads before review routing ([#3408](https://github.com/coreplanelabs/switchboard/issues/3408)) ([1f917c0](https://github.com/coreplanelabs/switchboard/commit/1f917c0f998997074e87b1c37972a2dc4fbca467))
+* **core:** preserve source proof for routed reviews ([#3407](https://github.com/coreplanelabs/switchboard/issues/3407)) ([c74571f](https://github.com/coreplanelabs/switchboard/commit/c74571f0483a68f9b7239aa6ea2b561ccdbb2d11))
+
 ## [1.307.2](https://github.com/coreplanelabs/switchboard/compare/v1.307.1...v1.307.2) (2026-10-21)
 
 
