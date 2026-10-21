@@ -88,7 +88,7 @@ export const nativeOperationOriginSchema = z
       .regex(/^repo:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     callId: z.string().uuid(),
     sourceId: z.string().regex(/^[A-Za-z0-9_.:-]{1,128}$/),
-    actor: z.enum(["system", "service", "admin", "operator", "read", "drain"]),
+    actor: z.enum(["system", "service", "admin", "operator", "read", "drain", "retire"]),
     traceId: z
       .string()
       .regex(/^[a-f0-9]{32}$/)

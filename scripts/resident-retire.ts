@@ -5,7 +5,8 @@ import { processSecrets } from "../src/secrets.js";
 runResidentRetire(process.argv.slice(2), {
   fetcher: fetch,
   readToken: processSecrets.named("RESIDENT_READ_TOKEN")?.reveal() ?? "",
-  adminToken: processSecrets.named("RESIDENT_ADMIN_TOKEN")?.reveal(),
+  controlToken:
+    processSecrets.named("RESIDENT_RETIRE_TOKEN")?.reveal() ?? processSecrets.named("RESIDENT_ADMIN_TOKEN")?.reveal(),
   write: (line) => process.stdout.write(`${line}\n`),
 }).catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.message : "resident retirement failed"}\n`);

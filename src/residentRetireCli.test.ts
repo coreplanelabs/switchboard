@@ -65,7 +65,7 @@ describe("resident:retire operator command", () => {
     await runResidentRetire([...argv, "--record-hash", recordHash, "--apply"], {
       fetcher,
       readToken: "reader",
-      adminToken: "admin",
+      controlToken: "admin",
       write: (line) => lines.push(line),
     });
     expect(fetcher).toHaveBeenCalledTimes(3);
@@ -84,7 +84,7 @@ describe("resident:retire operator command", () => {
       runResidentRetire([...argv, "--record-hash", "b".repeat(64), "--apply"], {
         fetcher,
         readToken: "reader",
-        adminToken: "admin",
+        controlToken: "admin",
         write: () => {},
       }),
     ).rejects.toThrow("record hash changed");
@@ -128,7 +128,7 @@ describe("resident:retire operator command", () => {
       runResidentRetire([...argv, "--record-hash", recordHash, "--apply"], {
         fetcher,
         readToken: "reader",
-        adminToken: "admin",
+        controlToken: "admin",
         write: () => {},
       }),
     ).rejects.toThrow("retirement result unverified");
@@ -141,14 +141,17 @@ describe("resident:retire operator command", () => {
       .mockResolvedValueOnce(page())
       .mockRejectedValueOnce(new Error("lost reply"))
       .mockResolvedValueOnce(page());
+    const lines: string[] = [];
     await expect(
       runResidentRetire([...argv, "--record-hash", recordHash, "--apply"], {
         fetcher,
         readToken: "reader",
-        adminToken: "admin",
-        write: () => {},
+        controlToken: "admin",
+        write: (line) => lines.push(line),
       }),
     ).rejects.toThrow("retirement result unverified");
     expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(lines.join("\n")).toContain("control reply unavailable");
+    expect(lines.join("\n")).not.toContain("lost reply");
   });
 });

@@ -139,6 +139,18 @@ on:
         description: "Refuse if main moved after the workflow captured its commit"
         type: boolean
         default: false
+      retire-resource:
+        description: "Optional exact repository resource for terminal native cleanup before upload"
+        type: string
+        default: ""
+      retire-key:
+        description: "Optional exact saved native operation key for terminal cleanup before upload"
+        type: string
+        default: ""
+      retire-record-hash:
+        description: "Optional saved record hash for terminal cleanup before upload"
+        type: string
+        default: ""
     secrets:
       CLOUDFLARE_DEPLOY_TOKEN:
         required: false
@@ -155,6 +167,9 @@ on:
       RESIDENT_DRAIN_TOKEN:
         required: false
         description: the resident fleet's drain/reconcile bearer (POST /drain, /reconcile, /undrain) — without it a selected resident step cannot prove image readiness and ends as a partial deployment
+      RESIDENT_RETIRE_TOKEN:
+        required: false
+        description: single-purpose exact terminal native-scope retirement bearer
       SANDBOX_TOKEN:
         required: false
         description: the sandbox live gate's bearer
@@ -273,6 +288,24 @@ jobs:
         run: |
           echo "::error::deploy-production runs only from main — got ${GITHUB_REF}. Nothing was deployed."
           exit 1
+      - name: validate optional native retirement
+        env:
+          RETIRE_RESOURCE: ${{ inputs.retire-resource }}
+          RETIRE_KEY: ${{ inputs.retire-key }}
+          RETIRE_HASH: ${{ inputs.retire-record-hash }}
+          CLI_MODE: ${{ inputs.cli }}
+          QUICK_CHECKS: ${{ inputs.quick-checks }}
+          CURRENT_MAIN: ${{ inputs.require-current-main }}
+        run: |
+          if [ -z "$RETIRE_RESOURCE$RETIRE_KEY$RETIRE_HASH" ]; then exit 0; fi
+          if [ -z "$RETIRE_RESOURCE" ] || [ -z "$RETIRE_KEY" ] || [ -z "$RETIRE_HASH" ]; then
+            echo "::error::native retirement requires resource, key and record hash together. Nothing was deployed."
+            exit 1
+          fi
+          if [ "$CLI_MODE" != "checkout" ] || [ "$QUICK_CHECKS" != "true" ] || [ "$CURRENT_MAIN" != "true" ]; then
+            echo "::error::native retirement requires the checked, current-main deploy. Nothing was deployed."
+            exit 1
+          fi
       # One command word for every step below: the checked-out tree's CLI, or
       # the published package at one version. `label` names what this run
       # deploys in the job summary — the commit, or the package at its version.
@@ -496,6 +529,20 @@ jobs:
       - name: the tree is the commit
         if: inputs.cli != 'package'
         run: git status --porcelain
+      - name: retire exact ended native scope
+        if: inputs.retire-key != '' && inputs.cli != 'package'
+        env:
+          RETIRE_RESOURCE: ${{ inputs.retire-resource }}
+          RETIRE_KEY: ${{ inputs.retire-key }}
+          RETIRE_HASH: ${{ inputs.retire-record-hash }}
+          RESIDENT_RETIRE_TOKEN: ${{ secrets.RESIDENT_RETIRE_TOKEN }}
+        run: |
+          if [ -z "$RESIDENT_RETIRE_TOKEN" ] || [ -z "$RESIDENT_READ_TOKEN" ]; then
+            echo "::error::native retirement needs RESIDENT_RETIRE_TOKEN and RESIDENT_READ_TOKEN. Nothing was deployed."
+            exit 1
+          fi
+          resident_url=$(jq -er 'if .profile.origin == "example" then empty else .profile.selection.workers.resident.hostname | "https://" + . end' "$RUNNER_TEMP/plan.json")
+          npm run --silent resident:retire -- --url "$resident_url" --resource "$RETIRE_RESOURCE" --key "$RETIRE_KEY" --record-hash "$RETIRE_HASH" --apply
       - name: deploy
         id: deploy
         env:

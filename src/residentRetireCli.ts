@@ -22,7 +22,7 @@ type Row = {
 export interface ResidentRetireIO {
   fetcher: typeof fetch;
   readToken: string;
-  adminToken?: string;
+  controlToken?: string;
   write(line: string): void;
 }
 
@@ -171,7 +171,7 @@ function closed(row: Row | undefined, target: NativeRetirementTarget, selected: 
 export async function runResidentRetire(argv: string[], io: ResidentRetireIO): Promise<void> {
   const target = options(argv);
   if (!io.readToken) throw new Error("missing RESIDENT_READ_TOKEN");
-  if (target.apply && !io.adminToken) throw new Error("missing RESIDENT_ADMIN_TOKEN");
+  if (target.apply && !io.controlToken) throw new Error("missing RESIDENT_RETIRE_TOKEN or RESIDENT_ADMIN_TOKEN");
   const rows = await inventory(io, target.url, target.resource, target.resident);
   const selected = rows.find((row) => row.key === target.key);
   if (!selected) throw new Error("selected native operation absent from complete inventory");
@@ -206,13 +206,14 @@ export async function runResidentRetire(argv: string[], io: ResidentRetireIO): P
   try {
     const response = await io.fetcher(new URL("/retire-native-operation", target.url), {
       method: "POST",
-      headers: { authorization: `Bearer ${io.adminToken}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${io.controlToken}`, "content-type": "application/json" },
       body: JSON.stringify({ ...parsed.data, ...(target.resident === undefined ? {} : { resident: target.resident }) }),
       signal: AbortSignal.timeout(RESIDENT_RETIRE_WRITE_TIMEOUT_MS),
     });
     status = response.status;
   } catch {
     // The request may have committed. Read the original record once; never send another control here.
+    io.write("retirement control reply unavailable; reading the saved receipt; original control outcome unknown");
   }
   let after: Row[];
   try {

@@ -14,6 +14,18 @@ on:
         description: "Bypass preflights and allow a superseded commit to deploy; can interrupt work"
         type: boolean
         default: false
+      retire-resource:
+        description: "Optional exact repo:owner/name from a blocked native operation"
+        type: string
+        default: ""
+      retire-key:
+        description: "Optional exact native-operation key from the refusal"
+        type: string
+        default: ""
+      retire-record-hash:
+        description: "Optional 64-character record hash from the same refusal"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -31,5 +43,8 @@ jobs:
       image-source: build
       quick-checks: true
       require-current-main: true
+      retire-resource: ${{ inputs.retire-resource }}
+      retire-key: ${{ inputs.retire-key }}
+      retire-record-hash: ${{ inputs.retire-record-hash }}
       smoke: false
     secrets: inherit # zizmor: ignore[secrets-inherit]

@@ -98,6 +98,8 @@ A **deploy fence** is a durable change to that drain record. It also closes regi
 
 For an ended run with an unknown original result, an administrator can retire its exact native scope. Memory first proves a sealed terminal run and blocks that run ID from starting again. Resident freezes the original journal, closes that scope, and keeps the unknown result, saved run and workspace. The [operator procedure](../how-to/operate-production.md#clean-up-native-work-after-a-run-ends) does not repeat the command or clear unrelated work. A live or unverified run cannot use this path.
 
+Emergency CI uses the existing read bearer plus a separate `RESIDENT_RETIRE_TOKEN` for that exact terminal scope route. The retirement bearer cannot drain the fleet, recover another operation, read the inventory or manage a repository. The production job keeps the retirement step under its deployment lock and runs it before any Worker upload. The ordinary release and an emergency run without an exact retirement target do not use this control.
+
 ## Why the deploy order follows from this
 
 <!-- generated:deploy-order · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->

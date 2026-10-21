@@ -1116,6 +1116,9 @@ describe("the production deploy is one reusable workflow", () => {
       "image-source": "profile",
       "quick-checks": false,
       "require-current-main": false,
+      "retire-resource": "",
+      "retire-key": "",
+      "retire-record-hash": "",
     });
     // A scoped dispatch skips the blanket image warm-up and lets deploy all
     // copy only its selected Workers' missing images.
@@ -1198,6 +1201,7 @@ describe("the production deploy is one reusable workflow", () => {
       "MEMORY_TOKEN",
       "RESIDENT_DRAIN_TOKEN",
       "RESIDENT_READ_TOKEN",
+      "RESIDENT_RETIRE_TOKEN",
       "SANDBOX_TOKEN",
       "SMOKE_ACCESS_CLIENT_ID",
       "SMOKE_ACCESS_CLIENT_SECRET",
@@ -1355,11 +1359,13 @@ describe("the production deploy is one reusable workflow", () => {
       'npm run --silent cli -- deploy plan $ARGS --allow-branch --json > "$RUNNER_TEMP/plan.json"',
       'npm run --silent cli -- deploy plan $ARGS --allow-branch | tee "$RUNNER_TEMP/plan.txt"',
       "git status --porcelain",
+      'npm run --silent resident:retire -- --url "$resident_url" --resource "$RETIRE_RESOURCE" --key "$RETIRE_KEY" --record-hash "$RETIRE_HASH" --apply',
       "npm run --silent cli -- deploy all $ARGS --allow-branch",
       'npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json"',
     ]);
     expect(checkoutSteps.filter((s) => s.run).map((s) => s.name)).toEqual([
       "only from main",
+      "validate optional native retirement",
       "the CLI",
       undefined, // npm ci
       "quick source checks",
@@ -1372,6 +1378,7 @@ describe("the production deploy is one reusable workflow", () => {
       "copy the release's images into the account registry",
       "plan",
       "the tree is the commit",
+      "retire exact ended native scope",
       "deploy",
       "what is live",
       "ordinary request through the live Door",
@@ -1824,9 +1831,67 @@ describe("emergency main deploy", () => {
       "image-source": "build",
       "quick-checks": true,
       "require-current-main": true,
+      "retire-resource": "${{ inputs.retire-resource }}",
+      "retire-key": "${{ inputs.retire-key }}",
+      "retire-record-hash": "${{ inputs.retire-record-hash }}",
       smoke: false,
     });
     expect(deploy.secrets).toBe("inherit");
+  });
+
+  it("accepts an exact terminal retirement only inside the locked main deploy job", () => {
+    const fast = parse(read(".github/workflows/deploy-main-fast.yml")) as Workflow & {
+      on: { workflow_dispatch: { inputs: Record<string, unknown> } };
+    };
+    const called = parse(read(".github/workflows/deploy-production.yml")) as Workflow;
+    const inputs = fast.on.workflow_dispatch.inputs;
+    expect(Object.keys(inputs)).toEqual(["targets", "force", "retire-resource", "retire-key", "retire-record-hash"]);
+    expect((fast.jobs.deploy as Job & { with: Record<string, unknown> }).with).toMatchObject({
+      "retire-resource": "${{ inputs.retire-resource }}",
+      "retire-key": "${{ inputs.retire-key }}",
+      "retire-record-hash": "${{ inputs.retire-record-hash }}",
+    });
+    const job = called.jobs.deploy as Job & {
+      env: Record<string, string>;
+      concurrency: { group: string; "cancel-in-progress": boolean };
+    };
+    const steps = job.steps;
+    const retire = steps.find((step) => step.name === "retire exact ended native scope") as Step & {
+      env: Record<string, string>;
+    };
+    expect(retire).toBeDefined();
+    expect(job.environment).toBe("production");
+    expect(job.concurrency).toEqual({ group: "deploy-production", "cancel-in-progress": false });
+    expect(job.env.RESIDENT_RETIRE_TOKEN).toBeUndefined();
+    expect(retire.env.RESIDENT_RETIRE_TOKEN).toBe("${{ secrets.RESIDENT_RETIRE_TOKEN }}");
+    expect(retire.run).toContain("npm run --silent resident:retire");
+    const absent = spawnSync("bash", ["-e", "-c", retire.run!], {
+      env: { ...process.env, RESIDENT_RETIRE_TOKEN: "", RESIDENT_READ_TOKEN: "reader" },
+    });
+    expect(absent.status).toBe(1);
+    expect(absent.stdout.toString()).toContain("native retirement needs RESIDENT_RETIRE_TOKEN");
+    const guard = steps.find((step) => step.name === "validate optional native retirement")!;
+    for (const [values, expected] of [
+      [{ RETIRE_RESOURCE: "", RETIRE_KEY: "", RETIRE_HASH: "" }, 0],
+      [{ RETIRE_RESOURCE: "repo:acme/app", RETIRE_KEY: "native-operation:thread:run:attempt", RETIRE_HASH: "" }, 1],
+      [
+        {
+          RETIRE_RESOURCE: "repo:acme/app",
+          RETIRE_KEY: "native-operation:thread:run:attempt",
+          RETIRE_HASH: "a".repeat(64),
+        },
+        0,
+      ],
+    ] as const) {
+      const result = spawnSync("bash", ["-e", "-c", guard.run!], {
+        env: { ...process.env, ...values, CLI_MODE: "checkout", QUICK_CHECKS: "true", CURRENT_MAIN: "true" },
+      });
+      expect(result.status).toBe(expected);
+    }
+    expect(steps.indexOf(retire)).toBeGreaterThan(
+      steps.findIndex((step) => step.name === "main still points at this commit"),
+    );
+    expect(steps.indexOf(retire)).toBeLessThan(steps.findIndex((step) => step.name === "deploy"));
   });
 });
 

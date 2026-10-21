@@ -694,6 +694,8 @@ export interface Env {
    *  (info, schedules, threads) — for dashboards and humans who need to look,
    *  never to change anything. Unset = no read scope exists. */
   RESIDENT_READ_TOKEN?: string;
+  /** Optional single-purpose bearer: exact terminal native scope retirement. */
+  RESIDENT_RETIRE_TOKEN?: string;
   /** Optional drain-only bearer (item 69): POST /drain and /undrain, nothing
    *  else — what a release deploy holds so it can close the fleet without the
    *  admin bearer. Unset = only admin can drain. */
@@ -1793,7 +1795,7 @@ function deployAdmissionOrigin(input: unknown) {
       typeof row.callId === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(row.callId)
         ? row.callId
         : null,
-    actor: ["system", "service", "admin", "operator", "read", "drain"].includes(String(row.actor))
+    actor: ["system", "service", "admin", "operator", "read", "drain", "retire"].includes(String(row.actor))
       ? String(row.actor)
       : null,
     parentSourceId: word(row.parentSourceId),
@@ -16097,7 +16099,7 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-type Scope = "admin" | "operator" | "read" | "drain";
+type Scope = "admin" | "operator" | "read" | "drain" | "retire";
 
 /** Which token a bearer is, or null. Constant-time per comparison; fail closed
  *  on unset/empty secrets. */
@@ -16107,6 +16109,7 @@ function tokenScope(env: Env, token: string | null): Scope | null {
   if (env.RESIDENT_OPERATOR_TOKEN && timingSafeEqual(token, env.RESIDENT_OPERATOR_TOKEN)) return "operator";
   if (env.RESIDENT_READ_TOKEN && timingSafeEqual(token, env.RESIDENT_READ_TOKEN)) return "read";
   if (env.RESIDENT_DRAIN_TOKEN && timingSafeEqual(token, env.RESIDENT_DRAIN_TOKEN)) return "drain";
+  if (env.RESIDENT_RETIRE_TOKEN && timingSafeEqual(token, env.RESIDENT_RETIRE_TOKEN)) return "retire";
   return null;
 }
 
@@ -16305,7 +16308,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/abandon-deploy-admission": { scope: "admin", method: "POST" },
   "/deploy-admission-abandonment": { scope: "admin", method: "GET" },
   "/replica-recover-native-operation": { scope: "admin", method: "POST" },
-  "/retire-native-operation": { scope: "admin", method: "POST" },
+  "/retire-native-operation": { scope: "retire", method: "POST" },
   "/recover-native-operation": { scope: "admin", method: "POST" }, // exact journal plus original native receipt
   "/recover-admission": { scope: "admin", method: "POST" }, // legacy requests refuse without mutation
   "/recover-quoted-admission": { scope: "admin", method: "POST" }, // original record plus operator evidence

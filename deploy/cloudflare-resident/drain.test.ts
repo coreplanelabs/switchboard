@@ -3680,7 +3680,7 @@ describe("the Worker's wiring (by scan)", () => {
     expect(source).toMatch(/"\/undrain": \{ scope: "drain", method: "POST" \}/);
     expect(source).toMatch(/case "\/drain":\s*\n\s*return await handleDrain\(env, body\);/);
     expect(source).toMatch(/case "\/undrain":\s*\n\s*return await handleUndrain\(env\);/);
-    expect(source).toMatch(/type Scope = "admin" \| "operator" \| "read" \| "drain";/);
+    expect(source).toMatch(/type Scope = "admin" \| "operator" \| "read" \| "drain" \| "retire";/);
     expect(source).toMatch(
       /env\.RESIDENT_DRAIN_TOKEN && timingSafeEqual\(token, env\.RESIDENT_DRAIN_TOKEN\)\) return "drain";/,
     );
