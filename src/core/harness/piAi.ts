@@ -1,12 +1,12 @@
 // pi's model library (`@earendil-works/pi-ai`) as the bot's provider layer for
 // structured model calls outside a run loop (harness-pi item 13): the one door,
-// intake and memory reflection. Callers keep the completion vocabulary — a
+// intake, title generation and memory reflection. Callers keep the completion vocabulary — a
 // `Provider` whose `complete` takes a `CompletionRequest` and answers a
 // `CompletionResult` — while pi's adapters speak each provider's wire shape.
 // The table is built from config provider blocks; the operator, intake and
 // memory model settings resolve through it. These background calls
 // do not publish harness `model.turn` spans. The operator records its phase
-// receipts and provider usage separately for timing and cost reconstruction.
+// receipts, and title generation records its provider outcome on the run.
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
@@ -223,6 +223,11 @@ export class PiAiProvider implements Provider {
           }
           failureContext.headers = Object.fromEntries(response.headers);
           const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
+          try {
+            req.observer?.onHttpResponse?.(response.status, requestId ?? undefined);
+          } catch {
+            /* Diagnostics cannot fail a completion. */
+          }
           if (requestId) {
             try {
               req.observer?.onResponse?.(requestId);

@@ -132,6 +132,16 @@ describe("createRunTimeline — grouping", () => {
       { kind: "note", text: "wrap up", noteKind: "wrap_up", mode: undefined, at: undefined },
     ]);
     expect(t.push({ type: "mystery" })).toEqual([]);
+    expect(
+      t.push({
+        type: "run_title_diagnostic",
+        outcome: "failed",
+        reason: "provider_error",
+        stage: "generation",
+        model: "openai/gpt-6-luna",
+        ms: 23,
+      }),
+    ).toEqual([]);
     expect(t.push(null)).toEqual([]);
     expect(t.push("junk")).toEqual([]);
     expect(t.steps()).toHaveLength(0);

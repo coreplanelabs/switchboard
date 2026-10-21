@@ -1,8 +1,8 @@
 // Feature: docs/reference/specs/live-view.md — background titles and prompt fallback.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseAppConfigText } from "./config.js";
-import type { CompletionRequest, Provider } from "./core/provider.js";
-import { runTitleGenerator, type TitleFailure } from "./runTitles.js";
+import { ProviderFailure, type CompletionRequest, type Provider } from "./core/provider.js";
+import { runTitleGenerator, type TitleDiagnostic } from "./runTitles.js";
 import { testRegistry } from "./core/runRegistry/testing.js";
 import { createRunEnding } from "./core/runEnding.js";
 import { interruptedRunRecord, assembleRunRecord } from "./core/dispatch/record.js";
@@ -223,7 +223,7 @@ describe("Run titles", () => {
   });
   it("reports a closed failure reason without request text or provider errors", async () => {
     const { reg } = testRegistry();
-    const failures: TitleFailure[] = [];
+    const diagnostics: TitleDiagnostic[] = [];
     let broken = true;
     let now = 1000;
     const generate = runTitleGenerator(
@@ -236,7 +236,7 @@ describe("Run titles", () => {
           return { stopReason: "end_turn", content: [{ type: "text", text: "Inspect deployment" }] };
         },
       }),
-      (failure) => failures.push(failure),
+      (diagnostic) => diagnostics.push(diagnostic),
       () => now,
     );
     reg.configureTitles(generate);
@@ -247,9 +247,251 @@ describe("Run titles", () => {
     const next = reg.create("next", { ...meta, prompt: "Inspect deployment" });
     await reg.titleSettled(next.id);
     expect(reg.getById(next.id)?.title).toBe("Inspect deployment");
-    expect(failures).toEqual([
-      { event: "run.title.failed", reason: "provider_error", model: "openai/gpt-6-luna", runId: "id-1", ms: 23 },
+    expect(diagnostics).toEqual([
+      {
+        event: "run.title.failed",
+        outcome: "failed",
+        reason: "provider_error",
+        stage: "generation",
+        model: "openai/gpt-6-luna",
+        runId: "id-1",
+        providerInvoked: true,
+        sendAttempts: 0,
+        errorKind: "error",
+        ms: 23,
+      },
+      {
+        event: "run.title.generated",
+        outcome: "generated",
+        reason: "generated",
+        stage: "generation",
+        model: "openai/gpt-6-luna",
+        runId: "id-2",
+        providerInvoked: true,
+        sendAttempts: 0,
+        stopReason: "end_turn",
+        outputChars: 18,
+        ms: 23,
+      },
     ]);
+  });
+  it("keeps a safe title failure diagnostic in the finished run stream", async () => {
+    const { reg } = testRegistry();
+    const generate = runTitleGenerator(
+      config(),
+      table({
+        name: "openai",
+        complete: async () => {
+          throw new Error("private provider response");
+        },
+      }),
+      () => {},
+      () => 1000,
+    );
+    reg.configureTitles(generate);
+    const run = reg.create("label", { ...meta, prompt: "private request" });
+    reg.finish(run.id, "completed");
+
+    await reg.titleSettled(run.id);
+
+    const diagnostic = reg.snapshotById(run.id)?.events.find((event) => event.type === "run_title_diagnostic");
+    expect(diagnostic).toMatchObject({
+      type: "run_title_diagnostic",
+      outcome: "failed",
+      reason: "provider_error",
+      model: "openai/gpt-6-luna",
+      stage: "generation",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("private request");
+    expect(JSON.stringify(diagnostic)).not.toContain("private provider response");
+    expect(reg.seal(run.id).events).toContainEqual({
+      type: "run_title_diagnostic",
+      outcome: "failed",
+      reason: "provider_error",
+      model: "openai/gpt-6-luna",
+      stage: "generation",
+      providerInvoked: true,
+      sendAttempts: 0,
+      errorKind: "error",
+      ms: 0,
+      seq: 1,
+      at: 1000,
+    });
+  });
+  it("retains the title provider's request, usage and price beside a generated title", async () => {
+    const { reg } = testRegistry();
+    let now = 1000;
+    const priced = {
+      ...config(),
+      costs: {
+        prices: {
+          "openai/gpt-6-luna": { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 },
+        },
+      },
+    };
+    reg.configureTitles(
+      runTitleGenerator(
+        priced,
+        table({
+          name: "openai",
+          complete: async (request) => {
+            await request.beforeSend?.();
+            now += 7;
+            request.observer?.onHttpResponse?.(200, "req_123");
+            now += 10;
+            return {
+              stopReason: "end_turn",
+              content: [{ type: "text", text: "Review the patch" }],
+              usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 5, cacheWriteTokens: 2 },
+            };
+          },
+        }),
+        () => {},
+        () => now,
+      ),
+    );
+    const run = reg.create("label", { ...meta, prompt: "private request" });
+
+    await reg.titleSettled(run.id);
+
+    const events = reg.snapshotById(run.id)?.events ?? [];
+    expect(events).toMatchObject([
+      {
+        type: "run_title_diagnostic",
+        outcome: "generated",
+        reason: "generated",
+        model: "openai/gpt-6-luna",
+        providerInvoked: true,
+        sendAttempts: 1,
+        requestId: "req_123",
+        responseMs: 7,
+        providerStatus: 200,
+        stopReason: "end_turn",
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheReadTokens: 5,
+        cacheWriteTokens: 2,
+        priceSource: "operator",
+        usd: 0.000053,
+        outputChars: 16,
+        ms: 17,
+        seq: 1,
+      },
+      { type: "run_title", title: "Review the patch", seq: 2 },
+    ]);
+    expect(JSON.stringify(events[0])).not.toContain("private request");
+    expect(JSON.stringify(events[0])).not.toContain("Review the patch");
+  });
+  it("retains a typed provider failure and request ID without its response text", async () => {
+    const { reg } = testRegistry();
+    let now = 1000;
+    reg.configureTitles(
+      runTitleGenerator(
+        config(),
+        table({
+          name: "openai",
+          complete: async (request) => {
+            await request.beforeSend?.();
+            now += 3;
+            request.observer?.onHttpResponse?.(429, "req_429\nprivate provider response");
+            now += 5;
+            throw new ProviderFailure("rate-limited", {
+              status: 429,
+              provider: "openai",
+              model: "gpt-6-luna",
+              diagnostic: { message: "private provider response" },
+            });
+          },
+        }),
+        () => {},
+        () => now,
+      ),
+    );
+    const run = reg.create("label", { ...meta, prompt: "private request" });
+
+    await reg.titleSettled(run.id);
+
+    const diagnostic = reg.snapshotById(run.id)?.events.find((event) => event.type === "run_title_diagnostic");
+    expect(diagnostic).toMatchObject({
+      type: "run_title_diagnostic",
+      outcome: "failed",
+      reason: "provider_error",
+      providerInvoked: true,
+      sendAttempts: 1,
+      requestId: "req_429",
+      responseMs: 3,
+      providerCause: "rate-limited",
+      providerStatus: 429,
+      errorKind: "error",
+      ms: 8,
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("private request");
+    expect(JSON.stringify(diagnostic)).not.toContain("private provider response");
+  });
+  it.each([
+    { stopReason: "max_tokens" as const, text: "", reason: "incomplete_output", invalidOutputKind: undefined },
+    { stopReason: "end_turn" as const, text: "Bad\nTitle", reason: "invalid_output", invalidOutputKind: "format" },
+  ])("records the title model's $reason result without raw output", async (answer) => {
+    const { reg } = testRegistry();
+    reg.configureTitles(
+      runTitleGenerator(
+        config(),
+        table({
+          name: "openai",
+          complete: async () => ({ stopReason: answer.stopReason, content: [{ type: "text", text: answer.text }] }),
+        }),
+        () => {},
+      ),
+    );
+    const run = reg.create("label", { ...meta, prompt: "Inspect deployment" });
+
+    await reg.titleSettled(run.id);
+
+    const diagnostic = reg.snapshotById(run.id)?.events.find((event) => event.type === "run_title_diagnostic");
+    expect(diagnostic).toMatchObject({
+      type: "run_title_diagnostic",
+      outcome: "failed",
+      reason: answer.reason,
+      stopReason: answer.stopReason,
+      ...(answer.invalidOutputKind ? { invalidOutputKind: answer.invalidOutputKind } : {}),
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("Bad\nTitle");
+  });
+  it("records when the configured title model has no provider", async () => {
+    const { reg } = testRegistry();
+    const noOpenAiProvider = { ...config(), providers: {} };
+    reg.configureTitles(
+      runTitleGenerator(
+        noOpenAiProvider,
+        table({
+          name: "openai",
+          complete: async () => {
+            throw new Error("must not be called");
+          },
+        }),
+        () => {},
+      ),
+    );
+    const run = reg.create("label", { ...meta, prompt: "Inspect deployment" });
+
+    await reg.titleSettled(run.id);
+
+    const diagnostic = reg.snapshotById(run.id)?.events.find((event) => event.type === "run_title_diagnostic");
+    expect(diagnostic).toMatchObject({
+      type: "run_title_diagnostic",
+      outcome: "skipped",
+      reason: "model_unavailable",
+      stage: "configuration",
+    });
+  });
+  it("keeps runs without title generation free of title diagnostics", async () => {
+    const { reg } = testRegistry();
+    const run = reg.create("label", { ...meta, prompt: "Inspect deployment" });
+
+    await reg.titleSettled(run.id);
+
+    expect(reg.getById(run.id)).toMatchObject({ id: run.id, label: "label", eventCount: 0 });
+    expect(reg.snapshotById(run.id)?.events).toEqual([]);
   });
   it("times saved titles and counts pending and completed jobs at the post-reply seal", async () => {
     const { reg, tick } = testRegistry();

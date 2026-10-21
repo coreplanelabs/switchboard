@@ -285,6 +285,12 @@ export function activityLine(e: RunEvent): string {
   switch (e.type) {
     case "run_title":
       return "Title saved";
+    case "run_title_diagnostic":
+      return e.outcome === "generated"
+        ? "Title generated"
+        : e.outcome === "failed"
+          ? "Title unavailable"
+          : "Title not generated";
     case "tool_call":
       return `→ ${e.summary}`;
     case "tool_input":

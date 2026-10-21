@@ -549,6 +549,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
     case "reference":
     case "run_meta":
     case "run_title":
+    case "run_title_diagnostic":
     case "run_state":
     case "publication_settlement":
     case "route":
@@ -636,7 +637,59 @@ export type RouteInputValue = RouteInputLeafOrList | RouteInputObject3;
  *  `pasted`; nothing writes or reads it now.) */
 export type RouteOutcome = "hand_back" | "offered" | "confirmed" | "refused";
 
+export const RUN_TITLE_DIAGNOSTIC_OUTCOMES = ["generated", "failed", "skipped"] as const;
+export const RUN_TITLE_DIAGNOSTIC_REASONS = [
+  "generated",
+  "timeout",
+  "provider_error",
+  "provider_unavailable",
+  "incomplete_output",
+  "invalid_output",
+  "model_unavailable",
+  "aborted",
+  "job_failed",
+] as const;
+export const RUN_TITLE_DIAGNOSTIC_STAGES = ["configuration", "generation", "publication"] as const;
+export const RUN_TITLE_DIAGNOSTIC_ERROR_KINDS = ["type_error", "range_error", "error", "non_error"] as const;
+export const RUN_TITLE_STOP_REASONS = ["end_turn", "tool_use", "max_tokens", "refusal", "other"] as const;
+export const RUN_TITLE_INVALID_OUTPUT_KINDS = ["empty", "format", "too_long"] as const;
+export const RUN_TITLE_PRICE_SOURCES = ["provider", "operator", "registry", "none"] as const;
+
+export interface RunTitleDiagnosticFields {
+  outcome: (typeof RUN_TITLE_DIAGNOSTIC_OUTCOMES)[number];
+  reason: (typeof RUN_TITLE_DIAGNOSTIC_REASONS)[number];
+  stage: (typeof RUN_TITLE_DIAGNOSTIC_STAGES)[number];
+  model?: string;
+  errorKind?: (typeof RUN_TITLE_DIAGNOSTIC_ERROR_KINDS)[number];
+  providerCause?: ProviderFailureCause;
+  providerStatus?: number;
+  providerInvoked?: boolean;
+  sendAttempts?: number;
+  requestId?: string;
+  responseMs?: number;
+  stopReason?: (typeof RUN_TITLE_STOP_REASONS)[number];
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  cacheOverReported?: boolean;
+  priceSource?: (typeof RUN_TITLE_PRICE_SOURCES)[number];
+  usd?: number;
+  outputChars?: number;
+  invalidOutputKind?: (typeof RUN_TITLE_INVALID_OUTPUT_KINDS)[number];
+  /** Elapsed title-generation time in milliseconds. */
+  ms: number;
+}
+
+/** Safe title-generation telemetry retained beside the run that produced it. */
+export interface RunTitleDiagnosticEvent extends RunTitleDiagnosticFields {
+  type: "run_title_diagnostic";
+  seq?: number;
+  at?: number;
+}
+
 export type RunEvent =
+  | RunTitleDiagnosticEvent
   | { type: "run_title"; title: string; seq?: number; at?: number }
   /** `callId` is the provider's tool_use id — the explicit pair key between a
    *  call and its result (live-view item 13); the runner stamps it on both. */

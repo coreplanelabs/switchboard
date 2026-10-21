@@ -375,6 +375,8 @@ export function createRunTimeline(): RunTimeline {
       }
       case "run_title":
         return str(e.title) ? [{ kind: "title", title: str(e.title) }] : [];
+      case "run_title_diagnostic":
+        return [];
       case "run_meta": {
         // Optional fields ride only when present (and well-typed) — the page
         // shows exactly what was resolved, never an empty slot.

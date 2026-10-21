@@ -15,6 +15,55 @@ describe("parseRunEventLines", () => {
       skipped: 1,
     });
   });
+  it("retains a safe run-title diagnostic and rejects an unknown reason", () => {
+    const diagnostic = {
+      type: "run_title_diagnostic",
+      outcome: "failed",
+      reason: "provider_error",
+      model: "openai/gpt-6-luna",
+      stage: "generation",
+      providerInvoked: true,
+      sendAttempts: 1,
+      requestId: "req_429",
+      providerCause: "rate-limited",
+      providerStatus: 429,
+      ms: 23,
+      seq: 4,
+      at: 1000,
+    };
+    const generated = {
+      type: "run_title_diagnostic",
+      outcome: "generated",
+      reason: "generated",
+      model: "openai/gpt-6-luna",
+      stage: "generation",
+      providerInvoked: true,
+      sendAttempts: 1,
+      stopReason: "end_turn",
+      inputTokens: 10,
+      outputTokens: 20,
+      priceSource: "operator",
+      usd: 0.000053,
+      ms: 17,
+      seq: 5,
+      at: 1017,
+    };
+    expect(
+      parseRunEventLines(
+        [
+          diagnostic,
+          generated,
+          { ...diagnostic, reason: "private provider response" },
+          { ...diagnostic, ms: -1 },
+          { ...diagnostic, providerCause: "private provider response" },
+          { ...diagnostic, requestId: "req_429\nprivate provider response" },
+          { ...diagnostic, providerStatus: 700 },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n"),
+      ),
+    ).toEqual({ events: [diagnostic, generated], skipped: 5 });
+  });
   it("keeps call-linked argument updates and rejects incomplete update frames", () => {
     const event = { type: "tool_input", callId: "c1", input: '{"path":"src/file.ts"}', at: 1 };
     expect(
