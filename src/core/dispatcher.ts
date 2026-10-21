@@ -5889,7 +5889,20 @@ export async function dispatch(
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
     if (!setupCustodyHeld && !registered?.control.destructive) ending.drain(undefined);
-    const setupRelease = setupRound && !resumeRowRetained ? await setupRound.release({ hardStopped: true }) : undefined;
+    // A fresh run that failed after attach still owns the resident binding
+    // until its original terminal ledger write lands. Releasing before that
+    // ACK makes the resident observe a live owner and retain the workspace.
+    const setupFinish =
+      setupRound && !setupCustodyHeld && !fencedWhileAttaching && !resume && !restart && reserved?.tracked()
+        ? await reserved.waitForFinish()
+        : undefined;
+    const setupRelease =
+      setupRound &&
+      !resumeRowRetained &&
+      !setupCustodyHeld &&
+      (setupFinish === undefined || setupFinish.kind === "landed" || setupFinish.kind === "off")
+        ? await setupRound.release({ hardStopped: true })
+        : undefined;
     if (
       registered &&
       !runLoopStarted &&

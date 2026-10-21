@@ -2,6 +2,7 @@ import { analyzeRunFriction } from "../runFriction.js";
 import { terminalCommitmentUnknown } from "../runLedger/writeThrough.js";
 import { WorkerRunLedger } from "../runLedgerWorker.js";
 import { UncertainStoreError } from "../storeFailure.js";
+import { terminalWorkspaceSettlement } from "../workspaceSettlement.js";
 import { isChildHandoff } from "./handoff.js";
 import { provisionalBearerExpiresAt } from "../budgets.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -1306,6 +1307,60 @@ describe("registerRun — the run's row on every surface before the attach", () 
 });
 
 describe("reserveRun — the ledger reservation before the attach", () => {
+  it("retains an empty publication map when a read-only review fails after resident attachment", async () => {
+    const d = deps();
+    const inner = new InMemoryRunLedger(() => NOW);
+    d.runLedger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-T",
+      fallback: new NullRunStore(),
+      warn: () => {},
+    });
+    const r = request(d, "agent:review acme/api#42", "review");
+    const runId = "review-setup-failed";
+    const out = await reserveRun(d, {
+      msg: r.message,
+      agent: r.agent,
+      profile: r.profile,
+      resolved: r.resolved,
+      repoCtx: { repo: "acme/api", ref: "change", headSha: "a".repeat(40), pr: 42 },
+      channelVisibility: "public",
+      runId,
+      startedAt: NOW,
+      receivedAt: NOW,
+      resume: undefined,
+      restart: undefined,
+      card: { update: () => {}, done: async () => {} },
+      hooks: { onStop: () => {}, onFenced: () => {} },
+      admitted: r.admitted,
+      root: r.root,
+    });
+    const binding = {
+      backend: "resident" as const,
+      ref: "change",
+      workspace: "/workspace/threads/review/change",
+      user: "worker2",
+      container: "vm-1",
+      ownerGen: "gen-T",
+      ownerFence: 7,
+    };
+    expect(await out?.reserved?.commitState({ binding })).toBe("ok");
+    const row = inner.live.get(runId);
+    if (!row) throw new Error("the review reservation was not retained");
+    const settlement = terminalWorkspaceSettlement(row, {
+      id: runId,
+      threadKey: r.message.threadKey,
+      repo: "acme/api",
+      userId: r.message.userId,
+      status: "failed",
+    } as RunRecord);
+    expect(settlement).toMatchObject({
+      owner: { runId, ownerGen: "gen-T", ownerFence: 7 },
+      publication: { version: 1, repo: "acme/api", branches: [], complete: true },
+      record: { status: "failed" },
+    });
+  });
+
   it.each(["coordinator", "childHandoff"] as const)(
     "preserves actual held error before a generic nontracked child refusal: %s",
     async (lane) => {

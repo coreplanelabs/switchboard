@@ -1044,6 +1044,19 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           `The child could not be durably reserved: ${reserved.kind === "untracked" ? reserved.why : "ownership was fenced"}.`,
         ),
       );
+    // A review can fail during setup after its resident binds, before the
+    // model loop records its initial publication map. Record the empty map
+    // while no branch write is possible so terminal settlement can still
+    // prove that this read-only run left no branch publication pending.
+    if (reserved.kind === "tracked" && agent.name === "review" && profile.identity === "read")
+      reserved.run.setState({
+        branchPublication: {
+          version: 1,
+          ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+          branches: [],
+          complete: true,
+        },
+      });
     // Named on the slot from here (the row exists now): a steer's durable
     // copy lands under it, and the boot-gap hand-off finds it. Deliberately
     // AFTER the reserve resolves, not before: a steer that lands during the
