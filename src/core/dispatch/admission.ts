@@ -124,6 +124,7 @@ function followUpOf(
     ...(msg.mergedFollowUps ? { mergedFollowUps: true as const } : {}),
     userId: msg.userId,
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(msg.requesterProfileId !== undefined ? { requesterProfileId: msg.requesterProfileId } : {}),
     // The credential behind a bound person and the app that relayed for them
     // (authorization.md items 14 and 15) ride the item as they ride the durable
     // row, so the fresh turn a leftover becomes is gated on the actor they make.
@@ -833,6 +834,7 @@ export interface SteerSender {
   messageId?: string;
   userId: string;
   userName?: string;
+  requesterProfileId?: string;
   /** The bound credential behind the person (item 15) and the app that relayed for them (item 14): the steer's gate decides on the actor they make. */
   authenticatedAs?: string;
   postedBy?: string;
@@ -916,6 +918,7 @@ export async function steerRun(
     channelId: sender.channelId,
     userId: sender.userId,
     ...(sender.userName !== undefined ? { userName: sender.userName } : {}),
+    ...(sender.requesterProfileId !== undefined ? { requesterProfileId: sender.requesterProfileId } : {}),
     ...(sender.authenticatedAs !== undefined ? { authenticatedAs: sender.authenticatedAs } : {}),
     ...(sender.postedBy !== undefined ? { postedBy: sender.postedBy } : {}),
     ...(sender.channelName !== undefined ? { channelName: sender.channelName } : {}),

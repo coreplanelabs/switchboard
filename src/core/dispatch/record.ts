@@ -207,6 +207,7 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
         threadKey: summary.threadKey ?? "",
         sourceUrl: summary.sourceUrl,
         userName: summary.userName,
+        requesterProfileId: summary.requesterProfileId,
         authenticatedAs: summary.authenticatedAs,
         postedBy: summary.postedBy,
       },
@@ -342,6 +343,7 @@ export function reclaimedRunRecord(input: {
       ...(row.meta.directAudience !== undefined ? { directAudience: row.meta.directAudience } : {}),
       sourceUrl: row.meta.sourceUrl,
       userName: row.meta.userName,
+      requesterProfileId: row.meta.requesterProfileId,
       authenticatedAs: row.meta.authenticatedAs,
       postedBy: row.meta.postedBy,
     },
@@ -478,6 +480,7 @@ export function assembleRunRecord(input: {
     | "threadKey"
     | "sourceUrl"
     | "userName"
+    | "requesterProfileId"
     | "relayedBy"
     | "authenticatedAs"
     | "postedBy"
@@ -654,6 +657,7 @@ export function assembleRunRecord(input: {
     ...(referencesOfEvents(events).length > 0 ? { references: referencesOfEvents(events) } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(msg.requesterProfileId !== undefined ? { requesterProfileId: msg.requesterProfileId } : {}),
     ...(input.headSha !== undefined && !privateMain ? { headSha: input.headSha } : {}),
     ...(input.doorPublicationPending !== undefined ? { doorPublicationPending: input.doorPublicationPending } : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),

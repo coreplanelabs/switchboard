@@ -117,7 +117,7 @@ export function visibleIndexFeed(
  * name lookup cannot resurrect a row after its removal. */
 export function namedIndexFeed(
   subscribe: (onEvent: IndexSubscriber) => Unsubscribe,
-  name?: (id: string) => Promise<string | PersonProfile | undefined>,
+  name?: (id: string, requesterProfileId?: string) => Promise<string | PersonProfile | undefined>,
 ): (onEvent: IndexSubscriber) => Unsubscribe {
   if (!name) return subscribe;
   return (onEvent) => {
@@ -127,9 +127,15 @@ export function namedIndexFeed(
     const unsubscribe = subscribe((event) => {
       if (closed) return;
       const id = event.type === "upsert" ? event.run.userId : undefined;
+      const requesterProfileId = event.type === "upsert" ? event.run.requesterProfileId : undefined;
+      const key = id ? JSON.stringify([id, requesterProfileId]) : undefined;
       // Start replay lookups together; each requester shares one bounded read.
-      if (id && !names.has(id)) names.set(id, readRequesterProfile(name, id));
-      const label = id ? names.get(id) : undefined;
+      if (id && key && !names.has(key))
+        names.set(
+          key,
+          readRequesterProfile((account) => name(account, requesterProfileId), id),
+        );
+      const label = key ? names.get(key) : undefined;
       tail = tail
         .then(async () => {
           const userProfile = await label;

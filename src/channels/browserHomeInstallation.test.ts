@@ -147,6 +147,7 @@ async function fixture(
   materializeNativeMedia?: BrowserHomeInstallationOptions["materializeNativeMedia"],
   nativeMcp?: ReturnType<typeof createOrganizationNativeSources>,
   configureCore?: (core: CoreDeps, github: InMemoryGithubApi) => void,
+  personByEmail?: (email: string) => Promise<{ id: string; name?: string } | undefined>,
 ) {
   let now = 1000,
     policy = "config";
@@ -365,6 +366,7 @@ async function fixture(
     grantsFor: (id) => (id === "access:alice" ? browserGrants : ALL_GRANTS),
     auth: () => ({ tokens }),
     personalTokens,
+    personByEmail,
     currentMcp: (...args) =>
       currentMcpVerifier ? currentMcpVerifier(...args) : Promise.resolve({ status: "unavailable" as const }),
     ...(personalApproved ? { personalApproval: { issuer: identity.issuer, audience: "access-app" } } : {}),
@@ -3694,12 +3696,26 @@ describe("browser installation", () => {
       ...currentNative,
       currentMcp: (...args: Parameters<typeof currentNative.currentMcp>) => currentNative.currentMcp(...args),
     };
-    const s = await fixture(false, false, provider, false, false, false, 10, false, undefined, native, configureCore);
+    const personByEmail = async () => ({ id: "slack:UALICE" });
+    const s = await fixture(
+      false,
+      false,
+      provider,
+      false,
+      false,
+      false,
+      10,
+      false,
+      undefined,
+      native,
+      configureCore,
+      personByEmail,
+    );
     const options: McpOptions = {
       auth: { tokens: s.tokens },
       sso,
       personalTokens: s.personalTokens,
-      personByEmail: async () => ({ id: "slack:UALICE" }),
+      personByEmail,
       commands: s.core.commands,
       approvalsEnabled: true,
       publicBaseUrl: "https://fixture.test",
@@ -4823,6 +4839,12 @@ describe("browser installation", () => {
       await s.execute();
       expect(s.effects).toEqual(["access:alice"]);
       expect(s.nativeReplies).toEqual(["Read-only command completed."]);
+      const savedRun = await s.runStore.get(owner);
+      expect(savedRun).toMatchObject({
+        userId: "access:alice",
+      });
+      if (mode === "access" || mode === "oauth") expect(savedRun).toMatchObject({ requesterProfileId: "slack:UALICE" });
+      else expect(savedRun?.requesterProfileId).toBeUndefined();
       expect(await s.send(args)).toMatchObject({
         wire: { result: { structuredContent: { admission: { status: "accepted", duplicate: true, runId: owner } } } },
       });

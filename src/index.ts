@@ -2037,7 +2037,8 @@ export async function runBot(): Promise<void> {
       },
       index: defaultRunRegistry,
       requesterName: (id) => browserWiring?.requesterName(id) ?? names.person(id),
-      requesterProfile: (id) => browserWiring?.requesterProfile(id) ?? Promise.resolve(undefined),
+      requesterProfile: (id, requesterProfileId) =>
+        browserWiring?.requesterProfile(id, requesterProfileId) ?? Promise.resolve(undefined),
       // The view-as picker's people (record 0053): the cache `viewAsPeople` keeps.
       people: () => viewAsPeople.current(),
       retention:

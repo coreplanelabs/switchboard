@@ -75,6 +75,8 @@ export interface RunSummary {
   sourceUrl?: string;
   /** `RunMeta.userName`: who started it, resolved. */
   userName?: string;
+  /** `RunMeta.requesterProfileId`: display-only profile lookup. */
+  requesterProfileId?: string;
   /** `RunMeta.authenticatedAs`: the bound credential behind the person, when there was one. */
   authenticatedAs?: string;
   /** The authenticated app that relayed this request for the credited person. */
@@ -192,6 +194,7 @@ export function summaryOf(run: RunState, now: number): RunSummary {
     ...(m?.repo !== undefined ? { repo: m.repo } : {}),
     ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m?.userName !== undefined ? { userName: m.userName } : {}),
+    ...(m?.requesterProfileId !== undefined ? { requesterProfileId: m.requesterProfileId } : {}),
     ...(m?.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
     ...(m?.postedBy !== undefined ? { postedBy: m.postedBy } : {}),
     ...(m?.authoritativeHistory ? { authoritativeHistory: true as const } : {}),

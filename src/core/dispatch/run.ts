@@ -544,6 +544,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.requesterProfileId !== undefined ? { requesterProfileId: msg.requesterProfileId } : {}),
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
       ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
       ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),

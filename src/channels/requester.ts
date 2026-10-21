@@ -19,7 +19,7 @@ import type { IncomingMessage } from "../core/types.js";
 export type PersonLookup = (email: string) => Promise<{ id: string; name?: string } | undefined>;
 
 /** The identity fields of the message a bound credential sends. */
-export type Requester = Pick<IncomingMessage, "userId" | "userName" | "authenticatedAs">;
+export type Requester = Pick<IncomingMessage, "userId" | "userName" | "requesterProfileId" | "authenticatedAs">;
 
 /** The requester for `credentialId` (`http:<subject>`, `mcp:<subject>`,
  *  `cli:local`): the person `email` names when the lookup finds one, else the

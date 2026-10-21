@@ -47,6 +47,8 @@ export interface RunMeta {
   /** Resolved display name of who started it (`IncomingMessage.userName`) — the
    *  source mark's hover says `via Slack · alice`, never a raw member id. */
   userName?: string;
+  /** Verified Slack profile for display on an Access-owned run; never authority. */
+  requesterProfileId?: string;
   /** The credential that authenticated the request when it was bound to the
    *  person `userId` names (`IncomingMessage.authenticatedAs`, authorization.md item 15). */
   authenticatedAs?: string;

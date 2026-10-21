@@ -46,3 +46,8 @@ export interface PersonProfile {
   name: string;
   avatarUrl?: string;
 }
+
+/** A Slack person used only to look up a current display profile. */
+export function isSlackProfileId(id: unknown): id is string {
+  return typeof id === "string" && /^slack:[UW][A-Z0-9]+$/.test(id);
+}
