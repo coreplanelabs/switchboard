@@ -6,7 +6,7 @@ import {
   leftBehindSentence,
   parseWorktreeCleanliness,
   worktreeCleanlinessScript,
-  collectPrivateTreeObservation,
+  inspectPrivateTreeObservation,
 } from "./residentCleanliness.js";
 
 describe("bounded native private-tree observation", () => {
@@ -27,11 +27,9 @@ describe("bounded native private-tree observation", () => {
     exitCode: exit,
   });
   it("returns measured counts only after both streams and a successful native exit", async () => {
-    expect(await collectPrivateTreeObservation(process(), "original-vm")).toMatchObject({
-      head: "b".repeat(40),
-      uncommittedChanges: 0,
-      untrackedNonIgnored: 0,
-      unpushedCommits: 1,
+    expect(await inspectPrivateTreeObservation(process(), "original-vm")).toMatchObject({
+      kind: "observed",
+      tree: { head: "b".repeat(40), uncommittedChanges: 0, untrackedNonIgnored: 0, unpushedCommits: 1 },
     });
   });
   it.each(["private stdout", "private stderr", "oversize bytes", "duplicate field", "different VM", "failed exit"])(
@@ -49,17 +47,53 @@ describe("bounded native private-tree observation", () => {
                 : scenario === "different VM"
                   ? process(metadata.replace("original-vm", "other-vm"))
                   : process(metadata, "", Promise.resolve(1));
-      expect(await collectPrivateTreeObservation(p, "original-vm")).toBeNull();
+      expect(await inspectPrivateTreeObservation(p, "original-vm")).toMatchObject({ kind: "unknown" });
     },
   );
   it("rejects a rejected exit promise and missing stream without leaking the error", async () => {
     expect(
-      await collectPrivateTreeObservation(
+      await inspectPrivateTreeObservation(
         process(metadata, "", Promise.reject(new Error("private process error"))),
         "original-vm",
       ),
-    ).toBeNull();
-    expect(await collectPrivateTreeObservation({ ...process(), stderr: null }, "original-vm")).toBeNull();
+    ).toMatchObject({ kind: "unknown" });
+    expect(await inspectPrivateTreeObservation({ ...process(), stderr: null }, "original-vm")).toMatchObject({
+      kind: "unknown",
+    });
+  });
+  it.each([
+    [20, "native-boot-unverified"],
+    [21, "private-directory-absent"],
+    [22, "private-directory-unverified"],
+    [23, "uid-processes-present"],
+    [24, "uid-processes-unverified"],
+    [25, "git-probe-failed"],
+    [124, "native-exit-unverified"],
+  ])("reports only a closed stage for native exit %i", async (exit, reason) => {
+    expect(
+      await inspectPrivateTreeObservation(process("private data", "", Promise.resolve(exit)), "original-vm"),
+    ).toEqual({
+      kind: "unknown",
+      reason,
+    });
+  });
+  it("distinguishes boot and stream failure without returning private output", async () => {
+    expect(
+      await inspectPrivateTreeObservation(process(metadata.replace("original-vm", "other-vm")), "original-vm"),
+    ).toEqual({
+      kind: "unknown",
+      reason: "native-boot-unverified",
+    });
+    expect(await inspectPrivateTreeObservation(process(metadata, "private error"), "original-vm")).toEqual({
+      kind: "unknown",
+      reason: "native-stream-unverified",
+    });
+    expect(
+      await inspectPrivateTreeObservation(process(metadata.replace("unpushed=1", "unpushed=invalid")), "original-vm"),
+    ).toEqual({
+      kind: "unknown",
+      reason: "git-probe-failed",
+    });
   });
 });
 
