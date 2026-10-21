@@ -14272,10 +14272,27 @@ export class ResidentDO extends Sandbox<Env> {
         );
       };
       const journal = new NativeOperationJournal(this.ctx.storage);
+      const native = {
+        request: async (value: Record<string, unknown>, timeout: number) => {
+          // Recovery has already checked the exact record and original owner.
+          // Wake a sleeping container so the scope can compare its current boot
+          // with the original boot before closing; waking never replays work.
+          if (!this.ctx.container?.running) {
+            if (
+              this.destroying ||
+              (await this.ctx.storage.get(CLEANUP_PENDING_KEY)) ||
+              (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))
+            )
+              throw new Error("native-scope runtime unavailable");
+            await this.start();
+          }
+          return this.nativeScopeTransport().request(value, timeout);
+        },
+      };
       const operator = await journal.recoverOperator(
         key,
         recordHash,
-        { request: (value, timeout) => this.nativeScopeTransport().request(value, timeout) },
+        native,
         async (record) =>
           "opOwner" in record &&
           key === `native-operation:${record.opOwner}` &&
