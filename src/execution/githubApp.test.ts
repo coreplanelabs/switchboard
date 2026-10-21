@@ -359,8 +359,54 @@ describe("resolveGithubToken", () => {
     );
     const mod = await freshModule();
     const err = await mod.resolveGithubToken().catch((e: unknown) => e);
-    expect((err as Error).message).toContain("HTTP 401");
+    expect((err as Error).message).toBe("GitHub App token mint failed: HTTP 401");
     expect((err as Error).message).not.toContain("ghp_");
+  });
+
+  it("a door token mint keeps safe JSON detail but omits malformed response headers", async () => {
+    configureApp();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          { message: "Resource not accessible by integration: https://private.example/repo?token=SECRET" },
+          {
+            status: 422,
+            headers: { "x-github-request-id": "PRIVATE/path", "x-ratelimit-remaining": "-1" },
+          },
+        ),
+      ),
+    );
+    const mod = await freshModule();
+    const error = await mod.resolveGithubDoorToken("read", "acme/private").catch((cause: unknown) => cause);
+    expect((error as Error).message).toBe(
+      "GitHub door token mint failed: HTTP 422; message Resource not accessible by integration: «redacted-url»",
+    );
+  });
+
+  it("keeps observed GitHub mint fields without copying a raw response body", async () => {
+    configureApp();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          {
+            message:
+              "Resource not accessible by integration: https://private.example/repo?token=SECRET ghp_123456789012345678901234567890\nPRIVATE_SECOND_LINE",
+          },
+          {
+            status: 403,
+            headers: { "x-github-request-id": "A1:B2", "x-ratelimit-remaining": "0", "retry-after": "120" },
+          },
+        ),
+      ),
+    );
+    const mod = await freshModule();
+    const error = await mod.resolveGithubToken().catch((cause: unknown) => cause);
+    expect((error as Error).message).toBe(
+      "GitHub App token mint failed: HTTP 403; request A1:B2; remaining 0; retry after 120s; message Resource not accessible by integration: «redacted-url» «redacted-github-token»",
+    );
+    expect((error as Error).message).not.toMatch(/private\.example|PRIVATE_SECOND_LINE|ghp_1234|SECRET/);
   });
 
   it("surfaces mint failures with the HTTP status", async () => {
@@ -402,6 +448,27 @@ describe("resolveGithubToken", () => {
     expect(mod.githubAppConfigured()).toBe(false);
     configureApp();
     expect(mod.githubAppConfigured()).toBe(true);
+  });
+});
+
+describe("resolveGithubIdentity", () => {
+  it("keeps a safe GitHub 403 message and request ID in the identity failure log", async () => {
+    process.env.GH_TOKEN = "fixture";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          { message: "Resource not accessible by integration: https://private.example/repo?token=SECRET" },
+          { status: 403, headers: { "x-github-request-id": "C3:D4" } },
+        ),
+      ),
+    );
+    const mod = await freshModule();
+    expect(await mod.resolveGithubIdentity()).toBeUndefined();
+    expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+      "[github] identity lookup failed: /user: HTTP 403; request C3:D4; message Resource not accessible by integration: «redacted-url»",
+    ]);
   });
 });
 
