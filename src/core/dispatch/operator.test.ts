@@ -171,7 +171,7 @@ describe("formal model schema and runtime agreement", () => {
                 model: "openai/gpt-6.1-sol",
               },
             }
-          : { ...value, model: "openai/gpt-6.1-sol" };
+          : { ...value, model: "openai/gpt-6.1-sol", effort: "high" };
       expect(schema.parse(supplied)).toEqual(supplied);
     }
   });
