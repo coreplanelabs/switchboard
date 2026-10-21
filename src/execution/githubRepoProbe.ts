@@ -1,4 +1,7 @@
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
+import { classificationOf } from "../core/trace/classify.js";
+import { tracedFetch } from "../core/trace/tracedFetch.js";
+import type { Span } from "../core/trace/types.js";
 
 // The repository vet of a `repo-cold` run (docs/reference/specs/execution.md item 18):
 // the resolver's probe for bare `owner/name` tokens on the machine class that
@@ -22,6 +25,8 @@ export interface GithubRepoProbeOptions {
    *  mints nothing — the vet is anonymous and the resolver is never asked. */
   scope?: GithubTokenScope;
   fetch?: typeof fetch;
+  /** The request's repository-resolution span, when one exists. */
+  span?: Span;
   /** The credential resolver; default: the App's installation token (or GH_TOKEN). */
   token?: (scope: GithubTokenScope) => Promise<string | null>;
 }
@@ -29,28 +34,56 @@ export interface GithubRepoProbeOptions {
 /** The probe `resolveRepoContext` takes: `true` binds, `false` refuses, `"unreachable"` reports. */
 export function githubRepoProbe(opts: GithubRepoProbeOptions): (slug: string) => Promise<boolean | "unreachable"> {
   const fetchImpl = opts.fetch ?? fetch;
-  const token = opts.token ?? ((scope) => resolveGithubToken(scope));
-  return async (slug) => {
-    if (!SLUG.test(slug)) return false;
+  const probe = async (slug: string, span?: Span): Promise<boolean | "unreachable"> => {
+    if (!SLUG.test(slug)) {
+      span?.setAttrs({ outcome: "invalid_slug" });
+      return false;
+    }
     let bearer: string | null;
     try {
-      bearer = opts.scope === undefined ? null : await token(opts.scope);
+      bearer =
+        opts.scope === undefined
+          ? null
+          : await (opts.token ?? ((scope) => resolveGithubToken(scope, span)))(opts.scope);
     } catch {
+      span?.setAttrs({ outcome: "credential_unverified" });
       return "unreachable";
     }
     const headers: Record<string, string> = { accept: "application/vnd.github+json", "user-agent": "switchboard" };
     if (bearer) headers.authorization = `Bearer ${bearer}`;
     let res: Response;
     try {
-      res = await fetchImpl(`https://api.github.com/repos/${slug}`, {
-        headers,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      res = await tracedFetch(
+        span,
+        `https://api.github.com/repos/${slug}`,
+        { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+        { route: "repository", name: "github.rest", fetchImpl },
+      );
+    } catch (error) {
+      span?.setAttrs({
+        outcome:
+          classificationOf(error)?.kind === "timeout" ||
+          (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
+            ? "timeout_unverified"
+            : "transport_unverified",
       });
-    } catch {
       return "unreachable";
     }
-    if (res.ok) return true;
-    if (res.status === 404) return false;
+    if (res.ok) {
+      span?.setAttrs({ outcome: "verified" });
+      return true;
+    }
+    if (res.status === 404) {
+      span?.setAttrs({ outcome: "not_visible" });
+      return false;
+    }
+    span?.setAttrs({ outcome: "http_unverified" });
     return "unreachable";
   };
+  return (slug) =>
+    opts.span
+      ? opts.span.span("github.repo_probe", (span) => probe(slug, span), {
+          ...(opts.scope ? { attrs: { scope: opts.scope } } : {}),
+        })
+      : probe(slug);
 }

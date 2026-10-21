@@ -1,5 +1,6 @@
 import { createSign } from "node:crypto";
 import { redactAndCap } from "../core/redact.js";
+import { classifyError, httpStatusCode } from "../core/trace/classify.js";
 import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 import { systemClock } from "../core/trace/clock.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
@@ -293,7 +294,10 @@ async function mintCore(scope: GithubTokenScope, span?: Span, signal?: AbortSign
   );
   if (!res.ok) {
     const errBody = await res.text().catch(() => "");
-    throw new Error(`GitHub App token mint failed: HTTP ${res.status} ${redactAndCap(errBody, 300)}`);
+    throw classifyError(new Error(`GitHub App token mint failed: HTTP ${res.status} ${redactAndCap(errBody, 300)}`), {
+      kind: "http",
+      code: httpStatusCode(res.status),
+    });
   }
   const data = (await res.json()) as { token: string; expires_at: string };
   const expiresAtMs = Date.parse(data.expires_at);

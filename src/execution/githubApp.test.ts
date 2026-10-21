@@ -373,6 +373,30 @@ describe("resolveGithubToken", () => {
     await expect(mod.resolveGithubToken()).rejects.toThrow(/HTTP 401/);
   });
 
+  it("records failed mint status or transport class without the response body in a trace", async () => {
+    configureApp();
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response("private-response-detail", { status: 401 }))
+        .mockRejectedValueOnce(new TypeError("private-network-detail")),
+    );
+    const mod = await freshModule();
+    const { createTracer } = await import("../core/trace/tracer.js");
+    const { recordingSink } = await import("../core/testing/recordingSink.js");
+    const log = recordingSink();
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [log] });
+
+    await expect(mod.resolveGithubToken("read", root)).rejects.toThrow(/HTTP 401/);
+    await expect(mod.resolveGithubToken("read", root)).rejects.toThrow(/private-network-detail/);
+    expect(log.ends.filter((entry) => entry.name === "github.token_mint")).toMatchObject([
+      { status: "error", errorKind: "http", errorCode: "401" },
+      { status: "error", errorKind: "transport" },
+    ]);
+    expect(JSON.stringify(log.ends)).not.toMatch(/private-response-detail|private-network-detail/);
+  });
+
   it("githubAppConfigured requires all three env vars", async () => {
     const mod = await freshModule();
     expect(mod.githubAppConfigured()).toBe(false);

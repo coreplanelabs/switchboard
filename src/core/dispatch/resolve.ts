@@ -285,7 +285,7 @@ export function resolveRepoTarget(
               : resolveRepoContext(
                   msg,
                   history,
-                  ...repoVetFor(profile, deps.config.config.execution?.resident),
+                  ...repoVetFor(profile, deps.config.config.execution?.resident, span),
                   ctx.records,
                   ctx.operatorRepo,
                   ctx.reviewBarePr,
@@ -426,8 +426,9 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
 function repoVetFor(
   profile: RunProfile,
   resident: ResidentExecutionConfig | undefined,
+  span: Span,
 ): [probe: RepoProbe | undefined, slugs: ResidentSlugs | undefined] {
   if (profile.machine === "repo-cold")
-    return [githubRepoProbe({ scope: githubTokenScopeFor(profile.identity) }), undefined];
+    return [githubRepoProbe({ scope: githubTokenScopeFor(profile.identity), span }), undefined];
   return [residentOnboardedProbe(resident), residentSlugsLister(resident)];
 }
