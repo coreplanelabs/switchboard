@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.307.0](https://github.com/coreplanelabs/switchboard/compare/v1.306.0...v1.307.0) (2026-10-21)
+
+
+### Features
+
+* **core:** check current access to saved source input ([#3383](https://github.com/coreplanelabs/switchboard/issues/3383)) ([9170006](https://github.com/coreplanelabs/switchboard/commit/91700064abb4e0c1a18935d7f38337f37f4c56d5))
+* **core:** correlate app failures with Cloudflare invocations ([#3374](https://github.com/coreplanelabs/switchboard/issues/3374)) ([234de51](https://github.com/coreplanelabs/switchboard/commit/234de51ed38c6c4c75d48fd254619fd973e60925))
+* **core:** inspect original storage writes and receipts ([#3350](https://github.com/coreplanelabs/switchboard/issues/3350)) ([8fac05b](https://github.com/coreplanelabs/switchboard/commit/8fac05bd2f27109268731666b24ea0f470339e92))
+* **core:** preserve source input intent through reclaim ([#3386](https://github.com/coreplanelabs/switchboard/issues/3386)) ([a1019d4](https://github.com/coreplanelabs/switchboard/commit/a1019d4ce1084a5b58f5ec8f18d915cde05f89ab))
+* **core:** trace storage receipt and client acceptance ([#3372](https://github.com/coreplanelabs/switchboard/issues/3372)) ([2f5cf0d](https://github.com/coreplanelabs/switchboard/commit/2f5cf0df47df66d71008502cdd5107597f1fda3b))
+* **review:** view GitHub checks in the PR panel ([#3382](https://github.com/coreplanelabs/switchboard/issues/3382)) ([fe764c1](https://github.com/coreplanelabs/switchboard/commit/fe764c1a95a6b54c12711476e301a5f2819d21c0))
+* **sandbox:** retain version and timeout evidence for run diagnosis ([#3384](https://github.com/coreplanelabs/switchboard/issues/3384)) ([2299646](https://github.com/coreplanelabs/switchboard/commit/2299646097650f1909fe1403a63c73b3d18c7d53))
+
+
+### Bug fixes
+
+* **core:** finish refused uploads before responding ([#3346](https://github.com/coreplanelabs/switchboard/issues/3346)) ([203a0c6](https://github.com/coreplanelabs/switchboard/commit/203a0c6ce6831885ad09ebef37721111730908fb))
+* **core:** hold unconfirmed command effects through recovery ([#3381](https://github.com/coreplanelabs/switchboard/issues/3381)) ([d4a435d](https://github.com/coreplanelabs/switchboard/commit/d4a435d3b5c89ef8e625125ce774ff2043126647))
+* **core:** prepare the current base before PR review ([#3379](https://github.com/coreplanelabs/switchboard/issues/3379)) ([51ba8e8](https://github.com/coreplanelabs/switchboard/commit/51ba8e8e7b342b2574735a4d64ddcfaee054946e))
+* **core:** protect held workspace refreshes and explain fallback ([#3375](https://github.com/coreplanelabs/switchboard/issues/3375)) ([1969051](https://github.com/coreplanelabs/switchboard/commit/19690514c5198a5abe757001374b79392f7776c5))
+* **core:** recognize referenced platform storage resets ([#3348](https://github.com/coreplanelabs/switchboard/issues/3348)) ([3d4bba8](https://github.com/coreplanelabs/switchboard/commit/3d4bba890b112cfd87e6f9ac483cc6e71fc76f2f))
+* **core:** record command status from native runtime results ([#3329](https://github.com/coreplanelabs/switchboard/issues/3329)) ([194f544](https://github.com/coreplanelabs/switchboard/commit/194f5448a16244ffe86f7d6e6427bf67aeee444c))
+* **core:** recover stalled state guard reads within the request budget ([#3369](https://github.com/coreplanelabs/switchboard/issues/3369)) ([50b9eab](https://github.com/coreplanelabs/switchboard/commit/50b9eabe7f9346676c2f20b679a1ca2f031e3ab1))
+* **core:** resume reviews after sandbox control loss ([#3368](https://github.com/coreplanelabs/switchboard/issues/3368)) ([c2c7a30](https://github.com/coreplanelabs/switchboard/commit/c2c7a30bf3f6a97fa778ac1fab33e0bbc60503f0))
+* **core:** retain source validation failures in telemetry ([#3378](https://github.com/coreplanelabs/switchboard/issues/3378)) ([de607d1](https://github.com/coreplanelabs/switchboard/commit/de607d1b8137c3d3bb93aeb1aec099766c8ef462))
+* **deploy:** distinguish staging acceptance outcomes ([#3371](https://github.com/coreplanelabs/switchboard/issues/3371)) ([1dfdd70](https://github.com/coreplanelabs/switchboard/commit/1dfdd7074e1fa649f2dade899364126a2aa3e931))
+* **deploy:** recover interrupted staging uploads ([#3345](https://github.com/coreplanelabs/switchboard/issues/3345)) ([d6c78df](https://github.com/coreplanelabs/switchboard/commit/d6c78dfb43300eb1381abfa411373f109e5f4302))
+* **deploy:** recover transient Resident application reads ([#3367](https://github.com/coreplanelabs/switchboard/issues/3367)) ([ac4d786](https://github.com/coreplanelabs/switchboard/commit/ac4d786b751047d5c3159d2fe7248a567a13af8e))
+* **deploy:** stop before upload on closed native holds ([#3377](https://github.com/coreplanelabs/switchboard/issues/3377)) ([2d9306b](https://github.com/coreplanelabs/switchboard/commit/2d9306b252a2efb0fddea6c0550f9f7717205726))
+* **deploy:** verify Cloudflare status for every stack Worker ([#3385](https://github.com/coreplanelabs/switchboard/issues/3385)) ([389090b](https://github.com/coreplanelabs/switchboard/commit/389090bbc90ec6d173397ee77739985ddf5bc520))
+* **resident:** allow exact unknown restore disposal on full reset ([#3359](https://github.com/coreplanelabs/switchboard/issues/3359)) ([3d65375](https://github.com/coreplanelabs/switchboard/commit/3d65375e5d1f044c3c3db0fa4ccca88cc23faebe))
+* **resident:** explain exact native reset refusals ([#3361](https://github.com/coreplanelabs/switchboard/issues/3361)) ([3d2cb26](https://github.com/coreplanelabs/switchboard/commit/3d2cb26091ad6ada7b29478bb55a5c4fbb0492e4))
+* **resident:** name a retired stored operation in the deploy receipt ([#3366](https://github.com/coreplanelabs/switchboard/issues/3366)) ([75723ac](https://github.com/coreplanelabs/switchboard/commit/75723acaf05ada962688c4aa22e53b8848763db9))
+* **resident:** resume interrupted producer cleanup ([#3376](https://github.com/coreplanelabs/switchboard/issues/3376)) ([99507a6](https://github.com/coreplanelabs/switchboard/commit/99507a6df9c261274eefa257d51c896df43af350))
+* **resident:** retry interrupted container destruction ([#3365](https://github.com/coreplanelabs/switchboard/issues/3365)) ([fcf025a](https://github.com/coreplanelabs/switchboard/commit/fcf025a34803c5635e7aad1a79844094b0500553))
+* **review:** pin every input to the PR comparison ([#3380](https://github.com/coreplanelabs/switchboard/issues/3380)) ([72701cd](https://github.com/coreplanelabs/switchboard/commit/72701cd57d77dde0a5819ba4ec1361a6eaf8015b))
+* **runs:** settle stale leases without closing finished runs again ([#3347](https://github.com/coreplanelabs/switchboard/issues/3347)) ([cc620a6](https://github.com/coreplanelabs/switchboard/commit/cc620a679dca8b159727bee196d32defa7c8d7e0))
+* **runs:** show unconfirmed execution without a live pulse ([#3349](https://github.com/coreplanelabs/switchboard/issues/3349)) ([63de4c4](https://github.com/coreplanelabs/switchboard/commit/63de4c4b138bb57c8283990a628d45079640ac00))
+* **sandbox:** record container stop and alarm failures ([#3370](https://github.com/coreplanelabs/switchboard/issues/3370)) ([d879e22](https://github.com/coreplanelabs/switchboard/commit/d879e22c442914d78b0ab11e01b36a30217f8fd5))
+* **tools:** use typed status and hold uncertain uploads ([#3336](https://github.com/coreplanelabs/switchboard/issues/3336)) ([1c39526](https://github.com/coreplanelabs/switchboard/commit/1c395263ad118a670db4a3bf53e505d240f8982f))
+
 ## [1.306.0](https://github.com/coreplanelabs/switchboard/compare/v1.305.1...v1.306.0) (2026-10-19)
 
 
