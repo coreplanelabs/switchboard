@@ -71,6 +71,7 @@ import {
   type UncertainStoreDiagnosis,
 } from "../storeFailure.js";
 import { preserveHarnessPolicy } from "./checkpointState.js";
+import { sourceInputIntentsOf } from "./sourceInputIntent.js";
 import { assignLedgerLiveState } from "./decisions.js";
 import type { RunLiveState } from "../runLiveState.js";
 import { inboxPushSequence, messageFromInbox } from "./inboxMessage.js";
@@ -2473,6 +2474,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       if (this.detached || this.finished || this.finishLanding) return;
       const next = preserveHarnessPolicy(this.state, { ...this.state, ...patch });
       if (!next) throw new PermanentStoreError("run state conflicts with original session policy");
+      if (next.sourceInputIntents !== undefined) {
+        const intents = sourceInputIntentsOf(next.sourceInputIntents);
+        if (!intents) throw new PermanentStoreError("run state has invalid source input intent");
+        // Storage uses this same form. A lost reply must reconcile the bytes
+        // the store saved, regardless of the caller's JSON field order.
+        next.sourceInputIntents = intents;
+      }
       this.state = next;
       this.stateDirty = true;
       this.stateVersion++;

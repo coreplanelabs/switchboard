@@ -1093,6 +1093,25 @@ These checks also protect context derived from source input, including summaries
 | A private GitHub input reaches a model only with its original task identity, current App and person-level permission, and verified private destination. Permission revoked while request bytes wait prevents the upstream call. | `[unit]` `src/channels/githubActivityAccess.test.ts::current GitHub activity access::rechecks private GitHub input access through the shared context guard` |
 | Pending-input retention, exact native input acknowledgment and enabled delivery remain unqualified | `[gap]` No source producer or runtime source reader is enabled. Current context access alone does not authorize delivery, target selection or inbox settlement. |
 
+### Original native input intent
+
+An input intent records the host-assigned ID for one source inbox row before native submission. `sourceInputIntents` keeps that ID, original run and owner generation, requester and destination, native session and launch ordinal, exact row witness, source reference and rendered-input hash in existing live run state. `prepared` can advance to `begun`; neither phase proves that the native process accepted input. A later native receipt must also retain Pi's generated entry ID or OpenCode's original input identity.
+
+Only the current owner-fenced state writer can add a prepared intent or advance its phase, and only against previously saved matching native session facts and a begun launch. Ordinary state updates preserve all original entries. Reclaim changes the current writer, not an input's original generation. Unsupported, unsafe, oversized or conflicting data is refused rather than replaced or truncated. The archive task guard restores only its task field; the live-state guard checks input intents against the complete current state.
+
+Each intent refusal reports one warning with the canonical run ID when available and a closed guard reason. The warning includes no input metadata, source text, native session or exception details. Valid writes and state without input intents produce no warning.
+
+This is a live-state storage contract. It does not validate source permission or the canonical row digest, submit native input, acknowledge consumption, retain pending input after terminal finish, or activate delivery. No production caller creates these intents yet. Those paths must be qualified together before enabling a producer.
+
+| Criterion | Proof |
+| --- | --- |
+| Omitted state preserves original input coordinates; replacement, aliases, deletion, unsafe data and unsupported versions are refused | `[unit]` `src/core/runLedger/checkpointState.test.ts::original source input intent custody::*` |
+| The owning in-memory store binds first preparation to the current owner and previously saved native session; reclaim preserves original identity and begun cannot roll back | `[unit]` `src/core/runLedger/checkpointState.test.ts::source input intent state transaction::*` |
+| The actual SQLite store and a new client retain the same original input through omission and reclaim, reject stale writers and replacements, and preserve the original generation | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source-input context readers in SQLite::retains %s input intent through owner changes in SQLite` |
+| The tracked writer uses the same normalized input metadata as storage before hashing the expected state, including reordered nested fields. After a lost reply, exact canonical commitment permits a later distinct state write; absent original data stays held without replay. | `[unit]` `src/core/runLedger/writeThrough.test.ts::uncertain canonical boundaries::retains the exact original input after a lost state reply: committed=%s reordered=%s` |
+| Input refusals emit one bounded guard reason and canonical owner ID, with no private metadata; valid or unrelated state stays silent | `[unit]` `src/core/runLedger/checkpointState.test.ts::original source input intent custody::reports one bounded guard reason per input refusal without private metadata` |
+| Canonical row/source admission, trusted native submission, exact native receipt and committed checkpoint acknowledgment, and terminal pending-input retention remain unqualified | `[gap]` No source input sender or settlement caller is enabled. |
+
 ## Retained original source tasks
 
 The optional version 1 `sourceTask` snapshot stores the original orchestrator coordinates and the same eight task fields as the live fold-target projection: repository, branch, base branch, input head, PR number, accepted operation-target data, native GitHub identity and record task key. These are data to compare, not a requester, credential, current permission or executable action target. The complete snapshot is bounded to 16 KiB; unsafe data, unknown fields and unsupported versions stay unproved.

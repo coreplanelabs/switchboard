@@ -1,5 +1,176 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { preserveCheckpointState } from "./checkpointState.js";
+import { testSourceInputIntent as inputIntent } from "../testing/sourceInputs.js";
+import { sourceInputIntentsOf } from "./sourceInputIntent.js";
+
+const inputOwner = {
+  runId: "source-consumer",
+  ownerGen: "g1",
+  meta: { userId: "cli:alice", channelId: "cli:main", threadKey: "cli:thread" },
+};
+
+describe("original source input intent custody", () => {
+  const nativeState = {
+    harnessLaunch: {
+      version: 1,
+      harness: "pi",
+      phase: "begun",
+      ordinal: 0,
+      sessionPolicy: { version: 1, commandRoute: "native", identity: "write" },
+    },
+    harness: {
+      harness: "pi",
+      launchOrdinal: 0,
+      sessionFile: "original-native-session",
+      sessionPolicy: { version: 1, commandRoute: "native", identity: "write" },
+    },
+  };
+
+  it("preserves original input coordinates when an ordinary state update omits them", () => {
+    const original = inputIntent();
+    expect(preserveCheckpointState({ sourceInputIntents: original }, { progress: "later" })).toEqual({
+      progress: "later",
+      sourceInputIntents: original,
+    });
+  });
+
+  it("rejects replacement, deletion and unsupported original state", () => {
+    const original = inputIntent();
+    for (const changed of [
+      { ...original, version: 99 },
+      { version: 1, entries: [] },
+      { ...original, entries: [{ ...original.entries[0], renderedHash: "b".repeat(64) }] },
+      { ...original, entries: [{ ...original.entries[0], witness: { ...original.entries[0]!.witness, seq: 9 } }] },
+    ])
+      expect(
+        preserveCheckpointState({ sourceInputIntents: original }, { sourceInputIntents: changed }),
+      ).toBeUndefined();
+    expect(preserveCheckpointState({ sourceInputIntents: { version: 99 } }, {})).toBeUndefined();
+    expect(preserveCheckpointState({ sourceInputIntents: original }, {})).toEqual({ sourceInputIntents: original });
+  });
+
+  it("admits only prepared metadata against the acknowledged native session and canonical owner", () => {
+    const state = inputIntent();
+    expect(preserveCheckpointState(nativeState, { sourceInputIntents: state }, false, inputOwner)).toEqual({
+      sourceInputIntents: state,
+      harnessLaunch: nativeState.harnessLaunch,
+      harness: nativeState.harness,
+    });
+    expect(preserveCheckpointState(nativeState, { sourceInputIntents: state })).toBeUndefined();
+    for (const owner of [
+      { ...inputOwner, runId: "foreign" },
+      { ...inputOwner, ownerGen: "g2" },
+      { ...inputOwner, meta: { ...inputOwner.meta, userId: "cli:other" } },
+    ])
+      expect(preserveCheckpointState(nativeState, { sourceInputIntents: state }, false, owner)).toBeUndefined();
+    for (const native of [
+      { ...nativeState.harness, ended: true },
+      { ...nativeState.harness, sessionFile: "/foreign/session.jsonl" },
+      { ...nativeState.harness, launchOrdinal: 1 },
+      undefined,
+    ])
+      expect(
+        preserveCheckpointState({ ...nativeState, harness: native }, { sourceInputIntents: state }, false, inputOwner),
+      ).toBeUndefined();
+  });
+
+  it("keeps begun monotonic and preserves original writer coordinates after reclaim", () => {
+    const original = inputIntent(),
+      begun = structuredClone(original);
+    begun.entries[0]!.phase = "begun";
+    const prior = { ...nativeState, sourceInputIntents: original };
+    const nextOwner = { ...inputOwner, ownerGen: "g2" };
+    expect(preserveCheckpointState(prior, { sourceInputIntents: begun }, false, nextOwner)).toEqual({
+      sourceInputIntents: begun,
+      harnessLaunch: nativeState.harnessLaunch,
+      harness: nativeState.harness,
+    });
+    expect(begun.entries[0]!.owner.gen).toBe("g1");
+    expect(
+      preserveCheckpointState(
+        { ...nativeState, sourceInputIntents: begun },
+        { sourceInputIntents: original },
+        false,
+        nextOwner,
+      ),
+    ).toBeUndefined();
+    expect(preserveCheckpointState(nativeState, { sourceInputIntents: begun }, false, inputOwner)).toBeUndefined();
+  });
+
+  it("reports one bounded guard reason per input refusal without private metadata", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const original = inputIntent();
+      expect(preserveCheckpointState(nativeState, { sourceInputIntents: original }, false, inputOwner)).toMatchObject({
+        sourceInputIntents: original,
+      });
+      expect(preserveCheckpointState({}, { progress: "unchanged" })).toEqual({ progress: "unchanged" });
+      expect(warn.mock.calls).toEqual([]);
+      const changed = structuredClone(original);
+      changed.entries[0]!.renderedHash = "b".repeat(64);
+      const begun = structuredClone(original);
+      begun.entries[0]!.phase = "begun";
+      for (const [prior, next] of [
+        [nativeState, { version: 99, privateMarker: "PRIVATE_SOURCE_TEXT" }],
+        [{ ...nativeState, sourceInputIntents: original }, changed],
+        [{ ...nativeState, harness: undefined }, original],
+        [nativeState, begun],
+      ] as const)
+        expect(preserveCheckpointState(prior, { sourceInputIntents: next }, false, inputOwner)).toBeUndefined();
+      expect(warn.mock.calls).toEqual([
+        ["[runs/state] source input intent refused", { runId: "source-consumer", reason: "invalid-metadata" }],
+        ["[runs/state] source input intent refused", { runId: "source-consumer", reason: "original-changed" }],
+        ["[runs/state] source input intent refused", { runId: "source-consumer", reason: "owner-or-session" }],
+        ["[runs/state] source input intent refused", { runId: "source-consumer", reason: "new-intent" }],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("refuses input aliases and unsafe metadata without evaluating accessors", () => {
+    const original = inputIntent();
+    expect(sourceInputIntentsOf(original)).toEqual(original);
+    const alias = structuredClone(original.entries[0]!);
+    alias.id = "replacement-id";
+    alias.witness.seq = 9;
+    expect(sourceInputIntentsOf({ version: 1, entries: [original.entries[0], alias] })).toBeUndefined();
+    expect(sourceInputIntentsOf({ ...original, accepted: true })).toBeUndefined();
+    expect(
+      sourceInputIntentsOf({
+        ...original,
+        entries: Array.from({ length: 65 }, (_, i) => ({
+          ...original.entries[0]!,
+          id: `input-${i}`,
+          witness: { ...original.entries[0]!.witness, seq: i + 1 },
+          reference: {
+            ...original.entries[0]!.reference,
+            receipt: { ...original.entries[0]!.reference.receipt, key: `source:${i.toString(16).padStart(64, "0")}` },
+          },
+        })),
+      }),
+    ).toBeUndefined();
+    expect(
+      sourceInputIntentsOf({
+        ...original,
+        entries: [{ ...original.entries[0]!, native: { ...original.entries[0]!.native, sessionId: "x".repeat(4097) } }],
+      }),
+    ).toBeUndefined();
+    let reads = 0;
+    const unsafe = Object.defineProperty({}, "version", {
+      enumerable: true,
+      get() {
+        reads++;
+        return 1;
+      },
+    });
+    expect(sourceInputIntentsOf(unsafe)).toBeUndefined();
+    expect(reads).toBe(0);
+    const saved = preserveCheckpointState({ sourceInputIntents: original }, {})!;
+    original.entries[0]!.owner.gen = "changed";
+    expect(saved.sourceInputIntents).toMatchObject({ version: 1, entries: [{ owner: { gen: "g1" } }] });
+  });
+});
 const policy = { version: 1, commandRoute: "hosted-review", identity: "read" };
 const facts = {
   harness: "pi",
@@ -66,6 +237,87 @@ describe("original session policy custody", () => {
 });
 
 import { InMemoryRunLedger } from "./inMemory.js";
+describe("source input intent state transaction", () => {
+  it.each(["pi", "opencode"] as const)("keeps %s original intent through omission and reclaim", async (harness) => {
+    const ledger = new InMemoryRunLedger(() => 1000);
+    const original = inputIntent(harness),
+      entry = original.entries[0]!;
+    const launch = { version: 1, harness, phase: "prepared", ordinal: 0, sessionPolicy: policy };
+    expect(
+      await ledger.claim({
+        runId: "source-consumer",
+        threadKey: "cli:thread",
+        gen: "g1",
+        startedAt: 1,
+        leaseMs: 10000,
+        system: "original",
+        tools: [],
+        meta: inputOwner.meta,
+        state: { harnessLaunch: launch },
+      }),
+    ).toMatchObject({ ok: true });
+    // Claim and generic state paths cannot backfill input metadata without original native facts.
+    expect(await ledger.setState("source-consumer", "g1", { sourceInputIntents: original })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await ledger.setState("source-consumer", "g1", { harnessLaunch: { ...launch, phase: "begun" } })).toEqual({
+      ok: true,
+    });
+    const native = {
+      harness,
+      launchOrdinal: 0,
+      sessionPolicy: policy,
+      ...(harness === "pi" ? { sessionFile: entry.native.sessionId } : { sessionID: entry.native.sessionId }),
+    };
+    expect(await ledger.setState("source-consumer", "g1", { harness: native })).toEqual({ ok: true });
+    for (const changed of [
+      { ...entry, owner: { ...entry.owner, runId: "foreign" } },
+      { ...entry, owner: { ...entry.owner, gen: "g2" } },
+      { ...entry, owner: { ...entry.owner, requester: "cli:other" } },
+      { ...entry, native: { ...entry.native, sessionId: "foreign-session" } },
+      { ...entry, native: { ...entry.native, launchOrdinal: 1 } },
+      { ...entry, phase: "begun" },
+    ])
+      expect(
+        await ledger.setState("source-consumer", "g1", { sourceInputIntents: { version: 1, entries: [changed] } }),
+      ).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.setState("source-consumer", "g1", { sourceInputIntents: original })).toEqual({ ok: true });
+    expect(await ledger.setState("source-consumer", "g1", { progress: "later" })).toEqual({ ok: true });
+    expect(await ledger.peekInbox("source-consumer", "g1", 0)).toMatchObject({
+      ok: true,
+      boundary: { state: { progress: "later", sourceInputIntents: original } },
+    });
+    expect(await ledger.handoff("g1", ["source-consumer"])).toEqual({ marked: ["source-consumer"] });
+    expect(await ledger.reclaim("g2", 2000, 10000)).toMatchObject([
+      { row: { ownerGen: "g2", state: { sourceInputIntents: original } } },
+    ]);
+    const begun = structuredClone(original);
+    begun.entries[0]!.phase = "begun";
+    expect(await ledger.setState("source-consumer", "g1", { sourceInputIntents: begun })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await ledger.setState("source-consumer", "g2", { sourceInputIntents: begun })).toEqual({ ok: true });
+    for (const changed of [
+      original,
+      { version: 1, entries: [] },
+      { version: 99, entries: begun.entries },
+      { version: 1, entries: [{ ...begun.entries[0], id: "replacement-input" }] },
+    ])
+      expect(await ledger.setState("source-consumer", "g2", { sourceInputIntents: changed })).toEqual({
+        ok: false,
+        reason: "fenced",
+      });
+    expect(await ledger.setState("source-consumer", "g2", {})).toEqual({ ok: true });
+    expect(await ledger.peekInbox("source-consumer", "g2", 0)).toMatchObject({
+      ok: true,
+      boundary: {
+        state: { sourceInputIntents: { entries: [{ id: "source-input-one", phase: "begun", owner: { gen: "g1" } }] } },
+      },
+    });
+  });
+});
 describe("durable launch state transaction", () => {
   it.each(["pi", "opencode"] as const)(
     "preserves %s intent and rejects phase or permission rollback",

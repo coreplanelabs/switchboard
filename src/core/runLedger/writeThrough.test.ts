@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { captureSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
+import { testSourceInputIntent } from "../testing/sourceInputs.js";
 import type { CoordinatorReconcileEffect, CoordinatorReconcileReceipt } from "../coordinator/workflowReconciliation.js";
 import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
@@ -826,6 +827,90 @@ describe("unknown terminal admission hold", () => {
 });
 
 describe("uncertain canonical boundaries", () => {
+  it.each([
+    [true, false],
+    [true, true],
+    [false, false],
+    [false, true],
+  ])(
+    "retains the exact original input after a lost state reply: committed=%s reordered=%s",
+    async (committed, reordered) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      const original = testSourceInputIntent(),
+        entry = original.entries[0]!;
+      entry.owner = {
+        runId: "r1",
+        gen: "gen-A",
+        requester: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+      };
+      entry.reference.root = {
+        runId: "r1",
+        requester: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+      };
+      entry.witness.runId = "r1";
+      const reverseFields = (value: unknown): unknown => {
+        if (Array.isArray(value)) return value.map(reverseFields);
+        if (value && typeof value === "object")
+          return Object.fromEntries(
+            Object.entries(value)
+              .reverse()
+              .map(([key, field]) => [key, reverseFields(field)]),
+          );
+        return value;
+      };
+      const supplied = reordered ? reverseFields(original) : original;
+      const writes: string[] = [];
+      const ledger = overriding(inner, {
+        setState: async (...args) => {
+          if (args[2].sourceInputIntents !== undefined) {
+            writes.push(JSON.stringify(args[2]));
+            if (writes.length === 1) {
+              if (committed) expect(await inner.setState(...args)).toEqual({ ok: true });
+              throw new UncertainStoreError(
+                "input intent reply unavailable",
+                await storeRequestWitness("/runs/state", JSON.stringify(args)),
+              );
+            }
+          }
+          return inner.setState(...args);
+        },
+      });
+      const h = harness({ ledger }),
+        run = (await openRun(h.wt, openReq()))!;
+      try {
+        const policy = { version: 1, commandRoute: "native", identity: "write" };
+        const launch = { version: 1, harness: "pi", phase: "prepared", ordinal: 0, sessionPolicy: policy };
+        expect(await run.commitState({ harnessLaunch: launch })).toBe("ok");
+        expect(await run.commitState({ harnessLaunch: { ...launch, phase: "begun" } })).toBe("ok");
+        expect(
+          await run.commitState({
+            harness: { harness: "pi", launchOrdinal: 0, sessionFile: entry.native.sessionId, sessionPolicy: policy },
+          }),
+        ).toBe("ok");
+        expect(await run.commitState({ sourceInputIntents: supplied })).toBe("unavailable");
+        const held = structuredClone(run.writeBoundaryFailure);
+        expect(held).toMatchObject({ kind: "state", runId: "r1", gen: "gen-A" });
+        expect(await run.commitState({ progress: "later" })).toBe(committed ? "ok" : "unavailable");
+        if (committed) {
+          expect(inner.live.get("r1")?.state).toMatchObject({ progress: "later", sourceInputIntents: original });
+          expect(writes).toHaveLength(2);
+          expect(writes[0]).not.toBe(writes[1]);
+        } else {
+          expect(run.writeBoundaryFailure).toEqual(held);
+          expect(inner.live.get("r1")?.state).not.toHaveProperty("sourceInputIntents");
+          expect(writes).toHaveLength(1);
+        }
+        expect(JSON.parse(writes[0]!).sourceInputIntents).toEqual(original);
+        expect(h.sleeps).toEqual([]);
+      } finally {
+        await run.close();
+      }
+    },
+  );
   function deferred() {
     let resolve!: () => void;
     const promise = new Promise<void>((done) => (resolve = done));

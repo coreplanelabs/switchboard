@@ -8022,9 +8022,12 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!restoredChecks) return undefined;
     if (restoredChecks.checks !== undefined) incoming = { ...incoming, checkExecutions: restoredChecks.checks };
     if (evidence?.sourceTask !== undefined) {
-      const retainedTask = preserveCheckpointState({ sourceTask: evidence.sourceTask }, incoming);
+      const retainedTask = preserveCheckpointState(
+        { sourceTask: evidence.sourceTask },
+        { sourceTask: incoming.sourceTask },
+      );
       if (!retainedTask || !workEvidenceBelongsToRun(retainedTask, owner)) return undefined;
-      incoming = retainedTask;
+      incoming = { ...incoming, ...retainedTask };
     }
     const baseline =
       evidence && Object.hasOwn(evidence, "branchIdentityBaseline")
@@ -8990,7 +8993,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         if (!restored) return { ok: false, reason: "fenced" };
         state = restored;
         const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
-        const preserved = preserveCheckpointState(row.state, state, mintSeed);
+        const preserved = preserveCheckpointState(row.state, state, mintSeed, row);
         if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }, row.meta))
           return { ok: false, reason: "fenced" };
         // A retry may follow a committed write with a lost RPC reply. An exact
