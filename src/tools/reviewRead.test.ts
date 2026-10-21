@@ -158,7 +158,16 @@ describe("review_read", () => {
     ctx.executor = new LocalExecutor(root);
     ctx.checkout = () => tmpdir();
     expect(await read({ kind: "file", path: "unicode.txt" }, ctx)).toEqual({
-      error: "Git source could not be read completely within the 10 MiB limit",
+      error: "Git source checkout head failed",
+    });
+  });
+
+  it("names failed Git reads without reporting a false size limit or private path", async () => {
+    const ctx = context();
+    ctx.reviewReadTarget = () => ({ repo: "example/project", pr: 7, head, baseRef: "main", base: "0".repeat(40) });
+    expect(await read({ kind: "diff" }, ctx)).toEqual({ error: "Git source merge base failed" });
+    expect(await read({ kind: "file", path: "private-token-marker.txt" })).toEqual({
+      error: "Git source file read failed",
     });
   });
 
