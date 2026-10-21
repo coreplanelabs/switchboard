@@ -20,6 +20,8 @@ import type { createOrganizationAuthentication } from "./organizationAuthenticat
 import type { HomeCommandSeed } from "./webSeed.js";
 import type { HomeDestination } from "./homeSeed.js";
 import { createHomeAccessEpoch } from "./homeAccessEpoch.js";
+import { closedStage, type ClosedStageName } from "../core/trace/closedStage.js";
+import type { Span, TraceOptions } from "../core/trace/types.js";
 import { samePrivateDestination, type OrganizationPrivateAudience } from "../core/dispatch/privateDestination.js";
 import {
   originalOrganizationDispatchOf,
@@ -137,53 +139,82 @@ export function createHomeHost(options: HomeHostOptions) {
       expiresAt: row.expiresAt,
     };
   }
-  async function privateHistory(request: Omit<OrganizationExecutionRequest, "io">): Promise<TextTurn[]> {
-    const current = await options.authentication.resolveEnvelope(request.envelope);
+  async function privateHistory(
+    request: Omit<OrganizationExecutionRequest, "io">,
+    trace?: TraceOptions,
+  ): Promise<TextTurn[]> {
+    const timed = async <T>(name: ClosedStageName, work: (child?: Span) => Promise<T> | T): Promise<T> =>
+      trace?.span ? closedStage(trace.span, name, work) : work();
+    const current = await timed("home.history.resolve_initial", () =>
+      options.authentication.resolveEnvelope(request.envelope),
+    );
     if (current.status !== "resolved")
       throw historyFailure("history_conversation_unavailable", "The private conversation is unavailable.");
     if (!current.privateSource || request.envelope.actor.stream === null) return [];
     const captured = request.envelope.sourceReference?.capturedPrivateEpoch;
-    if (captured && captured !== (await currentEpoch({ actor: current.actor, authentication: current.authentication })))
+    if (
+      captured &&
+      captured !==
+        (await timed("home.history.epoch_initial", (child) =>
+          currentEpoch({ actor: current.actor, authentication: current.authentication }, { span: child }),
+        ))
+    )
       throw historyFailure("history_epoch_unavailable", "The private conversation is unavailable.");
     const history =
       request.envelope.sourceReference?.contextMode === "request"
         ? { status: "stream_tail" as const, entries: [] }
-        : await options.organization.streamTail(current.authentication, 100);
+        : await timed("home.history.stream_tail", () => options.organization.streamTail(current.authentication, 100));
     if (history.status !== "stream_tail")
       throw historyFailure("history_tail_unavailable", "The private conversation is unavailable.");
-    const final = await options.authentication.resolveEnvelope(request.envelope);
+    const final = await timed("home.history.resolve_after_tail", () =>
+      options.authentication.resolveEnvelope(request.envelope),
+    );
     if (
       final.status !== "resolved" ||
       !final.privateSource ||
-      (captured && captured !== (await currentEpoch({ actor: final.actor, authentication: final.authentication })))
+      (captured &&
+        captured !==
+          (await timed("home.history.epoch_after_tail", (child) =>
+            currentEpoch({ actor: final.actor, authentication: final.authentication }, { span: child }),
+          )))
     )
       throw historyFailure("history_after_tail_unavailable", "The private conversation is unavailable.");
-    const turns: TextTurn[] = [];
-    for (const entry of history.entries) {
-      if (entry.receiptId === request.receipt.id || entry.role === "receipt") continue;
-      const context = await options.historyContext?.(
-        entry.receiptId,
-        { actor: final.actor, authentication: final.authentication },
-        request,
-        entry.role as "user" | "assistant",
-      );
-      turns.push({
-        role: entry.role as "user" | "assistant",
-        text: entry.content,
-        ...(entry.role === "user" && entry.authorId ? { user: entry.authorId } : {}),
-        ...(context ? { context } : {}),
-      });
-    }
+    const turns = await timed("home.history.context", async () => {
+      const turns: TextTurn[] = [];
+      for (const entry of history.entries) {
+        if (entry.receiptId === request.receipt.id || entry.role === "receipt") continue;
+        const context = await options.historyContext?.(
+          entry.receiptId,
+          { actor: final.actor, authentication: final.authentication },
+          request,
+          entry.role as "user" | "assistant",
+        );
+        turns.push({
+          role: entry.role as "user" | "assistant",
+          text: entry.content,
+          ...(entry.role === "user" && entry.authorId ? { user: entry.authorId } : {}),
+          ...(context ? { context } : {}),
+        });
+      }
+      return turns;
+    });
     const normalized = options.normalizeHistory
-      ? await options.normalizeHistory({ actor: final.actor, authentication: final.authentication }, request, turns)
+      ? await timed("home.history.normalize", () =>
+          options.normalizeHistory!({ actor: final.actor, authentication: final.authentication }, request, turns),
+        )
       : turns;
     // Context metadata can await source reads after the earlier epoch check.
-    const complete = await options.authentication.resolveEnvelope(request.envelope);
+    const complete = await timed("home.history.resolve_after_context", () =>
+      options.authentication.resolveEnvelope(request.envelope),
+    );
     if (
       complete.status !== "resolved" ||
       !complete.privateSource ||
       (captured &&
-        captured !== (await currentEpoch({ actor: complete.actor, authentication: complete.authentication })))
+        captured !==
+          (await timed("home.history.epoch_after_context", (child) =>
+            currentEpoch({ actor: complete.actor, authentication: complete.authentication }, { span: child }),
+          )))
     )
       throw historyFailure("history_after_context_unavailable", "The private conversation is unavailable.");
     return normalized;
@@ -321,15 +352,21 @@ export function createHomeHost(options: HomeHostOptions) {
       };
       return {
         reply,
-        authoritativePrivateHistory: async (message) => {
-          const owned = message ? await originalInput(message) : request;
+        authoritativePrivateHistory: async (message, trace) => {
+          const owned = message
+            ? trace?.span
+              ? await closedStage(trace.span, "home.history.original_input", () => originalInput(message))
+              : await originalInput(message)
+            : request;
           if (!owned) throw new Error("The original private input is unavailable.");
-          return privateHistory(owned);
+          return privateHistory(owned, trace);
         },
-        rehostOrganizationInput: async (message) => {
-          const owned = await originalInput(message);
+        rehostOrganizationInput: async (message, trace) => {
+          const owned = trace?.span
+            ? await closedStage(trace.span, "home.history.original_input", () => originalInput(message))
+            : await originalInput(message);
           if (!owned) return;
-          await privateHistory(owned);
+          await privateHistory(owned, trace);
           return { msg: owned.msg, io: sink(owned) };
         },
         ...(privateAudience

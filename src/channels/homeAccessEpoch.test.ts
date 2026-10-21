@@ -16,6 +16,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { NO_GRANTS } from "../core/authz/types.js";
 import { createTracer } from "../core/trace/tracer.js";
+import type { SpanRecord } from "../core/trace/types.js";
 import { digestBearer, InMemoryPersonalTokenStore } from "../mcp/personalTokens.js";
 import type { HomeRuntimeContext } from "./homeRuntime.js";
 async function fixture(currentBrowser?: Parameters<typeof createOrganizationAuthentication>[0]["currentBrowser"]) {
@@ -381,6 +382,28 @@ describe("complete Home access epoch", () => {
     expect(span.record().attrs).toEqual({ epochScopeExcluded: 201 });
   });
 
+  it("times a slow catalogue read with only a bounded entry count", async () => {
+    const h = await fixture();
+    await h.send("retained-key");
+    let tick = 1;
+    const spans: SpanRecord[] = [];
+    const span = createTracer({ clock: () => tick }).start("request", {
+      sinks: [{ onEnd: (record) => void spans.push(record) }],
+    });
+    const execute = h.store.execute.bind(h.store);
+    vi.spyOn(h.store, "execute").mockImplementation(async (command) => {
+      const result = await execute(command);
+      if (command.action === "source-catalogue") tick += 19_000;
+      return result;
+    });
+    expect(await h.epoch(h.context, { span })).toMatch(/^[0-9a-f]{64}$/);
+    expect(spans.filter((record) => record.name === "home.epoch.source_catalogue")).toMatchObject([
+      { durationMs: 19_000, status: "ok", attrs: { count: 1 } },
+    ]);
+    expect(JSON.stringify(spans)).not.toContain("private fixture");
+    expect(JSON.stringify(spans)).not.toContain("retained-key");
+  });
+
   it("delivers an already accepted owner reply after another valid scope is added and fences it after revocation", async () => {
     const h = await fixture();
     let host!: ReturnType<typeof createHomeHost>;
@@ -434,6 +457,17 @@ describe("complete Home access epoch", () => {
     const request = await original;
     try {
       await h.send("new-valid-scope", "mcp:alice:new-thread");
+      const spans: SpanRecord[] = [];
+      const trace = createTracer({ clock: () => 1 }).start("request", {
+        sinks: [{ onEnd: (record) => void spans.push(record) }],
+      });
+      await request.io.authoritativePrivateHistory!(undefined, { span: trace });
+      const history = spans.find((record) => record.name === "home.history.epoch_initial");
+      expect(history).toMatchObject({ status: "ok" });
+      expect(spans.find((record) => record.name === "home.epoch.source_catalogue")).toMatchObject({
+        parentSpanId: history?.spanId,
+        status: "ok",
+      });
       await request.io.reply("Accepted owner answer");
       const delivered = await h.organization.streamTail(h.context.authentication);
       expect(delivered.status === "stream_tail" ? delivered.entries.map((entry) => entry.content) : null).toEqual([

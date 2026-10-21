@@ -75,7 +75,7 @@ export function createRunStreamSink(opts: RunStreamSinkOptions): RunStreamSink {
   let rootId: string | undefined;
   let rootEnded = false;
   let warnedAfterRoot = false;
-  const ended = new Set<string>();
+  const active = new Set<string>();
   let binding: { runId: string; publish: (e: SpanStreamEvent) => void } | undefined;
 
   const retain = (event: SpanStreamEvent): void => {
@@ -114,7 +114,7 @@ export function createRunStreamSink(opts: RunStreamSinkOptions): RunStreamSink {
       return false;
     }
     // A late child (its parent already ended) is recorded, never streamed.
-    if (rec.parentSpanId && ended.has(rec.parentSpanId)) return false;
+    if (rec.parentSpanId && !active.has(rec.parentSpanId)) return false;
     return true;
   };
 
@@ -124,6 +124,7 @@ export function createRunStreamSink(opts: RunStreamSinkOptions): RunStreamSink {
     },
     onStart(rec) {
       if (rootId === undefined && rec.parentSpanId === undefined) rootId = rec.spanId;
+      if (!rootEnded && (!rec.parentSpanId || active.has(rec.parentSpanId))) active.add(rec.spanId);
       if (!accept(rec)) return;
       emit({
         type: "span_start",
@@ -136,8 +137,8 @@ export function createRunStreamSink(opts: RunStreamSinkOptions): RunStreamSink {
     },
     onEnd(rec) {
       const isRoot = rec.spanId === rootId;
-      const ok = accept(rec);
-      ended.add(rec.spanId);
+      const ok = active.has(rec.spanId) && accept(rec);
+      active.delete(rec.spanId);
       if (ok) {
         const attrs: SpanAttrs = {
           ...rec.attrs,

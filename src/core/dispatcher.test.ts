@@ -32167,6 +32167,10 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       operatorRepoCatalog: "skipped",
       operatorRepoCandidates: 0,
     });
+    expect(spans.find((span) => span.name === "dispatch.operator.source_context")).toMatchObject({
+      status: "ok",
+      attrs: {},
+    });
     expect(spans.find((span) => span.name === "dispatch.repo_context")?.attrs).toMatchObject({
       repoResolution: "rejected",
       repoTargetRelation: "unresolved",

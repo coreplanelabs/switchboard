@@ -5,6 +5,7 @@ import {
 } from "../core/organization/admissionTrace.js";
 import { agentMaintenanceRefusal } from "../core/maintenance.js";
 import type { TraceOptions } from "../core/trace/types.js";
+import { closedStage } from "../core/trace/closedStage.js";
 import { operatorModeOf } from "../config.js";
 import { historyFailure } from "../core/organization/ownerFailure.js";
 import { contextAccessForMessage } from "../core/dispatch/contextAccess.js";
@@ -1240,21 +1241,29 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       const originalHistory = io.authoritativePrivateHistory?.bind(io);
       const rehost = io.rehostOrganizationInput?.bind(io);
       if (originalHistory)
-        io.authoritativePrivateHistory = async (message) => {
-          const history = await originalHistory(message);
+        io.authoritativePrivateHistory = async (message, trace) => {
+          const history = await originalHistory(message, trace);
           const pointer = message && originalOrganizationDispatchOf(message);
           const owned =
             pointer && pointer.ingressRunId !== request.runId
-              ? await originalBinding(pointer.ingressRunId, message)
+              ? trace?.span
+                ? await closedStage(trace.span, "home.history.binding", () =>
+                    originalBinding(pointer.ingressRunId, message),
+                  )
+                : await originalBinding(pointer.ingressRunId, message)
               : request;
           if (!owned) throw new Error("Attached work context is unavailable.");
           if (!owned.envelope.context.length) return history;
-          const result = await withAttachedMetadata(owned, history);
-          await originalHistory(message);
+          const result = trace?.span
+            ? await closedStage(trace.span, "home.history.attached_metadata", () =>
+                withAttachedMetadata(owned, history),
+              )
+            : await withAttachedMetadata(owned, history);
+          await originalHistory(message, trace);
           return result;
         };
       if (rehost)
-        io.rehostOrganizationInput = async (message) => {
+        io.rehostOrganizationInput = async (message, trace) => {
           const original = originalOrganizationDispatchOf(message);
           if (original?.savedNativeMediaSource) {
             const media = await io.readSavedNativeMedia!(original.savedNativeMediaSource, message);
@@ -1272,9 +1281,15 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
               ? { msg: owned.msg, io: owned.io }
               : undefined;
           }
-          const restored = await rehost(message);
+          const restored = await rehost(message, trace);
           const pointer = restored && originalOrganizationDispatchOf(restored.msg);
-          const owned = pointer && (await originalBinding(pointer.ingressRunId, restored.msg));
+          const owned =
+            pointer &&
+            (trace?.span
+              ? await closedStage(trace.span, "home.history.binding", () =>
+                  originalBinding(pointer.ingressRunId, restored.msg),
+                )
+              : await originalBinding(pointer.ingressRunId, restored.msg));
           return owned ? { msg: owned.msg, io: owned.io } : undefined;
         };
       const saved = originalOrganizationDispatchOf(request.msg)?.savedNativeMediaSource;

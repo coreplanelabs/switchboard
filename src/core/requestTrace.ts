@@ -17,8 +17,8 @@ import type { SpanLog } from "./trace/spanLog.js";
 // `dispatch()`. The root's sinks, in order: the process log sink (or the
 // injected sinks — a test's recording sink), the run-stream sink (a Null
 // Object until `bindRun` points it at a registry run), the card sink (a Null
-// Object until `bindCard`), and a collector that keeps every record so far,
-// so a card closed before any run existed can still print the request's shape.
+// Object until `bindCard`), and a collector that keeps streamed records so a
+// card closed before any run existed can still print the request's shape.
 // `startProcessRoot` records lifecycle work and owner failure diagnostics
 // outside the agent's request trace (item 20). It uses the leading sinks
 // only, since nothing streams or paints.
@@ -101,8 +101,12 @@ export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOption
   const card = createCardSink((name) => `${displayNameOf(name)}…`);
   const records = new Map<string, SpanRecord>();
   const collector: SpanSink = {
-    onStart: (rec) => void records.set(rec.spanId, rec),
-    onEnd: (rec) => void records.set(rec.spanId, rec),
+    onStart: (rec) => {
+      if (isStreamed(rec.name)) records.set(rec.spanId, rec);
+    },
+    onEnd: (rec) => {
+      if (isStreamed(rec.name)) records.set(rec.spanId, rec);
+    },
   };
   const root = tracer.start("request", {
     sinks: [...leadingSinks(deps), stream, card, collector],
@@ -132,7 +136,7 @@ export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOption
     spansSoFar() {
       // The root itself is structure, never a term; streamed children only —
       // the partition is over what a run's stream would carry.
-      return [...records.values()].filter((r) => r.spanId !== root.id && isStreamed(r.name));
+      return [...records.values()].filter((r) => r.spanId !== root.id);
     },
   };
 }

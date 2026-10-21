@@ -117,6 +117,10 @@ describe("createRunStreamSink", () => {
     const late = agent.start("tool.bash");
     late.end();
     expect(names(events)).not.toContain("span_start:tool.bash");
+    const lateLogOnly = agent.start("home.epoch.source_catalogue");
+    lateLogOnly.start("tool.bash").end();
+    lateLogOnly.end();
+    expect(names(events)).not.toContain("span_start:tool.bash");
     root.end();
     // a log-only span after the root must not spend the one warning slot…
     root.start("post.history_write").end();
@@ -131,6 +135,19 @@ describe("createRunStreamSink", () => {
     bind("late-run");
     expect(events.length).toBe(before);
     expect(warnings.some((w) => w.includes("no-op"))).toBe(true);
+  });
+
+  it("streams a child of an active log-only parent and drops a child after that parent ends", () => {
+    const { root, bind } = setup();
+    const events = bind("r");
+    const parent = root.start("home.epoch.source_catalogue");
+    parent.start("tool.bash").end();
+    parent.end();
+    parent.start("tool.bash").end();
+    expect(names(events).filter((name) => name.includes("tool.bash"))).toEqual([
+      "span_start:tool.bash",
+      "span_end:tool.bash",
+    ]);
   });
 
   it("the buffer is bounded: the protected head survives, the middle is dropped, and a run bound afterwards gets one counted spans_dropped note naming the count and the gap", async () => {

@@ -1,5 +1,6 @@
 import { observeAdmission, type AdmissionObservation } from "../core/organization/admissionTrace.js";
-import type { TraceOptions } from "../core/trace/types.js";
+import type { Span, TraceOptions } from "../core/trace/types.js";
+import { closedStage, type ClosedStageName } from "../core/trace/closedStage.js";
 import { mapLimit } from "../core/mapLimit.js";
 import { HOME_PRIVATE_READ_CONCURRENCY } from "../core/budgets.js";
 import { createHash } from "node:crypto";
@@ -25,26 +26,34 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
   ): Promise<string | undefined> => {
     let gap: AdmissionObservation = { reason: "receiver-unavailable" };
     let complete = false;
+    const timed = async <T>(name: ClosedStageName, work: (child?: Span) => Promise<T> | T): Promise<T> =>
+      trace?.span ? closedStage(trace.span, name, work) : work();
     try {
       const reference = context.authentication.sourceReference;
       if (!reference) return;
-      const addressed = await options.organization.resolve(context.authentication);
+      const addressed = await timed("home.epoch.resolve_initial", () =>
+        options.organization.resolve(context.authentication),
+      );
       if (!addressed || addressed.organization !== options.organizationId) return;
-      const current = await options.authentication.resolveAuthorization({
-        ...addressed,
-        source: context.authentication.source,
-        sourceReference: reference,
-        destination: { kind: "broad" },
-        target: null,
-        context: [],
-        action: "read",
-      });
+      const current = await timed("home.epoch.authorization", () =>
+        options.authentication.resolveAuthorization({
+          ...addressed,
+          source: context.authentication.source,
+          sourceReference: reference,
+          destination: { kind: "broad" },
+          target: null,
+          context: [],
+          action: "read",
+        }),
+      );
       if (
         current.status !== "resolved" ||
         !authorize(current.actor, "organization:read", { type: "organization", id: options.organizationId }).allow
       )
         return;
-      const resolved = await options.organization.resolve(current.authentication);
+      const resolved = await timed("home.epoch.resolve_reader", () =>
+        options.organization.resolve(current.authentication),
+      );
       if (!resolved || resolved.organization !== options.organizationId || !resolved.actor.stream) return;
       const nativePolicy = options.policyEpoch();
       if (reference.contextMode === "request") {
@@ -65,15 +74,17 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
           return;
         // This frame consumes no historical source. Recheck the exact current
         // receiver and binding after awaits without observing the catalogue.
-        const receiver = await options.authentication.resolveAuthorization({
-          ...resolved,
-          source: current.authentication.source,
-          sourceReference: reference,
-          destination: { kind: "broad" },
-          target: null,
-          context: [],
-          action: "read",
-        });
+        const receiver = await timed("home.epoch.receiver_check", () =>
+          options.authentication.resolveAuthorization({
+            ...resolved,
+            source: current.authentication.source,
+            sourceReference: reference,
+            destination: { kind: "broad" },
+            target: null,
+            context: [],
+            action: "read",
+          }),
+        );
         if (
           receiver.status !== "resolved" ||
           receiver.policyFingerprint !== current.policyFingerprint ||
@@ -81,7 +92,9 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
           options.policyEpoch() !== nativePolicy
         )
           return;
-        const final = await options.organization.resolve(receiver.authentication);
+        const final = await timed("home.epoch.resolve_receiver", () =>
+          options.organization.resolve(receiver.authentication),
+        );
         if (
           !final ||
           final.organization !== resolved.organization ||
@@ -111,36 +124,44 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
       let after: string | undefined;
       do {
         gap = { reason: "catalogue-unavailable" };
-        const catalogue = await options.store.execute({
-          action: "source-catalogue",
-          ...resolved,
-          limit: 200,
-          paged: true,
-          ...(after ? { after } : {}),
+        const catalogue = await timed("home.epoch.source_catalogue", async (child) => {
+          const result = await options.store.execute({
+            action: "source-catalogue",
+            ...resolved,
+            limit: 200,
+            paged: true,
+            ...(after ? { after } : {}),
+          });
+          if (result.status === "source-catalogue") child?.setAttrs({ count: Math.min(200, result.entries.length) });
+          return result;
         });
         if (catalogue.status !== "source-catalogue" || catalogue.revision === undefined) return;
         snapshotRevision ??= catalogue.revision;
         accessRevision ??= catalogue.accessRevision;
         gap = { reason: "catalogue-changed" };
         if (catalogue.revision !== snapshotRevision || catalogue.accessRevision !== accessRevision) return;
-        const decisions = await mapLimit(catalogue.entries, HOME_PRIVATE_READ_CONCURRENCY, async (source) => {
-          if (
-            !options.authentication.sourceInReadScope(
-              source.actor.identity,
-              source.sourceReference,
-              current.authentication,
-            )
-          )
-            return;
-          const decision = source.allowed
-            ? await options.authentication.evaluateSourceIdentity(
+        const decisions = await timed("home.epoch.source_identity", async (child) => {
+          const result = await mapLimit(catalogue.entries, HOME_PRIVATE_READ_CONCURRENCY, async (source) => {
+            if (
+              !options.authentication.sourceInReadScope(
                 source.actor.identity,
                 source.sourceReference,
-                source.actor.onBehalfOf,
                 current.authentication,
               )
-            : { status: "denied" as const };
-          return { source, decision };
+            )
+              return;
+            const decision = source.allowed
+              ? await options.authentication.evaluateSourceIdentity(
+                  source.actor.identity,
+                  source.sourceReference,
+                  source.actor.onBehalfOf,
+                  current.authentication,
+                )
+              : { status: "denied" as const };
+            return { source, decision };
+          });
+          child?.setAttrs({ count: Math.min(200, result.filter(Boolean).length) });
+          return result;
         });
         for (const checked of decisions) {
           if (!checked) {
@@ -179,11 +200,16 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
       gap = { reason: "policy-observe-unavailable" };
       const updates = [...observations].map(([authority, fingerprint]) => ({ authority, fingerprint }));
       for (let offset = 0; offset < updates.length; offset += 200) {
-        const observed = await options.store.execute({
-          action: "source-policy-observe",
-          ...resolved,
-          expectedRevision: snapshotRevision,
-          observations: updates.slice(offset, offset + 200),
+        const expectedRevision = snapshotRevision;
+        const observed = await timed("home.epoch.policy_observe", async (child) => {
+          const result = await options.store.execute({
+            action: "source-policy-observe",
+            ...resolved,
+            expectedRevision,
+            observations: updates.slice(offset, offset + 200),
+          });
+          child?.setAttrs({ count: Math.min(200, updates.length - offset) });
+          return result;
         });
         if (observed.status !== "source-policies-observed") return;
         snapshotRevision = observed.revision;
@@ -192,15 +218,17 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
       // Native catalogue checks can outlive the viewer's signed credential.
       // Reprove this receiver after those awaits before publishing its epoch.
       gap = { reason: "receiver-unavailable" };
-      const receiver = await options.authentication.resolveAuthorization({
-        ...resolved,
-        source: context.authentication.source,
-        sourceReference: reference,
-        destination: { kind: "broad" },
-        target: null,
-        context: [],
-        action: "read",
-      });
+      const receiver = await timed("home.epoch.receiver_check", () =>
+        options.authentication.resolveAuthorization({
+          ...resolved,
+          source: context.authentication.source,
+          sourceReference: reference,
+          destination: { kind: "broad" },
+          target: null,
+          context: [],
+          action: "read",
+        }),
+      );
       if (
         receiver.status !== "resolved" ||
         receiver.policyFingerprint !== current.policyFingerprint ||
@@ -209,7 +237,9 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
       )
         return;
       gap = { reason: "catalogue-changed" };
-      const final = await options.store.execute({ action: "get", organization: options.organizationId });
+      const final = await timed("home.epoch.final_snapshot", () =>
+        options.store.execute({ action: "get", organization: options.organizationId }),
+      );
       if (
         final.status !== "state" ||
         final.state.sourcePolicyRevision !== snapshotRevision ||

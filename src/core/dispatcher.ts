@@ -69,6 +69,7 @@ import { NativeClaimUnknownError, TerminalCommitmentUnknownError } from "./runLe
 import { UnknownAllocationClaimError } from "./runLedger/allocationAck.js";
 import { PromotionPendingError, PromotionIdentityRefusal } from "./runLedger/promotion.js";
 import { systemClock } from "./trace/index.js";
+import { closedStage } from "./trace/closedStage.js";
 import type { SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
 import type { RunOwner } from "./trace/streamSpans.js";
@@ -1772,7 +1773,11 @@ export async function dispatch(
               ];
               if (
                 inherited.length &&
-                !(await contextReader.validateDependencies(mergeContextDependencies(freshContext(), ...inherited))).ok
+                !(
+                  await closedStage(span, "dispatch.operator.source_context", () =>
+                    contextReader.validateDependencies(mergeContextDependencies(freshContext(), ...inherited)),
+                  )
+                ).ok
               )
                 throw new RefusalError(
                   refusalOf("setup_failed", "Earlier conversation context could not be verified. No new task started."),
@@ -1784,7 +1789,9 @@ export async function dispatch(
                 !pointer.nativeMediaDigest &&
                 !pointer.savedNativeMediaSource
               ) {
-                const restored = await io.rehostOrganizationInput?.(msg);
+                const restored = await closedStage(span, "dispatch.operator.source_rehost", (child) =>
+                  io.rehostOrganizationInput?.(msg, { span: child }),
+                );
                 if (!restored) {
                   if (chatActorOf(deps.config, msg).kind !== "service" || !io.authoritativePrivateHistory)
                     throw new RefusalError(
@@ -1792,13 +1799,21 @@ export async function dispatch(
                     );
                   // The captured service sink rechecks its active original input.
                   // Rehosting remains limited to uncertain custody.
-                  await io.authoritativePrivateHistory(msg);
+                  await closedStage(span, "dispatch.operator.source_history", (child) =>
+                    io.authoritativePrivateHistory!(msg, { span: child }),
+                  );
                 }
               }
               if (!pointer?.nativeMediaDigest && !pointer?.savedNativeMediaSource) return;
               const media = pointer.savedNativeMediaSource
-                ? await io.readSavedNativeMedia?.(pointer.savedNativeMediaSource, msg)
-                : (await io.rehostOrganizationInput?.(msg))?.msg;
+                ? await closedStage(span, "dispatch.operator.source_media", () =>
+                    io.readSavedNativeMedia?.(pointer.savedNativeMediaSource!, msg),
+                  )
+                : (
+                    await closedStage(span, "dispatch.operator.source_media", (child) =>
+                      io.rehostOrganizationInput?.(msg, { span: child }),
+                    )
+                  )?.msg;
               if (
                 !media ||
                 ["images", "documents", "staged"].some(
