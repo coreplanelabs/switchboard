@@ -1246,3 +1246,22 @@ Original live-state writes can retain a transaction-bound result under the [writ
 | Criterion | Proof |
 |---|---|
 | Request-only review recovery restores the original base commit when fresh resolution advances the base; malformed saved pins refuse instead of substituting a new comparison. | `[unit]` `src/core/dispatch/reattach.test.ts::restartEvidenceOf: boot recovery before promotion::restores the original review base when request-only recovery resolves a newer base`; `::refuses a malformed saved base instead of substituting a newly resolved base: …` |
+
+
+## Shutdown evidence read
+
+`runs get <id> --include shutdown` reports two independent observations. `shutdown` checks only current local stop-target eligibility. A finished run reports `reason: finished-run`; the read does not contact or stop its runtime. Missing targets, identity mismatches, unavailable controls, failed ledger reads and failed local checks have separate bounded reasons.
+
+`shutdownEvidence` reads retained acknowledgements for the same finished run and reader identity. It names the original shutdown acknowledgement or the exact cancellation receipt as its basis. A `no-workspace` cancellation does not confirm shutdown. A missing acknowledgement stays unknown even when the run is failed, finished or sealed. Missing records, unconfigured history, observer errors and identity mismatches remain distinct. `observedAt` is the read time, not the process-ending time. The compact cancellation projection retains only its ID and recorded disposition; a process-only disposition does not prove workspace removal. No legacy workspace allocation or disposition field supplies physical evidence.
+
+A failed history read, live-ledger read or local target check emits `run.shutdown_evidence.observation_failed` with the run ID, source, read stage, bounded error class and observation time. It excludes exception prose and request bytes. If the optional log sink throws, the original unavailable or unknown result stays unchanged and adds `reporting: failed`. A cached finished view shares one history snapshot between its artifacts and shutdown evidence.
+
+The diagnostic creates no new producer receipt, recovery, continuation or deletion authority. Original process and workspace facts absent from history remain a producer-retention gap.
+
+| Criterion | Proof |
+| --- | --- |
+| A finished run's local target check remains separate from retained positive and unknown shutdown evidence. | `[unit]` `src/core/runsService.test.ts::RunsService.getRun::separates retained shutdown evidence from a finished run's live target check` |
+| A retained cancellation exposes its exact disposition without adding private target fields; no-workspace stays unknown. | `[unit]` `src/core/runsService.test.ts::RunsService.getRun::reports the exact retained cancellation disposition *` |
+| An observer failure remains distinct from missing proof and contains no exception prose or request bytes. | `[unit]` `src/core/runsService.test.ts::RunsService.getRun::distinguishes a failed shutdown history observation from missing proof*` |
+| A changed reader cannot acquire an earlier record's shutdown acknowledgement. | `[unit]` `src/core/runsService.test.ts::RunsService.getRun::does not reuse another reader's retained shutdown acknowledgement` |
+| Current target checks retain authorization and exact resource checks, with separate observer-failure reasons. | `[unit]` `src/core/commands/runs.test.ts::runs.stop::reads a fresh shutdown check without changing the target or borrowing another resource` |

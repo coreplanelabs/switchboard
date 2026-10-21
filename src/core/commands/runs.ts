@@ -554,13 +554,15 @@ export const runsGet = defineCommand({
     include: z
       .enum(["messages", "audience", "shutdown"])
       .optional()
-      .describe("add events, the audience-refusal diagnostic, or the current local shutdown target check"),
+      .describe(
+        "add events, the audience-refusal diagnostic, or retained shutdown evidence and the current target check",
+      ),
   }),
   action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
   describe:
-    "One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic; `--include shutdown` checks the current target without contacting its runtime.",
+    "One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic; `--include shutdown` reads retained shutdown acknowledgements separately from the current target check; it does not contact the runtime.",
   handler: async ({ args, options, caller, deps }) => {
     const view = await getVisibleRun(
       await deps.runs(),

@@ -1638,26 +1638,28 @@ describe("runs.stop", () => {
     const fetch = vi.fn(async () => {
       throw new Error("must not contact an unverified runtime");
     });
+    const stopRuntime = createRunStop(
+      { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+      secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+      fetch,
+    );
+    if (!stopRuntime) throw new Error("fixture requires resident stop support");
     const runs = createRunsService({
       registry: reg,
       store,
       ledger,
       clock: () => now,
-      stopRuntime: createRunStop(
-        { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
-        secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
-        fetch,
-      ),
+      stopRuntime,
       warn: (line) => {
         if (sinkFails) throw new Error("sink unavailable");
         warnings.push(JSON.parse(line));
       },
     });
-    return { id, registry, ledger, runs, warnings, fetch, deps: { runs: async () => runs } };
+    return { id, registry, ledger, runs, warnings, fetch, stopRuntime, deps: { runs: async () => runs } };
   }
 
   it("reads a fresh shutdown check without changing the target or borrowing another resource", async () => {
-    const { id, registry, ledger, warnings, fetch, deps } = await invalidOwnerWorld();
+    const { id, registry, ledger, warnings, fetch, stopRuntime, deps } = await invalidOwnerWorld();
     const input = { args: [id], options: { include: "shutdown" } };
     expect(value<{ shutdown: unknown }>(await registry.invoke("runs.get", input, cli, deps)).shutdown).toEqual({
       status: "observed",
@@ -1694,13 +1696,43 @@ describe("runs.stop", () => {
     ledger.live.set(id, { ...current, meta: { ...current.meta, channelId: "mcp:Y" } });
     expect(value<{ shutdown: unknown }>(await registry.invoke("runs.get", input, cli, deps)).shutdown).toEqual({
       status: "unavailable",
+      reason: "identity-mismatch",
     });
     vi.spyOn(ledger, "listLive").mockRejectedValueOnce(new Error("private source detail"));
     expect(value<{ shutdown: unknown }>(await registry.invoke("runs.get", input, cli, deps)).shutdown).toEqual({
       status: "unavailable",
+      reason: "ledger-read-failed",
+      observationError: "unclassified",
+    });
+    ledger.live.set(id, current);
+    vi.spyOn(stopRuntime, "unavailable").mockImplementationOnce(() => {
+      throw new Error("private target detail");
+    });
+    expect(value<{ shutdown: unknown }>(await registry.invoke("runs.get", input, cli, deps)).shutdown).toEqual({
+      status: "unavailable",
+      reason: "target-check-failed",
+      observationError: "unclassified",
     });
     expect(ledger.live.get(id)?.stop).toBeNull();
-    expect(warnings).toEqual([]);
+    expect(warnings).toMatchObject([
+      {
+        event: "run.shutdown_evidence.observation_failed",
+        runId: id,
+        source: "live-ledger",
+        stage: "ledger-read",
+        outcome: "unavailable",
+        errorKind: "unclassified",
+      },
+      {
+        event: "run.shutdown_evidence.observation_failed",
+        runId: id,
+        source: "live-ledger",
+        stage: "target-check",
+        outcome: "unavailable",
+        errorKind: "unclassified",
+      },
+    ]);
+    expect(JSON.stringify(warnings)).not.toContain("private");
     expect(fetch).not.toHaveBeenCalled();
   });
 
