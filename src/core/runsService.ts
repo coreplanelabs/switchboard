@@ -1,7 +1,13 @@
 import { writeReceiptReadOf, type WriteReceiptSelector, type WriteReceiptRead } from "./runLedger/writeReceipt.js";
 import type { PersonProfile } from "./names.js";
 import type { CancellationRefusal, CancellationObservation } from "./runLedger/cancellation.js";
-import { cancellationMatches, cancellationOf, cancellationRefusalOf } from "./runLedger/cancellation.js";
+import {
+  cancellationMatches,
+  cancellationOf,
+  cancellationRefusalOf,
+  cancellationRecordMatches,
+} from "./runLedger/cancellation.js";
+import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./storeFailure.js";
 import type { ClaimObservationPage } from "./runLedger/claimObservation.js";
 import { originalReadOf } from "./runLedger/originalEvidence.js";
 import {
@@ -298,6 +304,17 @@ export interface UnitLineage {
   unit?: { key: string; id: string; title?: string; thread: "coding" | "review" };
 }
 
+type ShutdownObservationError = "route-missing" | "transient" | "permanent" | "unclassified";
+function shutdownObservationErrorOf(error: unknown): ShutdownObservationError {
+  return error instanceof RouteMissingError
+    ? "route-missing"
+    : error instanceof TransientStoreError
+      ? "transient"
+      : error instanceof PermanentStoreError
+        ? "permanent"
+        : "unclassified";
+}
+
 /** Run details and safe diagnostics require an explicit include. */
 export interface RunRecordView extends RunView {
   /** Original sender retained on canonical record-body reads. */
@@ -313,8 +330,40 @@ export interface RunRecordView extends RunView {
   branchPublication?: RunRecord["branchPublication"];
   branchPushReceipts?: RunRecord["branchPushReceipts"];
   audience?: { status: "recorded"; refusal: AudienceRefusalReceipt } | { status: "unavailable" };
+  /** Retained acknowledgements, separate from current local stop eligibility. */
+  shutdownEvidence?: {
+    source: "run-history";
+    observedAt: number;
+    status:
+      | "recorded"
+      | "not-recorded"
+      | "record-missing"
+      | "unconfigured"
+      | "run-active"
+      | "identity-mismatch"
+      | "read-failed";
+    runtimeShutdown: "confirmed" | "unknown";
+    basis: "runtime-shutdown-acknowledgement" | "cancellation-receipt" | "none";
+    cancellation?: { id: string; disposition: NonNullable<RunRecord["cancellation"]>["disposition"] };
+    observationError?: ShutdownObservationError;
+    reporting?: "failed";
+  };
   shutdown?:
-    | { status: "unavailable" }
+    | {
+        status: "unavailable";
+        reason:
+          | "finished-run"
+          | "ledger-unconfigured"
+          | "target-missing"
+          | "target-ambiguous"
+          | "identity-mismatch"
+          | "stop-unconfigured"
+          | "target-unclassified"
+          | "ledger-read-failed"
+          | "target-check-failed";
+        observationError?: ShutdownObservationError;
+        reporting?: "failed";
+      }
     | {
         status: "observed";
         source: "live-ledger";
@@ -929,6 +978,29 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   const prices = deps.prices ?? NO_PRICES;
   const clock = deps.clock ?? systemClock;
   const warn = deps.warn ?? ((m: string) => console.warn(m));
+  const reportShutdownObservationFailure = (
+    runId: string,
+    stage: "history-read" | "ledger-read" | "target-check",
+    errorKind: ShutdownObservationError,
+    observedAt: number,
+  ): "failed" | undefined => {
+    try {
+      warn(
+        JSON.stringify({
+          event: "run.shutdown_evidence.observation_failed",
+          runId,
+          source: stage === "history-read" ? "run-history" : "live-ledger",
+          stage,
+          outcome: "unavailable",
+          errorKind,
+          observedAt,
+        }),
+      );
+    } catch {
+      // A failed optional report cannot change the original unknown evidence.
+      return "failed";
+    }
+  };
   const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
   const ledgerProjection = (row: LiveRunRow, events: readonly RunEvent[]): RunView =>
     ledgerView(
@@ -1074,6 +1146,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
    *  none — lends nothing; a store that throws is one warning and nothing. */
   const storedArtifacts = async (
     id: string,
+    loaded?: { record: RunListItem | null },
   ): Promise<
     Pick<
       RunView,
@@ -1097,7 +1170,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   > => {
     let row: RunListItem | null;
     try {
-      row = await storeSummary(id);
+      row = loaded ? loaded.record : await storeSummary(id);
     } catch (err) {
       warn(
         `[runs] history store read failed for ${id} — serving the registry row without its record: ${describe(err)}`,
@@ -1575,25 +1648,91 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
 
     async getRun(id, opts = {}) {
       if ((await deletedRuns([id])).includes(id)) return notFound;
-      const diagnostic = async (view: RunRecordView): Promise<RunRecordView> => {
+      const diagnostic = async (
+        view: RunRecordView,
+        retained?: { record: RunListItem | null } | { error: unknown },
+      ): Promise<RunRecordView> => {
         if (opts.include === "shutdown") {
-          let shutdown: NonNullable<RunRecordView["shutdown"]> = { status: "unavailable" };
+          const evidence: NonNullable<RunRecordView["shutdownEvidence"]> = {
+            source: "run-history",
+            observedAt: clock(),
+            status: !view.finished ? "run-active" : !store ? "unconfigured" : "record-missing",
+            runtimeShutdown: "unknown",
+            basis: "none",
+          };
+          if (view.finished && store) {
+            try {
+              if (retained && "error" in retained) throw retained.error;
+              const saved = retained ? retained.record : await storeSummary(id);
+              if (saved) {
+                if (
+                  saved.id !== view.id ||
+                  saved.startedAt !== view.startedAt ||
+                  saved.threadKey !== view.threadKey ||
+                  saved.userId !== view.userId ||
+                  saved.channelId !== view.channelId ||
+                  saved.repo !== view.repo ||
+                  (saved.channelVisibility ?? "unknown") !== (view.channelVisibility ?? "unknown")
+                )
+                  evidence.status = "identity-mismatch";
+                else {
+                  const cancellation = cancellationOf(saved.cancellation?.cancellation);
+                  if (cancellation && cancellationRecordMatches(saved, cancellation)) {
+                    evidence.cancellation = { id: cancellation.id, disposition: saved.cancellation!.disposition };
+                    if (saved.cancellation!.disposition !== "no-workspace") {
+                      evidence.runtimeShutdown = "confirmed";
+                      evidence.basis = "cancellation-receipt";
+                    }
+                  }
+                  if (saved.runtimeShutdownConfirmed === true) {
+                    evidence.runtimeShutdown = "confirmed";
+                    evidence.basis = "runtime-shutdown-acknowledgement";
+                  }
+                  evidence.status =
+                    evidence.runtimeShutdown === "confirmed" || evidence.cancellation ? "recorded" : "not-recorded";
+                }
+              }
+            } catch (error) {
+              evidence.status = "read-failed";
+              evidence.observationError = shutdownObservationErrorOf(error);
+              evidence.observedAt = clock();
+              const reporting = reportShutdownObservationFailure(
+                id,
+                "history-read",
+                evidence.observationError,
+                evidence.observedAt,
+              );
+              if (reporting) evidence.reporting = reporting;
+            }
+          }
+          evidence.observedAt = clock();
+          if (view.finished)
+            return { ...view, shutdownEvidence: evidence, shutdown: { status: "unavailable", reason: "finished-run" } };
+          let shutdown: NonNullable<RunRecordView["shutdown"]> = {
+            status: "unavailable",
+            reason: ledger ? "target-missing" : "ledger-unconfigured",
+          };
+          let observer: "ledger-read" | "target-check" = "ledger-read";
           try {
             // Fresh canonical evidence must match the exact resource the command authorizes.
             // Local eligibility neither contacts the runtime nor proves its shutdown.
             const rows = (await ledger?.listLive())?.filter((row) => row.runId === id) ?? [];
             const row = rows.length === 1 ? rows[0] : undefined;
-            if (
+            if (rows.length > 1) shutdown = { status: "unavailable", reason: "target-ambiguous" };
+            else if (
               row &&
-              !view.finished &&
-              deps.stopRuntime?.unavailable &&
-              row.startedAt === view.startedAt &&
-              row.meta.threadKey === view.threadKey &&
-              row.meta.userId === view.userId &&
-              row.meta.channelId === view.channelId &&
-              row.meta.repo === view.repo &&
-              (row.meta.channelVisibility ?? "unknown") === (view.channelVisibility ?? "unknown")
-            ) {
+              (row.startedAt !== view.startedAt ||
+                row.meta.threadKey !== view.threadKey ||
+                row.meta.userId !== view.userId ||
+                row.meta.channelId !== view.channelId ||
+                row.meta.repo !== view.repo ||
+                (row.meta.channelVisibility ?? "unknown") !== (view.channelVisibility ?? "unknown"))
+            )
+              shutdown = { status: "unavailable", reason: "identity-mismatch" };
+            else if (row && !deps.stopRuntime?.unavailable)
+              shutdown = { status: "unavailable", reason: "stop-unconfigured" };
+            else if (row && deps.stopRuntime?.unavailable) {
+              observer = "target-check";
               const unavailable = deps.stopRuntime.unavailable(row);
               const refusal = cancellationRefusalOf(unavailable);
               if (unavailable === undefined || refusal) {
@@ -1609,13 +1748,21 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
                   runtimeContacted: false,
                   confirmation: "not-checked",
                 };
-              }
+              } else shutdown = { status: "unavailable", reason: "target-unclassified" };
             }
-          } catch {
-            // Keep the explicit unavailable result when the diagnostic source cannot be read.
-            return { ...view, shutdown };
+          } catch (error) {
+            // The observer failed; that is separate from missing ending proof.
+            const observationError = shutdownObservationErrorOf(error);
+            const reporting = reportShutdownObservationFailure(id, observer, observationError, clock());
+            shutdown = {
+              status: "unavailable",
+              reason: observer === "ledger-read" ? "ledger-read-failed" : "target-check-failed",
+              observationError,
+              ...(reporting ? { reporting } : {}),
+            };
           }
-          return { ...view, shutdown };
+          evidence.observedAt = clock();
+          return { ...view, shutdown, shutdownEvidence: evidence };
         }
         if (opts.include !== "audience") return view;
         let receipt: AudienceRefusalReceipt | undefined;
@@ -1651,7 +1798,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           view.events = events;
           if (record.researchBrief !== undefined) view.researchBrief = record.researchBrief;
         }
-        return { ok: true, value: await diagnostic(view) };
+        return { ok: true, value: await diagnostic(view, { record }) };
       }
       const summary = registry.getById(id);
       if (summary) {
@@ -1661,8 +1808,16 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         // A finished row inside the registry's window: its identity, stop state,
         // finish fields and events are the registry's; the record's typed
         // artifacts are the store's to supply (item 21). A live row never asks.
-        if (summary.finished) Object.assign(view, await storedArtifacts(id));
-        return { ok: true, value: await diagnostic(view) };
+        let retained: { record: RunListItem | null } | { error: unknown } | undefined;
+        if (summary.finished && opts.include === "shutdown") {
+          try {
+            retained = { record: await storeSummary(id) };
+            Object.assign(view, await storedArtifacts(id, retained));
+          } catch (error) {
+            retained = { error };
+          }
+        } else if (summary.finished) Object.assign(view, await storedArtifacts(id));
+        return { ok: true, value: await diagnostic(view, retained) };
       }
       // Live on the ledger, not here (item 41): the row and the events it holds.
       const far = await ledgerRow(id);
@@ -1679,7 +1834,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         const summary = await storeSummary(id);
         if (summary)
           return ordinaryRun(summary, opts.privateWorkerAccess)
-            ? { ok: true, value: await diagnostic(persistedView(summary, prices)) }
+            ? { ok: true, value: await diagnostic(persistedView(summary, prices), { record: summary }) }
             : notFound;
         // Not live, not stored: a queued ask's id still has a page (record
         // 0064, "The queue") — the stored request the plane holds under it.

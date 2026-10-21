@@ -78,7 +78,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/runs.original` | `GET`, `POST` | `runs:read` | Inspect bounded stored evidence for one current original. Does not repeat writes, settle a run, or prove process ending. |
 | `/api/runs.receipt` | `GET`, `POST` | `runs:read` | Read one original storage write receipt. Missing proof stays unknown and never permits replay. |
 | `/api/runs.claims` | `GET`, `POST` | `runs:read` | List persisted unknown native claim observations. These are not current holds or commit receipts; missing observations do not prove absence. |
-| `/api/runs.get` | `GET`, `POST` | `runs:read` | One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic; `--include shutdown` checks the current target without contacting its runtime. |
+| `/api/runs.get` | `GET`, `POST` | `runs:read` | One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic; `--include shutdown` reads retained shutdown acknowledgements separately from the current target check; it does not contact the runtime. |
 | `/api/runs.events` | `GET`, `POST` | `runs:read` | A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content. |
 | `/api/runs.friction` | `GET`, `POST` | `runs:read` | One run's friction diagnosis (live: computed now; persisted: as stored). |
 | `/api/runs.check` | `GET`, `POST` | `runs:read` | Inspect an original recorded check without running it again; saved output is wrapped as untrusted content. |

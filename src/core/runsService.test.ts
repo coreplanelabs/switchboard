@@ -1,6 +1,6 @@
 import { homeOverview } from "./home/overview.js";
 import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
-import { UncertainStoreError } from "./storeFailure.js";
+import { UncertainStoreError, TransientStoreError } from "./storeFailure.js";
 import { storeRequestWitness } from "./storeResponse.js";
 import { WorkerRunStore } from "./runStoreWorker.js";
 import { rememberStorageFailure, type StorageFailureNotice } from "./storageFailureDiagnostic.js";
@@ -98,6 +98,180 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it("separates retained shutdown evidence from a finished run's live target check", async () => {
+    const { reg, store } = setup();
+    const svc = createRunsService({ registry: reg, store, clock: () => NOW });
+    for (const [id, confirmed] of [
+      ["confirmed-ending", true],
+      ["unknown-ending", false],
+    ] as const) {
+      await store!.put(
+        record(id, NOW, {
+          status: "failed",
+          sealedAt: NOW,
+          ...(confirmed ? { runtimeShutdownConfirmed: true } : {}),
+        }),
+      );
+      expect(await svc.getRun(id, { include: "shutdown" })).toMatchObject({
+        ok: true,
+        value: {
+          id,
+          shutdown: { status: "unavailable", reason: "finished-run" },
+          shutdownEvidence: {
+            source: "run-history",
+            observedAt: NOW,
+            status: confirmed ? "recorded" : "not-recorded",
+            runtimeShutdown: confirmed ? "confirmed" : "unknown",
+            basis: confirmed ? "runtime-shutdown-acknowledgement" : "none",
+          },
+        },
+      });
+    }
+  });
+
+  it.each(["workspace-discarded", "no-workspace"] as const)(
+    "reports the exact retained cancellation disposition %s without exposing its private target",
+    async (disposition) => {
+      const { reg, store } = setup();
+      const svc = createRunsService({ registry: reg, store, clock: () => NOW });
+      const saved = record("cancelled-ending", NOW, { status: "stopped_hard" });
+      saved.cancellation = {
+        version: 1,
+        actor,
+        cancellation: {
+          version: 1,
+          id: "original-cancellation",
+          runId: saved.id,
+          ownerGen: "original-owner",
+          threadKey: saved.threadKey,
+          startedAt: saved.startedAt,
+          actor,
+        },
+        disposition,
+      };
+      await store!.put(saved);
+      const response = await svc.getRun(saved.id, { include: "shutdown" });
+      expect(response).toMatchObject({
+        ok: true,
+        value: {
+          shutdownEvidence: {
+            source: "run-history",
+            observedAt: NOW,
+            status: "recorded",
+            runtimeShutdown: disposition === "no-workspace" ? "unknown" : "confirmed",
+            basis: disposition === "no-workspace" ? "none" : "cancellation-receipt",
+            cancellation: { id: "original-cancellation", disposition },
+          },
+        },
+      });
+      const evidence = response.ok ? response.value.shutdownEvidence : undefined;
+      expect(JSON.stringify(evidence)).not.toContain("original-owner");
+      expect(JSON.stringify(evidence)).not.toContain("cli:local");
+    },
+  );
+
+  it.each([false, true])(
+    "distinguishes a failed shutdown history observation from missing proof: sink failure=%s",
+    async (sinkFails) => {
+      const { reg, store } = setup();
+      const live = reg.create("finished but still cached");
+      reg.finish(live.id, "failed");
+      vi.spyOn(store!, "getSummary").mockRejectedValue(
+        Object.assign(new TransientStoreError("private detail"), { request: { payload: "private body" } }),
+      );
+      const notes: unknown[] = [];
+      const svc = createRunsService({
+        registry: reg,
+        store,
+        clock: () => NOW,
+        warn: (line) => {
+          if (!line.startsWith("{")) return;
+          if (sinkFails) throw new Error("private sink detail");
+          notes.push(JSON.parse(line));
+        },
+      });
+      const response = await svc.getRun(live.id, { include: "shutdown" });
+      expect(response).toMatchObject({
+        ok: true,
+        value: {
+          shutdown: { status: "unavailable", reason: "finished-run" },
+          shutdownEvidence: {
+            source: "run-history",
+            observedAt: NOW,
+            status: "read-failed",
+            runtimeShutdown: "unknown",
+            basis: "none",
+            observationError: "transient",
+          },
+        },
+      });
+      if (sinkFails) expect(response).toMatchObject({ ok: true, value: { shutdownEvidence: { reporting: "failed" } } });
+      else
+        expect(notes).toEqual([
+          {
+            event: "run.shutdown_evidence.observation_failed",
+            runId: live.id,
+            source: "run-history",
+            stage: "history-read",
+            outcome: "unavailable",
+            errorKind: "transient",
+            observedAt: NOW,
+          },
+        ]);
+      expect(JSON.stringify({ response, notes })).not.toContain("private");
+    },
+  );
+
+  it("does not reuse another reader's retained shutdown acknowledgement", async () => {
+    const { reg, store } = setup();
+    const run = reg.create("current reader", {
+      channelId: "slack:C1",
+      userId: "slack:UBOB",
+      threadKey: "slack:C1:current-reader",
+    });
+    reg.finish(run.id, "failed");
+    await store!.put(
+      record(run.id, NOW, {
+        runtimeShutdownConfirmed: true,
+        startedAt: NOW,
+        threadKey: "slack:C1:current-reader",
+      }),
+    );
+    const svc = createRunsService({ registry: reg, store, clock: () => NOW });
+    expect(await svc.getRun(run.id, { include: "shutdown" })).toMatchObject({
+      ok: true,
+      value: {
+        userId: "slack:UBOB",
+        shutdownEvidence: { status: "identity-mismatch", runtimeShutdown: "unknown", basis: "none" },
+      },
+    });
+  });
+
+  it("does not apply a saved shutdown acknowledgement to a currently active run", async () => {
+    const { reg, store } = setup();
+    const run = reg.create("active again", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:active-again",
+    });
+    await store!.put(
+      record(run.id, NOW, {
+        startedAt: NOW,
+        threadKey: "slack:C1:active-again",
+        runtimeShutdownConfirmed: true,
+      }),
+    );
+    const svc = createRunsService({ registry: reg, store, clock: () => NOW });
+    expect(await svc.getRun(run.id, { include: "shutdown" })).toMatchObject({
+      ok: true,
+      value: {
+        finished: false,
+        shutdown: { status: "unavailable", reason: "ledger-unconfigured" },
+        shutdownEvidence: { status: "run-active", runtimeShutdown: "unknown", basis: "none" },
+      },
+    });
+  });
+
   it("keeps the current failure context ahead of an older stored artifact", async () => {
     const { reg, store, svc } = setup();
     const run = reg.create();

@@ -305,7 +305,10 @@ export function cancellationMatches(row: LiveRunRow, cancellation: RunCancellati
   );
 }
 
-export function cancellationRecordMatches(record: RunRecord, cancellation: RunCancellation): boolean {
+export function cancellationRecordMatches(
+  record: Pick<RunRecord, "id" | "startedAt" | "threadKey" | "repo" | "status" | "provisional" | "cancellation">,
+  cancellation: RunCancellation,
+): boolean {
   const receipt = record.cancellation;
   return (
     record.id === cancellation.runId &&
