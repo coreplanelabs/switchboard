@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { captureSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
-import { testSourceInputIntent } from "../testing/sourceInputs.js";
+import { testSourceInputIntent, seedSourceInputIntent } from "../testing/sourceInputs.js";
+import { readSourceInputProof } from "../references/sourceInputProof.js";
+import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { CoordinatorReconcileEffect, CoordinatorReconcileReceipt } from "../coordinator/workflowReconciliation.js";
 import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
@@ -1284,6 +1286,255 @@ describe("mintGeneration", () => {
     expect(gen).toBe("20260907T231512Z-3fa9c1d2");
     expect(GEN_PATTERN.test(gen)).toBe(true);
     expect(mintGeneration()).not.toBe(mintGeneration());
+  });
+});
+
+describe("source input admission", () => {
+  async function fixture(harnessName: "pi" | "opencode" = "pi") {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const h = harness({ ledger: inner });
+    const req = openReq({ meta: { ...openReq().meta, agent: "orchestrator" } });
+    req.seed!.context = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    const run = (await openRun(h.wt, req))!;
+    const input = testSourceInputIntent(harnessName),
+      entry = input.entries[0]!;
+    entry.owner = {
+      runId: "r1",
+      gen: "gen-A",
+      requester: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+    };
+    const policy = { version: 1, commandRoute: "native", identity: "write" };
+    const launch = { version: 1, harness: harnessName, phase: "prepared", ordinal: 0, sessionPolicy: policy };
+    expect(await run.commitState({ harnessLaunch: launch })).toBe("ok");
+    expect(await run.commitState({ harnessLaunch: { ...launch, phase: "begun" } })).toBe("ok");
+    expect(
+      await run.commitState({
+        harness: {
+          harness: harnessName,
+          launchOrdinal: 0,
+          [harnessName === "pi" ? "sessionFile" : "sessionID"]: entry.native.sessionId,
+          sessionPolicy: policy,
+        },
+      }),
+    ).toBe("ok");
+    const original = await seedSourceInputIntent(inner, input);
+    expect(await run.commitState({ sourceInputIntents: original })).toBe("ok");
+    let allowed = true;
+    const validate = async (context: ContextDependencies) => {
+      for (const reference of context.sourceInputs ?? []) {
+        const proof = await readSourceInputProof(reference, { ledger: inner, checkAccess: async () => allowed });
+        if (proof.kind !== "consistent") return { ok: false as const, code: "saved-context-unproved" as const };
+      }
+      return { ok: true as const };
+    };
+    return {
+      ...h,
+      run,
+      original,
+      validate,
+      revoke: () => {
+        allowed = false;
+      },
+    };
+  }
+
+  it.each(["pi", "opencode"] as const)(
+    "retains the exact %s source before beginning its original input",
+    async (native) => {
+      const f = await fixture(native),
+        entry = f.original.entries[0]!;
+      try {
+        expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+        expect(f.ledger.live.get("r1")?.state).toMatchObject({
+          sourceInputIntents: { version: 1, entries: [{ ...entry, phase: "begun" }] },
+          contextDependencies: { version: 4, status: "known", sourceInputs: [entry.reference] },
+        });
+        expect((await f.ledger.readSessionTail(f.run.session!.key, 1)).sources).toMatchObject({
+          status: "known",
+          context: { version: 4, status: "known", sourceInputs: [entry.reference] },
+        });
+        expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(false);
+        const peek = await f.ledger.peekInbox("r1", "gen-A", 0);
+        expect(peek.ok && peek.items.map((item) => item.witness)).toEqual([entry.witness]);
+      } finally {
+        await f.run.close();
+      }
+    },
+  );
+
+  it("reports one safe hold reason and stays silent on a successful begin", async () => {
+    const f = await fixture(),
+      entry = f.original.entries[0]!;
+    try {
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      expect(f.warnings).toEqual([]);
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(false);
+      expect(f.warnings.map((value) => JSON.parse(value))).toEqual([
+        { event: "source.input.held", runId: "r1", reason: "intent-unproved" },
+      ]);
+    } finally {
+      await f.run.close();
+    }
+    const g = await fixture();
+    try {
+      g.revoke();
+      expect(await g.run.beginSourceInput(g.original.entries[0]!.id, g.validate)).toBe(false);
+      expect(g.warnings.map((value) => JSON.parse(value))).toEqual([
+        { event: "source.input.held", runId: "r1", reason: "access-refused" },
+      ]);
+      vi.spyOn(g.warnings, "push").mockImplementation(() => {
+        throw new Error("diagnostic sink unavailable");
+      });
+      expect(await g.run.beginSourceInput(g.original.entries[0]!.id, g.validate)).toBe(false);
+      expect(g.ledger.live.get("r1")?.state.sourceInputIntents).toEqual(g.original);
+    } finally {
+      await g.run.close();
+    }
+  });
+
+  it("keeps a revoked original prepared and checks current access again after commitment", async () => {
+    const f = await fixture(),
+      entry = f.original.entries[0]!;
+    try {
+      f.revoke();
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(false);
+      expect(f.ledger.live.get("r1")?.state.sourceInputIntents).toEqual(f.original);
+    } finally {
+      await f.run.close();
+    }
+    const g = await fixture(),
+      next = g.original.entries[0]!;
+    try {
+      const setState = g.ledger.setState.bind(g.ledger);
+      vi.spyOn(g.ledger, "setState").mockImplementation(async (...args) => {
+        const result = await setState(...args);
+        const frame = args[2].sourceInputIntents as typeof g.original | undefined;
+        if (frame?.entries[0]?.phase === "begun") g.revoke();
+        return result;
+      });
+      expect(await g.run.beginSourceInput(next.id, g.validate)).toBe(false);
+      expect(g.ledger.live.get("r1")?.state.sourceInputIntents).toEqual({
+        version: 1,
+        entries: [{ ...next, phase: "begun" }],
+      });
+      expect(await g.run.beginSourceInput(next.id, async () => ({ ok: true }))).toBe(false);
+    } finally {
+      await g.run.close();
+    }
+  });
+
+  it.each([true, false])("holds a lost begun reply without repeating the original: committed=%s", async (committed) => {
+    const f = await fixture(),
+      entry = f.original.entries[0]!;
+    let begunWrites = 0;
+    const setState = f.ledger.setState.bind(f.ledger);
+    vi.spyOn(f.ledger, "setState").mockImplementation(async (...args) => {
+      const frame = args[2].sourceInputIntents as typeof f.original | undefined;
+      if (frame?.entries[0]?.phase === "begun") {
+        begunWrites++;
+        if (committed) expect(await setState(...args)).toEqual({ ok: true });
+        throw new UncertainStoreError(
+          "PRIVATE_SOURCE_WRITE",
+          await storeRequestWitness("/runs/state", JSON.stringify(args)),
+        );
+      }
+      return setState(...args);
+    });
+    try {
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(false);
+      expect(f.ledger.live.get("r1")?.state.sourceInputIntents).toEqual({
+        version: 1,
+        entries: [{ ...entry, phase: committed ? "begun" : "prepared" }],
+      });
+      expect(f.run.writeBoundaryFailure).toMatchObject({ kind: "state", runId: "r1", gen: "gen-A" });
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(false);
+      expect(begunWrites).toBe(1);
+      expect(f.sleeps).toEqual([]);
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it.each(["context", "native-session", "row"] as const)(
+    "holds a %s change during final access validation",
+    async (changed) => {
+      const f = await fixture(),
+        entry = f.original.entries[0]!;
+      let checks = 0;
+      try {
+        expect(
+          await f.run.beginSourceInput(entry.id, async (context) => {
+            const result = await f.validate(context);
+            if (++checks === 3) {
+              if (changed === "context") {
+                expect(
+                  await f.run.commitState({ contextDependencies: { ...context, githubRepos: ["fixture/late"] } }),
+                ).toBe("ok");
+              } else if (changed === "native-session") {
+                const state = f.ledger.live.get("r1")!.state;
+                expect(
+                  await f.run.commitState({ harness: { ...(state.harness as Record<string, unknown>), ended: true } }),
+                ).toBe("ok");
+              } else {
+                f.ledger.inbox.set("r1", []);
+              }
+            }
+            return result;
+          }),
+        ).toBe(false);
+        expect(f.ledger.live.get("r1")?.state.sourceInputIntents).toEqual({
+          version: 1,
+          entries: [{ ...entry, phase: "begun" }],
+        });
+        expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(false);
+      } finally {
+        await f.run.close();
+      }
+    },
+  );
+
+  it("serializes two attempts for one original input and preserves access errors", async () => {
+    const f = await fixture(),
+      entry = f.original.entries[0]!;
+    try {
+      const cause = new TypeError("PRIVATE_ACCESS_FAILURE");
+      await expect(
+        f.run.beginSourceInput(entry.id, async () => {
+          throw cause;
+        }),
+      ).rejects.toBe(cause);
+      expect(f.ledger.live.get("r1")?.state.sourceInputIntents).toEqual(f.original);
+      expect(
+        await Promise.all([f.run.beginSourceInput(entry.id, f.validate), f.run.beginSourceInput(entry.id, f.validate)]),
+      ).toEqual([true, false]);
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it("does not replace context added while the first access check waits", async () => {
+    const f = await fixture(),
+      entry = f.original.entries[0]!;
+    let checks = 0;
+    try {
+      expect(
+        await f.run.beginSourceInput(entry.id, async (context) => {
+          if (++checks === 1)
+            expect(
+              await f.run.commitState({ contextDependencies: { ...context, githubRepos: ["fixture/new-source"] } }),
+            ).toBe("ok");
+          return { ok: true };
+        }),
+      ).toBe(false);
+      expect(f.ledger.live.get("r1")?.state).toMatchObject({
+        sourceInputIntents: f.original,
+        contextDependencies: { githubRepos: ["fixture/new-source"] },
+      });
+    } finally {
+      await f.run.close();
+    }
   });
 });
 

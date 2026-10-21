@@ -71,7 +71,9 @@ import {
   type UncertainStoreDiagnosis,
 } from "../storeFailure.js";
 import { preserveHarnessPolicy } from "./checkpointState.js";
-import { sourceInputIntentsOf } from "./sourceInputIntent.js";
+import { sourceInputIntentsOf, sourceInputNativeMatches } from "./sourceInputIntent.js";
+import { sourceSnapshot } from "./sourceEvents.js";
+import type { AudienceCheck } from "../audienceDecision.js";
 import { assignLedgerLiveState } from "./decisions.js";
 import type { RunLiveState } from "../runLiveState.js";
 import { inboxPushSequence, messageFromInbox } from "./inboxMessage.js";
@@ -455,6 +457,10 @@ export interface LedgerRun {
   commitState(patch: RunState): Promise<FinishingGate>;
   /** Persist trusted dependencies before source content reaches a model. */
   writeSources(sources: SessionSources): Promise<boolean>;
+  /** Retain and check the whole source context before marking an original
+   * input begun. A begun or uncertain original cannot be begun again. This
+   * neither sends native input nor proves native admission or inbox ACK. */
+  beginSourceInput(id: string, validate: (context: ContextDependencies) => Promise<AudienceCheck>): Promise<boolean>;
   /** Persist one controller-admitted result before handing its bytes to a model. */
   recordSourceResult(receipt: SourceResultReceipt): Promise<boolean>;
   /** Freeze an acknowledged source cursor in the owned live row before handoff. */
@@ -816,6 +822,12 @@ export class NullLedgerRun implements LedgerRun {
     // no ledger to mirror onto
   }
   async writeSources(_sources: SessionSources): Promise<boolean> {
+    return false;
+  }
+  async beginSourceInput(
+    _id: string,
+    _validate: (context: ContextDependencies) => Promise<AudienceCheck>,
+  ): Promise<boolean> {
     return false;
   }
   async recordSourceResult(_receipt: SourceResultReceipt): Promise<boolean> {
@@ -1923,6 +1935,106 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       // refused or unknown write; every caller keeps its own frozen evidence.
       const frozen = structuredClone(sources);
       const sending = this.sourceSending.then(() => this.saveSources(frozen));
+      this.sourceSending = sending.catch(() => false);
+      return sending;
+    }
+
+    beginSourceInput(id: string, validate: (context: ContextDependencies) => Promise<AudienceCheck>): Promise<boolean> {
+      const sending = this.sourceSending.then(async () => {
+        const hold = (
+          reason:
+            | "owner-unavailable"
+            | "write-unconfirmed"
+            | "intent-unproved"
+            | "context-unproved"
+            | "access-refused"
+            | "context-changed"
+            | "sources-unconfirmed"
+            | "intent-changed"
+            | "begin-unconfirmed"
+            | "readback-unavailable"
+            | "readback-unproved"
+            | "native-changed"
+            | "row-unproved",
+        ): false => {
+          try {
+            warn(JSON.stringify({ event: "source.input.held", runId: this.runId, reason }));
+          } catch {
+            // A diagnostic sink failure cannot authorize a held input.
+          }
+          return false;
+        };
+        if (!this.tracked() || this.finished || this.handedOff || this.finishLanding || !this.sessionRow)
+          return hold("owner-unavailable");
+        await this.stateSending;
+        if (!(await this.reconcilePendingBoundary())) return hold("write-unconfirmed");
+        const original = sourceInputIntentsOf(this.state.sourceInputIntents);
+        const entry = original?.entries.find((entry) => entry.id === id);
+        if (!original || !entry || entry.phase !== "prepared" || entry.owner.runId !== this.runId)
+          return hold("intent-unproved");
+        if (!sourceInputNativeMatches(this.state, entry)) return hold("native-changed");
+        const prior = this.state.contextDependencies;
+        if (!isContextDependencies(prior) || prior.status !== "known") return hold("context-unproved");
+        const priorRevision = JSON.stringify(prior);
+        const context = mergeContextDependencies(prior, {
+          version: 4,
+          status: "known",
+          revision: 0,
+          origins: [],
+          slack: [],
+          mcp: [],
+          sourceInputs: [entry.reference],
+        });
+        if (context.status !== "known") return hold("context-unproved");
+        if (!(await validate(structuredClone(context))).ok) return hold("access-refused");
+        if (JSON.stringify(this.state.contextDependencies) !== priorRevision) return hold("context-changed");
+        if (
+          !(await this.saveSources({
+            version: 1,
+            status: "known",
+            receipts: [],
+            binding: sourceBinding({
+              userId: entry.owner.requester,
+              channelId: entry.owner.channelId,
+              threadKey: entry.owner.threadKey,
+            }),
+            context,
+          }))
+        )
+          return hold("sources-unconfirmed");
+        // Validate the cumulative saved context, including parallel results,
+        // rather than authorizing only the new leaf from an earlier snapshot.
+        const current = this.state.contextDependencies;
+        if (!isContextDependencies(current) || current.status !== "known") return hold("context-unproved");
+        const checked = JSON.stringify(current);
+        if (!(await validate(structuredClone(current))).ok) return hold("access-refused");
+        if (JSON.stringify(this.state.contextDependencies) !== checked) return hold("context-changed");
+        const pending = sourceInputIntentsOf(this.state.sourceInputIntents);
+        if (JSON.stringify(pending) !== JSON.stringify(original)) return hold("intent-changed");
+        const begun = {
+          version: 1 as const,
+          entries: original.entries.map((input) => (input.id === id ? { ...input, phase: "begun" as const } : input)),
+        };
+        if (!(await this.setStateAndFlush({ sourceInputIntents: begun }))) return hold("begin-unconfirmed");
+        // Permission can change while the storage acknowledgment waits. Keep
+        // the begun identity on refusal; it never becomes a fresh submission.
+        if (!(await validate(structuredClone(current))).ok) return hold("access-refused");
+        if (JSON.stringify(this.state.contextDependencies) !== checked) return hold("context-changed");
+        const observed = await ledger.peekInbox(this.runId, gen, 0);
+        if (!observed.ok) return hold("readback-unavailable");
+        const saved = sourceSnapshot(observed.boundary.state);
+        if (!saved || typeof saved !== "object" || Array.isArray(saved)) return hold("readback-unproved");
+        const state = saved as RunState;
+        if (!this.tracked() || this.finished || this.handedOff || this.finishLanding) return hold("owner-unavailable");
+        if (!sourceInputNativeMatches(state, entry)) return hold("native-changed");
+        if (JSON.stringify(sourceInputIntentsOf(state.sourceInputIntents)) !== JSON.stringify(begun))
+          return hold("intent-changed");
+        if (JSON.stringify(sourceSnapshot(state.contextDependencies)) !== JSON.stringify(sourceSnapshot(current)))
+          return hold("context-changed");
+        if (!observed.items.some((item) => JSON.stringify(item.witness) === JSON.stringify(entry.witness)))
+          return hold("row-unproved");
+        return true;
+      });
       this.sourceSending = sending.catch(() => false);
       return sending;
     }
