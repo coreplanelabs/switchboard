@@ -153,7 +153,7 @@ const deployOptions = z.object({
   affected: flag
     .optional()
     .describe(
-      "select the Workers whose inputs changed since the commit each one serves (its /healthz build.commit; else the last release tag; else unsure → deploy) — what the release deploy runs",
+      "select the Workers whose inputs changed since each one's exact /healthz build.commit; an unreadable commit makes that Worker unsure and selected — what the release deploy runs",
     ),
   base: gitRef
     .optional()

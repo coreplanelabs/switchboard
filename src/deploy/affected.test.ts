@@ -29,12 +29,12 @@ const sha = (c: string) => c.repeat(40);
 const HEAD = sha("f");
 const LIVE = sha("a");
 const OLDER = sha("b");
-const TAG = sha("c");
 
 type Tree = Record<string, string>;
 
 type LockPkg = {
   version?: string;
+  integrity?: string;
   dev?: boolean;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
@@ -136,9 +136,6 @@ interface FakeRepo {
   trees: Record<string, Tree>;
   /** What each Worker's /healthz says. Absent → an error. */
   live?: Partial<Record<WorkerName, { commit: string } | { error: string }>>;
-  /** Commits that are ancestors of HEAD (HEAD itself always is). */
-  ancestors?: string[];
-  lastRelease?: { tag: string; commit: string };
 }
 
 function fakeProbe(repo: FakeRepo) {
@@ -149,8 +146,6 @@ function fakeProbe(repo: FakeRepo) {
       probed.push(w);
       return repo.live?.[w] ?? { error: `GET /healthz → HTTP 401` };
     },
-    isAncestor: async (commit, head) => commit === head || (repo.ancestors ?? []).includes(commit),
-    lastRelease: async () => repo.lastRelease,
     changedPaths: async (base, head) => {
       const a = repo.trees[base];
       const b = repo.trees[head];
@@ -377,14 +372,14 @@ describe("lockfile workspace dependencies", () => {
     expect([
       ...workspaceDependencies(rootLock, "deploy/cloudflare-resident", { includeDev: false })!.entries(),
     ]).toEqual([
-      ["node_modules/@cloudflare/sandbox", "0.13.0"],
-      ["node_modules/@cloudflare/containers", "0.3.7"],
+      ["node_modules/@cloudflare/sandbox", { version: "0.13.0" }],
+      ["node_modules/@cloudflare/containers", { version: "0.3.7" }],
     ]);
     // The sandbox Worker's own SDK is nested (a different major), and so is its containers dep.
     expect([...workspaceDependencies(rootLock, "deploy/cloudflare-sandbox", { includeDev: false })!.entries()]).toEqual(
       [
-        ["deploy/cloudflare-sandbox/node_modules/@cloudflare/sandbox", "0.3.7"],
-        ["deploy/cloudflare-sandbox/node_modules/@cloudflare/containers", "0.0.28"],
+        ["deploy/cloudflare-sandbox/node_modules/@cloudflare/sandbox", { version: "0.3.7" }],
+        ["deploy/cloudflare-sandbox/node_modules/@cloudflare/containers", { version: "0.0.28" }],
       ],
     );
     expect([...workspaceDependencies(rootLock, "deploy/cloudflare-memory", { includeDev: false })!.keys()]).toEqual([]);
@@ -398,9 +393,9 @@ describe("lockfile workspace dependencies", () => {
     // web: vue's installed peer is followed, its optional peer nobody installed is not; vite's bundled
     // rollup has no entry of its own and is NOT recorded as unresolved — vite's version tracks it.
     expect([...workspaceDependencies(rootLock, "web", { includeDev: true })!.entries()]).toEqual([
-      ["node_modules/vue", "3.5.0"],
-      ["node_modules/vite", "7.0.0"],
-      ["node_modules/@vue/compiler-sfc", "3.5.0"],
+      ["node_modules/vue", { version: "3.5.0" }],
+      ["node_modules/vite", { version: "7.0.0" }],
+      ["node_modules/@vue/compiler-sfc", { version: "3.5.0" }],
     ]);
   });
 
@@ -429,7 +424,9 @@ describe("lockfile workspace dependencies", () => {
       "deploy/cloudflare-memory",
       { includeDev: false },
     )!;
-    expect([...dangling.entries()]).toEqual([["deploy/cloudflare-memory/node_modules/ghost", "unresolved"]]);
+    expect([...dangling.entries()]).toEqual([
+      ["deploy/cloudflare-memory/node_modules/ghost", { version: "unresolved" }],
+    ]);
   });
 
   it("an unreadable lockfile or an unknown workspace is not a dependency set — the caller treats it as a change (fail open)", () => {
@@ -446,7 +443,7 @@ describe("lockfile workspace dependencies", () => {
         const closure = workspaceDependencies(real, workspace, { includeDev });
         // Bundled deps (tailwind's wasm runtime) and optional peers must not read as missing.
         expect(
-          [...(closure ?? new Map()).entries()].filter(([, v]) => v === "unresolved"),
+          [...(closure ?? new Map()).entries()].filter(([, v]) => v.version === "unresolved"),
           `${w.name}: ${workspace || "root"} unresolved`,
         ).toEqual([]);
         expect(closure, `${w.name}: ${workspace || "root"}`).toBeDefined();
@@ -462,7 +459,7 @@ describe("lockfile workspace dependencies", () => {
       const sdk = [...closure.entries()].filter(([k]) => k.endsWith("node_modules/@cloudflare/sandbox"));
       expect(sdk, dir).toHaveLength(1);
       // An exact pin in package.json (no range operator) is the version the lockfile resolves.
-      if (/^\d/.test(pinned)) expect(sdk[0][1], dir).toBe(pinned);
+      if (/^\d/.test(pinned)) expect(sdk[0][1].version, dir).toBe(pinned);
     }
   });
 });
@@ -581,7 +578,6 @@ describe("computeAffected", () => {
     const { probe } = fakeProbe({
       trees: { [HEAD]: BASE_TREE, [LIVE]: BASE_TREE },
       live: allLive(LIVE),
-      ancestors: [LIVE],
     });
     const r = await computeAffected(probe);
     expect(r.head).toBe(HEAD);
@@ -604,7 +600,7 @@ describe("computeAffected", () => {
     const head = withChanges({
       "src/core/memory/scorer.ts": "export const tokenize = (s: string) => s.split(/\\s+/);\n",
     });
-    const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] });
+    const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE) });
     const r = await computeAffected(probe);
     expect(decisions(r)).toEqual({ memory: "deploy", bot: "deploy", resident: "skip", sandbox: "skip" });
     expect(r.selected).toEqual(["memory", "bot"]);
@@ -615,7 +611,6 @@ describe("computeAffected", () => {
     const disk = fakeProbe({
       trees: { [HEAD]: withChanges({ "src/execution/residentDisk.ts": "export const df = 2;\n" }), [LIVE]: BASE_TREE },
       live: allLive(LIVE),
-      ancestors: [LIVE],
     });
     expect((await computeAffected(disk.probe)).selected).toEqual(["resident", "bot"]);
   });
@@ -629,7 +624,7 @@ describe("computeAffected", () => {
       ".depot/workflows/ci.yml": "name: ci\n",
       "CHANGELOG.md": "## 0.2.0\n",
     });
-    const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] });
+    const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE) });
     const r = await computeAffected(probe);
     expect(r.selected).toEqual([]);
     expect(r.deployAll).toBe(false);
@@ -642,7 +637,7 @@ describe("computeAffected", () => {
       "deploy/cloudflare-acceptance-source/wrangler.toml": "name = 'fixture'\n",
       "deploy/cloudflare-acceptance-source/package.json": "{}\n",
     });
-    const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] });
+    const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE) });
     const result = await computeAffected(probe);
     expect(result.unclassified).toEqual([]);
     expect(result.selected).toEqual([]);
@@ -667,14 +662,13 @@ describe("computeAffected", () => {
     const registered = fakeProbe({
       trees: { [HEAD]: rootRegistered, [LIVE]: BASE_TREE },
       live: allLive(LIVE),
-      ancestors: [LIVE],
     });
     expect((await computeAffected(registered.probe)).selected).toEqual([]);
   });
 
   it("an unclassified path makes every Worker unsure → the whole fleet deploys, saying why", async () => {
     const head = withChanges({ "terraform/main.tf": "resource {}\n" });
-    const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] });
+    const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE) });
     const r = await computeAffected(probe);
     expect(r.deployAll).toBe(true);
     expect(r.unclassified).toEqual(["terraform/main.tf"]);
@@ -686,83 +680,108 @@ describe("computeAffected", () => {
     expect(r.markdown).toContain("terraform/main.tf");
   });
 
-  it("a Worker whose live commit cannot be read falls back to the last release tag; with no tag either it is deployed as unsure", async () => {
+  it("does not skip a Worker when its live commit is unreadable and the candidate tree has no diff", async () => {
+    const { probe } = fakeProbe({
+      trees: { [HEAD]: BASE_TREE },
+      live: { ...allLive(HEAD), sandbox: { error: "GET /healthz → HTTP 401" } },
+    });
+    const result = await computeAffected(probe);
+    expect(result.selected).toEqual(["sandbox"]);
+    expect(result.workers.find((worker) => worker.name === "sandbox")).toMatchObject({
+      decision: "deploy",
+      reasons: ["unsure: /healthz: GET /healthz → HTTP 401"],
+    });
+  });
+
+  it("compares a staging Worker with its exact live tree even when branch heads diverge", async () => {
+    const otherHead = sha("9");
+    const { probe } = fakeProbe({
+      trees: {
+        [HEAD]: BASE_TREE,
+        [otherHead]: withChanges({ "deploy/cloudflare-sandbox/Dockerfile": "FROM newer-image\n" }),
+      },
+      live: { ...allLive(HEAD), sandbox: { commit: otherHead } },
+    });
+    const result = await computeAffected(probe);
+    expect(result.selected).toEqual(["sandbox"]);
+    expect(result.workers.find((worker) => worker.name === "sandbox")).toMatchObject({
+      decision: "deploy",
+      reasons: ["deploy/cloudflare-sandbox/Dockerfile"],
+    });
+  });
+
+  it("selects Bot alone when a Dockerfile-copied runtime file changes", async () => {
+    for (const path of ["scripts/meat-progress.patch", "docker-entrypoint.sh", "deploy/hooks/prepare-commit-msg"]) {
+      const result = await computeAffected(
+        fakeProbe({ trees: { [HEAD]: withChanges({ [path]: "new content" }), [LIVE]: BASE_TREE }, live: allLive(LIVE) })
+          .probe,
+      );
+      expect(result.selected, path).toEqual(["bot"]);
+    }
+  });
+
+  it("selects a Worker when its pinned dependency bytes change without a version bump", async () => {
+    const head = withChanges({
+      "package-lock.json": lockWith({
+        "deploy/cloudflare-sandbox/node_modules/@cloudflare/sandbox": {
+          ...ROOT_LOCK_PACKAGES["deploy/cloudflare-sandbox/node_modules/@cloudflare/sandbox"],
+          integrity: "sha512-new-bytes",
+        },
+      }),
+    });
+    const result = await computeAffected(
+      fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
+    );
+    expect(result.selected).toEqual(["sandbox"]);
+  });
+
+  it("a Worker whose live commit cannot be read is selected as unsure", async () => {
     const head = withChanges({ "deploy/cloudflare-sandbox/Dockerfile": "FROM docker.io/cloudflare/sandbox:0.3.8\n" });
     const { probe, probed } = fakeProbe({
-      trees: { [HEAD]: head, [LIVE]: BASE_TREE, [TAG]: BASE_TREE },
+      trees: { [HEAD]: head, [LIVE]: BASE_TREE },
       live: { memory: { commit: LIVE }, bot: { commit: LIVE }, resident: { commit: LIVE } }, // sandbox: 401 without its bearer
-      ancestors: [LIVE, TAG],
-      lastRelease: { tag: "v0.1.0", commit: TAG },
     });
     const r = await computeAffected(probe);
     expect(probed).toEqual(["memory", "resident", "bot", "sandbox"]);
     expect(r.workers.find((w) => w.name === "sandbox")).toMatchObject({
       decision: "deploy",
-      base: { kind: "release", tag: "v0.1.0", commit: TAG },
-      reasons: ["deploy/cloudflare-sandbox/Dockerfile"],
+      base: { kind: "none" },
+      reasons: ["unsure: /healthz: GET /healthz → HTTP 401"],
     });
     expect(r.selected).toEqual(["sandbox"]);
-    // No tag either: unsure, and the reason carries both facts.
-    const noTag = fakeProbe({
-      trees: { [HEAD]: BASE_TREE, [LIVE]: BASE_TREE },
-      live: { memory: { commit: LIVE }, bot: { commit: LIVE }, resident: { commit: LIVE } },
-      ancestors: [LIVE],
-    });
-    const r2 = await computeAffected(noTag.probe);
-    expect(r2.workers.find((w) => w.name === "sandbox")).toMatchObject({
-      decision: "deploy",
-      base: { kind: "none" },
-      reasons: ["unsure: no base — /healthz: GET /healthz → HTTP 401; no release tag before HEAD"],
-    });
-    expect(r2.selected).toEqual(["sandbox"]);
-    expect(r2.deployAll).toBe(false);
+    expect(r.deployAll).toBe(false);
   });
 
-  it("a live commit that is dirty, `unknown`, or not an ancestor of HEAD is never a base — the Worker is unsure (or falls back to the tag)", async () => {
+  it("dirty, unknown and abbreviated live commits deploy as unsure; a distinct full commit is compared by tree", async () => {
     const stranger = sha("9");
     const { probe } = fakeProbe({
-      trees: { [HEAD]: BASE_TREE, [LIVE]: BASE_TREE, [TAG]: BASE_TREE },
+      trees: { [HEAD]: BASE_TREE, [LIVE]: BASE_TREE, [stranger]: BASE_TREE },
       live: {
-        memory: { commit: `${LIVE}-dirty` },
+        memory: { commit: LIVE.slice(0, 7) },
         bot: { commit: "unknown" },
         resident: { commit: stranger },
-        sandbox: { commit: LIVE },
+        sandbox: { commit: `${LIVE}-dirty` },
       },
-      ancestors: [LIVE, TAG],
     });
     const r = await computeAffected(probe);
     expect(r.workers.find((w) => w.name === "memory")).toMatchObject({
       decision: "deploy",
-      base: { kind: "none", reason: `serving ${LIVE.slice(0, 7)}-dirty — a dirty build is not a commit` },
+      base: { kind: "none", reason: `serving an unrecognizable build identity "${LIVE.slice(0, 7)}"` },
     });
     expect(r.workers.find((w) => w.name === "bot")).toMatchObject({
       decision: "deploy",
       base: { kind: "none", reason: 'serving commit "unknown" — the image was built without a stamp' },
     });
     expect(r.workers.find((w) => w.name === "resident")).toMatchObject({
-      decision: "deploy",
-      base: {
-        kind: "none",
-        reason: `live commit ${stranger.slice(0, 7)} is not an ancestor of HEAD ${HEAD.slice(0, 7)}`,
-      },
+      decision: "skip",
+      base: { kind: "live", commit: stranger },
     });
     expect(r.workers.find((w) => w.name === "sandbox")).toMatchObject({
-      decision: "skip",
-      base: { kind: "live", commit: LIVE },
+      decision: "deploy",
+      base: { kind: "none", reason: `serving ${LIVE.slice(0, 7)}-dirty — a dirty build is not a commit` },
     });
-    expect(r.selected).toEqual(["memory", "resident", "bot"]);
+    expect(r.selected).toEqual(["memory", "bot", "sandbox"]);
     expect(r.deployAll).toBe(false);
-    // With a release tag the same three fall back to it instead of guessing.
-    const tagged = fakeProbe({
-      trees: { [HEAD]: BASE_TREE, [LIVE]: BASE_TREE, [TAG]: BASE_TREE },
-      live: { memory: { commit: "unknown" } },
-      ancestors: [LIVE, TAG],
-      lastRelease: { tag: "v0.1.0", commit: TAG },
-    });
-    expect((await computeAffected(tagged.probe)).workers.find((w) => w.name === "memory")).toMatchObject({
-      decision: "skip",
-      base: { kind: "release", tag: "v0.1.0" },
-    });
   });
 
   it("the resident Dockerfile, wrangler config and its SDK moving in the root lockfile reach only the resident — not the bot, not the sandbox's nested copy; a devDependency bump in its workspace reaches nothing", async () => {
@@ -780,7 +799,7 @@ describe("computeAffected", () => {
       }),
     });
     const a = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: prodBump, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: prodBump, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(a.selected).toEqual(["resident"]);
     expect(a.workers.find((w) => w.name === "resident")!.reasons).toEqual([
@@ -804,7 +823,7 @@ describe("computeAffected", () => {
       }),
     });
     const b = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: devBump, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: devBump, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(b.selected).toEqual([]);
     expect(b.unclassified).toEqual([]);
@@ -814,7 +833,7 @@ describe("computeAffected", () => {
       "deploy/cloudflare-resident/wrangler.jsonc": '{ "name": "switchboard-resident", "x": 1 }',
     });
     const c = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: image, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: image, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(c.selected).toEqual(["resident"]);
     expect(c.workers.find((w) => w.name === "resident")!.reasons).toEqual([
@@ -831,7 +850,7 @@ describe("computeAffected", () => {
       ".release-please-manifest.json": '{".": "0.2.0"}',
     });
     const a = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: release, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: release, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(a.selected).toEqual([]);
     expect(a.deployAll).toBe(false);
@@ -840,7 +859,7 @@ describe("computeAffected", () => {
       "package.json": JSON.stringify({ name: "switchboard", version: "0.2.0", dependencies: { zod: "^4.1.0" } }),
     });
     const b = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: dep, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: dep, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(b.selected).toEqual(["bot"]);
     expect(b.workers.find((w) => w.name === "bot")!.reasons).toEqual(["package.json"]);
@@ -849,7 +868,7 @@ describe("computeAffected", () => {
       "package-lock.json": lockWith({ "node_modules/vitest": { version: "5.1.0", dev: true } }),
     });
     const c = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: toolchain, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: toolchain, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(c.selected).toEqual(["bot"]);
     expect(c.workers.find((w) => w.name === "bot")!.reasons).toEqual([
@@ -860,7 +879,7 @@ describe("computeAffected", () => {
       "package-lock.json": lockWith({ "node_modules/vite": { version: "7.1.0", dev: true } }),
     });
     const d = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: vite, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: vite, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(d.workers.find((w) => w.name === "bot")!.reasons).toEqual([
       "package-lock.json: dependencies of web changed — vite 7.0.0 → 7.1.0",
@@ -870,7 +889,7 @@ describe("computeAffected", () => {
       "package-lock.json": lockWith({ "node_modules/wrangler": { version: "4.121.0", dev: true } }),
     });
     const e = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: shimTool, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: shimTool, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(e.selected).toEqual([]);
   });
@@ -880,7 +899,7 @@ describe("computeAffected", () => {
       "src/core/memory/engine.ts": 'import { gone } from "./vanished.js";\nexport const rank = gone;\n',
     });
     const r = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(r.workers.find((w) => w.name === "memory")!.reasons).toContain(
       "unsure: import ./vanished.js from src/core/memory/engine.ts resolves to no file",
@@ -892,7 +911,6 @@ describe("computeAffected", () => {
     const { probe } = fakeProbe({
       trees: { [HEAD]: BASE_TREE, [LIVE]: BASE_TREE },
       live: allLive(LIVE),
-      ancestors: [LIVE],
     });
     const failing: AffectedProbe = { ...probe, changedPaths: async () => undefined };
     const r = await computeAffected(failing, { base: "v9.9.9" });
@@ -923,7 +941,6 @@ describe("computeAffected", () => {
     const { probe, probed } = fakeProbe({
       trees: { [HEAD]: head, [OLDER]: BASE_TREE },
       live: allLive(HEAD),
-      ancestors: [OLDER],
     });
     const r = await computeAffected(probe, { base: OLDER });
     expect(probed).toEqual([]);
@@ -940,10 +957,8 @@ describe("computeAffected", () => {
       "deploy/cloudflare-sandbox/Dockerfile": "FROM x\n",
     });
     const { probe } = fakeProbe({
-      trees: { [HEAD]: head, [LIVE]: BASE_TREE, [TAG]: BASE_TREE },
+      trees: { [HEAD]: head, [LIVE]: BASE_TREE },
       live: { memory: { commit: LIVE }, bot: { commit: LIVE }, resident: { commit: LIVE } },
-      ancestors: [LIVE, TAG],
-      lastRelease: { tag: "v0.1.0", commit: TAG },
     });
     const r = await computeAffected(probe);
     const md = formatAffectedMarkdown(r);
@@ -955,7 +970,7 @@ describe("computeAffected", () => {
     );
     expect(md).toContain(`| bot | **deploy** | live \`${LIVE.slice(0, 7)}\` | \`src/core/memory/scorer.ts\` |`);
     expect(md).toContain(`| resident | skip | live \`${LIVE.slice(0, 7)}\` | no input changed |`);
-    expect(md).toContain("| sandbox | **deploy** | release `v0.1.0` | `deploy/cloudflare-sandbox/Dockerfile` |");
+    expect(md).toContain("| sandbox | **deploy** | none | unsure: /healthz: GET /healthz → HTTP 401 |");
     expect(md).toContain("Unclassified paths: none");
     expect(md.indexOf("| memory |")).toBeLessThan(md.indexOf("| bot |"));
     // Many reasons are capped, with the count.
@@ -963,13 +978,12 @@ describe("computeAffected", () => {
       Array.from({ length: 12 }, (_, i) => [`src/m${i}.ts`, `export const m${i} = ${i};\n`]),
     );
     const big = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: withChanges(many), [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] })
-        .probe,
+      fakeProbe({ trees: { [HEAD]: withChanges(many), [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(big.workers.find((w) => w.name === "bot")!.reasons).toHaveLength(12);
     expect(big.markdown).toContain("… +4 more");
     const none = await computeAffected(
-      fakeProbe({ trees: { [HEAD]: BASE_TREE, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] }).probe,
+      fakeProbe({ trees: { [HEAD]: BASE_TREE, [LIVE]: BASE_TREE }, live: allLive(LIVE) }).probe,
     );
     expect(none.markdown).toContain("**nothing to deploy** — every Worker already serves this tree's inputs");
   });

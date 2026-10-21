@@ -143,8 +143,7 @@ jobs:
       RELEASE_PR: "true"
       # A stalled npm-cache segment gives up after 1 min, not 10 (see ci.yml).
       SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
-      # Optional: lets the plan read the sandbox's live commit; without it the
-      # sandbox is judged against the last release tag (unsure before the first).
+      # Without this bearer, affected selection marks the sandbox unsure and selects it.
       SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       # `pr` is release-please's PullRequest JSON ({ number, headBranchName, … }).
@@ -154,8 +153,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
-          # Full history + tags: the diff against each Worker's live commit, and
-          # the last `v*` tag as the fallback base.
+          # Full history for diffs against each Worker's live commit; tags also
+          # identify the release's published image references.
           fetch-depth: 0
           fetch-tags: true
           # The sticky comment is posted with GH_TOKEN, never through git.

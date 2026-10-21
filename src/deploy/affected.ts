@@ -31,7 +31,7 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   { rule: "markdown", test: /^(?!(?:skills|engineering)\/).*\.md$/ },
   { rule: "ci", test: /^\.github\// },
   { rule: "ci", test: /^\.depot\/workflows\// },
-  { rule: "scripts", test: /^scripts\// },
+  { rule: "scripts", test: /^scripts\/(?!meat-progress\.patch$)/ },
   // The npm package is built and published by the release, never deployed; its
   // manifest is in the image only so npm can resolve the workspace tree.
   { rule: "npm package (published by the release, not deployed)", test: /^packages\// },
@@ -181,6 +181,8 @@ export async function importClosure(
 
 interface LockPackage {
   version?: unknown;
+  integrity?: unknown;
+  resolved?: unknown;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
@@ -221,18 +223,24 @@ function resolveLockPackage(packages: Record<string, LockPackage>, fromPath: str
 
 /**
  * The dependency closure of one npm workspace in the ROOT `package-lock.json`
- * (v2/v3 `packages` map), as `{ lockfile path → version }` — what wrangler
+ * (v2/v3 `packages` map), as `{ lockfile path → version + pinned source }` — what wrangler
  * bundles for that Worker (`includeDev: false`), or what an image's `npm ci`
  * installs for it (`includeDev: true`; the toolchain builds the artifact).
  * The workspace itself is `""` for the root package, else its directory.
  * `undefined` when the text is not a lockfile or the workspace is not in it —
  * the caller fails open.
  */
+export interface LockedDependency {
+  version: string;
+  /** Integrity pins the bytes; without it, the resolved source is the best available identity. */
+  source?: string;
+}
+
 export function workspaceDependencies(
   lockfileText: string | undefined,
   workspace: string,
   { includeDev }: { includeDev: boolean },
-): Map<string, string> | undefined {
+): Map<string, LockedDependency> | undefined {
   if (lockfileText === undefined) return undefined;
   let parsed: unknown;
   try {
@@ -245,7 +253,7 @@ export function workspaceDependencies(
   const all = packages as Record<string, LockPackage>;
   const root = all[workspace];
   if (typeof root !== "object" || root === null) return undefined;
-  const out = new Map<string, string>();
+  const out = new Map<string, LockedDependency>();
   const queue: { from: string; edges: { name: string; peer: boolean }[] }[] = [
     { from: workspace, edges: lockEdges(root, { includeDev }) },
   ];
@@ -256,12 +264,19 @@ export function workspaceDependencies(
       if (key === undefined) {
         // A peer nobody installed is not part of what ships. Anything else
         // named but absent from the lockfile is recorded, so a diff shows it.
-        if (!peer) out.set(`${from ? `${from}/` : ""}node_modules/${name}`, "unresolved");
+        if (!peer) out.set(`${from ? `${from}/` : ""}node_modules/${name}`, { version: "unresolved" });
         continue;
       }
       if (out.has(key)) continue;
       const pkg = all[key];
-      out.set(key, typeof pkg.version === "string" ? pkg.version : "?");
+      out.set(key, {
+        version: typeof pkg.version === "string" ? pkg.version : "?",
+        ...(typeof pkg.integrity === "string"
+          ? { source: pkg.integrity }
+          : typeof pkg.resolved === "string"
+            ? { source: pkg.resolved }
+            : {}),
+      });
       // Inside the closure only what npm installs matters: a dependency's own
       // devDependencies never are; its peers are (npm ≥7), unless optional.
       queue.push({ from: key, edges: lockEdges(pkg, { includeDev: false }) });
@@ -273,15 +288,16 @@ export function workspaceDependencies(
 const depName = (key: string) => key.slice(key.lastIndexOf("node_modules/") + "node_modules/".length);
 
 /** Human lines for what moved between two production dependency sets; empty when nothing did. */
-export function prodDepsDiff(before: Map<string, string>, after: Map<string, string>): string[] {
+export function prodDepsDiff(before: Map<string, LockedDependency>, after: Map<string, LockedDependency>): string[] {
   const lines: string[] = [];
   for (const key of [...new Set([...before.keys(), ...after.keys()])].sort()) {
     const a = before.get(key);
     const b = after.get(key);
-    if (a === b) continue;
-    if (a === undefined) lines.push(`+ ${depName(key)} ${b}`);
+    if (a?.version === b?.version && a?.source === b?.source) continue;
+    if (a === undefined) lines.push(`+ ${depName(key)} ${b?.version}`);
     else if (b === undefined) lines.push(`− ${depName(key)}`);
-    else lines.push(`${depName(key)} ${a} → ${b}`);
+    else if (a.version !== b.version) lines.push(`${depName(key)} ${a.version} → ${b.version}`);
+    else lines.push(`${depName(key)} ${a.version}: package source changed`);
   }
   return lines;
 }
@@ -337,10 +353,6 @@ export interface AffectedProbe {
   head(): Promise<string>;
   /** The commit a Worker serves: `build.commit` from its `/healthz` (the sandbox needs its bearer). */
   liveCommit(worker: WorkerName): Promise<{ commit: string } | { error: string }>;
-  /** `git merge-base --is-ancestor <commit> <head>`. */
-  isAncestor(commit: string, head: string): Promise<boolean>;
-  /** The last release before HEAD (`git describe --tags --match 'v*' --abbrev=0 HEAD^`), resolved. */
-  lastRelease(): Promise<{ tag: string; commit: string } | undefined>;
   /** `git diff --name-only <base> <head>` (renames as both sides); `undefined`
    *  when git fails (a base that is not in this checkout) — never `[]`, which
    *  would read as a confident "nothing changed". */
@@ -350,10 +362,7 @@ export interface AffectedProbe {
 }
 
 export type AffectedBase =
-  | { kind: "live"; commit: string }
-  | { kind: "release"; tag: string; commit: string }
-  | { kind: "ref"; ref: string }
-  | { kind: "none"; reason: string };
+  { kind: "live"; commit: string } | { kind: "ref"; ref: string } | { kind: "none"; reason: string };
 
 export interface WorkerAffected {
   name: WorkerName;
@@ -376,27 +385,24 @@ export interface AffectedReport {
 
 const short = (commit: string) => commit.slice(0, 7);
 
-/** Judge a live commit as a base: only a plain hex commit that is an ancestor of HEAD. */
+/** A readable live commit is the exact tree to compare, including across staging branches. */
 async function liveBase(
   probe: AffectedProbe,
   worker: WorkerName,
-  head: string,
 ): Promise<{ base: AffectedBase } | { reason: string }> {
   const live = await probe.liveCommit(worker);
   if (!("commit" in live)) return { reason: `/healthz: ${live.error}` };
   const c = live.commit.trim();
   if (c === "unknown") return { reason: 'serving commit "unknown" — the image was built without a stamp' };
   if (c.endsWith("-dirty")) return { reason: `serving ${short(c)}-dirty — a dirty build is not a commit` };
-  if (!/^[0-9a-f]{7,40}$/.test(c))
+  if (!/^[0-9a-f]{40}$/.test(c))
     return { reason: `serving an unrecognizable build identity ${JSON.stringify(c.slice(0, 40))}` };
-  if (!(await probe.isAncestor(c, head)))
-    return { reason: `live commit ${short(c)} is not an ancestor of HEAD ${short(head)}` };
   return { base: { kind: "live", commit: c } };
 }
 
 /**
  * The selection. Per Worker: a base (`opts.base` for every Worker, else its
- * live commit, else the last release, else none = unsure), the paths changed
+ * exact live commit, else none = unsure), the paths changed
  * from that base to HEAD, and which of them are its inputs. Then the fleet-wide
  * rule: an unclassified path anywhere makes every Worker unsure.
  */
@@ -406,8 +412,6 @@ export async function computeAffected(
   workers: readonly WorkerSpec[] = WORKER_SPECS,
 ): Promise<AffectedReport> {
   const head = await probe.head();
-  let lastRelease: Promise<{ tag: string; commit: string } | undefined> | undefined;
-  const fallback = () => (lastRelease ??= probe.lastRelease());
   const readHead = (p: string) => probe.fileAt(head, p);
 
   const judged: WorkerAffected[] = [];
@@ -434,15 +438,11 @@ export async function computeAffected(
     } else if (opts.base !== undefined) {
       base = { kind: "ref", ref: opts.base };
     } else {
-      const live = await liveBase(probe, w.name, head);
+      const live = await liveBase(probe, w.name);
       if ("base" in live) base = live.base;
       else {
-        const rel = await fallback();
-        if (rel) base = { kind: "release", tag: rel.tag, commit: rel.commit };
-        else {
-          base = { kind: "none", reason: live.reason };
-          reasons.push(`unsure: no base — ${live.reason}; no release tag before HEAD`);
-        }
+        base = { kind: "none", reason: live.reason };
+        reasons.push(`unsure: ${live.reason}`);
       }
     }
 
@@ -533,8 +533,6 @@ function describeBase(base: AffectedBase, code: (s: string) => string): string {
   switch (base.kind) {
     case "live":
       return `live ${code(short(base.commit))}`;
-    case "release":
-      return `release ${code(base.tag)}`;
     case "ref":
       return `ref ${code(/^[0-9a-f]{40}$/.test(base.ref) ? short(base.ref) : base.ref)}`;
     case "none":

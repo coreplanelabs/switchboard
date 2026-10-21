@@ -73,9 +73,8 @@
 #   SANDBOX_TOKEN         required whenever the sandbox is selected: its live
 #                         gate reads GET /healthz and probes POST /exec with it
 #                         (a sandbox step is refused before anything deploys
-#                         without it); it also lets --affected read the
-#                         sandbox's live commit instead of falling back to the
-#                         last release tag
+#                         without it); --affected selects an unreadable sandbox
+#                         as unsure instead of treating a release tag as live evidence
 #   CONFIG_REPO_APP_CLIENT_ID, CONFIG_REPO_APP_PRIVATE_KEY  a GitHub App that can
 #                         read the configuration repository a `github://` profile
 #                         (and its `configSource`) names — the token minted from
@@ -350,9 +349,9 @@ jobs:
             *) echo "::error::cli must be checkout or package — got '$MODE'. Nothing was deployed."; exit 1 ;;
           esac
       # The calling repository, in `checkout` mode: it is this repository and
-      # the tree `deploy all` deploys. Full history + tags: --affected diffs
-      # against the commit each Worker serves and falls back to the last `v*`
-      # tag before HEAD. There is no `repository:` here or below — this workflow
+      # the tree `deploy all` deploys. Full history: --affected diffs against
+      # the commit each Worker serves, including a divergent staging branch.
+      # There is no `repository:` here or below — this workflow
       # never checks out ANOTHER repository.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: inputs.cli != 'package'
@@ -424,7 +423,7 @@ jobs:
           if [ -z "$RESIDENT_READ_TOKEN" ]; then echo "::warning::RESIDENT_READ_TOKEN is not set — the post-deploy resident readiness gate cannot read the registry"; fi
           if [ -z "$RESIDENT_DRAIN_TOKEN" ]; then echo "::warning::RESIDENT_DRAIN_TOKEN is not set — a resident step is refused before any Worker upload"; fi
           if [ -z "$MEMORY_TOKEN" ]; then echo "::warning::MEMORY_TOKEN is not set — a bot step would be refused before anything deploys (deploy all pushes the bot's config to the state Worker with it)"; fi
-          if [ -z "$SANDBOX_TOKEN" ]; then echo "::warning::SANDBOX_TOKEN is not set — a sandbox step would be refused before anything deploys, and --affected judges the sandbox against the last release tag, not what it serves"; fi
+          if [ -z "$SANDBOX_TOKEN" ]; then echo "::warning::SANDBOX_TOKEN is not set — a sandbox step would be refused before anything deploys, and --affected selects it as unsure"; fi
           if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_TOKEN" ]; then echo "::error::SMOKE_INGRESS_TOKEN is not set — add the dedicated ingress bearer before deploying a release"; exit 1; fi
           if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_ORIGIN" ]; then echo "::error::SMOKE_INGRESS_ORIGIN is not set — configure the trusted production bot origin before deploying a release"; exit 1; fi
           if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_CONFIG" ]; then echo "::error::SMOKE_INGRESS_CONFIG is not set — configure a disposable fixture before enabling acceptance"; exit 1; fi

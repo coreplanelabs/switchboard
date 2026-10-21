@@ -502,14 +502,14 @@ describe("planDeploy", () => {
         {
           name: "resident",
           decision: "deploy",
-          base: { kind: "release", tag: "v0.1.0", commit: "c".repeat(40) },
+          base: { kind: "live", commit: "c".repeat(40) },
           reasons: ["deploy/cloudflare-resident/Dockerfile"],
         },
         {
           name: "sandbox",
           decision: "deploy",
           base: { kind: "none", reason: "/healthz: HTTP 401" },
-          reasons: ["unsure: no base — /healthz: HTTP 401; no release tag before HEAD"],
+          reasons: ["unsure: /healthz: HTTP 401"],
         },
       ],
       selected: ["resident", "bot", "sandbox"],
@@ -525,9 +525,7 @@ describe("planDeploy", () => {
     const text = formatPlan(p);
     expect(text.indexOf("Affected: resident, bot, sandbox")).toBe(0);
     expect(text).toContain("  - memory: skip — live aaaaaaa — no input changed");
-    expect(text).toContain(
-      "  - sandbox: deploy — none — unsure: no base — /healthz: HTTP 401; no release tag before HEAD",
-    );
+    expect(text).toContain("  - sandbox: deploy — none — unsure: /healthz: HTTP 401");
     expect(text.indexOf("Affected:")).toBeLessThan(text.indexOf("Checks:"));
     expect(plan({ affected: report, skip: ["sandbox"] }).steps.map((s) => s.name)).toEqual(["resident", "bot"]);
     const nothing = plan({
