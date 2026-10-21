@@ -1113,6 +1113,9 @@ describe("the production deploy is one reusable workflow", () => {
       version: "",
       "copy-images": "auto",
       smoke: false,
+      "image-source": "profile",
+      "quick-checks": false,
+      "require-current-main": false,
     });
     // A scoped dispatch skips the blanket image warm-up and lets deploy all
     // copy only its selected Workers' missing images.
@@ -1123,9 +1126,51 @@ describe("the production deploy is one reusable workflow", () => {
       "targets",
       "force",
       "copy-images",
+      "image-source",
+      "quick-checks",
     ]);
-    for (const k of ["targets", "force", "copy-images", "smoke"])
+    for (const k of ["targets", "force", "copy-images", "smoke", "image-source", "quick-checks"])
       expect(workflow.on.workflow_dispatch.inputs[k]).toEqual(inputs[k]);
+  });
+
+  it("checks the build before any emergency production write and selects checkout images", () => {
+    expect(job.env?.SWITCHBOARD_DEPLOY_IMAGE_MODE).toBe("${{ inputs.image-source == 'build' && 'build' || '' }}");
+    const checks = steps.find((s) => s.name === "quick source checks")!;
+    expect(checks.if).toBe("inputs.quick-checks && inputs.cli != 'package'");
+    expect(lines(checks)).toEqual([
+      "npm run check:dist",
+      "npm run typecheck",
+      "npm run typecheck -w deploy/cloudflare-memory",
+      "npm run typecheck -w deploy/cloudflare",
+      "npm run typecheck -w deploy/cloudflare-resident",
+      "npm run typecheck -w deploy/cloudflare-sandbox",
+    ]);
+    expect(steps.indexOf(checks)).toBeGreaterThan(steps.findIndex((s) => s.run === "npm ci"));
+    expect(steps.indexOf(checks)).toBeLessThan(
+      steps.findIndex((s) => s.name === "candidate Door through configured model"),
+    );
+    expect(steps.indexOf(checks)).toBeLessThan(steps.findIndex((s) => s.name === "deploy"));
+  });
+
+  it("refuses an emergency deploy when main moved while the job waited", () => {
+    const gate = steps.find((s) => s.name === "main still points at this commit")!;
+    expect(gate.if).toBe("inputs.require-current-main && inputs.cli != 'package'");
+    expect(steps.indexOf(gate)).toBeLessThan(
+      steps.findIndex((s) => s.name === "copy the release's images into the account registry"),
+    );
+    expect(steps.indexOf(gate)).toBeLessThan(steps.findIndex((s) => s.name === "deploy"));
+    const candidate = "a".repeat(40);
+    for (const [current, expected] of [
+      [candidate, 0],
+      ["b".repeat(40), 1],
+    ] as const) {
+      const result = spawnSync("bash", ["-e", "-c", `gh() { printf '%s\\n' "$CURRENT_MAIN"; }\n${gate.run}`], {
+        encoding: "utf8",
+        env: { ...process.env, GITHUB_SHA: candidate, CURRENT_MAIN: current, GITHUB_REPOSITORY: "acme/repo" },
+      });
+      expect(result.status).toBe(expected);
+      if (expected === 1) expect(result.stdout).toContain("main moved");
+    }
   });
 
   it("a manual rollback selects an exact published CLI through the existing package deploy path", () => {
@@ -1297,6 +1342,12 @@ describe("the production deploy is one reusable workflow", () => {
     );
     expect(rendered.filter((l) => /^(npm|git)\b|npm run --silent cli/.test(l))).toEqual([
       "npm ci",
+      "npm run check:dist",
+      "npm run typecheck",
+      "npm run typecheck -w deploy/cloudflare-memory",
+      "npm run typecheck -w deploy/cloudflare",
+      "npm run typecheck -w deploy/cloudflare-resident",
+      "npm run typecheck -w deploy/cloudflare-sandbox",
       'npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/smoke-fleet.json"',
       'npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json" --check',
       "npm run load -- route --smoke --profile-model",
@@ -1311,11 +1362,13 @@ describe("the production deploy is one reusable workflow", () => {
       "only from main",
       "the CLI",
       undefined, // npm ci
+      "quick source checks",
       "the configuration repository needs the App",
       "the credentials this run has",
       "the selection",
       "validate disposable smoke setup",
       "candidate Door through configured model",
+      "main still points at this commit",
       "copy the release's images into the account registry",
       "plan",
       "the tree is the commit",
@@ -1440,12 +1493,15 @@ describe("the production deploy is one reusable workflow", () => {
   it("the reusable CLI refuses unknown modes and nonexact package versions", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "swb-release-cli-"));
     try {
-      for (const [mode, version, expected] of [
-        ["checkout", "", "npm run --silent cli --"],
-        ["package", "1.2.3", `npx --yes ${facts.npmPackage}@1.2.3`],
-        ["package", "", undefined],
-        ["package", "latest", undefined],
-        ["typo", "1.2.3", undefined],
+      for (const [mode, version, imageSource, quickChecks, expected] of [
+        ["checkout", "", "profile", "false", "npm run --silent cli --"],
+        ["package", "1.2.3", "profile", "false", `npx --yes ${facts.npmPackage}@1.2.3`],
+        ["package", "", "profile", "false", undefined],
+        ["package", "latest", "profile", "false", undefined],
+        ["package", "1.2.3", "build", "false", undefined],
+        ["package", "1.2.3", "profile", "true", undefined],
+        ["checkout", "", "unknown", "false", undefined],
+        ["typo", "1.2.3", "profile", "false", undefined],
       ]) {
         const output = path.join(dir, "output");
         writeFileSync(output, "");
@@ -1456,6 +1512,8 @@ describe("the production deploy is one reusable workflow", () => {
             MODE: mode!,
             VERSION: version!,
             COPY_IMAGES: "never",
+            IMAGE_SOURCE: imageSource!,
+            QUICK_CHECKS: quickChecks!,
             REF_TYPE: "branch",
             REF_NAME: "main",
             GITHUB_SHA: "a".repeat(40),
@@ -1734,6 +1792,41 @@ describe("one-click MCP access sync", () => {
     ]) {
       expect(accepts(bad), JSON.stringify(bad)).toBe(false);
     }
+  });
+});
+
+describe("emergency main deploy", () => {
+  it("is an idle manual entry point that validates and deploys the captured main checkout", () => {
+    const workflow = parse(read(".github/workflows/deploy-main-fast.yml")) as Workflow & {
+      permissions: Record<string, string>;
+    };
+    expect(workflow.on).toHaveProperty("workflow_dispatch");
+    expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
+    expect(workflow.on.workflow_dispatch).toMatchObject({
+      inputs: {
+        targets: { default: "all" },
+        force: { default: false },
+      },
+    });
+    expect(workflow.permissions).toEqual({ contents: "read" });
+    expect(Object.keys(workflow.jobs)).toEqual(["deploy"]);
+    const deploy = workflow.jobs.deploy as Job & {
+      uses?: string;
+      with?: Record<string, unknown>;
+      secrets?: string;
+    };
+    expect(deploy.uses).toBe("./.github/workflows/deploy-production.yml");
+    expect(deploy.with).toEqual({
+      targets: "${{ inputs.targets }}",
+      force: "${{ inputs.force }}",
+      cli: "checkout",
+      "copy-images": "never",
+      "image-source": "build",
+      "quick-checks": true,
+      "require-current-main": true,
+      smoke: false,
+    });
+    expect(deploy.secrets).toBe("inherit");
   });
 });
 

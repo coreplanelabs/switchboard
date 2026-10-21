@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ConfigSourceIO } from "./configSource.js";
-import { EXAMPLE_ACCOUNT, PROFILE_ENV, PROFILE_EXAMPLE_PATH, PROFILE_PATH } from "./profile.js";
+import { DEPLOY_IMAGE_MODE_ENV, EXAMPLE_ACCOUNT, PROFILE_ENV, PROFILE_EXAMPLE_PATH, PROFILE_PATH } from "./profile.js";
 import { deployFiles, loadProfileOnHost, publishedImagesOnHost, renderWorkerConfigsOnHost } from "./run.js";
-import { TEST_PROFILE } from "./testing/profile.js";
+import { TEST_PROFILE, TEST_REGISTRY_PROFILE } from "./testing/profile.js";
 import { ensureWorkArea, WORK_AREA_STAMP } from "./workArea.js";
 import { renderWorkerConfigs, workerConfigTargets } from "./wranglerTemplate.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -62,6 +62,27 @@ describe("loadProfileOnHost", () => {
     expect(calls).toEqual([
       "https://api.github.com/repos/acme/infrastructure/contents/switchboard/profile.json?ref=main",
     ]);
+  });
+
+  it("an emergency checkout builds this commit while retaining the remote installation and config source", async () => {
+    const ref = "github://acme/infrastructure/switchboard/profile.json@main";
+    const io: ConfigSourceIO = {
+      ...noIO,
+      env: { CONFIG_REPO_TOKEN: "ghp_x" },
+      fetch: async () => ({ status: 200, text: async () => JSON.stringify(TEST_REGISTRY_PROFILE) }),
+    };
+    const loaded = await loadProfileOnHost({ [PROFILE_ENV]: ref, [DEPLOY_IMAGE_MODE_ENV]: "build" }, io);
+    expect(loaded).toEqual({
+      origin: "profile",
+      path: ref,
+      profile: { ...TEST_REGISTRY_PROFILE, images: "build" },
+    });
+  });
+
+  it("an invalid image override refuses before deployment", async () => {
+    await expect(
+      loadProfileOnHost({ [PROFILE_ENV]: PROFILE_EXAMPLE_PATH, [DEPLOY_IMAGE_MODE_ENV]: "unknown" }),
+    ).rejects.toThrow(`${DEPLOY_IMAGE_MODE_ENV} must be build`);
   });
 
   it("a github:// override that cannot be read, or is not a profile, is an error naming the reference and the cause", async () => {

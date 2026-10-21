@@ -38,6 +38,26 @@ Nothing runs: it prints which Workers are stale, why, and each preflight. `GET /
 npx --yes @coreplane/switchboard@<version> deploy all --affected
 ```
 
+### Deploy current main without a release
+
+Use the idle manual workflow when the release path is too slow and the change is already merged to `main`:
+
+```bash
+gh workflow run deploy-main-fast.yml --ref main -f targets=all
+```
+
+In GitHub, open **Actions → deploy main fast → Run workflow**, select `main`, and keep `targets=all` and `force=false`. The run captures one `main` commit. It installs dependencies, checks the bot and web build and all four Worker types, then probes candidate Door routing. It checks that `main` still names the captured commit before the first production write. It builds container images from that checkout, deploys under the normal production lock and environment, and requires each selected Worker to report that exact commit.
+
+This path does not wait for the release PR, staging Review E2E, npm publication or GHCR image publication. It does not create a release tag or publish images for operators. A later routine release can deploy again. The predeploy checks do not prove a complete agent request; this workflow sets the optional postdeploy ingress smoke off. The live receipt proves selected Worker uptake and readiness only.
+
+Use `targets=affected` or a comma-separated Worker list only when you have checked the plan and know that the omitted Workers need no update. `--affected` can fall back to a release tag when a live commit cannot be read. The default `all` avoids that uncertainty. If a normal deploy already holds the shared lock, this run waits; inspect its state before cancelling it. If `main` has moved when the predeploy check runs, this run fails before deployment. Start a new run for the new head.
+
+`force=true` bypasses the bot and resident preflights and permits a superseded commit to deploy. It can interrupt in-flight work. A protected Resident operation can still refuse the full-fleet deploy before any Worker upload, even with `force=true`. The native ownership fences and postdeploy readiness gates still apply. Use it only for a deliberate forced rollout after checking the captured commit and current production state:
+
+```bash
+gh workflow run deploy-main-fast.yml --ref main -f targets=all -f force=true
+```
+
 `deploy all` is the normal runner: memory, resident, bot, sandbox, never the four by hand. A refusing preflight is retried every 60 s (`--wait-max` minutes), then the deploy fails by name — it never rolls over what refused; re-run it once it clears (`gh run rerun RUN_ID --failed` for a CI job). In-flight bot runs never refuse: they hand off to the next container. `--force` can bypass the bot preflight but cannot bypass the Resident's native-owner evidence or the early native-record check. A newer release cut while an older run's re-run is pending supersedes it — cancel the older run; if it runs anyway, `deploy all` refuses a Worker whose live `/healthz` commit already contains the commit being deployed (`refused: … this release is superseded — re-run nothing, the newer release carries it`), and only `--force` / `SWITCHBOARD_DEPLOY_FORCE=1` deploys over it, as a deliberate rollback.
 
 After upload, the runner confirms that the exact Worker version serves 100% in the Cloudflare Workers deployments API. For a changed container image or configuration, it selects the rollout for this upload and pins its ID. Status lines report the rollout status, current and target versions, step, updated container count and health error count. A replaced or reverted rollout fails. A Worker-only upload requires no container rollout. A Bot rollback can reuse an earlier application target without a new rollout; its selected image, runtime and exact health must still agree. These API checks share the existing readiness deadline with the service checks. A completed rollout still needs the applicable Worker health, resident registry, container inventory and exec proof. The memory Worker has no container rollout; its API check proves activation, and its separate functional check remains required.
