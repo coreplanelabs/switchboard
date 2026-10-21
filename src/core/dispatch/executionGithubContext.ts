@@ -97,6 +97,21 @@ export async function currentGithubReadCapability(
   input: Record<string, unknown>,
   github: GithubCapability,
   agentName: string,
+  readResults?: Map<string, Promise<unknown>>,
+): Promise<{ ok: true } | { ok: false; githubAccess: GithubAccessDiagnostic }> {
+  const first = await currentGithubReadCapabilityOnce(receipt, input, github, agentName, readResults);
+  // A read can time out after GitHub accepts it. Recheck from the catalogue
+  // with fresh reads once; the second answer alone may grant current access.
+  if (first.ok || !["timeout", "transport"].includes(first.githubAccess.reason)) return first;
+  readResults?.clear();
+  return currentGithubReadCapabilityOnce(receipt, input, github, agentName, readResults);
+}
+
+async function currentGithubReadCapabilityOnce(
+  receipt: SourceResultReceipt,
+  input: Record<string, unknown>,
+  github: GithubCapability,
+  agentName: string,
   // Owned by one context validation. Never retain read results across a model
   // or publication boundary; those boundaries must observe revoked access.
   readResults?: Map<string, Promise<unknown>>,
