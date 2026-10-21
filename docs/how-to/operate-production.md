@@ -40,6 +40,9 @@ npx --yes @coreplane/switchboard@<version> deploy all --affected
 
 `deploy all` is the normal runner: memory, resident, bot, sandbox, never the four by hand. A refusing preflight is retried every 60 s (`--wait-max` minutes), then the deploy fails by name — it never rolls over what refused; re-run it once it clears (`gh run rerun RUN_ID --failed` for a CI job). In-flight bot runs never refuse: they hand off to the next container. `--force` can bypass the bot preflight but cannot bypass the Resident's native-owner evidence or the early native-record check. A newer release cut while an older run's re-run is pending supersedes it — cancel the older run; if it runs anyway, `deploy all` refuses a Worker whose live `/healthz` commit already contains the commit being deployed (`refused: … this release is superseded — re-run nothing, the newer release carries it`), and only `--force` / `SWITCHBOARD_DEPLOY_FORCE=1` deploys over it, as a deliberate rollback.
 
+After upload, the runner confirms that the exact Worker version serves 100% in the Cloudflare Workers deployments API. For a changed container image or configuration, it selects the rollout for this upload and pins its ID. Status lines report the rollout status, current and target versions, step, updated container count and health error count. A replaced or reverted rollout fails. A Worker-only upload requires no container rollout. A Bot rollback can reuse an earlier application target without a new rollout; its selected image, runtime and exact health must still agree. These API checks share the existing readiness deadline with the service checks. A completed rollout still needs the applicable Worker health, resident registry, container inventory and exec proof. The memory Worker has no container rollout; its API check proves activation, and its separate functional check remains required.
+
+
 | Preflight | Refuses while |
 |---|---|
 | bot | the container is mid-rollout |

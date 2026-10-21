@@ -28,6 +28,7 @@ function harness() {
     value: [{ name: probeThreadKey(options.expectedCommit), state: "running", version: 12 }],
   };
   const deps: SandboxGateDeps = {
+    readDeploymentStatus: async () => ({ state: "ready", reason: "fixture Worker deployment verified" }),
     env: { SANDBOX_TOKEN: "fixture" },
     now: () => now,
     sleep: async () => {

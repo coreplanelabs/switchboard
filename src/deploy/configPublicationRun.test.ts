@@ -94,7 +94,7 @@ vi.mock("node:child_process", () => ({
           else processes.onBot();
           code = name === "resident" ? processes.residentCode : processes.botCode;
         }
-        output = code === 0 ? "Current Version ID: worker-version" : "upload failed";
+        output = code === 0 ? "Current Version ID: 11111111-1111-4111-8111-111111111111" : "upload failed";
         if (name !== "memory" && processes.botOutput !== undefined) output = processes.botOutput;
         if (name === "resident" && processes.residentOutput !== undefined) output = processes.residentOutput;
       }
@@ -256,6 +256,7 @@ function runner(
   let clock = 0;
   const app = { value: { version: 3, image: "registry.example/bot:old" } } as const;
   const deps: SandboxGateDeps = {
+    readDeploymentStatus: async () => ({ state: "ready", reason: "fixture Worker deployment verified" }),
     env: { RESIDENT_READ_TOKEN: "fixture" },
     now: () => clock,
     sleep: async (ms) => {
@@ -753,7 +754,7 @@ describe("runDeployPlan config publication", () => {
     };
     processes.residentCode = 0;
     processes.residentOutput =
-      "Current Version ID: worker-version\nContainer application changes\nno changes switchboard-staging-resident-residentdo\nNo changes to be made";
+      "Current Version ID: 11111111-1111-4111-8111-111111111111\nContainer application changes\nno changes switchboard-staging-resident-residentdo\nNo changes to be made";
     processes.onResident = () => {
       expect(store.slotState.document?.yaml).toBe(candidateText);
       events.push("resident upload");
@@ -887,7 +888,13 @@ describe("runDeployPlan config publication", () => {
       kind: "ran",
       ok: false,
       results: [
-        { name: "memory", script: "switchboard-memory", live: "n/a", status: "deployed (no version id in output?)" },
+        {
+          name: "memory",
+          script: "switchboard-memory",
+          versionId: "11111111-1111-4111-8111-111111111111",
+          live: "n/a",
+          status: "deployed",
+        },
       ],
       notAttempted: ["bot"],
     });

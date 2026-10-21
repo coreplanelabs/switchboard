@@ -95,6 +95,7 @@ function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, li
   let clock = 0;
   let uploaded = false;
   const deps: SandboxGateDeps = {
+    readDeploymentStatus: async () => ({ state: "ready", reason: "fixture Worker deployment verified" }),
     env,
     now: () => clock,
     sleep: async (ms) => {
@@ -1137,6 +1138,24 @@ describe("resident deployment readiness", () => {
 });
 
 describe("resident application target", () => {
+  it("accepts parsed native application metadata after a successful upload", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    let providerReads = 0;
+    h.deps.readDeploymentStatus = async () =>
+      providerReads++ === 0
+        ? { state: "waiting", rolloutId: "selected", reason: "rollout selected progressing: updated 1/7" }
+        : { state: "ready", rolloutId: "selected", reason: "rollout selected completed: updated 7/7" };
+    const original = h.deps.readAppState;
+    h.deps.readAppState = async (...args) => {
+      const value = await original(...args);
+      return "value" in value ? { value: { ...value.value, id: "11111111-1111-4111-8111-111111111111" } } : value;
+    };
+    expect(await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toEqual({
+      ok: true,
+      versionId: "0c48b341-f216-4262-81c0-bc62ecb5669a",
+      live: "live",
+    });
+  });
   it("uses structured registry intent when the deploy output omits its container announcement", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
     let reads = 0;

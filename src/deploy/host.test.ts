@@ -21,6 +21,55 @@ afterAll(() => {
   for (const t of temps) rmSync(t, { recursive: true, force: true });
 });
 
+describe("Cloudflare deployment account", () => {
+  it("uses the frozen plan account instead of file data for outbound status reads", async () => {
+    const savedEnv = process.env;
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    const directory = mkdtempSync(join(tmpdir(), "deployment-account-"));
+    const config = join(directory, "wrangler.jsonc");
+    const versionId = "11111111-1111-4111-8111-111111111111";
+    const intent = { account: TEST_PROFILE.account, script: "example-memory", versionId, since: 0 };
+    const requests: string[] = [];
+    try {
+      writeFileSync(config, JSON.stringify({ account_id: "f".repeat(32) }));
+      process.env = { ...savedEnv, CLOUDFLARE_API_TOKEN: "synthetic-token" };
+      fetcher.mockImplementation(async (url) => {
+        requests.push(String(url));
+        return Response.json({
+          success: true,
+          result: {
+            deployments: [
+              {
+                id: "deployment",
+                created_on: "2026-01-01T00:00:00Z",
+                versions: [{ version_id: versionId, percentage: 100 }],
+              },
+            ],
+          },
+        });
+      });
+      expect(await defaultSandboxGateDeps.readDeploymentStatus(intent, "deploy/cloudflare-memory", config)).toEqual({
+        state: "ready",
+        reason: "Worker version 11111111-1111-4111-8111-111111111111 serves 100%",
+      });
+      expect(requests).toEqual([
+        `https://api.cloudflare.com/client/v4/accounts/${TEST_PROFILE.account}/workers/scripts/example-memory/deployments`,
+      ]);
+      expect(
+        await defaultSandboxGateDeps.readDeploymentStatus(
+          { ...intent, account: "unverified" },
+          "deploy/cloudflare-memory",
+          config,
+        ),
+      ).toEqual({ state: "failed", reason: "selected Cloudflare account is invalid" });
+    } finally {
+      fetcher.mockRestore();
+      process.env = savedEnv;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("deployment command cancellation", () => {
   it("smoke observations read native versions from the Worker directory once", async () => {
     const savedEnv = process.env;
@@ -233,9 +282,9 @@ OPERATOR_ROOT.workArea=${JSON.stringify(dir)};
 const write=hostDeployFiles.write;hostDeployFiles.write=async(path,text)=>{appendFileSync(${JSON.stringify(written)},JSON.stringify(workPath(OPERATOR_ROOT,path))+'\\n');await write(path,text);};
 process.env.CLOUDFLARE_API_TOKEN='fixture';
 const profile=${JSON.stringify(join(dir, "profile.json"))};writeFileSync(profile,JSON.stringify(TEST_PROFILE));process.env.SWITCHBOARD_DEPLOY_PROFILE=profile;
-globalThis.fetch=async()=>{appendFileSync(${JSON.stringify(calls)},'http\\n');return Response.json({success:true,result:{status:'active'}});};
+globalThis.fetch=async(input)=>{if(String(input).endsWith('/deployments'))return Response.json({success:true,result:{deployments:[{id:'deployment',created_on:new Date().toISOString(),versions:[{version_id:'11111111-1111-4111-8111-111111111111',percentage:100}]}]}});appendFileSync(${JSON.stringify(calls)},'http\\n');return Response.json({success:true,result:{status:'active'}});};
 const plan=planDeploy({dryRun:false,force:false,allowBranch:true,only:['memory'],waitMaxMinutes:1,pollSeconds:1},{root:{mode:'checkout',path:${JSON.stringify(root)}},hasNodeModules:()=>true},{profile:TEST_PROFILE,origin:'profile',path:profile},{mode:'build'});
-plan.checks.cleanTree=false;plan.checks.atOriginMain=false;mkdirSync(${JSON.stringify(join(dir, "deploy/cloudflare-memory/node_modules"))},{recursive:true});plan.steps[0].requiredEnv=[];plan.steps[0].capabilities=[{command:['wrangler','containers','list','--json'],needs:'fixture'}];plan.steps[0].command=[process.execPath,'-e',"console.log('Current Version ID: fixture')"];plan.steps[0].wakeUrl=undefined;
+plan.checks.cleanTree=false;plan.checks.atOriginMain=false;mkdirSync(${JSON.stringify(join(dir, "deploy/cloudflare-memory/node_modules"))},{recursive:true});plan.steps[0].requiredEnv=[];plan.steps[0].capabilities=[{command:['wrangler','containers','list','--json'],needs:'fixture'}];plan.steps[0].command=[process.execPath,'-e',"console.log('Current Version ID: 11111111-1111-4111-8111-111111111111')"];plan.steps[0].wakeUrl=undefined;
 const result=await runDeployPlanOnHost(plan,{log:()=>{},warn:()=>{},stream:()=>{}});console.log(JSON.stringify(result));
 `,
         );
@@ -297,7 +346,7 @@ const result=await runDeployPlanOnHost(plan,{log:()=>{},warn:()=>{},stream:()=>{
           expect(JSON.parse(output)).toMatchObject({
             kind: "ran",
             ok: true,
-            results: [{ name: "memory", status: "deployed (no version id in output?)" }],
+            results: [{ name: "memory", status: "deployed" }],
             notAttempted: [],
           });
           expect(readFileSync(calls, "utf8")).toBe("http\ncapability\ngit\n");

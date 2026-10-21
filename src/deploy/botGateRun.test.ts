@@ -1,3 +1,4 @@
+import { readCloudflareDeployment } from "./cloudflareDeployment.js";
 import { describe, expect, it, vi } from "vitest";
 import { LIVE_GATE_POLL_MS } from "./liveGate.js";
 import { workersFor, type DeployStep, type BotLiveGate } from "./plan.js";
@@ -65,6 +66,7 @@ function harness(script: Scripted) {
     return values[Math.min(at, values.length - 1)]!;
   };
   const deps: SandboxGateDeps = {
+    readDeploymentStatus: async () => ({ state: "ready", reason: "fixture Worker deployment verified" }),
     env: {},
     now: () => clock,
     sleep: async (ms) => {
@@ -95,6 +97,29 @@ function harness(script: Scripted) {
   };
   return { deps, io, exec, calls, lines };
 }
+
+describe("provider status before Bot readiness", () => {
+  it("waits on provider progress and refuses a replaced rollout", async () => {
+    const h = harness({ app: [before, after], health: [serving(PRIOR_COMMIT)] });
+    let reads = 0;
+    h.deps.readDeploymentStatus = async (intent) => {
+      expect(intent).toMatchObject({
+        script: "switchboard",
+        versionId: WORKER_VERSION,
+        container: { beforeVersion: 17, image: PRIOR_IMAGE },
+      });
+      return reads++ === 0
+        ? { state: "waiting", rolloutId: "selected", reason: "rollout selected progressing: updated 1/7" }
+        : { state: "failed", rolloutId: "selected", reason: "rollout selected replaced" };
+    };
+    expect(await deployStep(botStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toMatchObject({
+      ok: false,
+      versionId: WORKER_VERSION,
+      reason: "deployed but NOT live — Cloudflare deployment failed: rollout selected replaced",
+    });
+    expect(h.lines.join("\n")).toContain("rollout selected progressing: updated 1/7");
+  });
+});
 
 describe("build deployment waits for its uploaded target", () => {
   const oldTarget: Read<AppState> = { value: { version: 55, image: NEWER_IMAGE } };
@@ -246,6 +271,20 @@ describe("deployStep (bot rollback fence)", () => {
       health: [serving(NEWER_COMMIT), serving(PRIOR_COMMIT)],
       output: `no changes ${APP}\nCurrent Version ID: ${WORKER_VERSION}`,
     });
+    h.deps.readDeploymentStatus = (intent) =>
+      readCloudflareDeployment(intent, async (path) => ({
+        value: path.includes("/workers/")
+          ? {
+              deployments: [
+                {
+                  id: "deployment",
+                  created_on: "2026-01-01T00:00:00Z",
+                  versions: [{ version_id: WORKER_VERSION, percentage: 100 }],
+                },
+              ],
+            }
+          : [],
+      }));
     expect(await deployStep(botStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toEqual({
       ok: true,
       versionId: WORKER_VERSION,
