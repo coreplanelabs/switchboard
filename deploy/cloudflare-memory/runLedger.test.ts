@@ -1,4 +1,4 @@
-import { testSourceInput, testSourceInputIntent } from "../../src/core/testing/sourceInputs.ts";
+import { testSourceInput, testSourceInputIntent, seedSourceInputIntent } from "../../src/core/testing/sourceInputs.ts";
 import { captureSourceTaskSnapshot } from "../../src/core/references/sourceTaskSnapshot.ts";
 import { checkStateFixture } from "../../src/core/testing/checkState.ts";
 import { captureCheckArchive } from "../../src/core/checkInspection.ts";
@@ -19616,6 +19616,52 @@ describe("typed SQLite source evidence", () => {
     expect(stored.target).toMatchObject({ producerGen: "g1" });
     expect(messageFromInbox(stored, 0, target)).toBeUndefined();
     expect(observed.data.boundary.lastStep).toBeNull();
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (url, init) => fetchMemoryTest(String(url), init),
+    });
+    const policy = { version: 1, commandRoute: "native", identity: "write" };
+    const launch = { version: 1, harness: "pi", phase: "prepared", ordinal: 0, sessionPolicy: policy };
+    const prior = observed.data.boundary.state;
+    expect(await client.setState("r1", "g2", { ...prior, harnessLaunch: launch })).toEqual({ ok: true });
+    expect(await client.setState("r1", "g2", { ...prior, harnessLaunch: { ...launch, phase: "begun" } })).toEqual({
+      ok: true,
+    });
+    expect(
+      await client.setState("r1", "g2", {
+        ...prior,
+        harness: { harness: "pi", launchOrdinal: 0, sessionFile: "original-native-session", sessionPolicy: policy },
+      }),
+    ).toEqual({ ok: true });
+    const input = testSourceInputIntent(),
+      entry = input.entries[0]!;
+    entry.owner = { runId: "r1", gen: "g2", requester: target.requester, channelId: target.channelId, threadKey };
+    const root = (await client.listLive()).find((row) => row.runId === rootId)!;
+    const selected = orchestratorDecisionsOf(root.state.orchestratorDecisions, owner)?.[0];
+    entry.reference = {
+      ...entry.reference,
+      receipt: message!.receipt,
+      root: { runId: rootId, requester: owner.requesterId, channelId: owner.channelId, threadKey: owner.threadKey },
+      inputHash: await sourceHash(sourceSnapshot(message)),
+      routing:
+        kind === "notice"
+          ? { kind: "notice" }
+          : {
+              kind: "fold",
+              decision: {
+                id: JSON.stringify([rootId, "fold-two"]),
+                hash: await sourceHash(sourceSnapshot(selected)),
+              },
+            },
+    };
+    entry.witness = observed.data.items[0].witness;
+    expect(await client.setState("r1", "g2", { ...prior, sourceInputIntents: input })).toEqual({ ok: true });
+    expect(await client.peekInbox("r1", "g2", 0)).toMatchObject({
+      ok: true,
+      boundary: { state: { sourceInputIntents: input } },
+    });
   });
 
   it("retains source provenance and a decision reference without becoming requester input", async () => {
@@ -20659,11 +20705,46 @@ describe("source-input context readers in SQLite", () => {
         ok: false,
         reason: "fenced",
       });
+    expect(await ledger.setState(id, "g1", { sourceInputIntents: original })).toEqual({ ok: false, reason: "fenced" });
+    original.entries = (await seedSourceInputIntent(ledger, original)).entries;
+    const bound = original.entries[0]!;
+    for (const changed of [
+      { ...bound, witness: { ...bound.witness, seq: 999 } },
+      { ...bound, witness: { ...bound.witness, digest: "b".repeat(64) } },
+      { ...bound, reference: { ...bound.reference, inputHash: "f".repeat(64) } },
+      {
+        ...bound,
+        reference: { ...bound.reference, receipt: { ...bound.reference.receipt, bodyHash: "f".repeat(64) } },
+      },
+    ])
+      expect(await ledger.setState(id, "g1", { sourceInputIntents: { version: 1, entries: [changed] } })).toEqual({
+        ok: false,
+        reason: "fenced",
+      });
     expect(await ledger.setState(id, "g1", { sourceInputIntents: original })).toEqual({ ok: true });
     expect(await ledger.setState(id, "g1", { progress: "later" })).toEqual({ ok: true });
     expect(await ledger.peekInbox(id, "g1", 0)).toMatchObject({
       ok: true,
       boundary: { state: { progress: "later", sourceInputIntents: original } },
+    });
+    const removed = await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_instance, state) => {
+      const raw = state.storage.sql
+        .exec<{ seq: number; json: string }>("SELECT seq,json FROM run_inbox WHERE run_id=?", id)
+        .one();
+      state.storage.sql.exec("DELETE FROM run_inbox WHERE run_id=?", id);
+      return raw;
+    });
+    const missing = structuredClone(original);
+    missing.entries[0]!.phase = "begun";
+    expect(await ledger.setState(id, "g1", { sourceInputIntents: missing })).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.setState(id, "g1", { progress: "row unavailable" })).toEqual({ ok: true });
+    expect(await ledger.peekInbox(id, "g1", 0)).toMatchObject({
+      ok: true,
+      items: [],
+      boundary: { state: { sourceInputIntents: original } },
+    });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_instance, state) => {
+      state.storage.sql.exec("INSERT INTO run_inbox(run_id,seq,json) VALUES(?,?,?)", id, removed.seq, removed.json);
     });
     expect(await ledger.handoff("g1", [id])).toEqual({ marked: [id] });
     const reader = new WorkerRunLedger(options);
@@ -20806,6 +20887,7 @@ describe("source-input context readers in SQLite", () => {
     entry.owner = { runId: id, gen: "g2", requester: "cli:user", channelId: "cli:main", threadKey: thread };
     entry.reference.root = { runId: id, requester: "cli:user", channelId: "cli:main", threadKey: thread };
     entry.witness.runId = id;
+    input.entries = (await seedSourceInputIntent(ledger, input)).entries;
     expect(await ledger.setState(id, "g2", { sourceInputIntents: input })).toEqual({ ok: true });
     expect(await ledger.peekInbox(id, "g2", 0)).toMatchObject({
       ok: true,

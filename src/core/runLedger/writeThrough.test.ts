@@ -864,7 +864,6 @@ describe("uncertain canonical boundaries", () => {
           );
         return value;
       };
-      const supplied = reordered ? reverseFields(original) : original;
       const writes: string[] = [];
       const ledger = overriding(inner, {
         setState: async (...args) => {
@@ -882,7 +881,7 @@ describe("uncertain canonical boundaries", () => {
         },
       });
       const h = harness({ ledger }),
-        run = (await openRun(h.wt, openReq()))!;
+        run = (await openRun(h.wt, openReq({ meta: { ...openReq().meta, agent: "orchestrator" } })))!;
       try {
         const policy = { version: 1, commandRoute: "native", identity: "write" };
         const launch = { version: 1, harness: "pi", phase: "prepared", ordinal: 0, sessionPolicy: policy };
@@ -893,6 +892,8 @@ describe("uncertain canonical boundaries", () => {
             harness: { harness: "pi", launchOrdinal: 0, sessionFile: entry.native.sessionId, sessionPolicy: policy },
           }),
         ).toBe("ok");
+        original.entries = (await seedSourceInputIntent(inner, original)).entries;
+        const supplied = reordered ? reverseFields(original) : original;
         expect(await run.commitState({ sourceInputIntents: supplied })).toBe("unavailable");
         const held = structuredClone(run.writeBoundaryFailure);
         expect(held).toMatchObject({ kind: "state", runId: "r1", gen: "gen-A" });

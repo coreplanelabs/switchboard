@@ -7,6 +7,7 @@ import {
   type OriginalSelector,
 } from "./originalEvidence.js";
 import { sameSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
+import { prepareSourceInputRows, sourceInputRowsUnchanged, sourceInputWriteSnapshot } from "./sourceInputIntent.js";
 import { INBOX_DELIVERY_RECEIPTS_MAX } from "../budgets.js";
 import { nativeClaimObservationOf, claimObservationKey, claimObservationQueryOf } from "./claimObservation.js";
 import { matchesVisibility } from "../runRecord.js";
@@ -2318,6 +2319,15 @@ export class InMemoryRunLedger implements RunLedger {
     if (!preserved) return { ok: false, reason: "fenced" };
     if (!workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }, row.meta))
       return { ok: false, reason: "fenced" };
+    const inputBefore = preserved.sourceInputIntents !== undefined ? sourceInputWriteSnapshot(row) : undefined;
+    const bindings =
+      inputBefore !== undefined
+        ? await prepareSourceInputRows(row.state, preserved, (seq) => this.sourceInputRow(runId, seq))
+        : [];
+    if (!bindings) {
+      console.warn("[runs/state] source input intent refused", { runId, reason: "row-binding" });
+      return { ok: false, reason: "fenced" };
+    }
     if (mintSeed) {
       const receipt = preserved.unitSeedReceipt as UnitSeedReceipt;
       const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
@@ -2352,6 +2362,15 @@ export class InMemoryRunLedger implements RunLedger {
       log.rangePins ??= {};
       log.rangePins[runId] = [...(log.rangePins[runId] ?? []), { from: receipt.seed.from, to: receipt.seed.through }];
     }
+    if (
+      inputBefore !== undefined &&
+      (this.live.get(runId) !== row ||
+        sourceInputWriteSnapshot(row) !== inputBefore ||
+        !sourceInputRowsUnchanged(bindings, (seq) => this.sourceInputRow(runId, seq)))
+    ) {
+      console.warn("[runs/state] source input intent refused", { runId, reason: "row-changed" });
+      return { ok: false, reason: "fenced" };
+    }
     const feedbackReceipt = retainedFeedbackReceipt(row.state.reviewPublication, preserved.reviewPublication, {
       runId,
       repo: row.meta.repo,
@@ -2366,6 +2385,16 @@ export class InMemoryRunLedger implements RunLedger {
   private sourceInboxRecord(key: string): unknown {
     const row = this.sourceEvents.get(key);
     return row && { event: parseStoredJson(row.json), receipt: row.receipt, job: row.job };
+  }
+
+  private sourceInputRow(runId: string, seq: number) {
+    const owner = this.live.get(runId);
+    if (!owner) return;
+    const floor = inboxSegmentFloor(this.steps.get(runId)?.inboxSegmentArchive, owner);
+    const item = this.inbox.get(runId)?.find((row) => row.seq === seq);
+    if (floor === undefined || seq <= floor || !item || !unreadInbox(this.steps.get(runId)?.at(-1) ?? null)(item))
+      return;
+    return item;
   }
 
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {

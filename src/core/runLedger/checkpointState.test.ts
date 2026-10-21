@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { preserveCheckpointState } from "./checkpointState.js";
-import { testSourceInputIntent as inputIntent } from "../testing/sourceInputs.js";
+import { testSourceInputIntent as inputIntent, seedSourceInputIntent } from "../testing/sourceInputs.js";
 import { sourceInputIntentsOf } from "./sourceInputIntent.js";
 
 const inputOwner = {
@@ -252,7 +252,7 @@ describe("source input intent state transaction", () => {
         leaseMs: 10000,
         system: "original",
         tools: [],
-        meta: inputOwner.meta,
+        meta: { ...inputOwner.meta, agent: "orchestrator" },
         state: { harnessLaunch: launch },
       }),
     ).toMatchObject({ ok: true });
@@ -282,12 +282,60 @@ describe("source input intent state transaction", () => {
       expect(
         await ledger.setState("source-consumer", "g1", { sourceInputIntents: { version: 1, entries: [changed] } }),
       ).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.setState("source-consumer", "g1", { sourceInputIntents: original })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    original.entries = (await seedSourceInputIntent(ledger, original)).entries;
+    const bound = original.entries[0]!;
+    for (const changed of [
+      { ...bound, witness: { ...bound.witness, seq: 999 } },
+      { ...bound, witness: { ...bound.witness, digest: "b".repeat(64) } },
+      { ...bound, reference: { ...bound.reference, inputHash: "f".repeat(64) } },
+      {
+        ...bound,
+        reference: { ...bound.reference, receipt: { ...bound.reference.receipt, bodyHash: "f".repeat(64) } },
+      },
+    ])
+      expect(
+        await ledger.setState("source-consumer", "g1", { sourceInputIntents: { version: 1, entries: [changed] } }),
+      ).toEqual({ ok: false, reason: "fenced" });
+    const movedState = ledger.setState("source-consumer", "g1", { sourceInputIntents: original });
+    expect(await ledger.setState("source-consumer", "g1", { progress: "concurrent writer" })).toEqual({ ok: true });
+    expect(await movedState).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.peekInbox("source-consumer", "g1", 0)).toMatchObject({
+      ok: true,
+      boundary: { state: { progress: "concurrent writer" } },
+    });
+    const originalRows = ledger.inbox.get("source-consumer")!;
+    const movedRow = ledger.setState("source-consumer", "g1", { sourceInputIntents: original });
+    ledger.inbox.delete("source-consumer");
+    expect(await movedRow).toEqual({ ok: false, reason: "fenced" });
+    ledger.inbox.set("source-consumer", originalRows);
+    const heartbeatWrite = ledger.setState("source-consumer", "g1", { sourceInputIntents: original });
+    expect(await ledger.heartbeat("source-consumer", "g1", 20000)).toMatchObject({ ok: true });
+    expect(await heartbeatWrite).toEqual({ ok: true });
     expect(await ledger.setState("source-consumer", "g1", { sourceInputIntents: original })).toEqual({ ok: true });
     expect(await ledger.setState("source-consumer", "g1", { progress: "later" })).toEqual({ ok: true });
     expect(await ledger.peekInbox("source-consumer", "g1", 0)).toMatchObject({
       ok: true,
       boundary: { state: { progress: "later", sourceInputIntents: original } },
     });
+    const pendingRows = ledger.inbox.get("source-consumer")!;
+    ledger.inbox.delete("source-consumer");
+    const missing = structuredClone(original);
+    missing.entries[0]!.phase = "begun";
+    expect(await ledger.setState("source-consumer", "g1", { sourceInputIntents: missing })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await ledger.setState("source-consumer", "g1", { progress: "row unavailable" })).toEqual({ ok: true });
+    expect(await ledger.peekInbox("source-consumer", "g1", 0)).toMatchObject({
+      ok: true,
+      items: [],
+      boundary: { state: { sourceInputIntents: original } },
+    });
+    ledger.inbox.set("source-consumer", pendingRows);
     expect(await ledger.handoff("g1", ["source-consumer"])).toEqual({ marked: ["source-consumer"] });
     expect(await ledger.reclaim("g2", 2000, 10000)).toMatchObject([
       { row: { ownerGen: "g2", state: { sourceInputIntents: original } } },
