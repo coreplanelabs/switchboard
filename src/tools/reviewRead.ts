@@ -17,21 +17,31 @@ const { execFileSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const args = JSON.parse(process.argv[1]);
 const cap = 10 * 1024 * 1024;
-const git = (...parts) => execFileSync("git", ["--no-pager", "-C", args.checkout, ...parts], {
-  maxBuffer: cap, stdio: ["ignore", "pipe", "pipe"],
-  env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_REPLACE_OBJECTS: "1" }
-});
+const git = (stage, ...parts) => {
+  try {
+    return execFileSync("git", ["--no-pager", "-C", args.checkout, ...parts], {
+      maxBuffer: cap, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_REPLACE_OBJECTS: "1" }
+    });
+  } catch (error) {
+    // Git stderr can name private paths or contain source. Return only a fixed
+    // stage and reserve the size reason for Node's actual buffer-limit error.
+    throw new Error(error?.code === "ENOBUFS"
+      ? "Git source could not be read completely within the 10 MiB limit"
+      : "Git source " + stage + " failed");
+  }
+};
 const fail = (error) => { process.stdout.write(JSON.stringify({ error })); };
 try {
-  const head = git("rev-parse", "--verify", "HEAD").toString().trim();
+  const head = git("checkout head", "rev-parse", "--verify", "HEAD").toString().trim();
   if (head !== args.target.head) throw new Error("bound review head does not match the checkout");
   const base = args.target.base;
-  const mergeBase = git("merge-base", base, head).toString().trim();
+  const mergeBase = git("merge base", "merge-base", base, head).toString().trim();
   if (!/^[a-f0-9]{40}$/.test(base) || !/^[a-f0-9]{40}$/.test(mergeBase)) throw new Error("review base could not be pinned");
   const source = { ...args.target, base, mergeBase, kind: args.kind, ...(args.path ? { path: args.path } : {}) };
   const bytes = args.kind === "diff"
-    ? git("diff", "--no-ext-diff", "--no-textconv", "--no-color", mergeBase, head, "--")
-    : git("show", "--no-ext-diff", "--no-textconv", "--format=", "--end-of-options", head + ":" + args.path);
+    ? git("diff", "diff", "--no-ext-diff", "--no-textconv", "--no-color", mergeBase, head, "--")
+    : git("file read", "show", "--no-ext-diff", "--no-textconv", "--format=", "--end-of-options", head + ":" + args.path);
   const sourceHash = createHash("sha256").update(JSON.stringify(source)).update("\0").update(bytes).digest("hex");
   if (args.sourceHash && args.sourceHash !== sourceHash) throw new Error("source changed; start a new read at offset 0");
   if (args.offset > bytes.length) throw new Error("offset is past the source end");
@@ -47,9 +57,7 @@ try {
   if (text.includes("\0")) throw new Error("binary source is not supported");
   process.stdout.write(JSON.stringify({ source, sourceHash, size: bytes.length, offset: args.offset, nextOffset: end, eof: end === bytes.length, text }));
 } catch (error) {
-  // Child stderr can contain private source or command details. Keep failures
-  // bounded and distinguish our contract errors from Git/transport failures.
-  fail(error && "status" in error ? "Git source could not be read completely within the 10 MiB limit" : String(error.message));
+  fail(error && "status" in error ? "Git source read failed" : String(error.message));
 }
 `;
 
