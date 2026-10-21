@@ -261,26 +261,72 @@ describe("resolveRepoContext: read-scoped PR lookup", () => {
 });
 
 describe("currentPrBase — trusted review preparation", () => {
-  it.each(["current", "missing SHA", "invalid SHA", "wrong repository", "closed", "invalid ref"] as const)(
-    "returns only an exact usable PR base: %s",
+  it.each(["stale PR SHA", "missing PR SHA", "wrong repository", "closed", "invalid ref"] as const)(
+    "uses only a live branch tip for a usable PR base: %s",
     async (mode) => {
-      stubFetch({
-        body: {
-          number: 7,
-          state: mode === "closed" ? "closed" : "open",
-          head: { sha: "a".repeat(40), repo: { full_name: "fork/api" } },
-          base: {
-            ref: mode === "invalid ref" ? "bad..ref" : "release",
-            ...(mode === "missing SHA" ? {} : { sha: mode === "invalid SHA" ? "short" : "b".repeat(40) }),
-            repo: { full_name: mode === "wrong repository" ? "acme/other" : "acme/api" },
-          },
+      const pull = {
+        number: 7,
+        state: mode === "closed" ? "closed" : "open",
+        head: { sha: "a".repeat(40), repo: { full_name: "fork/api" } },
+        base: {
+          ref: mode === "invalid ref" ? "bad..ref" : "release",
+          ...(mode === "missing PR SHA" ? {} : { sha: "b".repeat(40) }),
+          repo: { full_name: mode === "wrong repository" ? "acme/other" : "acme/api" },
         },
-      });
+      };
+      const usable = mode === "stale PR SHA" || mode === "missing PR SHA";
+      const { calls } = stubFetch(
+        { body: pull },
+        ...(usable ? [{ body: { ref: "refs/heads/release", object: { type: "commit", sha: "c".repeat(40) } } }] : []),
+      );
       expect(await currentPrBase({ repo: "acme/api", number: 7 })).toEqual(
-        mode === "current" ? { baseRef: "release", baseSha: "b".repeat(40) } : undefined,
+        usable ? { baseRef: "release", baseSha: "c".repeat(40) } : undefined,
+      );
+      expect(calls.map((call) => call.url)).toEqual(
+        usable
+          ? [
+              "https://api.github.com/repos/acme/api/pulls/7",
+              "https://api.github.com/repos/acme/api/git/ref/heads/release",
+            ]
+          : ["https://api.github.com/repos/acme/api/pulls/7"],
       );
     },
   );
+
+  it("refuses an unreadable or malformed live base ref", async () => {
+    const pull = {
+      number: 7,
+      state: "open",
+      head: { sha: "a".repeat(40), repo: { full_name: "fork/api" } },
+      base: { ref: "release", sha: "b".repeat(40), repo: { full_name: "acme/api" } },
+    };
+    stubFetch({ body: pull }, { status: 503, body: { message: "unavailable" } });
+    await expect(currentPrBase({ repo: "acme/api", number: 7 })).rejects.toThrow();
+    stubFetch({ body: pull }, { body: { ref: "refs/heads/release", object: { type: "tag", sha: "c".repeat(40) } } });
+    await expect(currentPrBase({ repo: "acme/api", number: 7 })).rejects.toThrow();
+    stubFetch({ body: pull }, { body: { ref: "refs/heads/other", object: { type: "commit", sha: "c".repeat(40) } } });
+    await expect(currentPrBase({ repo: "acme/api", number: 7 })).rejects.toThrow();
+  });
+
+  it("refuses base facts from a different GitHub credential source", async () => {
+    const sourceA = { host: "github.com" as const, appId: 1, installationId: 2 };
+    const sourceB = { host: "github.com" as const, appId: 1, installationId: 3 };
+    vi.spyOn(githubApp, "resolveGithubCredential")
+      .mockResolvedValueOnce({ token: "read", expiresAtMs: null, source: sourceA })
+      .mockResolvedValueOnce({ token: "read", expiresAtMs: null, source: sourceB });
+    stubFetch(
+      {
+        body: {
+          number: 7,
+          state: "open",
+          head: { sha: "a".repeat(40), repo: { full_name: "fork/api" } },
+          base: { ref: "release", repo: { full_name: "acme/api" } },
+        },
+      },
+      { body: { ref: "refs/heads/release", object: { type: "commit", sha: "c".repeat(40) } } },
+    );
+    await expect(currentPrBase({ repo: "acme/api", number: 7 })).rejects.toThrow("changed GitHub credential source");
+  });
 });
 
 describe("currentPrHeadSha — the review post transition guard", () => {

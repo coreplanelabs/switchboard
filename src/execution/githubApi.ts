@@ -357,6 +357,7 @@ export type GithubRoute =
   | "pull_reviews"
   | "pull_review_comments"
   | "head_ref"
+  | "base_ref"
   | "issue_create"
   | "issue_update"
   | "issue_comment_create"
@@ -665,6 +666,34 @@ export class RestGithubApi implements GithubApi {
         ...(requestId ? { requestId } : {}),
       },
     };
+  }
+
+  /** The live base branch of an open PR. PR-object base.sha can lag its ref. */
+  async getCurrentPullBase(repo: string, number: number): Promise<{ baseRef: string; baseSha: string } | undefined> {
+    const pull = await this.getPullRequest(repo, number);
+    const baseRef = validRef(pull.base.ref);
+    if (pull.state !== "open" || pull.base.repo.toLowerCase() !== repo.toLowerCase() || !baseRef) return;
+    const response = await this.request(
+      "read",
+      "GET",
+      "base_ref",
+      `/repos/${repo}/git/ref/heads/${baseRef.split("/").map(encodeURIComponent).join("/")}`,
+    );
+    if (!sameCredentialSource(pull.source, this.sources.get(response)))
+      throw new GithubApiError(502, "PR base read changed GitHub credential source");
+    const data = (await githubJson(response, "base_ref")) as {
+      ref?: unknown;
+      object?: { type?: unknown; sha?: unknown };
+    } | null;
+    const baseSha = data?.object?.sha;
+    if (
+      data?.ref !== `refs/heads/${baseRef}` ||
+      data?.object?.type !== "commit" ||
+      typeof baseSha !== "string" ||
+      !/^[a-f0-9]{40}$/.test(baseSha)
+    )
+      throw new GithubResponseDecodeError(response.status, githubRequestId(response), "base_ref");
+    return { baseRef, baseSha };
   }
 
   async getCommitChecks(repo: string, head: string): Promise<CommitCheck[]> {

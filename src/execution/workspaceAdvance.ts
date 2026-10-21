@@ -89,17 +89,19 @@ export async function prepareReviewBase(
   const transport = `${git} -c credential.helper= -c credential.helper=${shellQuote(helper)}`;
   const command = [
     "set -eu",
-    `${git} check-ref-format ${ref}`,
-    `test "$(${git} rev-parse --verify HEAD)" = ${shellQuote(head)}`,
+    "review_fail() { printf 'review base: %s\\n' \"$1\" >&2; exit 1; }",
+    `${git} check-ref-format ${ref} >/dev/null 2>&1 || review_fail 'invalid base ref'`,
+    `test "$(${git} rev-parse --verify HEAD 2>/dev/null)" = ${shellQuote(head)} || review_fail 'checkout HEAD changed'`,
+    `test -n "\${GH_ENTERPRISE_TOKEN:-}" || review_fail 'Git credential unavailable'`,
     `review_remote="\${GIT_DOOR_REMOTE:-origin}"`,
-    `review_before=$(${transport} ls-remote --exit-code "$review_remote" ${ref})`,
-    `test "$review_before" = "$(printf '%s\\t%s' ${shellQuote(base.baseSha)} ${ref})"`,
-    `${transport} fetch --force --no-tags "$review_remote" ${shellQuote(`+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`)}`,
-    `review_base=$(${git} rev-parse --verify --end-of-options ${shellQuote(`refs/remotes/origin/${baseRef}^{commit}`)})`,
-    `test "$review_before" = "$(printf '%s\\t%s' "$review_base" ${ref})"`,
-    `test "$(${transport} ls-remote --exit-code "$review_remote" ${ref})" = "$review_before"`,
-    `test "$(${git} rev-parse --verify HEAD)" = ${shellQuote(head)}`,
-    `${git} merge-base ${tracking} ${shellQuote(head)} >/dev/null`,
+    `review_before=$(${transport} ls-remote --exit-code "$review_remote" ${ref} 2>/dev/null) || review_fail 'remote base lookup failed'`,
+    `test "$review_before" = "$(printf '%s\\t%s' ${shellQuote(base.baseSha)} ${ref})" || review_fail 'GitHub and remote base tips differ'`,
+    `${transport} fetch --force --no-tags "$review_remote" ${shellQuote(`+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`)} >/dev/null 2>&1 || review_fail 'base fetch failed'`,
+    `review_base=$(${git} rev-parse --verify --end-of-options ${shellQuote(`refs/remotes/origin/${baseRef}^{commit}`)} 2>/dev/null) || review_fail 'fetched base is unavailable'`,
+    `test "$review_before" = "$(printf '%s\\t%s' "$review_base" ${ref})" || review_fail 'fetched base tip changed'`,
+    `test "$(${transport} ls-remote --exit-code "$review_remote" ${ref} 2>/dev/null)" = "$review_before" || review_fail 'remote base tip changed'`,
+    `test "$(${git} rev-parse --verify HEAD 2>/dev/null)" = ${shellQuote(head)} || review_fail 'checkout HEAD changed'`,
+    `${git} merge-base ${tracking} ${shellQuote(head)} >/dev/null 2>&1 || review_fail 'base and head have no known merge base'`,
   ].join("\n");
   if (opts?.signal?.aborted) throw new Error("review base preparation stopped");
   await runWorkspaceCommand(run, command, "prepare_review_base", { ...opts, timeoutMs: BASH_TIMEOUT_MS });
