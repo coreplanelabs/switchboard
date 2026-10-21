@@ -1,5 +1,6 @@
 import { harnessLaunchIntentOf, originalSessionPolicyOf, sameOriginalSessionPolicy } from "../harness/sessionPolicy.js";
-import type { RunState } from "./types.js";
+import type { LiveRunRow, RunState } from "./types.js";
+import { preserveSourceInputIntents } from "./sourceInputIntent.js";
 import { isRunWorkEvidence } from "../runRecord.js";
 import { isBranchIdentityBaseline } from "../branchIdentityBaseline.js";
 import { sourceTaskSnapshotOf } from "../references/sourceTaskSnapshot.js";
@@ -105,8 +106,11 @@ export function preserveCheckpointState(
   prior: RunState,
   incoming: RunState,
   unitSeedAcknowledged = false,
+  sourceInputOwner?: Pick<LiveRunRow, "runId" | "ownerGen" | "meta">,
 ): RunState | undefined {
-  const next = preserveHarnessPolicy(prior, incoming);
+  const sourceInputs = preserveSourceInputIntents(prior, incoming, sourceInputOwner);
+  if (!sourceInputs) return undefined;
+  const next = preserveHarnessPolicy(prior, sourceInputs);
   if (!next) return undefined;
   if (prior.killRequested === true) next.killRequested = true;
   if (prior.sourceTask !== undefined) {

@@ -1595,9 +1595,9 @@ export class InMemoryRunLedger implements RunLedger {
     if (restoredChecks.checks !== undefined) incoming = { ...incoming, checkExecutions: restoredChecks.checks };
     const sourceTask = evidence?.sourceTask ?? record?.sourceTask;
     if (sourceTask !== undefined) {
-      const retainedTask = preserveCheckpointState({ sourceTask }, incoming);
+      const retainedTask = preserveCheckpointState({ sourceTask }, { sourceTask: incoming.sourceTask });
       if (!retainedTask || !workEvidenceBelongsToRun(retainedTask, owner)) return undefined;
-      incoming = retainedTask;
+      incoming = { ...incoming, ...retainedTask };
     }
     const baseline =
       evidence && Object.hasOwn(evidence, "branchIdentityBaseline")
@@ -2314,7 +2314,7 @@ export class InMemoryRunLedger implements RunLedger {
     if (!restored) return { ok: false, reason: "fenced" };
     state = restored;
     const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
-    const preserved = preserveCheckpointState(row.state, state, mintSeed);
+    const preserved = preserveCheckpointState(row.state, state, mintSeed, row);
     if (!preserved) return { ok: false, reason: "fenced" };
     if (!workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }, row.meta))
       return { ok: false, reason: "fenced" };

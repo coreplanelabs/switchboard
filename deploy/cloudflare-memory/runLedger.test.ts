@@ -1,4 +1,4 @@
-import { testSourceInput } from "../../src/core/testing/sourceInputs.ts";
+import { testSourceInput, testSourceInputIntent } from "../../src/core/testing/sourceInputs.ts";
 import { captureSourceTaskSnapshot } from "../../src/core/references/sourceTaskSnapshot.ts";
 import { checkStateFixture } from "../../src/core/testing/checkState.ts";
 import { captureCheckArchive } from "../../src/core/checkInspection.ts";
@@ -20610,6 +20610,85 @@ describe("terminal native retirement authority", () => {
 });
 
 describe("source-input context readers in SQLite", () => {
+  it.each(["pi", "opencode"] as const)("retains %s input intent through owner changes in SQLite", async (harness) => {
+    const key = storeKey(),
+      id = "source-consumer",
+      thread = "cli:thread";
+    const options = {
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => fetchMemoryTest(String(input), init),
+    };
+    const ledger = new WorkerRunLedger(options);
+    const original = testSourceInputIntent(harness),
+      entry = original.entries[0]!;
+    const policy = { version: 1, commandRoute: "native", identity: "write" };
+    const launch = { version: 1, harness, phase: "prepared", ordinal: 0, sessionPolicy: policy };
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, id, thread, "g1", {
+            meta: { agent: "orchestrator", userId: "cli:alice", channelId: "cli:main", threadKey: thread },
+            state: { harnessLaunch: launch },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await ledger.setState(id, "g1", { sourceInputIntents: original })).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.setState(id, "g1", { harnessLaunch: { ...launch, phase: "begun" } })).toEqual({ ok: true });
+    expect(
+      await ledger.setState(id, "g1", {
+        harness: {
+          harness,
+          launchOrdinal: 0,
+          sessionPolicy: policy,
+          ...(harness === "pi" ? { sessionFile: entry.native.sessionId } : { sessionID: entry.native.sessionId }),
+        },
+      }),
+    ).toEqual({ ok: true });
+    for (const changed of [
+      { ...entry, owner: { ...entry.owner, requester: "cli:other" } },
+      { ...entry, owner: { ...entry.owner, gen: "g2" } },
+      { ...entry, native: { ...entry.native, sessionId: "foreign-session" } },
+      { ...entry, native: { ...entry.native, launchOrdinal: 1 } },
+      { ...entry, phase: "begun" },
+    ])
+      expect(await ledger.setState(id, "g1", { sourceInputIntents: { version: 1, entries: [changed] } })).toEqual({
+        ok: false,
+        reason: "fenced",
+      });
+    expect(await ledger.setState(id, "g1", { sourceInputIntents: original })).toEqual({ ok: true });
+    expect(await ledger.setState(id, "g1", { progress: "later" })).toEqual({ ok: true });
+    expect(await ledger.peekInbox(id, "g1", 0)).toMatchObject({
+      ok: true,
+      boundary: { state: { progress: "later", sourceInputIntents: original } },
+    });
+    expect(await ledger.handoff("g1", [id])).toEqual({ marked: [id] });
+    const reader = new WorkerRunLedger(options);
+    expect(await reader.reclaim("g2", Date.now() + LEASE_MS * 2, LEASE_MS)).toMatchObject([
+      { row: { ownerGen: "g2", state: { sourceInputIntents: original } } },
+    ]);
+    const begun = structuredClone(original);
+    begun.entries[0]!.phase = "begun";
+    expect(await reader.setState(id, "g1", { sourceInputIntents: begun })).toEqual({ ok: false, reason: "fenced" });
+    expect(await reader.setState(id, "g2", { sourceInputIntents: begun })).toEqual({ ok: true });
+    for (const changed of [
+      original,
+      { version: 1, entries: [] },
+      { version: 99, entries: begun.entries },
+      { version: 1, entries: [{ ...begun.entries[0], id: "replacement-input" }] },
+    ])
+      expect(await reader.setState(id, "g2", { sourceInputIntents: changed })).toEqual({ ok: false, reason: "fenced" });
+    expect(await reader.setState(id, "g2", {})).toEqual({ ok: true });
+    expect(await new WorkerRunLedger(options).peekInbox(id, "g2", 0)).toMatchObject({
+      ok: true,
+      boundary: {
+        state: { sourceInputIntents: { entries: [{ id: "source-input-one", phase: "begun", owner: { gen: "g1" } }] } },
+      },
+    });
+  });
   it("retains the acknowledged source task through state, finish and private archive readback", async () => {
     const key = storeKey(),
       id = "source-task-root",
@@ -20701,6 +20780,37 @@ describe("source-input context readers in SQLite", () => {
     );
     expect(JSON.parse(raw.summary_json)).not.toHaveProperty("sourceTask");
     expect(JSON.parse(raw.work_evidence_json).sourceTask).toEqual(original);
+    const policy = { version: 1, commandRoute: "native", identity: "write" };
+    const launch = { version: 1, harness: "pi", phase: "prepared", ordinal: 0, sessionPolicy: policy };
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, id, thread, "g2", {
+            phase: "attaching",
+            startedAt: row.startedAt,
+            meta: { ...row.meta, restartOf: id },
+            state: { harnessLaunch: launch },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await ledger.setState(id, "g2", { harnessLaunch: { ...launch, phase: "begun" } })).toEqual({ ok: true });
+    expect(
+      await ledger.setState(id, "g2", {
+        harness: { harness: "pi", sessionFile: "original-native-session", launchOrdinal: 0, sessionPolicy: policy },
+      }),
+    ).toEqual({ ok: true });
+    const input = testSourceInputIntent(),
+      entry = input.entries[0]!;
+    entry.owner = { runId: id, gen: "g2", requester: "cli:user", channelId: "cli:main", threadKey: thread };
+    entry.reference.root = { runId: id, requester: "cli:user", channelId: "cli:main", threadKey: thread };
+    entry.witness.runId = id;
+    expect(await ledger.setState(id, "g2", { sourceInputIntents: input })).toEqual({ ok: true });
+    expect(await ledger.peekInbox(id, "g2", 0)).toMatchObject({
+      ok: true,
+      boundary: { state: { sourceTask: original, sourceInputIntents: input } },
+    });
   });
   it("retains exact source references in state, session snapshots and the root retention index", async () => {
     const key = storeKey(),
