@@ -37,6 +37,21 @@ export interface PrivateTreeObservation {
   unpushedCommits: number;
 }
 
+export type PrivateTreeInspection =
+  | { kind: "observed"; tree: PrivateTreeObservation }
+  | {
+      kind: "unknown";
+      reason:
+        | "native-boot-unverified"
+        | "native-stream-unverified"
+        | "native-exit-unverified"
+        | "private-directory-absent"
+        | "private-directory-unverified"
+        | "uid-processes-present"
+        | "uid-processes-unverified"
+        | "git-probe-failed";
+    };
+
 /** A separate strict probe for deletion authority. Reporting counts below
  * intentionally retain their older meaning and cannot authorize removal. */
 export function privateTreeObservationScript(worktreePath: string, user: string, sessionCommand = false): string {
@@ -61,14 +76,18 @@ export function privateTreeObservationScript(worktreePath: string, user: string,
 
 /** Bound and drain both native streams before interpreting counts. No raw
  * process output or errors cross the diagnostic boundary. */
-export async function collectPrivateTreeObservation(
+export async function inspectPrivateTreeObservation(
   process: {
     stdout: ReadableStream<Uint8Array> | null | undefined;
     stderr: ReadableStream<Uint8Array> | null | undefined;
     exitCode: Promise<number>;
   },
   expectedContainer: string,
-): Promise<PrivateTreeObservation | null> {
+): Promise<PrivateTreeInspection> {
+  const unknown = (reason: Extract<PrivateTreeInspection, { kind: "unknown" }>["reason"]): PrivateTreeInspection => ({
+    kind: "unknown",
+    reason,
+  });
   const read = async (stream: ReadableStream<Uint8Array> | null | undefined) => {
     if (!stream) return null;
     const reader = stream.getReader();
@@ -102,14 +121,20 @@ export async function collectPrivateTreeObservation(
     return new TextDecoder().decode(bytes);
   };
   const [out, err, exit] = await Promise.allSettled([read(process.stdout), read(process.stderr), process.exitCode]);
-  if (
-    out.status !== "fulfilled" ||
-    out.value === null ||
-    err.status !== "fulfilled" ||
-    err.value !== "" ||
-    exit.status !== "fulfilled"
-  )
-    return null;
+  if (out.status !== "fulfilled" || out.value === null || err.status !== "fulfilled" || err.value !== "")
+    return unknown("native-stream-unverified");
+  if (exit.status !== "fulfilled") return unknown("native-exit-unverified");
+  // These exit codes belong to the fixed, root-owned probe stages. No native
+  // output or Git error is returned to the caller.
+  const failedStage = {
+    20: "native-boot-unverified",
+    21: "private-directory-absent",
+    22: "private-directory-unverified",
+    23: "uid-processes-present",
+    24: "uid-processes-unverified",
+    25: "git-probe-failed",
+  } as const;
+  if (exit.value !== 0) return unknown(failedStage[exit.value as keyof typeof failedStage] ?? "native-exit-unverified");
   // Only the probe's exact tags are admissible, even when exit status is zero.
   const lines = out.value.split("\n");
   const containers = lines.filter((line) => line.startsWith("container="));
@@ -118,14 +143,15 @@ export async function collectPrivateTreeObservation(
     containers.length !== 1 ||
     containers[0] !== `container=${expectedContainer}`
   )
-    return null;
+    return unknown("native-boot-unverified");
   if (lines.some((line) => line !== "" && !/^(container|present|branch|head|tracked|untracked|unpushed)=/.test(line)))
-    return null;
-  return parsePrivateTreeObservation({
+    return unknown("native-stream-unverified");
+  const tree = parsePrivateTreeObservation({
     stdout: lines.filter((line) => !line.startsWith("container=")).join("\n"),
     exitCode: exit.value,
     timedOut: false,
   });
+  return tree ? { kind: "observed", tree } : unknown("git-probe-failed");
 }
 
 export function parsePrivateTreeObservation(result: {

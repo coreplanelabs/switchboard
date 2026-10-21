@@ -299,7 +299,7 @@ import {
   evictedTreeSentence,
   parseWorktreeCleanliness,
   parsePrivateTreeObservation,
-  collectPrivateTreeObservation,
+  inspectPrivateTreeObservation,
   privateTreeObservationScript,
   worktreeCleanlinessScript,
   type EvictedTree,
@@ -11308,7 +11308,7 @@ export class ResidentDO extends Sandbox<Env> {
     | { kind: "unknown"; reason: string }
     | {
         kind: "observed";
-        binding: Pick<ThreadBinding, "threadKey" | "ref" | "sha" | "user" | "worktreePath" | "container">;
+        binding: Pick<ThreadBinding, "threadKey" | "ref" | "sha" | "user" | "container">;
         owner: WorkspaceOwner;
         fence: WorkspaceOwner;
         ownerStatus: string;
@@ -11415,31 +11415,20 @@ export class ResidentDO extends Sandbox<Env> {
               try {
                 if (this.ctx.container?.running !== true) return unknown("runtime-unavailable");
                 const path = shellQuote(binding.worktreePath);
+                const checkProcesses = [
+                  `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
+                  'code=$?; test "$code" = 1 || { test "$code" = 0 && exit 23; exit 24; }',
+                ];
                 const command = [
-                  'printf "container=%s\\n" "$(/bin/cat /proc/sys/kernel/random/boot_id)"',
-                  `test -d ${path} && test ! -L ${path} || exit 1`,
-                  `test "$(/usr/bin/stat -c %u ${path})" = "$(/usr/bin/id -u ${shellQuote(binding.user)})" || exit 1`,
-                  `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
-                  'test "$?" = 1 || exit 1',
-                  privateTreeObservationScript(binding.worktreePath, binding.user, true),
-                  'code=$?; test "$code" = 0 || exit "$code"',
-                  `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
-                  'test "$?" = 1 || exit 1',
+                  "boot=$(/bin/cat /proc/sys/kernel/random/boot_id 2>/dev/null) || exit 20",
+                  'printf "container=%s\\n" "$boot"',
+                  `if test ! -e ${path} && test ! -L ${path}; then exit 21; fi`,
+                  `test -d ${path} && test ! -L ${path} || exit 22`,
+                  `test "$(/usr/bin/stat -c %u ${path} 2>/dev/null)" = "$(/usr/bin/id -u ${shellQuote(binding.user)} 2>/dev/null)" || exit 22`,
+                  ...checkProcesses,
+                  `${privateTreeObservationScript(binding.worktreePath, binding.user, true)} 2>/dev/null || exit 25`,
+                  ...checkProcesses,
                 ].join("\n");
-                const process = await this.ctx.container.exec([
-                  "/usr/bin/env",
-                  "-i",
-                  "PATH=/usr/local/bin:/usr/bin:/bin",
-                  "/usr/bin/timeout",
-                  "-s",
-                  "KILL",
-                  String(CREDENTIAL_INSPECTION_MAX_MS / SECOND_MS),
-                  "/bin/sh",
-                  "-c",
-                  command,
-                ]);
-                const tree = await collectPrivateTreeObservation(process, binding.container!);
-                if (!tree || tree.branch !== ref || tree.head !== head) return unknown("private-tree-unverified");
                 const unchanged = async () =>
                   this.ctx.container?.running === true &&
                   JSON.stringify(await this.ctx.storage.get(threadBindingKey(threadKey))) === JSON.stringify(binding) &&
@@ -11448,7 +11437,30 @@ export class ResidentDO extends Sandbox<Env> {
                   (this.threadOpsInFlight.get(threadKey) ?? 0) === 1 &&
                   (await soleClaimant()) &&
                   (this.containerIdMemo === undefined || this.containerIdMemo === binding.container);
+                let inspection;
+                try {
+                  const process = await this.ctx.container.exec([
+                    "/usr/bin/env",
+                    "-i",
+                    "PATH=/usr/local/bin:/usr/bin:/bin",
+                    "/usr/bin/timeout",
+                    "-s",
+                    "KILL",
+                    String(CREDENTIAL_INSPECTION_MAX_MS / SECOND_MS),
+                    "/bin/sh",
+                    "-c",
+                    command,
+                  ]);
+                  inspection = await inspectPrivateTreeObservation(process, binding.container!);
+                } catch {
+                  if (!(await unchanged())) return unknown("observation-changed");
+                  return unknown("native-exec-unavailable");
+                }
                 if (!(await unchanged())) return unknown("observation-changed");
+                if (inspection.kind === "unknown") return inspection;
+                const { tree } = inspection;
+                if (tree.branch !== ref) return unknown("private-tree-branch-mismatch");
+                if (tree.head !== head) return unknown("private-tree-head-mismatch");
                 const decision = await this.workspaceRemovalDecision(binding, true, false, {
                   tree,
                   container: binding.container!,
@@ -11461,7 +11473,6 @@ export class ResidentDO extends Sandbox<Env> {
                     ref,
                     sha: binding.sha,
                     user: binding.user,
-                    worktreePath: binding.worktreePath,
                     container: binding.container,
                   },
                   owner,

@@ -6,6 +6,7 @@ import {
   workspaceSettlementOf,
 } from "../../src/core/workspaceSettlement.js";
 import { runInNewContext } from "node:vm";
+import { spawnSync } from "node:child_process";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -14,7 +15,7 @@ import {
   collectDependencyInspection,
 } from "../../src/execution/dependencyInspection.js";
 import {
-  collectPrivateTreeObservation,
+  inspectPrivateTreeObservation,
   privateTreeObservationScript,
 } from "../../src/execution/residentCleanliness.js";
 import { parsePoolBindings } from "../../src/execution/residentPoolSpends.js";
@@ -255,7 +256,7 @@ ${methodOf(source, "cancellationPending")}
     const execute = vi.fn(async (_argv: readonly string[]) => output());
     const Constructor = runInNewContext(compiled, {
       dependencyInspectionInputSchema,
-      collectPrivateTreeObservation,
+      inspectPrivateTreeObservation,
       privateTreeObservationScript,
       shellQuote,
       parsePoolBindings,
@@ -307,7 +308,13 @@ ${methodOf(source, "cancellationPending")}
       kind: "observed",
       owner: h.owner,
       fence: h.owner,
-      binding: h.binding,
+      binding: {
+        threadKey: input.threadKey,
+        ref: input.ref,
+        sha: h.binding.sha,
+        user: h.binding.user,
+        container: h.binding.container,
+      },
       soleClaimant: true,
       uidProcesses: 0,
       tree: { head: input.head, unpushedCommits: 1 },
@@ -318,6 +325,8 @@ ${methodOf(source, "cancellationPending")}
       container: "original-vm",
     });
     expect(h.execute).toHaveBeenCalledOnce();
+    expect(JSON.stringify(answer)).not.toContain(h.binding.worktreePath);
+    expect(spawnSync("/bin/sh", ["-n", "-c", h.execute.mock.calls[0]![0][9]!]).status).toBe(0);
     const command = h.execute.mock.calls[0]![0].join(" ");
     expect(command).toContain("--session-command");
     expect(command).not.toMatch(/git fetch|git push|git reset|rm -rf/);
@@ -422,5 +431,56 @@ ${methodOf(source, "cancellationPending")}
       reason: "owner-unverified",
     });
     expect(h.execute).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["branch", "private-tree-branch-mismatch"],
+    ["head", "private-tree-head-mismatch"],
+  ])("reports a closed %s mismatch without release", async (field, reason) => {
+    const h = fixture();
+    h.execute.mockImplementationOnce(async () => {
+      const original = h.output();
+      const text =
+        `container=original-vm\npresent=yes\nbranch=${field === "branch" ? "codex/other" : input.ref}\n` +
+        `head=${field === "head" ? "c".repeat(40) : input.head}\ntracked=0\nuntracked=0\nunpushed=1\n`;
+      return {
+        ...original,
+        stdout: new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(text));
+            c.close();
+          },
+        }),
+      };
+    });
+    expect(await h.instance.inspectThreadPreservation(input)).toEqual({ kind: "unknown", reason });
+    expect(h.instance.workspaceRemovalDecision).not.toHaveBeenCalled();
+    expect(h.storage.put).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [20, "native-boot-unverified"],
+    [21, "private-directory-absent"],
+    [22, "private-directory-unverified"],
+    [23, "uid-processes-present"],
+    [24, "uid-processes-unverified"],
+    [25, "git-probe-failed"],
+  ])("reports native probe stage %i without release", async (exit, reason) => {
+    const h = fixture();
+    h.execute.mockImplementationOnce(async () => ({ ...h.output(), exitCode: Promise.resolve(exit) }));
+    expect(await h.instance.inspectThreadPreservation(input)).toEqual({ kind: "unknown", reason });
+    expect(h.instance.workspaceRemovalDecision).not.toHaveBeenCalled();
+    expect(h.storage.put).not.toHaveBeenCalled();
+    expect(h.storage.delete).not.toHaveBeenCalled();
+  });
+
+  it("reports a native execution failure without its private error", async () => {
+    const h = fixture();
+    h.execute.mockRejectedValueOnce(new Error("private process error"));
+    expect(await h.instance.inspectThreadPreservation(input)).toEqual({
+      kind: "unknown",
+      reason: "native-exec-unavailable",
+    });
+    expect(h.instance.workspaceRemovalDecision).not.toHaveBeenCalled();
   });
 });
