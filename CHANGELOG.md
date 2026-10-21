@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.307.1](https://github.com/coreplanelabs/switchboard/compare/v1.307.0...v1.307.1) (2026-10-21)
+
+
+### Bug fixes
+
+* **resident:** recover sleeping operator scopes after deploy ([#3394](https://github.com/coreplanelabs/switchboard/issues/3394)) ([907d392](https://github.com/coreplanelabs/switchboard/commit/907d3920eeefc7d4b9d5846682ef4feb765912cc))
+* **runs:** show requester names for MCP reviews ([#3395](https://github.com/coreplanelabs/switchboard/issues/3395)) ([97fa9eb](https://github.com/coreplanelabs/switchboard/commit/97fa9eb32d1569262bb74fb1c6a249dcfa203b89))
+* **tracing:** identify GitHub repository probe failures ([#3392](https://github.com/coreplanelabs/switchboard/issues/3392)) ([d401ecf](https://github.com/coreplanelabs/switchboard/commit/d401ecf9bc61d64976a56d67a4b4e2413bfdf7fb))
+* **tracing:** time private source checks before model calls ([#3391](https://github.com/coreplanelabs/switchboard/issues/3391)) ([3a0c7e6](https://github.com/coreplanelabs/switchboard/commit/3a0c7e673e993926ec7eb615ca1f3d142ffc73a6))
+
 ## [1.307.0](https://github.com/coreplanelabs/switchboard/compare/v1.306.0...v1.307.0) (2026-10-21)
 
 
