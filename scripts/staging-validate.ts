@@ -1,4 +1,4 @@
-import { STAGING_VALIDATION_WAIT_MS } from "../src/core/budgets.js";
+import { SECOND_MS, STAGING_VALIDATION_WAIT_MS } from "../src/core/budgets.js";
 import { systemClock } from "../src/core/trace/clock.js";
 import { appendFile } from "node:fs/promises";
 import { stagingValidation, type StagingPull, type ValidationCheck } from "../src/deploy/stagingCi.js";
@@ -19,13 +19,28 @@ if (
 )
   throw new Error("Staging validation needs a repository, exact commit, pull request and read token");
 
-const api = async <T>(path: string): Promise<T> => {
-  const response = await fetch(`https://api.github.com/repos/${repository}/${path}`, {
-    headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
-    redirect: "error",
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) throw new Error(`Staging validation cannot read GitHub (HTTP ${response.status})`);
+const api = async <T>(operation: "pull" | "permission" | "checks", path: string): Promise<T> => {
+  const url = `https://api.github.com/repos/${repository}/${path}`;
+  const read = () =>
+    fetch(url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
+      redirect: "error",
+      signal: AbortSignal.timeout(30_000),
+    });
+  let response = await read();
+  if (
+    response.status === 503 &&
+    !response.headers.has("retry-after") &&
+    response.headers.get("x-ratelimit-remaining") !== "0"
+  ) {
+    // Only repeat this read. A fresh response must still pass the exact-head checks.
+    await response.body?.cancel();
+    console.log(`Staging validation: GitHub ${operation} returned HTTP 503; retrying the same GET once.`);
+    await new Promise((resolve) => setTimeout(resolve, SECOND_MS));
+    response = await read();
+  }
+  if (!response.ok) throw new Error(`Staging validation cannot read GitHub ${operation} (HTTP ${response.status})`);
   return response.json() as Promise<T>;
 };
 const output = async (eligible: boolean) => {
@@ -36,17 +51,20 @@ await output(false);
 const deadline = systemClock() + (recheck ? 0 : STAGING_VALIDATION_WAIT_MS);
 let previous = "";
 for (;;) {
-  const pull = await api<StagingPull & { labels: { name: string }[] }>(`pulls/${number}`);
+  const pull = await api<StagingPull & { labels: { name: string }[] }>("pull", `pulls/${number}`);
   if (process.env.STAGING_REQUIRE_LABEL === "true" && !pull.labels.some((label) => label.name === "deploy:staging")) {
     console.log("Staging request withdrawn; no credentials given to the candidate.");
     break;
   }
   const permission = automatic
     ? undefined
-    : await api<{ permission: string }>(`collaborators/${encodeURIComponent(actor)}/permission`);
+    : await api<{ permission: string }>("permission", `collaborators/${encodeURIComponent(actor)}/permission`);
   const checks: ValidationCheck[] = [];
   for (let page = 1; page <= 10; page++) {
-    const data = await api<{ check_runs: ValidationCheck[] }>(`commits/${commit}/check-runs?per_page=100&page=${page}`);
+    const data = await api<{ check_runs: ValidationCheck[] }>(
+      "checks",
+      `commits/${commit}/check-runs?per_page=100&page=${page}`,
+    );
     checks.push(...data.check_runs);
     if (data.check_runs.length < 100) break;
     if (page === 10) throw new Error("Staging validation check inventory is incomplete");
