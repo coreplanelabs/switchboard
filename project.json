@@ -91,6 +91,10 @@
       "does": "Captures a retained resident and checks its offline restore.",
       "when": "Reviewed disposable rehearsal; verify the binding and builds."
     },
+    "resident:retire": {
+      "does": "Previews or retires one native scope.",
+      "when": "When deploy is blocked."
+    },
     "ci:gate": {
       "does": "Accepts successful CI legs or planned skips.",
       "when": "CI fan-out gates."

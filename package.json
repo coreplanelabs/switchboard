@@ -39,6 +39,7 @@
     "test": "npm run --silent deploy:gen && vitest run",
     "cli": "tsx src/cli.ts",
     "resident:archive": "tsx src/residentArchiveCli.ts",
+    "resident:retire": "tsx scripts/resident-retire.ts",
     "emoji:sync": "tsx scripts/slack-emoji-sync.ts",
     "verify": "npm run verify:root && npm run verify --workspaces --if-present && npm run check:site",
     "verify:root": "npm run check:consistency && npm run typecheck && npm run lint && npm run format:check && npm test && npm run check:dist",

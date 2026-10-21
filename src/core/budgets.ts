@@ -64,6 +64,9 @@ export const REVIEWS_HISTOGRAM_OPEN_MS = 30 * MINUTE_MS;
 export const HOSTED_MCP_CONNECT_POLL_MS = 2 * SECOND_MS;
 export const HOSTED_MCP_PROBE_TIMEOUT_MS = 15 * SECOND_MS;
 export const HOSTED_MCP_CALL_TIMEOUT_MS = 15 * MINUTE_MS;
+/** One read and one control in the source-checkout terminal native cleanup command. */
+export const RESIDENT_RETIRE_READ_TIMEOUT_MS = 15 * SECOND_MS;
+export const RESIDENT_RETIRE_WRITE_TIMEOUT_MS = 2 * MINUTE_MS;
 export const PERSONAL_TOKEN_WORKER_TIMEOUT_MS = 8 * SECOND_MS;
 /** The source-read protocol's maximum lifetime for a recorded result. */
 export const SOURCE_READ_ELIGIBILITY_MS = 60 * MINUTE_MS;

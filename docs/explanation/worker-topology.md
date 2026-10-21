@@ -86,6 +86,18 @@ flowchart TB
 - **A resident redeploy is different**: it swaps the isolate under active threads, so it is preflighted and refuses while work is in flight ([Operate production](../how-to/operate-production.md)).
 - **Every hop carries the same trace id.** The bot sets `traceparent` on calls to these Workers only, each adopts it after the bearer checks out, and the public shim strips outside trace context ([tracing spec](../reference/specs/tracing.md)).
 
+## Why a fast Resident deploy can stop
+
+The Resident Worker owns live handles to commands in its container. Uploading a new Worker replaces the old Worker isolates. The new isolate can read saved Durable Object records and retained workspace files, but it cannot use a handle held by the old isolate. A saved process identity can sometimes let the new isolate read the original process's terminal status from the same native runtime. A lost launch reply, retired runtime or opaque external write can still leave the result unknown. This is a limit of the current execution contract, not a rule that every process system must have. A future design could make more work reconnectable and save durable command receipts, but it would still need to prove what the original command did before it resumed or repeated work.
+
+The deploy has two entry controls. A **drain** is a timed record in the Resident registry. It stops new runs from attaching while runs already in progress finish. It still lets an already registered run reattach so that run can finish.
+
+A **deploy fence** is a durable change to that drain record. It also closes registered reattach. It then checks active requests, the exact owners of registered runs, native operations and resident state. The runner can upload only while the fence is still current and all required checks say no work is executing or unknown. If the job dies, the stored drain and fence remain until guarded release or their time limit. Saved native operation records are separate durable evidence. A closed record with an unknown original result blocks a Resident deploy before any Worker upload, even when the operator selects `force`.
+
+`force` skips the normal bot and Resident preflights and can override the older-commit guard. It does not remove the early native-record check or the postdeploy image and readiness checks. It can interrupt an active agent run, command or provision. The command's final output can be lost. A command may have changed files, pushed a commit or made an external write before its reply was lost; the new Worker cannot infer whether it did. A container reconcile can stop the old process. Saved run records and workspace files are not automatically deleted by `force`, but their contents do not prove that an interrupted command completed. A refresh or restore has checkpoints and can resume; provisioning may need a rebuild. A forced Worker upload can still end as a partial deploy if the fleet cannot reconcile and prove the selected image current.
+
+For an ended run with an unknown original result, an administrator can retire its exact native scope. Memory first proves a sealed terminal run and blocks that run ID from starting again. Resident freezes the original journal, closes that scope, and keeps the unknown result, saved run and workspace. The [operator procedure](../how-to/operate-production.md#clean-up-native-work-after-a-run-ends) does not repeat the command or clear unrelated work. A live or unverified run cannot use this path.
+
 ## Why the deploy order follows from this
 
 <!-- generated:deploy-order · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->

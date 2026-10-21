@@ -42,6 +42,7 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run test` | The whole vitest suite from one entry, after `deploy:gen`. | Local sessions before pushing; CI runs it for relevant changes. |
 | `npm run cli` | Runs operator commands and sends asks through the dispatcher. | Smoke tests, deploys, config and run history. |
 | `npm run resident:archive` | Captures a retained resident and checks its offline restore. | Reviewed disposable rehearsal; verify the binding and builds. |
+| `npm run resident:retire` | Previews or retires one native scope. | When deploy is blocked. |
 | `npm run emoji:sync` | Downloads custom Slack emoji. | Manual; emoji:read. |
 | `npm run verify` | Runs all repository and workspace CI checks. | Local human checks; CI selects affected checks. |
 | `npm run verify:root` | Runs the bot package's CI gates. | Bot changes; agents use affected checks. |
