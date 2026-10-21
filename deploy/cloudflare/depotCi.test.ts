@@ -503,7 +503,7 @@ describe("Depot CI edge", () => {
     expect(source).toContain(
       'if (pathname === DEPOT_CI_AUTHORIZATION_PATH) return new Response("not found", { status: 404 })',
     );
-    expect(source).toContain("getContainer(env.SWITCHBOARD, INSTANCE).fetch(req)");
+    expect(source).toContain("bindingFetch(getContainer(env.SWITCHBOARD, INSTANCE), req)");
     const forwarded = /const FORWARDED_OPTIONAL = \[([\s\S]*?)\]/.exec(source)![1];
     expect(forwarded).toContain('"DEPOT_CI_BRIDGE_TOKEN"');
     expect(forwarded).not.toContain('"DEPOT_API_TOKEN"');

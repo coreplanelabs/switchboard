@@ -22,14 +22,25 @@ describe("organization Worker correlation", () => {
       expect(sent.map((headers) => headers.get("x-switchboard-request-id"))).toEqual([
         expect.stringMatching(/^[a-f0-9-]{36}$/),
       ]);
-      expect(logs.map((line) => JSON.parse(line))).toEqual([
+      expect(logs.map((line) => JSON.parse(line))).toMatchObject([
         {
           event: "cloudflare.request.sent",
           requestId: sent[0]!.get("x-switchboard-request-id"),
           route: "/organization/execute",
           host: "state.example",
         },
+        {
+          event: "http.transport",
+          id: sent[0]!.get("x-switchboard-request-id"),
+          stage: "error",
+          cause: "timeout",
+          host: "state.example",
+          method: "POST",
+        },
       ]);
+      expect(logs.join("\n")).not.toMatch(
+        /PRIVATE_TOKEN|PRIVATE_INSTALLATION|PRIVATE_ORG|PRIVATE_PERSON|PRIVATE_ERROR/,
+      );
     } finally {
       log.mockRestore();
     }

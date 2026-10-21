@@ -1,4 +1,5 @@
 import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
+import { installHttpTransport } from "../../src/core/trace/httpTransport.js";
 import { prepareStorageRequest } from "../../src/core/storeResponse.js";
 import { storageTransport } from "../../src/core/storageTransport.js";
 import { assertRepositorySettingsWritable, resetRepositorySettings } from "../../src/execution/registrySettings.js";
@@ -627,6 +628,7 @@ export { ResidentRefresh } from "./refresh";
  *  outside without auth, and stamped on test overrides so they die with the
  *  build that set them (gc.ts). Nothing to bump: it follows the tree. */
 const BUILD = injectedBuildStamp();
+installHttpTransport();
 /** The identity stored test overrides are expired against — see `buildId`:
  *  the commit alone cannot tell two builds of one dirty tree apart. */
 const BUILD_ID = buildId(BUILD);

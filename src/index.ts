@@ -1,4 +1,5 @@
 import { githubActivityInputAccess } from "./channels/githubActivityAccess.js";
+import { installHttpTransport } from "./core/trace/httpTransport.js";
 import { logOwnerFailure } from "./core/organization/ownerFailure.js";
 import { storageFailureNote, type StorageFailureNotice } from "./core/storageFailureDiagnostic.js";
 import { createRunStop } from "./execution/runStop.js";
@@ -318,6 +319,7 @@ const INTERRUPTED_WRITE_BUDGET_MS = 10_000;
  * CLI's `start` (src/cli.ts) — the same process from the same directory.
  */
 export async function runBot(): Promise<void> {
+  installHttpTransport();
   for (const v of ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]) {
     if (!processSecrets.get(v)) {
       console.error(`Missing required env var ${v}`);

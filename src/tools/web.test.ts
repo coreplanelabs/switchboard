@@ -559,6 +559,23 @@ describe("toolset + agent wiring", () => {
 });
 
 describe("makeWebCapability", () => {
+  it("records HTTP transport without copying a web target's path or query", async () => {
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => lines.push(String(line)));
+    try {
+      const web = makeWebCapability(secretsFrom({}), async () => new Response("ok", { status: 200 }));
+      const response = await web.fetch("https://example.com/private?token=secret");
+      expect(await response.text()).toBe("ok");
+      expect(lines.map((line) => JSON.parse(line))).toMatchObject([
+        { event: "http.transport", stage: "send", host: "example.com" },
+        { event: "http.transport", stage: "headers", host: "example.com", status: 200 },
+      ]);
+      expect(lines.join("\n")).not.toMatch(/private|token=|secret/);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("selects Brave when a key is present, Null otherwise", () => {
     expect(makeWebCapability(secretsFrom({ BRAVE_SEARCH_API_KEY: "k" }), vi.fn()).search).toBeInstanceOf(
       BraveWebSearch,

@@ -1,5 +1,6 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { Agent, fetch as undiciFetch } from "undici";
+import { observeHttpRequest } from "../core/trace/httpTransport.js";
 import type { Secret, Secrets } from "../secrets.js";
 import type { RunnableTool } from "./runnableTool.js";
 
@@ -134,10 +135,11 @@ export function makeWebCapability(
   resolve: DnsResolve = nodeDnsResolve,
 ): WebCapability {
   const agent = new Agent({ connect: { lookup: makeSsrfLookup(resolve) } as never });
-  const boundFetch: FetchLike =
+  const rawFetch: FetchLike =
     fetchImpl ??
     ((url, init) =>
       undiciFetch(url, { ...(init as Record<string, unknown>), dispatcher: agent }) as unknown as Promise<Response>);
+  const boundFetch: FetchLike = (url, init) => observeHttpRequest(url, init, () => rawFetch(url, init));
   const key = secrets.get("BRAVE_SEARCH_API_KEY");
   const search: WebSearch = key ? new BraveWebSearch(key, boundFetch) : new NullWebSearch();
   return { fetch: boundFetch, search };

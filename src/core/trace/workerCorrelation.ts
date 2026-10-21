@@ -10,15 +10,17 @@ export function workerRequestId(headers: Headers): string | undefined {
 }
 
 /** The caller owns the route vocabulary. No URL, body or credential reaches this record. */
-export function observeWorkerSend(headers: Headers, route: string, host: string, traceId?: string): void {
+export function observeWorkerSend(headers: Headers, route: string, host: string, traceId?: string): boolean {
   try {
     const requestId = workerRequestId(headers) ?? crypto.randomUUID();
     headers.set(WORKER_REQUEST_ID_HEADER, requestId);
     console.log(
       JSON.stringify({ event: "cloudflare.request.sent", requestId, route, host, ...(traceId ? { traceId } : {}) }),
     );
+    return true;
   } catch {
     unavailable("client", "operator-log");
+    return false;
   }
 }
 

@@ -6,6 +6,7 @@ import source, { AcceptanceActions, READ_TOOL, type Env } from "./worker.js";
 // A storage-backed fake retains entries across Durable Object reconstruction.
 function fixture() {
   const rows = new Map<string, unknown>();
+  const actionWaiters = new Map<string, () => void>();
   let alarmAt: number | undefined;
   const base = {
     get: async <T>(key: string) => rows.get(key) as T | undefined,
@@ -14,6 +15,11 @@ function fixture() {
     },
     setAlarm: async (at: number) => {
       alarmAt = at;
+      for (const [key, ready] of actionWaiters) {
+        if (!rows.has(key)) continue;
+        actionWaiters.delete(key);
+        ready();
+      }
     },
     getAlarm: async () => alarmAt ?? null,
   };
@@ -31,6 +37,11 @@ function fixture() {
   let object = new AcceptanceActions({ storage }, env);
   const restart = () => {
     object = new AcceptanceActions({ storage }, env);
+  };
+  const slowActionReady = (id: string): Promise<void> => {
+    const key = `action:${id}`;
+    if (rows.has(key) && alarmAt !== undefined) return Promise.resolve();
+    return new Promise((resolve) => actionWaiters.set(key, resolve));
   };
   const post = (body: unknown, session?: string, authorization = `Bearer ${credential}`) =>
     source.fetch(
@@ -80,6 +91,7 @@ function fixture() {
       return alarmAt;
     },
     restart,
+    slowActionReady,
     post,
     rpc,
     session,
@@ -202,11 +214,8 @@ describe("controlled read source", () => {
       const session = await f.session();
       const actionId = crypto.randomUUID();
       const original = f.call(session, "execute", "slow", actionId);
-      let entry: { enteredAt: string; sessionId: string; stage: string } | undefined;
-      for (let i = 0; i < 50 && !entry; i++) {
-        await vi.advanceTimersByTimeAsync(1);
-        entry = await f.storage.get<{ enteredAt: string; sessionId: string; stage: string }>(`action:${actionId}`);
-      }
+      await f.slowActionReady(actionId);
+      const entry = await f.storage.get<{ enteredAt: string; sessionId: string; stage: string }>(`action:${actionId}`);
       expect(entry).toMatchObject({ sessionId: session, stage: "pending" });
       expect(f.alarmAt).toBeGreaterThan(Date.now() + 30_000);
       const diag = await source.fetch(
@@ -268,7 +277,7 @@ describe("controlled read source", () => {
       const actionId = crypto.randomUUID();
       await f.storage.put("fixture:slow", "tampered");
       void f.call(session, "execute", "slow", actionId);
-      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      await f.slowActionReady(actionId);
       await vi.advanceTimersByTimeAsync(36_000);
       await f.alarm();
       expect(await f.storage.get("pending")).toEqual([]);
@@ -288,7 +297,7 @@ describe("controlled read source", () => {
       const session = await f.session();
       const actionId = crypto.randomUUID();
       void f.call(session, "execute", "slow", actionId);
-      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      await f.slowActionReady(actionId);
       const put = f.storage.put;
       f.storage.put = async (key, value) => {
         if (key === `action:${actionId}`) throw new Error("temporary storage error");
@@ -340,8 +349,10 @@ describe("controlled read source", () => {
       const session = await f.session();
       const actionId = crypto.randomUUID();
       void f.call(session, "execute", "slow", actionId);
-      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
-      await vi.advanceTimersByTimeAsync(36_000 + 61_000);
+      await f.slowActionReady(actionId);
+      const entry = await f.storage.get<{ dueAt: number }>(`action:${actionId}`);
+      expect(entry).toBeDefined();
+      await vi.advanceTimersByTimeAsync(entry!.dueAt + 61_000 - Date.now());
       await f.alarm();
       expect(await f.storage.get("fixture:slow")).toBeUndefined();
       expect(await f.storage.get("pending")).toEqual([]);
@@ -361,7 +372,7 @@ describe("controlled read source", () => {
       const session = await f.session();
       const actionId = crypto.randomUUID();
       void f.call(session, "execute", "slow", actionId);
-      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      await f.slowActionReady(actionId);
       const get = f.storage.get;
       let finishRead: (() => void) | undefined;
       let held = false;
@@ -396,7 +407,7 @@ describe("controlled read source", () => {
       const session = await f.session();
       const actionId = crypto.randomUUID();
       void f.call(session, "execute", "slow", actionId);
-      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      await f.slowActionReady(actionId);
       const get = f.storage.get;
       let held = false;
       f.storage.get = async (key) => {
@@ -431,7 +442,7 @@ describe("controlled read source", () => {
       const session = await f.session();
       const actionId = crypto.randomUUID();
       void f.call(session, "execute", "slow", actionId);
-      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      await f.slowActionReady(actionId);
       const get = f.storage.get;
       let reads = 0;
       let finishRead: (() => void) | undefined;

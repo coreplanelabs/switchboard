@@ -18,6 +18,7 @@
 // Slack or GitHub credential, and no fetch but the container binding's.
 import { RECOVERY_ACTION_ID_PATTERN, recoveryWorkflowId } from "../../src/core/coordinator/recoveryStep.ts";
 import { getContainer } from "@cloudflare/containers";
+import { bindingFetch } from "../../src/core/trace/httpTransport.js";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import {
@@ -80,7 +81,8 @@ function containerBot(env: CoordinatorEnv): CoordinatorBot {
         throw new NonRetryableError(
           `the token map has no single \`${COORDINATOR_IDENTITY}\` entry — the coordinator cannot present itself to the bot`,
         );
-      const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+      const res = await bindingFetch(
+        getContainer(env.SWITCHBOARD, INSTANCE),
         new Request(`${INTERNAL}${COORDINATOR_STEP_PATH_PREFIX}${route}`, {
           method: "POST",
           headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },

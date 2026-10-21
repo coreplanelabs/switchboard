@@ -84,7 +84,14 @@ describe("Worker request correlation transport", () => {
           Response.json({ id: new Headers(init?.headers).get("x-switchboard-request-id") }),
       });
       expect(await external.json()).toEqual({ id: null });
-      expect(logs.map((line) => JSON.parse(line))).toEqual(atSend);
+      const recorded = logs.map((line) => JSON.parse(line));
+      expect(recorded.filter((line) => line.event === "cloudflare.request.sent")).toEqual(atSend);
+      expect(recorded.filter((line) => line.event === "http.transport")).toMatchObject([
+        { id: requestId, stage: "error", cause: "timeout", host: "state.example:8443" },
+        { stage: "send", host: "foreign.example" },
+        { stage: "headers", host: "foreign.example", status: 200 },
+      ]);
+      expect(JSON.stringify(recorded)).not.toMatch(/PRIVATE_BODY|PRIVATE_SINK_FAILURE|token=|authorization/);
       log.mockImplementation(() => {
         throw new Error("PRIVATE_SINK_FAILURE");
       });

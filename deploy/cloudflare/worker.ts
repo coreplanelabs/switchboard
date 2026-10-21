@@ -1,4 +1,5 @@
 import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
+import { bindingFetch, installHttpTransport, observeHttpRequest } from "../../src/core/trace/httpTransport.js";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { depotCiAuthorization, handleDepotCi } from "./depotCi.ts";
 import { maintenanceGate, WorkerMaintenanceStore } from "../../src/core/maintenance.ts";
@@ -72,6 +73,7 @@ export { ShipCoordinator } from "./coordinator";
 // on a `slow` log sink whose filter drops the line an unauthenticated refusal
 // would leave. The public edge never adopts a caller's trace context.
 const tracer = createTracer({ clock: systemClock });
+installHttpTransport();
 const traceSinks = [workerLogSink((line) => console.log(line))];
 
 export interface Env {
@@ -242,7 +244,7 @@ export class SwitchboardServer extends Container<Env> {
         await new Promise((resolve) => setTimeout(resolve, SECOND_MS));
       }
     }
-    return super.fetch(request);
+    return observeHttpRequest(request, undefined, () => super.fetch(request));
   }
 
   /**
@@ -350,7 +352,8 @@ async function handleCoordinatorInstances(request: Request, env: Env): Promise<R
   if (!parsed.ok) return json(400, { ok: false, error: parsed.reason });
   let answer: Response;
   try {
-    answer = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+    answer = await bindingFetch(
+      getContainer(env.SWITCHBOARD, INSTANCE),
       new Request(`${INTERNAL}${COORDINATOR_AUTHORIZE_PATH}`, {
         method: "POST",
         headers: { authorization: authorization ?? "" },
@@ -413,7 +416,8 @@ async function handleCoordinatorInstanceStatus(request: Request, env: Env, id: s
   }
   let answer: Response;
   try {
-    answer = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+    answer = await bindingFetch(
+      getContainer(env.SWITCHBOARD, INSTANCE),
       new Request(`${INTERNAL}${COORDINATOR_AUTHORIZE_PATH}`, {
         method: "POST",
         headers: { authorization: authorization ?? "" },
@@ -465,7 +469,8 @@ async function handleCoordinatorInstanceEvent(request: Request, env: Env, id: st
   }
   let answer: Response;
   try {
-    answer = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+    answer = await bindingFetch(
+      getContainer(env.SWITCHBOARD, INSTANCE),
       new Request(`${INTERNAL}${COORDINATOR_AUTHORIZE_PATH}`, {
         method: "POST",
         headers: { authorization: authorization ?? "" },
@@ -527,7 +532,7 @@ export default {
         depotToken: env.DEPOT_API_TOKEN,
         bridgeToken: env.DEPOT_CI_BRIDGE_TOKEN,
         authorize: (ticket, signal) =>
-          depotCiAuthorization(ticket, signal, (req) => getContainer(env.SWITCHBOARD, INSTANCE).fetch(req)),
+          depotCiAuthorization(ticket, signal, (req) => bindingFetch(getContainer(env.SWITCHBOARD, INSTANCE), req)),
         fetch: (input, init) => fetch(input, init),
       });
     // Only deliberately published copies are public. The existing run reader
@@ -543,7 +548,7 @@ export default {
     const route = shimRoute(pathname);
     if (route === undefined)
       return withDashboardFallback(inbound, async () =>
-        withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(inbound)),
+        withLength(await bindingFetch(getContainer(env.SWITCHBOARD, INSTANCE), inbound)),
       );
     const root = tracer.start("bot-shim.fetch", { sinks: traceSinks, attrs: { route } });
     observeWorkerRequest(
@@ -566,7 +571,7 @@ export default {
             // which executes or defers each effect. A refused bearer never
             // reaches the container.
             request.headers.get("authorization") === `Bearer ${env.MEMORY_TOKEN}` && env.MEMORY_TOKEN
-            ? withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded))
+            ? withLength(await bindingFetch(getContainer(env.SWITCHBOARD, INSTANCE), forwarded))
             : new Response(JSON.stringify({ error: "unauthorized" }), {
                 status: 401,
                 headers: { "content-type": "application/json" },
@@ -594,7 +599,7 @@ export default {
                         lengthPipe: (size) => new FixedLengthStream(size),
                       })
                     : await withDashboardFallback(forwarded, async () =>
-                        withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded)),
+                        withLength(await bindingFetch(getContainer(env.SWITCHBOARD, INSTANCE), forwarded)),
                       );
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
@@ -624,7 +629,7 @@ export default {
       return;
     }
     if (schedule.action.type === "healthz") {
-      const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(new Request(`${INTERNAL}/healthz`));
+      const res = await bindingFetch(getContainer(env.SWITCHBOARD, INSTANCE), new Request(`${INTERNAL}/healthz`));
       if (!res.ok) console.error(`switchboard health check failed: ${res.status}`);
       return;
     }
@@ -649,7 +654,8 @@ export default {
     const root = tracer.start(`cron.${schedule.name}`, { sinks: traceSinks, startedAt: firedAt });
     let firing: ScheduleFiring;
     try {
-      const res = await getContainer(env.SWITCHBOARD, INSTANCE).fetch(
+      const res = await bindingFetch(
+        getContainer(env.SWITCHBOARD, INSTANCE),
         withTraceContext(
           new Request(`${INTERNAL}/ingress`, {
             method: "POST",

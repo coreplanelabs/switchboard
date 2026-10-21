@@ -300,7 +300,9 @@ describe("required context shares the operator deadline", () => {
         {
           config: config(),
           clock: () => now,
-          operatorModel: async () => {
+          operatorModel: async (_prompt, call) => {
+            call.observe?.({ transport: "request_send", transportId: "transport-fixture" });
+            call.observe?.({ transport: "response_headers", status: 200 });
             now += 61_000;
             return bind();
           },
@@ -322,8 +324,10 @@ describe("required context shares the operator deadline", () => {
         phase: "model",
         budgetMs: 60_000,
         elapsedMs: 61_000,
-        transportStage: "before_send",
-        transportAttempts: 0,
+        transportStage: "after_headers",
+        transportAttempts: 1,
+        transportId: "transport-fixture",
+        responseStatus: 200,
       });
       expect(JSON.stringify(event)).not.toContain(url);
     } finally {

@@ -11,15 +11,17 @@ describe("routing telemetry retention", () => {
     const recorder = new RoutingRecorder(() => clock, clock, 61_000, new AbortController().signal);
     await recorder.during("model", async (observe) => {
       clock = 1_100;
-      observe({ transport: "request_send" });
+      observe({ transport: "request_send", transportId: "first-transport" });
       clock = 1_200;
       observe({ transport: "response_headers", status: 503 });
+      observe({ requestId: "first-provider-request" });
       clock = 1_300;
-      observe({ transport: "request_send" });
+      observe({ transport: "request_send", transportId: "second-transport" });
       return "no action";
     });
     const step = recorder.snapshot().steps[0];
-    expect(step).toMatchObject({ transportAttempts: 2, requestSentAt: 1_300 });
+    expect(step).toMatchObject({ transportAttempts: 2, requestSentAt: 1_300, transportId: "second-transport" });
+    expect(step.requestId).toBeUndefined();
     expect(step.responseHeadersAt).toBeUndefined();
     expect(step.responseStatus).toBeUndefined();
   });

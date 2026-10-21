@@ -1,9 +1,10 @@
 import type { AttrDomain, SpanAttrs } from "./attrs.js";
 import { classificationOf, classifyError } from "./classify.js";
 import { internalHosts, type InternalHosts } from "./internalHosts.js";
+import { nativeHttpFetch, observeHttpRequest } from "./httpTransport.js";
 import { formatTraceparent } from "./traceparent.js";
 import type { Span } from "./types.js";
-import { observeWorkerSend } from "./workerCorrelation.js";
+import { observeWorkerSend, workerRequestId } from "./workerCorrelation.js";
 
 // One outbound HTTP call as a span (docs/reference/specs/tracing.md item 21): `http.client`
 // under the caller's span, log-only, ending at the response headers — the body
@@ -34,14 +35,18 @@ export async function tracedFetch(
   init: RequestInit | undefined,
   opts: TracedFetchOptions,
 ): Promise<Response> {
-  const impl = opts.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
+  const impl = nativeHttpFetch(opts.fetchImpl ?? globalThis.fetch);
   const hosts = opts.hosts ?? internalHosts();
   const url = safeUrl(input);
   const host = url?.host ?? "";
   const internal = !!host && hosts.has(host);
   const headers = new Headers(init?.headers);
-  if (internal) observeWorkerSend(headers, opts.route, host, parent?.traceId);
-  if (!parent) return impl(input, internal ? { ...init, headers: Object.fromEntries(headers) } : init);
+  const sendAlreadyLogged = internal && observeWorkerSend(headers, opts.route, host, parent?.traceId);
+  const transport = internal ? { sendAlreadyLogged, id: workerRequestId(headers) } : {};
+  if (!parent) {
+    const sent = internal ? { ...init, headers: Object.fromEntries(headers) } : init;
+    return observeHttpRequest(input, sent, () => impl(input, sent), transport);
+  }
   const method = (init?.method ?? "GET").toUpperCase();
   const attrs: SpanAttrs = {
     ...(host && host.length <= HOST_MAX ? { host } : {}),
@@ -54,7 +59,8 @@ export async function tracedFetch(
       if (internal) headers.set("traceparent", formatTraceparent(span.traceId, span.id));
       let res: Response;
       try {
-        res = await impl(input, { ...init, headers });
+        const sent = { ...init, headers };
+        res = await observeHttpRequest(input, sent, () => impl(input, sent), { ...transport, traceId: span.traceId });
       } catch (err) {
         // A transport failure is our runtime's word, never the peer's body —
         // still class-and-code on the wire, since a message would name the host.

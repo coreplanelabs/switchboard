@@ -26,6 +26,7 @@ import {
 } from "../core/modelProxy/providerFailureAuth.js";
 import type { RunBearerGrant, RunBearerStore, RunMarks } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
+import { safeHttpErrorCode } from "../core/trace/httpTransport.js";
 import type { Clock } from "../core/trace/types.js";
 import {
   reportedCostOf,
@@ -1698,33 +1699,6 @@ function safelyObserve<T>(read: () => T): T | undefined {
   }
 }
 
-/** Codes the Node/undici transport may place on its own error object. Free text,
- *  getters and arbitrary code-shaped strings never cross into diagnostics. */
-const SAFE_TRANSPORT_ERROR_CODES = new Set([
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "EPIPE",
-  "ETIMEDOUT",
-  "ERR_STREAM_DESTROYED",
-  "ERR_STREAM_PREMATURE_CLOSE",
-  "UND_ERR_ABORTED",
-  "UND_ERR_BODY_TIMEOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_SOCKET",
-]);
-
-function safeTransportErrorCode(error: unknown): string | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(error, "code");
-    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") return undefined;
-    return SAFE_TRANSPORT_ERROR_CODES.has(descriptor.value) ? descriptor.value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /** The node:http adapter: the door from the headers (a refused call never
  *  buffers a body), then the call; a streamed answer is written chunk by chunk
  *  as it arrives, and a caller that goes away aborts the upstream call. Every
@@ -1809,7 +1783,7 @@ export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest
           void activeReader?.cancel().catch(() => {});
           const closeAt = deps.clock();
           const socket = safelyObserve(() => res.socket) ?? safelyObserve(() => req.socket);
-          const transportErrorCode = safeTransportErrorCode(
+          const transportErrorCode = safeHttpErrorCode(
             safelyObserve(() => (res as ServerResponse & { errored?: unknown }).errored) ??
               safelyObserve(() => (req as HttpRequest & { errored?: unknown }).errored),
           );

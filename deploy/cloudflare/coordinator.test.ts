@@ -75,7 +75,7 @@ describe("the coordinator holds no credential", () => {
   it("names none of the secrets the shim forwards into the container; its only fetch is the container binding's, presented with the coordinator bearer from the token map — no bare fetch, no other origin", () => {
     for (const name of CREDENTIALS) expect(source, name).not.toContain(name);
     expect(source).not.toMatch(/(?<![.\w])fetch\(/);
-    expect(source).toMatch(/getContainer\(env\.SWITCHBOARD, INSTANCE\)\.fetch\(/);
+    expect(source).toMatch(/bindingFetch\(\s*getContainer\(env\.SWITCHBOARD, INSTANCE\),/);
     expect(source).toContain(
       "tokenForSubject(parseIngressTokenMap(env.SWITCHBOARD_INGRESS_TOKENS).tokens, COORDINATOR_IDENTITY)",
     );
