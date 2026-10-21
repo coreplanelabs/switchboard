@@ -314,6 +314,34 @@ describe("closed typed execution refusal observations", () => {
       ]);
   });
 
+  it("retains only closed remote failure facts in a saved run note", () => {
+    const diagnostic = {
+      version: 1,
+      backend: "resident",
+      route: "/exec",
+      phase: "answer",
+      requestId: "11111111-1111-4111-a111-111111111111",
+      httpStatus: 200,
+      answerStatus: 409,
+      reason: "answered",
+      cause: "system",
+      commandOutcome: "unknown",
+    };
+    const note = {
+      type: "run_note",
+      kind: "run_failed",
+      summary: "original failure",
+      execFailureDiagnostic: diagnostic,
+    };
+    expect(parseRunEventLines(JSON.stringify(note)).events).toEqual([note]);
+    expect(
+      parseRunEventLines(JSON.stringify({ ...note, execFailureDiagnostic: { ...diagnostic, body: "PRIVATE" } })).events,
+    ).toEqual([{ type: "run_note", kind: "run_failed", summary: "original failure" }]);
+    expect(parseRunEventLines(JSON.stringify({ ...note, kind: "fleet_busy" })).events).toEqual([
+      { type: "run_note", kind: "fleet_busy", summary: "original failure" },
+    ]);
+  });
+
   it("retains closed operation attribution without changing an infrastructure failure or accepting extra payload fields", () => {
     const error = new ExecInfraError("original failure", "answered", "resident");
     const stack = error.stack;

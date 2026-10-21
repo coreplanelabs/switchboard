@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import { readSource } from "./testing/sourceScan";
 import { threadErrBuilders, type ThrowPredicates } from "./threadErr";
 
@@ -16,10 +18,43 @@ import { threadErrBuilders, type ThrowPredicates } from "./threadErr";
 const source = readSource("worker.ts");
 
 describe("streamOp — the streamed failure document carries its status", () => {
-  it("streams the op's result as it is and a rejection as `catchAllErr(err, \"op-failed\")`'s document, with no mapping between that could shed a field", () => {
-    const streamOp =
-      /function streamOp\([^)]*\): Response \{\s*return streamHeartbeatJson\(\s*pending,\s*\(result\) => result,\s*\(err\) => catchAllErr\(err, "op-failed"\),?\s*\);\s*\}/;
-    expect(source).toMatch(streamOp);
+  it("streams the op's result as it is and a rejection as `catchAllErr(err, \"op-failed\")`'s document, with no mapping between that could shed a field", async () => {
+    const start = source.indexOf("function streamOp(");
+    expect(start).toBeGreaterThan(-1);
+    const body = source.slice(start, source.indexOf("\n}\n", start) + 2);
+    const compiled = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    const predicates: ThrowPredicates = {
+      isControlReset: () => false,
+      isRuntimeReplacement: () => false,
+      sdkVouchesRuntimeMoved: () => false,
+      isPlatformTransientError: () => false,
+    };
+    const { catchAllErr } = threadErrBuilders(predicates);
+    const streamOp = runInNewContext(`${compiled}\nstreamOp`, {
+      catchAllErr,
+      streamHeartbeatJson: async (
+        pending: Promise<unknown>,
+        answered: (value: unknown) => object,
+        threw: (error: unknown) => object,
+        correlation: unknown,
+      ) => {
+        try {
+          return { body: answered(await pending), correlation };
+        } catch (error) {
+          return { body: threw(error), correlation };
+        }
+      },
+    });
+    const requestId = "11111111-1111-4111-a111-111111111111";
+    const success = { stdout: "", stderr: "", exitCode: 0, truncated: false };
+    expect(await streamOp(Promise.resolve(success), requestId)).toEqual({
+      body: success,
+      correlation: { route: "/op", requestId },
+    });
+    expect(await streamOp(Promise.reject(new Error("private failure")), requestId)).toMatchObject({
+      body: { status: 500, error: expect.stringMatching(/^op-failed/) },
+      correlation: { route: "/op", requestId },
+    });
   });
 
   it("the stream helper writes the mapped payload itself, sanitized and whole — one JSON document, never a projection of it", () => {

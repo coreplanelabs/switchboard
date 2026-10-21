@@ -2,7 +2,7 @@ import type { AttrDomain, SpanAttrs } from "./attrs.js";
 import { classificationOf, classifyError } from "./classify.js";
 import { internalHosts, type InternalHosts } from "./internalHosts.js";
 import { nativeHttpFetch, observeHttpRequest } from "./httpTransport.js";
-import { formatTraceparent } from "./traceparent.js";
+import { formatTraceparent, parseTraceparent } from "./traceparent.js";
 import type { Span } from "./types.js";
 import { observeWorkerSend, workerRequestId } from "./workerCorrelation.js";
 
@@ -12,8 +12,9 @@ import { observeWorkerSend, workerRequestId } from "./workerCorrelation.js";
 // the caller's closed-table route, the method and the status; never a header,
 // a query string or a body. `traceparent` goes on the request only when the
 // host is one of ours (`internalHosts`), so no trace id ever leaves for GitHub,
-// Slack, a model provider or an MCP server. Without a parent span there is no
-// traceparent; an internal request still has a diagnostic request ID and send log.
+// Slack, a model provider or an MCP server. Without a parent span or trusted
+// controller context there is no traceparent; an internal request still has a
+// diagnostic request ID and send log.
 
 export interface TracedFetchOptions {
   /** The route as the caller names it — a literal from a closed table, never the URL's path. */
@@ -24,6 +25,9 @@ export interface TracedFetchOptions {
   hosts?: InternalHosts;
   /** The fetch to use; the global one (read at call time, so a test's stub applies) by default. */
   fetchImpl?: typeof fetch;
+  /** Trusted run context for a controller operation without a per-poll span. */
+  runId?: string;
+  traceparent?: string;
 }
 
 const METHODS: ReadonlySet<string> = new Set(["GET", "POST", "PATCH", "PUT", "DELETE"]);
@@ -41,11 +45,25 @@ export async function tracedFetch(
   const host = url?.host ?? "";
   const internal = !!host && hosts.has(host);
   const headers = new Headers(init?.headers);
-  const sendAlreadyLogged = internal && observeWorkerSend(headers, opts.route, host, parent?.traceId);
+  const remoteParent = parent ? undefined : parseTraceparent(opts.traceparent);
+  let sendAlreadyLogged = false;
+  if (internal) {
+    sendAlreadyLogged = observeWorkerSend(
+      headers,
+      opts.route,
+      host,
+      parent?.traceId ?? remoteParent?.traceId,
+      opts.runId,
+    );
+    if (remoteParent && opts.traceparent) headers.set("traceparent", opts.traceparent);
+  }
   const transport = internal ? { sendAlreadyLogged, id: workerRequestId(headers) } : {};
   if (!parent) {
     const sent = internal ? { ...init, headers: Object.fromEntries(headers) } : init;
-    return observeHttpRequest(input, sent, () => impl(input, sent), transport);
+    return observeHttpRequest(input, sent, () => impl(input, sent), {
+      ...transport,
+      ...(remoteParent ? { traceId: remoteParent.traceId } : {}),
+    });
   }
   const method = (init?.method ?? "GET").toUpperCase();
   const attrs: SpanAttrs = {

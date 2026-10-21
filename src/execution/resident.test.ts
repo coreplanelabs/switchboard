@@ -33,7 +33,8 @@ import { recordingSink } from "../core/testing/recordingSink.js";
 import { createRunStreamSink, type SpanStreamEvent } from "../core/trace/runStreamSink.js";
 import { classOf } from "../core/trace/streamSpans.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../core/trace/internalHosts.js";
-import { parseTraceparent } from "../core/trace/traceparent.js";
+import { formatTraceparent, parseTraceparent } from "../core/trace/traceparent.js";
+import { ExecHarnessContainer } from "../core/harness/container.js";
 
 // Feature: docs/reference/specs/resident-repos.md — bot-side resident client: every
 // route POSTs {resource, threadKey, ...}; /exec streams heartbeat whitespace
@@ -1518,6 +1519,82 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
 // `http.client` span under the caller's span, and the trace context rides to
 // the resident because it is one of our hosts — and only then.
 describe("ResidentExecutor trace context", () => {
+  it("carries a review run's trace into a harness log observation without a tool span", async () => {
+    const root = createTracer({ clock: () => 1_000 }).start("run.agent", { sinks: [] });
+    const traceparent = formatTraceparent(root.traceId, root.id);
+    configureInternalHosts(internalHostsOf([OPTS.baseUrl]));
+    try {
+      const { calls } = stubFetch({
+        body: {
+          stdout: Buffer.from("original event\n").toString("base64"),
+          stderr: "",
+          exitCode: 0,
+          truncated: false,
+        },
+      });
+      const container = new ExecHarnessContainer(
+        new ResidentExecutor({
+          ...OPTS,
+          runId: "11111111-1111-4111-a111-111111111111",
+        }),
+        { runId: "11111111-1111-4111-a111-111111111111", clock: () => 1_000, traceparent },
+      );
+      await expect(container.readLog("/tmp/private/log", 0, 100)).resolves.toEqual(
+        new Uint8Array(Buffer.from("original event\n")),
+      );
+      expect(new Headers(calls[0]!.init.headers).get("traceparent")).toBe(traceparent);
+    } finally {
+      configureInternalHosts(NO_INTERNAL_HOSTS);
+    }
+  });
+
+  it("retains the exact failed exec request and closed response class for a run", async () => {
+    const runId = "11111111-1111-4111-a111-111111111111";
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    configureInternalHosts(internalHostsOf([OPTS.baseUrl]));
+    try {
+      const { calls } = stubFetch({
+        body: {
+          error: "private container failure",
+          status: 409,
+          cause: "system",
+          stdout: "",
+          stderr: "private container failure",
+          exitCode: 127,
+        },
+      });
+      const failure = await new ResidentExecutor({ ...OPTS, runId })
+        .execResult("private command")
+        .catch((error) => error);
+      const requestId = new Headers(calls[0]!.init.headers).get("x-switchboard-request-id");
+      expect(requestId).toMatch(/^[a-f0-9-]{36}$/);
+      expect(logs.map((line) => JSON.parse(line))).toContainEqual({
+        event: "cloudflare.request.sent",
+        requestId,
+        route: "/exec",
+        host: "resident.example",
+        runId,
+      });
+      expect(failure.execFailureDiagnostic).toEqual({
+        version: 1,
+        backend: "resident",
+        route: "/exec",
+        phase: "answer",
+        requestId,
+        httpStatus: 200,
+        answerStatus: 409,
+        reason: "answered",
+        cause: "system",
+        commandOutcome: "unknown",
+      });
+      expect(JSON.stringify(failure.execFailureDiagnostic)).not.toContain("private");
+    } finally {
+      configureInternalHosts(NO_INTERNAL_HOSTS);
+      log.mockRestore();
+    }
+  });
+
   it("attach, exec and the status probe are http.client children of the caller's span with host/route/method/status and no secret; traceparent is set for the configured resident host and absent when the host set is empty", async () => {
     const log = recordingSink();
     const root = createTracer({ clock: () => 5_000 }).start("request", { sinks: [log] });

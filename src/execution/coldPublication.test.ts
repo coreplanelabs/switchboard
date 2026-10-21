@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { createTracer } from "../core/trace/tracer.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
+import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../core/trace/internalHosts.js";
 import {
   execFileSync,
   type ExecFileSyncOptions,
@@ -368,6 +369,45 @@ describe("cold publication refusal diagnostics", () => {
       const predicate = new RegExp(literal.slice(1, literal.lastIndexOf("/.test")));
       expect(predicate.test(result.stderr)).toBe(true);
       expect(predicate.test(`${result.stderr}; diagnostics: added`)).toBe(false);
+    }
+  });
+  it("correlates one unknown publication request to its run without repeating the effect", async () => {
+    const runId = "11111111-1111-4111-a111-111111111111";
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    const fetch = vi.fn(async (_url: unknown, _init?: RequestInit) =>
+      Response.json({ error: "private effect" }, { status: 503 }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    configureInternalHosts(internalHostsOf([opts.url]));
+    try {
+      const failure = await new CloudflareSandboxExecutor({ ...opts, runId }).publishBranchResult!(input).catch(
+        (error) => error,
+      );
+      expect(failure.message).toContain("cold publication outcome unknown");
+      expect(fetch).toHaveBeenCalledOnce();
+      const requestId = new Headers(fetch.mock.calls[0]![1]?.headers).get("x-switchboard-request-id");
+      expect(requestId).toMatch(/^[a-f0-9-]{36}$/);
+      expect(logs.map((line) => JSON.parse(line))).toContainEqual({
+        event: "cloudflare.request.sent",
+        requestId,
+        route: "/publish",
+        host: "sandbox.example",
+        runId,
+      });
+      expect(failure.execFailureDiagnostic).toEqual({
+        version: 1,
+        backend: "sandbox",
+        route: "/publish",
+        phase: "answer",
+        requestId,
+        httpStatus: 503,
+        answerStatus: 503,
+        reason: "worker-unavailable",
+      });
+    } finally {
+      configureInternalHosts(NO_INTERNAL_HOSTS);
+      log.mockRestore();
     }
   });
   it.each(

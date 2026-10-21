@@ -198,6 +198,7 @@ function harness(
   const events: string[] = [];
   const warnings: string[] = [];
   const logs: string[] = [];
+  const roots: Array<{ name: string; outcome: string }> = [];
   let ackLost = options.lostAck;
   let acknowledged = 0;
   const fetch = vi.fn(async (url: URL, init: RequestInit) => {
@@ -343,7 +344,9 @@ function harness(
     ProcessWaitTimeoutError: class ProcessWaitTimeoutError extends Error {},
     FORCE_DETACH_DRAIN_MS: 1000,
     FORCE_DETACH_DRAIN_POLL_MS: 1,
-    emitStepRoot: () => {},
+    emitStepRoot: (name: string, _startedAt: number, _steps: unknown, _traceparent: unknown, outcome: string) => {
+      roots.push({ name, outcome });
+    },
     refusalOutcome: () => "refused",
     URL,
     Response,
@@ -513,7 +516,7 @@ function harness(
     }
     return beginNative(kind);
   };
-  return { instance, rows, events, warnings, logs, fetch, ackedRevision: () => acknowledged };
+  return { instance, rows, events, warnings, logs, roots, fetch, ackedRevision: () => acknowledged };
 }
 
 describe("resident cancellation inspection", () => {
@@ -1214,6 +1217,7 @@ describe("resident cancellation admission", () => {
     await expect(h.instance.execThread(threadKey, "echo work", 1000, undefined, undefined, owner)).rejects.toThrow(
       "taking too long to accept the connection",
     );
+    expect(h.roots).toContainEqual({ name: "resident.exec", outcome: "error" });
     expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toHaveLength(1);
     h.instance.processSandbox = {
       exec: async () => ({

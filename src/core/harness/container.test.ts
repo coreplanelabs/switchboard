@@ -1830,7 +1830,7 @@ describe("ExecHarnessContainer — original operation deadline", () => {
         );
         await vi.advanceTimersByTimeAsync(5000);
         expect(await result).toEqual({ value: new Uint8Array(Buffer.from("original log bytes")), error: undefined });
-        expect(requests).toEqual(
+        expect(requests).toMatchObject(
           [0, 1].map(() => ({
             body: {
               command: "tail -c +18 '/run/pi/log' | head -c 128 | base64 | tr -d '\\n'",
@@ -1844,6 +1844,12 @@ describe("ExecHarnessContainer — original operation deadline", () => {
             },
           })),
         );
+        const requestIds = requests.map(({ headers }) => headers["x-switchboard-request-id"]);
+        expect(requestIds).toEqual([
+          expect.stringMatching(/^[a-f0-9-]{36}$/),
+          expect.stringMatching(/^[a-f0-9-]{36}$/),
+        ]);
+        expect(new Set(requestIds).size).toBe(2);
         expect(envReads).toBe(1);
       } finally {
         vi.clearAllTimers();

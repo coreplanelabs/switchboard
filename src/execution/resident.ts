@@ -18,6 +18,8 @@ import { residentRefusalCodeOf, type ResidentRefusalCode } from "../core/runSetu
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { classifyError } from "../core/trace/classify.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
+import { WORKER_REQUEST_ID_HEADER } from "../core/trace/workerCorrelation.js";
+import { attachExecFailureDiagnostic } from "./execFailureDiagnostic.js";
 import type { Span } from "../core/trace/types.js";
 import { redactSecrets, stripAnsi } from "../core/redact.js";
 import { systemClock } from "../core/trace/clock.js";
@@ -1178,7 +1180,8 @@ export class ResidentExecutor implements Executor {
     timeoutMs: number = BASH_TIMEOUT_MS,
     signal?: AbortSignal,
     span?: Span,
-  ): Promise<{ status: number; data: Record<string, unknown> }> {
+    traceparent?: string,
+  ): Promise<{ status: number; data: Record<string, unknown>; requestId: string }> {
     if (route !== "/attach" && route !== "/detach") {
       while (this.attachmentPending) await this.attachmentPending;
       if (this.attachmentFailure) throw this.attachmentFailure;
@@ -1190,7 +1193,8 @@ export class ResidentExecutor implements Executor {
       Object.defineProperty(failure, "cause", { value: signal.reason });
       throw classifyError(failure, { kind: "transport" });
     }
-    let res: Response;
+    const requestId = crypto.randomUUID();
+    let res: Response | undefined;
     try {
       // One `http.client` span under the caller's (docs/reference/specs/tracing.md item 21);
       // the trace context rides only because the resident is one of our hosts.
@@ -1202,6 +1206,7 @@ export class ResidentExecutor implements Executor {
           headers: {
             "content-type": "application/json",
             authorization: `Bearer ${this.opts.token}`,
+            [WORKER_REQUEST_ID_HEADER]: requestId,
           },
           body: JSON.stringify({
             resource: this.opts.resource,
@@ -1222,13 +1227,13 @@ export class ResidentExecutor implements Executor {
           // bounds the command inside the container.
           signal: execDeadline(timeoutMs, signal),
         },
-        { route },
+        { route, runId: this.opts.runId, traceparent },
       );
       // The body read is under the SAME deadline: /exec streams heartbeats, so
       // a resident whose exec promise never settles hangs HERE, past the
       // headers, not on the fetch — read it inside the try so that abort is the
       // legible request-failed error below and NOT a raw TimeoutError.
-      return { status: res.status, data: await parseResidentBody(res) };
+      return { status: res.status, data: await parseResidentBody(res), requestId };
     } catch (err) {
       // Network-level failure, a deadline abort mid-body, or the run's own
       // stop: the command may still be running (or have run) in the resident —
@@ -1238,6 +1243,16 @@ export class ResidentExecutor implements Executor {
       const reason = infraReasonOfRequestFailure(err, signal);
       const failure = new ExecInfraError(requestFailedMessage("resident", route, err), reason);
       if (route === "/exec") failure.commandOutcome = "unknown";
+      attachExecFailureDiagnostic(failure, {
+        version: 1,
+        backend: "resident",
+        route,
+        phase: res ? "body" : "send",
+        requestId,
+        reason,
+        ...(res ? { httpStatus: res.status } : {}),
+        ...(failure.commandOutcome ? { commandOutcome: failure.commandOutcome } : {}),
+      });
       Object.defineProperty(failure, "cause", { value: err });
       throw classifyError(failure, {
         kind: reason === "deadline-passed" ? "timeout" : "transport",
@@ -1708,8 +1723,14 @@ export class ResidentExecutor implements Executor {
   private async opWithReattach(
     route: string,
     body: Record<string, unknown>,
-    opts: { signal?: AbortSignal; callTimeoutMs?: number; waitBudgetMs?: number; span?: Span } = {},
-  ): Promise<{ status: number; data: Record<string, unknown> }> {
+    opts: {
+      signal?: AbortSignal;
+      callTimeoutMs?: number;
+      waitBudgetMs?: number;
+      span?: Span;
+      traceparent?: string;
+    } = {},
+  ): Promise<{ status: number; data: Record<string, unknown>; requestId: string }> {
     if (this.attachmentFailure) throw this.attachmentFailure;
     const { signal, span } = opts;
     const callTimeoutMs = opts.callTimeoutMs ?? BASH_TIMEOUT_MS;
@@ -1770,7 +1791,8 @@ export class ResidentExecutor implements Executor {
     // A refused connect (resident-repos.md item 68) is waited out around every
     // send this operation makes, inside the command's own budget.
     const busyBudgetMs = Math.min(opts.waitBudgetMs ?? BASH_TIMEOUT_MS, RUNTIME_BUSY_WAIT_MAX_MS);
-    const send = () => this.callWaitingOutBusy(route, body, callTimeoutMs, busyBudgetMs, signal, span);
+    const send = () =>
+      this.callWaitingOutBusy(route, body, callTimeoutMs, busyBudgetMs, signal, span, opts.traceparent);
     // Every attach an operation opens from here — the rolling wake's re-attach,
     // which recreates the worktree from the mirror, and the three recovery
     // attaches — runs under the attach's own default clipped to the run's
@@ -1874,11 +1896,12 @@ export class ResidentExecutor implements Executor {
     budgetMs: number,
     signal?: AbortSignal,
     span?: Span,
-  ): Promise<{ status: number; data: Record<string, unknown> }> {
+    traceparent?: string,
+  ): Promise<{ status: number; data: Record<string, unknown>; requestId: string }> {
     let waited = 0;
     let attempt = 0;
     for (;;) {
-      const r = await this.call(route, body, callTimeoutMs, signal, span);
+      const r = await this.call(route, body, callTimeoutMs, signal, span, traceparent);
       if (r.data.reason !== RUNTIME_BUSY_REASON) return r;
       if (waited >= budgetMs) throw new ExecCapacityError(runtimeBusyExhaustedMessage(waited));
       const step = RUNTIME_BUSY_BACKOFF_MS[Math.min(attempt, RUNTIME_BUSY_BACKOFF_MS.length - 1)];
@@ -2230,14 +2253,34 @@ export class ResidentExecutor implements Executor {
       ...identityEnv,
     };
     if (Object.keys(env).length > 0) body.env = env;
-    const { status, data } = await this.opWithReattach("/exec", body, {
+    const { status, data, requestId } = await this.opWithReattach("/exec", body, {
       signal: opts?.signal,
       callTimeoutMs: timeoutMs + EXEC_CALL_MARGIN_MS,
       // The wake wait (item 65) may probe for what the command itself could:
       // the tool layer already clipped this to the run's remaining wall clock.
       waitBudgetMs: timeoutMs,
       span: opts?.span,
+      traceparent: opts?.traceparent,
     });
+    const diagnose = (failure: ExecInfraError, answerStatus: number): ExecInfraError => {
+      attachExecFailureDiagnostic(failure, {
+        version: 1,
+        backend: "resident",
+        route: "/exec",
+        phase: "answer",
+        requestId,
+        httpStatus: status,
+        answerStatus,
+        reason: failure.reason,
+        ...(typeof data.transient === "boolean" ? { transient: data.transient } : {}),
+        ...(data.cause === "request" || data.cause === "policy" || data.cause === "system"
+          ? { cause: data.cause }
+          : {}),
+        ...(failure.origin ? { origin: failure.origin } : {}),
+        ...(failure.commandOutcome ? { commandOutcome: failure.commandOutcome } : {}),
+      });
+      return failure;
+    };
     // A pre-validation client rejection — a plain HTTP 400 with an {error} and NO
     // `needs` (e.g. command-too-long), nothing streamed — is agent-fixable, not a
     // sick resident. Surface it as a normal Error so it does NOT count toward the
@@ -2291,12 +2334,12 @@ export class ResidentExecutor implements Executor {
       // Plain HTTP client refusals also precede dispatch. Other streamed or
       // server failures have no terminal process receipt.
       if ((status < 400 || status >= 500) && !memoryRefused) failure.commandOutcome = "unknown";
-      throw classifyError(failure, { kind: "infra" });
+      throw classifyError(diagnose(failure, said), { kind: "infra" });
     }
     if (status !== 200) {
       const failure = new ExecInfraError(`resident /exec HTTP ${status}`, residentAnswerReason(status, data));
       if (status < 400 || status >= 500) failure.commandOutcome = "unknown";
-      throw classifyError(failure, {
+      throw classifyError(diagnose(failure, status), {
         kind: "http",
         code: String(status),
       });
@@ -2309,9 +2352,12 @@ export class ResidentExecutor implements Executor {
       (data.exitCode as number) > 255 ||
       typeof data.truncated !== "boolean"
     )
-      throw Object.assign(new ExecInfraError("resident /exec: invalid command result", "worker-unavailable"), {
-        commandOutcome: "unknown" as const,
-      });
+      throw diagnose(
+        Object.assign(new ExecInfraError("resident /exec: invalid command result", "worker-unavailable"), {
+          commandOutcome: "unknown" as const,
+        }),
+        status,
+      );
     return {
       stdout: data.stdout,
       stderr: data.stderr,

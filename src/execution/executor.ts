@@ -11,6 +11,7 @@ import type { OperationResult, Operations, OpName } from "../core/operations.js"
 import { BASH_TIMEOUT_MS, bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
 import { MAX_READ_BYTES, tooLargeMessage } from "./binaryRead.js";
 import type { Span } from "../core/trace/types.js";
+import type { ExecFailureDiagnostic } from "./execFailureDiagnostic.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { PushedBranch } from "./residentRebind.js";
 import type { FleetBusyEndingFacts } from "./sandboxErrors.js";
@@ -38,6 +39,8 @@ export { BASH_TIMEOUT_MS, BASH_TIMEOUT_MAX_MS, EXEC_CALL_MARGIN_MS, clampBashTim
  *  21). Absent from a caller with no trace: the call is then a plain fetch. */
 export interface ExecTraceOptions {
   span?: Span;
+  /** One run's controller context without a span for each log poll. */
+  traceparent?: string;
 }
 
 /** What a release tells the workspace's owner beside the trace: the branches
@@ -199,6 +202,7 @@ export class ExecInfraError extends Error {
    * pre-dispatch refusal is confirmed. Reasons and output are not this proof. */
   declare commandOutcome?: "unknown";
   declare executionContext?: ExecutionDiagnosticContext;
+  declare execFailureDiagnostic?: ExecFailureDiagnostic;
   constructor(
     message: string,
     /** Why, as a type the harness's one more command waits on (`EXEC_INFRA_WAITABLE`), never the prose. */

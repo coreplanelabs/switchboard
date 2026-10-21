@@ -911,6 +911,8 @@ export class HarnessEndingUnconfirmedError extends Error {
 /** The original run's bound, shared by setup, transport retries and collection. */
 export interface HarnessOperationScope {
   runId: string;
+  /** The run root for cross-Worker correlation; no span is emitted per log poll. */
+  traceparent?: string;
   deadlineAt?: number;
   /** The existing run-control lease, once admitted; never a new lease. */
   remainingMs?: () => number | undefined;
@@ -1182,6 +1184,7 @@ export class ExecHarnessContainer implements HarnessContainer {
       return await this.executor.execResult(script, {
         timeoutMs: remaining,
         signal,
+        ...(this.scope?.traceparent ? { traceparent: this.scope.traceparent } : {}),
         ...(env ? { env } : {}),
         ...(busyObservation ? { busyObservation } : {}),
       });

@@ -5434,6 +5434,20 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("saves the failed harness operation without claiming that its command did not run", async () => {
     const error = new ExecInfraError("resident /exec: internal error; reference = fixture", "answered", "resident");
+    Object.defineProperty(error, "execFailureDiagnostic", {
+      value: {
+        version: 1,
+        backend: "resident",
+        route: "/exec",
+        phase: "answer",
+        requestId: "11111111-1111-4111-a111-111111111111",
+        httpStatus: 200,
+        answerStatus: 409,
+        reason: "answered",
+        cause: "system",
+        commandOutcome: "unknown",
+      },
+    });
     annotateExecutionDiagnostic(error, { caller: "harness", operation: "log" });
     const observed = watched(piHarness);
     observed.harness.open = async () => {
@@ -5454,6 +5468,18 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(record.events.filter((event) => event.type === "run_note" && event.kind === "run_failed")).toEqual([
       expect.objectContaining({
         summary: "resident /exec: internal error; reference = fixture; execution operation: harness/log",
+        execFailureDiagnostic: {
+          version: 1,
+          backend: "resident",
+          route: "/exec",
+          phase: "answer",
+          requestId: "11111111-1111-4111-a111-111111111111",
+          httpStatus: 200,
+          answerStatus: 409,
+          reason: "answered",
+          cause: "system",
+          commandOutcome: "unknown",
+        },
       }),
     ]);
   });

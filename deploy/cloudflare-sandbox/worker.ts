@@ -1,4 +1,9 @@
-import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
+import {
+  observeWorkerCompletion,
+  observeWorkerRequest,
+  workerRequestId,
+} from "../../src/core/trace/workerCorrelation.js";
+import { sandboxRoute } from "../../src/core/trace/workerTrace.js";
 import { installHttpTransport } from "../../src/core/trace/httpTransport.js";
 import {
   readCancellationPreparation,
@@ -1486,7 +1491,8 @@ export default {
     // authenticates every request and gains no unauthenticated surface for a
     // stamp (docs/reference/specs/execution.md item 13). It needs no thread, so it answers
     // before the X-Thread-Key check — and it is the one GET here.
-    if (request.method === "GET" && new URL(request.url).pathname === "/healthz") {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/healthz") {
       // `backupTransfer` says whether a seed can run here (presigned) or not (local).
       return json({
         ok: true,
@@ -1494,10 +1500,13 @@ export default {
         backupTransfer: backupTransferMode(env as unknown as Record<string, unknown>).mode,
       });
     }
-    observeWorkerRequest(request, { service: "sandbox", route: "sandbox.fetch", build: BUILD }, ctx?.tracing);
+    observeWorkerRequest(
+      request,
+      { service: "sandbox", route: sandboxRoute(url.pathname), build: BUILD },
+      ctx?.tracing,
+    );
     if (request.method !== "POST") return json({ error: "POST only" }, 405);
 
-    const url = new URL(request.url);
     const threadKey = request.headers.get("x-thread-key");
     if (url.pathname === "/install-repair" || url.pathname === "/install-repair/inspect") {
       if (!modelSandboxIdentity("/seed", threadKey)) return json({ error: "invalid thread identity" }, 400);
@@ -1720,6 +1729,7 @@ export default {
           return streamExec(
             () => sandbox.runCommand(String(body.command ?? ""), execTimeoutSecs, envVars),
             request.headers.get("traceparent") ?? undefined,
+            workerRequestId(request.headers),
           );
         }
         case "/seed": {
@@ -1736,6 +1746,7 @@ export default {
           return streamSeed(
             () => sandbox.seed(parsed.seed, envVars, claim as OwnerClaim | undefined),
             request.headers.get("traceparent") ?? undefined,
+            workerRequestId(request.headers),
           );
         }
         case "/read": {
@@ -1797,6 +1808,7 @@ export default {
 function heartbeatJson(
   run: () => Promise<object>,
   settle: { answered: (answer: object) => object; threw: (err: unknown) => object },
+  correlation?: { route: "/exec" | "/seed"; requestId: string | undefined },
 ): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -1810,12 +1822,16 @@ function heartbeatJson(
       }, 15_000);
       const finish = (payload: object) => {
         clearInterval(beat);
+        let delivery: "sent" | "client-gone" = "sent";
         try {
           controller.enqueue(encoder.encode(JSON.stringify(payload)));
           controller.close();
         } catch {
           // stream already errored/cancelled — nothing left to deliver to
+          delivery = "client-gone";
         }
+        if (correlation)
+          observeWorkerCompletion("sandbox", correlation.route, correlation.requestId, payload, delivery);
       };
       run().then(
         (answer) => finish(settle.answered(answer)),
@@ -1826,71 +1842,87 @@ function heartbeatJson(
   return new Response(stream, { headers: { "content-type": "application/json" } });
 }
 
-function streamExec(run: () => Promise<ExecAnswer | ExecFailure>, traceparent: string | undefined): Response {
+function streamExec(
+  run: () => Promise<ExecAnswer | ExecFailure>,
+  traceparent: string | undefined,
+  requestId: string | undefined,
+): Response {
   const startedAt = systemClock();
-  return heartbeatJson(run, {
-    answered: (a) => {
-      const answer = a as ExecAnswer | ExecFailure;
-      if ("error" in answer) {
-        // A command the sandbox never answered for, named by the Durable
-        // Object: an infra failure, classified, no message on the span.
+  return heartbeatJson(
+    run,
+    {
+      answered: (a) => {
+        const answer = a as ExecAnswer | ExecFailure;
+        if ("error" in answer) {
+          // A command the sandbox never answered for, named by the Durable
+          // Object: an infra failure, classified, no message on the span.
+          const root = execRoot(startedAt, traceparent);
+          root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
+          root.end("error");
+          return answer;
+        }
+        // The command as the Worker's own root (docs/reference/specs/tracing.md item 22).
+        execRoot(startedAt, traceparent).end(answer.exitCode === 0 ? "ok" : "error", {
+          exitCode: answer.exitCode,
+          ...(answer.exitCode === 124 ? { timedOut: true } : {}),
+        });
+        return answer;
+      },
+      threw: (err) => {
+        // The Durable Object threw: a failure its own classification did
+        // not name, seen here after the RPC boundary (name and message kept,
+        // prototype dropped), so the shared classifiers read the shape.
         const root = execRoot(startedAt, traceparent);
         root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
         root.end("error");
-        return answer;
-      }
-      // The command as the Worker's own root (docs/reference/specs/tracing.md item 22).
-      execRoot(startedAt, traceparent).end(answer.exitCode === 0 ? "ok" : "error", {
-        exitCode: answer.exitCode,
-        ...(answer.exitCode === 124 ? { timedOut: true } : {}),
-      });
-      return answer;
+        const shape = thrownShape(err);
+        const raw = thrownText(shape);
+        if (isRuntimeUnreachableError(err)) return runtimeUnreachableExecAnswer(raw);
+        if (isRuntimeBusyError(err)) return runtimeBusyExecAnswer(raw);
+        if (isFleetBusyError(err)) return fleetBusyExecAnswer(raw);
+        // A recycle the Durable Object did not catch by type: by name, or
+        // a recycle-shaped text minutes into the attempt (item 9).
+        const certain = shape.name !== undefined && isRecycleError({ name: shape.name });
+        const msg = recycledMidCommandMessage(systemClock() - startedAt, raw, certain);
+        return { error: msg, stdout: "", stderr: msg, exitCode: 127 } satisfies ExecFailure;
+      },
     },
-    threw: (err) => {
-      // The Durable Object threw: a failure its own classification did
-      // not name, seen here after the RPC boundary (name and message kept,
-      // prototype dropped), so the shared classifiers read the shape.
-      const root = execRoot(startedAt, traceparent);
-      root.fail(classifyError(new Error("sandbox exec failed"), { kind: "infra" }));
-      root.end("error");
-      const shape = thrownShape(err);
-      const raw = thrownText(shape);
-      if (isRuntimeUnreachableError(err)) return runtimeUnreachableExecAnswer(raw);
-      if (isRuntimeBusyError(err)) return runtimeBusyExecAnswer(raw);
-      if (isFleetBusyError(err)) return fleetBusyExecAnswer(raw);
-      // A recycle the Durable Object did not catch by type: by name, or
-      // a recycle-shaped text minutes into the attempt (item 9).
-      const certain = shape.name !== undefined && isRecycleError({ name: shape.name });
-      const msg = recycledMidCommandMessage(systemClock() - startedAt, raw, certain);
-      return { error: msg, stdout: "", stderr: msg, exitCode: 127 } satisfies ExecFailure;
-    },
-  });
+    { route: "/exec", requestId },
+  );
 }
 
 /** `POST /seed`'s answer over the same heartbeat stream, as its own
  *  `sandbox.seed` root. A start or a full fleet met at the warm-up keeps its
  *  wait token (items 14, 23); a silent control port its name (item 9); any
  *  other throw is a `seed-failed` with the text — never a dead sandbox. */
-function streamSeed(run: () => Promise<SeedAnswer | WaitAnswer>, traceparent: string | undefined): Response {
+function streamSeed(
+  run: () => Promise<SeedAnswer | WaitAnswer>,
+  traceparent: string | undefined,
+  requestId: string | undefined,
+): Response {
   const startedAt = systemClock();
   const root = () => startAdoptedRoot(tracer, "sandbox.seed", { sinks: traceSinks, startedAt, traceparent });
-  return heartbeatJson(run, {
-    answered: (a) => {
-      const answer = a as SeedAnswer | WaitAnswer;
-      if ("seeded" in answer)
-        root().end(answer.seeded ? "ok" : "error", { outcome: answer.seeded ? "seeded" : answer.reason });
-      return answer;
+  return heartbeatJson(
+    run,
+    {
+      answered: (a) => {
+        const answer = a as SeedAnswer | WaitAnswer;
+        if ("seeded" in answer)
+          root().end(answer.seeded ? "ok" : "error", { outcome: answer.seeded ? "seeded" : answer.reason });
+        return answer;
+      },
+      threw: (err) => {
+        const r = root();
+        r.fail(classifyError(new Error("sandbox seed failed"), { kind: "infra" }));
+        r.end("error");
+        const raw = thrownText(thrownShape(err));
+        if (isRuntimeUnreachableError(err)) return runtimeUnreachableAnswer(raw);
+        if (isFleetBusyError(err)) return fleetBusyAnswer(raw);
+        return { seeded: false, reason: "seed-failed", detail: raw } satisfies SeedAnswer;
+      },
     },
-    threw: (err) => {
-      const r = root();
-      r.fail(classifyError(new Error("sandbox seed failed"), { kind: "infra" }));
-      r.end("error");
-      const raw = thrownText(thrownShape(err));
-      if (isRuntimeUnreachableError(err)) return runtimeUnreachableAnswer(raw);
-      if (isFleetBusyError(err)) return fleetBusyAnswer(raw);
-      return { seeded: false, reason: "seed-failed", detail: raw } satisfies SeedAnswer;
-    },
-  });
+    { route: "/seed", requestId },
+  );
 }
 
 /** A route's answer while the container starts or the fleet is full: the
