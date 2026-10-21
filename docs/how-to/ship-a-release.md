@@ -72,6 +72,8 @@ gh workflow run deploy-production.yml --ref main -f targets=bot,resident
 gh workflow run deploy-production.yml --ref main -f targets=bot -f force=true   # bypasses the preflights — say why in the run
 ```
 
+After an uncertain direct CLI rollout, use `targets=all`. A Worker can report a new `/healthz` commit before its container image is ready; `--affected` alone compares source inputs. The CI workflow checks its prior upload and readiness steps, but it cannot see a direct CLI run.
+
 ## Next
 
 - [Operate production](operate-production.md)

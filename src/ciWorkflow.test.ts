@@ -1276,6 +1276,7 @@ describe("the production deploy is one reusable workflow", () => {
     });
     // Every deploy command in every step goes through it.
     for (const s of steps) {
+      if (s.id === "baseline") continue; // Reads GitHub job names as data; it invokes no deploy command.
       for (const line of lines(s).filter(isCommand)) {
         if (/\bdeploy (plan|all|images)\b/.test(line)) {
           expect(line, `a deploy command not routed through $CLI: ${line}`).toMatch(/\$CLI deploy /);
@@ -1360,7 +1361,7 @@ describe("the production deploy is one reusable workflow", () => {
       'npm run --silent cli -- deploy plan $ARGS --allow-branch | tee "$RUNNER_TEMP/plan.txt"',
       "git status --porcelain",
       'npm run --silent resident:retire -- --url "$resident_url" --resource "$RETIRE_RESOURCE" --key "$RETIRE_KEY" --record-hash "$RETIRE_HASH" --apply',
-      "npm run --silent cli -- deploy all $ARGS --allow-branch",
+      'npm run --silent cli -- deploy all $ARGS --allow-branch --json > "$RUNNER_TEMP/executed-deploy.json"',
       'npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json"',
     ]);
     expect(checkoutSteps.filter((s) => s.run).map((s) => s.name)).toEqual([
@@ -1371,6 +1372,7 @@ describe("the production deploy is one reusable workflow", () => {
       "quick source checks",
       "the configuration repository needs the App",
       "the credentials this run has",
+      "check the prior production rollout",
       "the selection",
       "validate disposable smoke setup",
       "candidate Door through configured model",
@@ -1386,6 +1388,142 @@ describe("the production deploy is one reusable workflow", () => {
     ]);
   });
 
+  it.each([
+    { event: "workflow_dispatch", name: "deploy all", deploy: "success", live: "success", expected: "--affected" },
+    { event: "push", name: "deploy / deploy affected", deploy: "success", live: "success", expected: "--affected" },
+    { event: "push", name: "deploy / deploy all", deploy: "success", live: "success", expected: "--affected" },
+    { event: "workflow_dispatch", name: "deploy bot", deploy: "success", live: "success", expected: "" },
+    { event: "workflow_dispatch", name: "deploy all", deploy: "failure", live: "skipped", expected: "" },
+  ])(
+    "uses affected production targets after proven readiness, including smoke-only failures: $name $deploy",
+    ({ event, name, deploy, live, expected }) => {
+      const baseline = steps.find((step) => step.id === "baseline")!;
+      const selection = steps.find((step) => step.id === "selection")!;
+      const dir = mkdtempSync(path.join(tmpdir(), "production-targets-"));
+      try {
+        writeFileSync(
+          path.join(dir, "gh"),
+          `#!${process.execPath}\nconst path=process.argv[3]; if(path.includes("deployments?")) process.stdout.write(JSON.stringify([{id:11},{id:10}])); else if(path.includes("/11/")) process.stdout.write("https://github.com/acme/repo/actions/runs/123/job/1"); else if(path.includes("/10/")) process.stdout.write(JSON.stringify([{state:"failure",log_url:"https://github.com/acme/repo/actions/runs/122/job/2"}])); else if(path.includes("/jobs/")) process.stdout.write(JSON.stringify({name:${JSON.stringify(name)},steps:[{name:"deploy",conclusion:${JSON.stringify(deploy)}},{name:"what is live",conclusion:${JSON.stringify(live)}}]})); else process.stdout.write(${JSON.stringify(event)});\n`,
+          { mode: 0o700 },
+        );
+        const output = path.join(dir, "output");
+        const env = {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GITHUB_REPOSITORY: "acme/repo",
+          GITHUB_SERVER_URL: "https://github.com",
+          GITHUB_RUN_ID: "123",
+          GITHUB_OUTPUT: output,
+          TARGETS: "affected",
+          FORCE: "false",
+        };
+        const checked = spawnSync("bash", ["-eo", "pipefail", "-c", baseline.run!], { encoding: "utf8", env });
+        expect(checked.status, checked.stderr).toBe(0);
+        const safe = readFileSync(output, "utf8").includes("safe_affected=true");
+        const selected = spawnSync("bash", ["-eo", "pipefail", "-c", selection.run!], {
+          encoding: "utf8",
+          env: { ...env, SAFE_AFFECTED: String(safe) },
+        });
+        expect(selected.status, selected.stderr).toBe(0);
+        expect(readFileSync(output, "utf8").trim().split("\n").at(-1)).toBe(`args=${expected}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    { selected: true, base: "b".repeat(40), expected: "c".repeat(40) },
+    { selected: false, base: "b".repeat(40), expected: "b".repeat(40) },
+    { selected: false, base: undefined, expected: undefined },
+  ])(
+    "binds production smoke to the selected or skipped Bot build: selected=$selected",
+    ({ selected, base, expected }) => {
+      const smoke = steps.find((step) => step.name === "ordinary request through the live Door")!;
+      const dir = mkdtempSync(path.join(tmpdir(), "production-smoke-"));
+      try {
+        writeFileSync(
+          path.join(dir, "executed-plan.json"),
+          JSON.stringify({
+            steps: selected ? [{ name: "bot" }] : [{ name: "memory" }],
+            affected: { workers: [{ name: "bot", base: base ? { commit: base } : { kind: "none" } }] },
+          }),
+        );
+        writeFileSync(
+          path.join(dir, "npm"),
+          `#!${process.execPath}\nrequire("node:fs").writeFileSync(process.env.SMOKE_TEST_RECEIPT, process.env.SMOKE_EXPECTED_COMMIT || "");\n`,
+          { mode: 0o700 },
+        );
+        const receipt = path.join(dir, "receipt");
+        const result = spawnSync("bash", ["-eo", "pipefail", "-c", smoke.run!], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            RUNNER_TEMP: dir,
+            GITHUB_SHA: "c".repeat(40),
+            SMOKE_TEST_RECEIPT: receipt,
+            SMOKE_EXPECTED_COMMIT: "",
+          },
+        });
+        expect(result.status === 0).toBe(Boolean(expected));
+        expect(existsSync(receipt) ? readFileSync(receipt, "utf8") : undefined).toBe(expected);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("reads the executed production selection when the preview differs", () => {
+    const deploy = steps.find((step) => step.name === "deploy")!;
+    const readiness = steps.find((step) => step.name === "what is live")!;
+    const dir = mkdtempSync(path.join(tmpdir(), "production-executed-plan-"));
+    try {
+      writeFileSync(
+        path.join(dir, "plan.json"),
+        JSON.stringify({
+          steps: [{ name: "bot", healthUrl: "https://unreadable.example.test/healthz" }],
+          root: { mode: "checkout" },
+        }),
+      );
+      const cli = path.join(dir, "cli");
+      writeFileSync(
+        cli,
+        `#!${process.execPath}\nprocess.stderr.write("wrangler deploy output\\n"); process.stdout.write(JSON.stringify({plan:{steps:[],root:{mode:"checkout"}}}));\n`,
+        { mode: 0o700 },
+      );
+      const deployed = spawnSync("bash", ["-eo", "pipefail", "-c", deploy.run!], {
+        encoding: "utf8",
+        env: { ...process.env, CLI: cli, ARGS: "--affected", RUNNER_TEMP: dir },
+      });
+      expect(deployed.status, deployed.stderr).toBe(0);
+      expect(deployed.stderr).toContain("wrangler deploy output");
+      expect(JSON.parse(readFileSync(path.join(dir, "executed-deploy.json"), "utf8"))).toEqual({
+        plan: { steps: [], root: { mode: "checkout" } },
+      });
+      const summary = path.join(dir, "summary");
+      const checked = spawnSync("bash", ["-eo", "pipefail", "-c", readiness.run!], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: summary,
+          GITHUB_SHA: "c".repeat(40),
+          DEPLOY_OUTCOME: "success",
+          LABEL: "fixture",
+        },
+      });
+      expect(checked.status, checked.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(path.join(dir, "executed-plan.json"), "utf8"))).toEqual({
+        steps: [],
+        root: { mode: "checkout" },
+      });
+      expect(readFileSync(summary, "utf8")).toContain("Selected Workers match the exact source commit");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("`deploy images` runs before the plan — a pre-warm; `deploy all` would copy the same images itself — unless `copy-images` is `never`", () => {
     const copy = steps.find((s) => /deploy images/.test(s.run ?? ""))!;
     expect(copy.if).toBe("inputs.copy-images != 'never'");
@@ -1396,10 +1534,10 @@ describe("the production deploy is one reusable workflow", () => {
     expect(cliStep.run).toContain('auto|never|"") ;;');
   });
 
-  it("keeps its shape: one job, `contents: read` at both levels, `environment: production`, the one concurrency group, every action pinned", () => {
+  it("keeps its shape: one job, read-only GitHub evidence, `environment: production`, the one concurrency group, every action pinned", () => {
     expect(Object.keys(workflow.jobs)).toEqual(["deploy"]);
     expect(workflow.permissions).toEqual({ contents: "read" });
-    expect(job.permissions).toEqual({ contents: "read" });
+    expect(job.permissions).toEqual({ contents: "read", actions: "read", deployments: "read" });
     expect(job).toMatchObject({
       environment: "production",
       concurrency: { group: "deploy-production", "cancel-in-progress": false },
@@ -1417,13 +1555,30 @@ describe("the production deploy is one reusable workflow", () => {
     const call = release.jobs.deploy;
     expect(call.uses).toBe("./.github/workflows/deploy-production.yml");
     expect(call.with).toEqual({
-      targets: "${{ vars.SWITCHBOARD_RELEASE_DEPLOY_TARGETS || 'affected' }}",
+      targets:
+        "${{ vars.SWITCHBOARD_RELEASE_DEPLOY_USE_TARGETS == 'true' && vars.SWITCHBOARD_RELEASE_DEPLOY_TARGETS || 'affected' }}",
       cli: "${{ vars.SWITCHBOARD_RELEASE_DEPLOY_CLI || 'checkout' }}",
       version: "${{ needs.release-please.outputs.version }}",
       "copy-images": "never",
       smoke: "${{ vars.SMOKE_INGRESS_ENABLED == 'true' }}",
     });
     expect(call.secrets).toBe("inherit");
+  });
+
+  it.each([
+    { enabled: "", targets: "all", expected: "affected" },
+    { enabled: "false", targets: "all", expected: "affected" },
+    { enabled: "true", targets: "all", expected: "all" },
+    { enabled: "true", targets: "memory,bot", expected: "memory,bot" },
+    { enabled: "true", targets: "", expected: "affected" },
+  ])("requires an explicit release target override: $enabled $targets", ({ enabled, targets, expected }) => {
+    const release = parse(read(".github/workflows/release-please.yml")) as Workflow;
+    const call = release.jobs.deploy as Job & { with?: Record<string, unknown> };
+    const expression = String(call.with?.targets).slice(3, -2);
+    const selected = runInNewContext(expression, {
+      vars: { SWITCHBOARD_RELEASE_DEPLOY_USE_TARGETS: enabled, SWITCHBOARD_RELEASE_DEPLOY_TARGETS: targets },
+    });
+    expect(selected).toBe(expected);
   });
 
   it.each(["success", "failure", "skipped", "cancelled"])(
@@ -1557,7 +1712,7 @@ describe("the production deploy is one reusable workflow", () => {
         writeFileSync(output, "");
         const result = spawnSync("bash", ["-e", "-c", selection.run!], {
           encoding: "utf8",
-          env: { ...process.env, TARGETS: targets!, FORCE: "false", GITHUB_OUTPUT: output },
+          env: { ...process.env, TARGETS: targets!, FORCE: "false", SAFE_AFFECTED: "true", GITHUB_OUTPUT: output },
         });
         expect(result.status).toBe(args === undefined ? 1 : 0);
         expect(readFileSync(output, "utf8")).toBe(args === undefined ? "" : `args=${args}\n`);

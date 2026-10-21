@@ -48,7 +48,16 @@ function runReceipt(
               },
             ],
     };
-    writeFileSync(join(dir, "plan.json"), opts.plan ?? JSON.stringify(plan));
+    writeFileSync(join(dir, "plan.json"), JSON.stringify(plan));
+    let executed = JSON.stringify({ plan });
+    if (opts.plan !== undefined) {
+      try {
+        executed = JSON.stringify({ plan: JSON.parse(opts.plan) });
+      } catch {
+        executed = opts.plan;
+      }
+    }
+    writeFileSync(join(dir, "executed-deploy.json"), executed);
     writeFileSync(
       join(dir, "health-fixture.json"),
       opts.emptyHealth ? "" : JSON.stringify(opts.health ?? { ok: true, build: { commit: HEAD } }),
@@ -165,7 +174,7 @@ describe("what is live deployment receipt", { timeout: 35_000 }, () => {
     expect(runReceipt(opts).code).toBe(1);
   });
 
-  it("passes only the frozen selected fleet with exact commits and current undrained reports", () => {
+  it("passes only the executed selected fleet with exact commits and current undrained reports", () => {
     expect(runReceipt().code).toBe(0);
     expect(runReceipt({ selected: false, health: { ok: false } }).code).toBe(0);
   });
