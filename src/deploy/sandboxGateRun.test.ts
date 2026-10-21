@@ -87,6 +87,7 @@ function harness(script: Scripted, env: Record<string, string> = { SANDBOX_TOKEN
     return arr ? arr[Math.min(i, arr.length - 1)] : fallback;
   };
   const deps: SandboxGateDeps = {
+    readDeploymentStatus: async () => ({ state: "ready", reason: "fixture Worker deployment verified" }),
     env,
     now: () => clock,
     sleep: async (ms) => {
@@ -571,6 +572,7 @@ describe("deployStep (sandbox)", () => {
       "[deploy:all] sandbox: container application at version 11 (image sha256:23e69f9e) before the upload",
       "[deploy:all] sandbox: version 0c48b341-f216-4262-81c0-bc62ecb5669a uploaded — waiting until live (commit e6af1aa)",
       "[deploy:all] sandbox: wrangler printed a container change — image sha256:eb7d4f28; the application must leave version 11",
+      "[deploy:all] sandbox: Cloudflare fixture Worker deployment verified",
       "[deploy:all] sandbox: deployed, not live yet — rollout: application still at pre-deploy version 11 / image sha256:23e69f9e — the deploy's new version is not registered yet (0m 0s)",
       "[deploy:all] sandbox: deployed, not live yet — rollout: application still at pre-deploy version 11 / image sha256:23e69f9e — the deploy's new version is not registered yet (0m 15s)",
       `[deploy:all] sandbox: live (${LIVE_DETAIL}; 30s after the upload)`,

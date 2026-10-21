@@ -1,3 +1,4 @@
+import { readCloudflareDeployment, type DeploymentIntent, type DeploymentStatus } from "./cloudflareDeployment.js";
 import { observeSandboxRun, type SandboxRunTarget } from "./sandboxRunEvidence.js";
 import { residentAddress } from "../execution/residentMembers.js";
 import { observePublicInventory, type PublicInventoryObservation } from "./publicInventoryObservation.js";
@@ -1303,6 +1304,12 @@ export interface SandboxGateDeps {
   signal?: AbortSignal;
   env: Record<string, string | undefined>;
   readHealth(url: string, bearer?: string, timeoutMs?: number, signal?: AbortSignal): Promise<HealthRead>;
+  readDeploymentStatus(
+    intent: DeploymentIntent,
+    dir: string,
+    config?: string,
+    signal?: AbortSignal,
+  ): Promise<DeploymentStatus>;
   /** `wrangler containers info <app> --json` → the application's version and image, run in `dir`. */
   readAppState(
     dir: string,
@@ -1526,6 +1533,56 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
     const auth = await run("npx", ["wrangler", "auth", "token", "--json"], { cwd: workerDir(dir), unset: UNSET_ENV });
     if (auth.code !== 0) return { error: "Wrangler credentials unavailable for the raw application list" };
     return readRawBotApplication(account, containerApp, parseWranglerJson(auth.output));
+  },
+  readDeploymentStatus: async (intent, dir, config, signal) => {
+    if (!config) return { state: "failed", reason: "selected Cloudflare account is unavailable" };
+    const account = intent.account;
+    if (typeof account !== "string" || !/^[a-f0-9]{32}$/.test(account))
+      return { state: "failed", reason: "selected Cloudflare account is invalid" };
+    // Keep credentials private and use the same configured authority as upload.
+    let headers = process.env.CLOUDFLARE_API_TOKEN
+      ? cloudflareReadHeaders({ type: "api_token", token: process.env.CLOUDFLARE_API_TOKEN })
+      : undefined;
+    if (!headers) {
+      const auth = await run("npx", ["wrangler", "auth", "token", "--json", "--config", config], {
+        cwd: workerDir(dir),
+        unset: [...UNSET_ENV, "WRANGLER_LOG", "WRANGLER_LOG_PATH"],
+        set: { WRANGLER_WRITE_LOGS: "false" },
+        signal,
+        ownedReadGroup: true,
+      });
+      if (auth.cancelled || auth.cleanup === "unconfirmed" || signal?.aborted)
+        return { state: "failed", reason: "Cloudflare authentication read interrupted" };
+      headers = auth.code === 0 ? cloudflareReadHeaders(parseWranglerJson(auth.output)) : undefined;
+    }
+    if (!headers) return { state: "failed", reason: "Cloudflare read credentials are unavailable" };
+    let selected = intent;
+    if (intent.container) {
+      const app = await resolveContainerAppId(dir, intent.container.application, config, signal);
+      if ("error" in app) return { state: "waiting", reason: "container application identity read unavailable" };
+      selected = { ...intent, container: { ...intent.container, application: app.value } };
+    }
+    return readCloudflareDeployment(selected, async (path) => {
+      try {
+        const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}${path}`, {
+          headers,
+          signal: signal ?? AbortSignal.timeout(LIVE_GATE_POLL_MS),
+        });
+        if (!response.ok) return { error: `HTTP ${response.status}` };
+        const body: unknown = await response.json();
+        if (
+          typeof body !== "object" ||
+          body === null ||
+          !("success" in body) ||
+          body.success !== true ||
+          !("result" in body)
+        )
+          return { error: "invalid provider response" };
+        return { value: body.result };
+      } catch {
+        return { error: signal?.aborted ? "read interrupted" : "request or JSON failed" };
+      }
+    });
   },
   readAppState: async (dir, containerApp, config, signal) => {
     const id = await resolveContainerAppId(dir, containerApp, config, signal);
@@ -1758,11 +1815,67 @@ export function botUploadProblem(
   return undefined;
 }
 
+function deploymentIntent(
+  step: DeployStep,
+  versionId: string | undefined,
+  since: number,
+  before?: Read<AppState>,
+  target?: RolloutTarget | null,
+): DeploymentIntent {
+  const application = step.residentContainerApp ?? step.liveGate?.containerApp;
+  const selectedImage = step.residentImage ?? step.botImage ?? target?.image;
+  const prior = before && "value" in before ? before.value : undefined;
+  // Bot rollbacks can reuse an earlier application target without a new rollout.
+  // Its native image, singleton and exact-health checks still qualify that target.
+  const changed = target != null || (step.name !== "bot" && selectedImage && prior?.image !== selectedImage);
+  return {
+    script: step.script,
+    versionId: versionId ?? "",
+    since,
+    ...(application && changed
+      ? { container: { application, beforeVersion: prior?.version, image: selectedImage } }
+      : {}),
+  };
+}
+
+async function waitForCloudflareDeployment(
+  step: Pick<DeployStep, "name" | "dir">,
+  intent: DeploymentIntent,
+  deadline: number,
+  io: Pick<DeployRunnerIO, "log">,
+  deps: SandboxGateDeps,
+): Promise<string | undefined> {
+  if (!intent.versionId) return "uploaded Worker version is unverified";
+  let selected = { ...intent };
+  let lastReason = "Cloudflare deployment status is unverified";
+  while (deps.now() < deadline && !deps.signal?.aborted) {
+    const signal = AbortSignal.timeout(deadline - deps.now());
+    const status = await deps.readDeploymentStatus(
+      selected,
+      step.dir,
+      undefined,
+      deps.signal ? AbortSignal.any([deps.signal, signal]) : signal,
+    );
+    if (deps.signal?.aborted) return "deployment cancelled";
+    if (signal.aborted || deps.now() >= deadline) break;
+    if (status.rolloutId) selected = { ...selected, rolloutId: status.rolloutId };
+    if (status.reason !== lastReason) io.log(`[deploy:all] ${step.name}: Cloudflare ${status.reason}`);
+    lastReason = status.reason;
+    if (status.state === "ready") return undefined;
+    if (status.state === "failed") return `Cloudflare deployment failed: ${status.reason}`;
+    await deps.sleep(Math.min(LIVE_GATE_POLL_MS, deadline - deps.now()), deps.signal);
+  }
+  return deps.signal?.aborted
+    ? "deployment cancelled"
+    : `${lastReason}; Cloudflare deployment readiness deadline exhausted`;
+}
+
 /** What an application gate knows about the rollout it waits for: the application as read BEFORE
  *  the upload, and the target wrangler's deploy output named (`null`: no container change printed). */
 export interface SandboxRollout {
   before: Read<AppState>;
   target: RolloutTarget | null;
+  deployment?: DeploymentIntent;
 }
 
 /**
@@ -1779,6 +1892,16 @@ export async function waitUntilBotLive(
   rollout?: SandboxRollout,
 ): Promise<GateOutcome> {
   const started = deps.now();
+  if (rollout?.deployment) {
+    const problem = await waitForCloudflareDeployment(
+      step,
+      rollout.deployment,
+      started + LIVE_GATE_DEADLINE_MS,
+      io,
+      deps,
+    );
+    if (problem) return { live: false, reason: problem };
+  }
   for (;;) {
     if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
     const elapsed = deps.now() - started;
@@ -1844,6 +1967,16 @@ export async function waitUntilSandboxLive(
   const started = deps.now();
   const deadline = AbortSignal.timeout(LIVE_GATE_DEADLINE_MS);
   const signal = deps.signal ? AbortSignal.any([deps.signal, deadline]) : deadline;
+  if (rollout.deployment) {
+    const problem = await waitForCloudflareDeployment(
+      step,
+      rollout.deployment,
+      started + LIVE_GATE_DEADLINE_MS,
+      io,
+      deps,
+    );
+    if (problem) return { live: false, reason: problem };
+  }
   let stage = "health";
   let lastReason: string | undefined;
   const stopped = (readIncomplete = false): GateOutcome | undefined => {
@@ -2059,6 +2192,7 @@ async function deployStepTraced(
   if (step.maintenance && !drain.drained)
     return { ok: false, live: "not deployed", reason: "selected staging drain was not acknowledged" };
   if (drain.problem) return { ok: false, live: "not deployed", reason: drain.problem };
+  let residentUploadStarted = deps.now();
   let residentBefore: Read<AppState> | undefined;
   let residentPrintedTarget: RolloutTarget | null | undefined;
   const waitMaxMs = drain.drained
@@ -2107,6 +2241,7 @@ async function deployStepTraced(
         residentBefore = step.residentContainerApp
           ? await deps.readAppState(step.dir, step.residentContainerApp)
           : undefined;
+        residentUploadStarted = deps.now();
         return residentBefore;
       },
       (output) => {
@@ -2131,6 +2266,14 @@ async function deployStepTraced(
       };
     if (result.ok && step.name === "resident") {
       readyDeadline = deps.now() + RESIDENT_READY_WAIT_MS;
+      const providerProblem = await waitForCloudflareDeployment(
+        step,
+        deploymentIntent(step, result.versionId, residentUploadStarted, residentBefore, residentPrintedTarget),
+        readyDeadline,
+        io,
+        deps,
+      );
+      if (providerProblem) return residentNotReady(result, providerProblem);
       // Reconcile only against the new Worker; an old healthy build can stamp
       // the old image current before the platform routes the uploaded version.
       const healthProblem = await waitForResident(step, expectedCommit, readyDeadline, io, deps);
@@ -2355,7 +2498,11 @@ async function deployStepTraced(
           residentImageReportsProblem(registry, resources) ||
           "error" in currentApp ||
           !sameResidentImageTarget(
-            { application: reopenTarget.application.application, ...currentApp.value },
+            {
+              application: reopenTarget.application.application,
+              version: currentApp.value.version,
+              image: currentApp.value.image,
+            },
             reopenTarget.application,
           ) ||
           !body ||
@@ -2415,7 +2562,10 @@ async function deployStepTraced(
         deps.signal?.aborted ||
         deps.now() > readyDeadline ||
         "error" in currentApp ||
-        !sameResidentImageTarget({ application: imageTarget.application, ...currentApp.value }, imageTarget)
+        !sameResidentImageTarget(
+          { application: imageTarget.application, version: currentApp.value.version, image: currentApp.value.image },
+          imageTarget,
+        )
       )
         return residentNotReady(
           result,
@@ -2568,9 +2718,12 @@ async function waitForResident(
     if (problems.length === 0 && imageTarget) {
       const actual = await readResidentAppWithinDeadline(step, imageTarget.application, deadline, deps);
       if (deps.signal?.aborted) return "deployment cancelled";
+      if ("error" in actual) return `Resident application read failed before image readiness: ${actual.error}`;
       if (
-        "error" in actual ||
-        !sameResidentImageTarget({ application: imageTarget.application, ...actual.value }, imageTarget)
+        !sameResidentImageTarget(
+          { application: imageTarget.application, version: actual.value.version, image: actual.value.image },
+          imageTarget,
+        )
       )
         return "Resident application target changed or could not be verified before image readiness";
     }
@@ -2750,6 +2903,7 @@ async function deployStepLoop(
     )
       return { ok: false, live: "not deployed", reason: "selected staging bootstrap upload reserve is exhausted" };
     uploadState(true);
+    const uploadStarted = deps.now();
     const r = await exec(step, io, deps.signal);
     if (r.cancelled || deps.signal?.aborted)
       return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
@@ -2757,6 +2911,22 @@ async function deployStepLoop(
     const outcome = classifyDeployOutput(r.code, r.output);
     if (outcome.kind === "deployed") {
       if (!step.liveGate) {
+        if (step.name !== "resident") {
+          const problem = await waitForCloudflareDeployment(
+            step,
+            deploymentIntent(step, outcome.versionId, uploadStarted),
+            deps.now() + LIVE_GATE_DEADLINE_MS,
+            io,
+            deps,
+          );
+          if (problem)
+            return {
+              ok: false,
+              versionId: outcome.versionId,
+              live: `deployed, not live: ${problem}`,
+              reason: `deployed but NOT live — ${problem}`,
+            };
+        }
         if (step.wakeUrl && step.name !== "resident") await wake(step.name, step.wakeUrl, io, deps.signal);
         return { ok: true, versionId: outcome.versionId, live: "n/a" };
       }
@@ -2781,17 +2951,22 @@ async function deployStepLoop(
               ? `[deploy:all] ${step.name}: wrangler printed a container change — ${target.image ? `image ${shortImage(target.image)}` : "configuration only, image unchanged"}; the application must leave ${from}`
               : `[deploy:all] ${step.name}: wrangler printed no container change — Worker-only deploy, no rollout expected`,
           );
+        const deployment = deploymentIntent(step, outcome.versionId, uploadStarted, application.before, target);
         const g: GateOutcome =
           liveGate.kind === "sandbox"
             ? await waitUntilSandboxLive(
                 step,
                 liveGate,
                 expectedCommit,
-                { before: application.before, target },
+                { before: application.before, target, deployment },
                 io,
                 deps,
               )
-            : await waitUntilBotLive(step, liveGate, expectedCommit, io, deps, { before: application.before, target });
+            : await waitUntilBotLive(step, liveGate, expectedCommit, io, deps, {
+                before: application.before,
+                target,
+                deployment,
+              });
         wait.setAttrs(g.live ? { outcome: "live", waitedMs: g.waitedMs } : { outcome: "not_live" });
         return g;
       });
@@ -2916,6 +3091,13 @@ export async function runDeployPlan(
     const deps: SandboxGateDeps = {
       ...originalDeps,
       setPagingSource: paging?.setSource,
+      readDeploymentStatus: (intent, dir, _config, signal) =>
+        originalDeps.readDeploymentStatus(
+          { ...intent, account: plan.checks.account },
+          dir,
+          config,
+          signal ?? originalDeps.signal,
+        ),
       readAppState: (dir, app, _config, signal) =>
         originalDeps.readAppState(dir, app, config, signal ?? originalDeps.signal),
       readInstances: (dir, app, _config, signal) =>
