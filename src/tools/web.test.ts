@@ -522,11 +522,87 @@ describe("BraveWebSearch adapter", () => {
     expect(results).toEqual([{ title: "Cat", url: "https://cats", snippet: "meow" }]);
   });
 
+  it("treats a null Brave web section as no results", async () => {
+    const search = new BraveWebSearch(new Secret("key123", "BRAVE_SEARCH_API_KEY"), async () =>
+      Response.json({ type: "search", web: null }),
+    );
+    const out = await webSearchTool.run({ query: "cats" }, ctxWith({ search }));
+    expect(out).toBe('No results for "cats".');
+  });
+
   it("throws on non-200", async () => {
     const fetchSpy = vi.fn<FetchLike>(async () => fakeResponse({ status: 429 }));
     await expect(new BraveWebSearch(new Secret("k", "BRAVE_SEARCH_API_KEY"), fetchSpy).search("x")).rejects.toThrow(
       /429/,
     );
+  });
+
+  it("keeps a Brave 429 code, request ID, rate limits and redacted detail on the tool result", async () => {
+    const fetchSpy = vi.fn<FetchLike>(async () =>
+      Response.json(
+        {
+          type: "ErrorResponse",
+          error: {
+            id: "request-123",
+            status: 429,
+            code: "RATE_LIMITED",
+            detail:
+              "Try https://private.example/path?token=secret or ghp_123456789012345678901234567890 for cats\nPRIVATE_SECOND_LINE",
+          },
+        },
+        {
+          status: 429,
+          headers: { "x-ratelimit-remaining": "0, 1000", "x-ratelimit-reset": "1, 1419704" },
+        },
+      ),
+    );
+    const search = new BraveWebSearch(new Secret("key123", "BRAVE_SEARCH_API_KEY"), fetchSpy);
+    const out = await webSearchTool.run({ query: "cats" }, ctxWith({ search }));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(out).toBe(
+      "web_search failed: Brave search HTTP 429; code RATE_LIMITED; request request-123; remaining 0,1000; reset 1,1419704s; detail Try «redacted-url» or «redacted-github-token» for «redacted-query»",
+    );
+    expect(out).not.toMatch(/private\.example|PRIVATE_SECOND_LINE|ghp_1234|key123/);
+  });
+
+  it("reports Brave transport failure without inventing an HTTP response or exposing the request URL", async () => {
+    const search = new BraveWebSearch(new Secret("key123", "BRAVE_SEARCH_API_KEY"), async () => {
+      throw new Error("GET https://api.search.brave.com/search?q=PRIVATE_QUERY failed");
+    });
+    const out = await webSearchTool.run({ query: "PRIVATE_QUERY" }, ctxWith({ search }));
+    expect(out).toBe("web_search failed: Brave search transport failed before a response");
+  });
+
+  it("uses the observed status and omits invalid Brave fields while capping the detail", async () => {
+    const search = new BraveWebSearch(new Secret("key123", "BRAVE_SEARCH_API_KEY"), async () =>
+      Response.json(
+        {
+          type: "ErrorResponse",
+          error: { id: "https://private.example/id", status: 401, code: "BAD;TOKEN", detail: "A".repeat(300) },
+        },
+        { status: 429, headers: { "x-ratelimit-remaining": "0, PRIVATE", "x-ratelimit-reset": "-1" } },
+      ),
+    );
+    const out = await webSearchTool.run({ query: "cats" }, ctxWith({ search }));
+    expect(out).toBe(`web_search failed: Brave search HTTP 429; detail ${"A".repeat(200)}…`);
+  });
+
+  it("keeps HTTP status when Brave sends an unparseable error body", async () => {
+    const search = new BraveWebSearch(
+      new Secret("key123", "BRAVE_SEARCH_API_KEY"),
+      async () => new Response("PRIVATE_HTML_BODY", { status: 403 }),
+    );
+    const out = await webSearchTool.run({ query: "cats" }, ctxWith({ search }));
+    expect(out).toBe("web_search failed: Brave search HTTP 403");
+  });
+
+  it("reports a malformed successful Brave response as a decode failure", async () => {
+    const search = new BraveWebSearch(new Secret("key123", "BRAVE_SEARCH_API_KEY"), async () =>
+      Response.json({ web: { results: "PRIVATE_BAD_ROWS" } }),
+    );
+    const out = await webSearchTool.run({ query: "cats" }, ctxWith({ search }));
+    expect(out).toBe("web_search failed: Brave search HTTP 200 response was invalid");
   });
 });
 
