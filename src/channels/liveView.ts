@@ -1210,6 +1210,7 @@ export function createLiveViewHandler(
           ...(view.finishedAt !== undefined ? { finishedAt: view.finishedAt } : {}),
           ...(view.sealedAt !== undefined ? { sealedAt: view.sealedAt } : {}),
           ...(view.replyOk !== undefined ? { replyOk: view.replyOk } : {}),
+          ...(view.replyNote !== undefined ? { replyNote: view.replyNote } : {}),
           ...(runDurationMs(view) !== undefined ? { durationMs: runDurationMs(view) } : {}),
           // The run's dollars beside its duration (costs.md item 4c); a record without usage has none.
           ...(view.cost !== undefined ? { cost: view.cost } : {}),

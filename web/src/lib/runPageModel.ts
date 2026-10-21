@@ -1079,10 +1079,10 @@ export function createRunClock(seed: RunClockSeed, browserNowAtSeed: number): Ru
   };
 }
 
-/** Parse an `end` frame's payload: the seal stamp and the tri-state `replyOk`
+/** Parse an `end` frame's payload: the seal stamp and reply disposition
  *  (docs/reference/specs/tracing.md). A stored stream's `end` carries `{}` — no stamp, no
  *  caption; anything malformed reads the same. */
-export function parseEndFrame(data: string | undefined): { sealedAt?: number; replyOk?: boolean } {
+export function parseEndFrame(data: string | undefined): { sealedAt?: number; replyOk?: boolean; replyNote?: string } {
   if (typeof data !== "string") return {};
   let parsed: unknown;
   try {
@@ -1091,18 +1091,26 @@ export function parseEndFrame(data: string | undefined): { sealedAt?: number; re
     return {};
   }
   if (typeof parsed !== "object" || parsed === null) return {};
-  const { sealedAt, replyOk } = parsed as { sealedAt?: unknown; replyOk?: unknown };
+  const { sealedAt, replyOk, replyNote } = parsed as { sealedAt?: unknown; replyOk?: unknown; replyNote?: unknown };
   return {
     ...(typeof sealedAt === "number" && Number.isFinite(sealedAt) && sealedAt > 0 ? { sealedAt } : {}),
     ...(typeof replyOk === "boolean" ? { replyOk } : {}),
+    ...(replyNote === "no channel to deliver to" ? { replyNote } : {}),
   };
 }
 
 /** The delivery caption beside a finished run's duration: `delivered in 2s`
  *  when the first reply attempt landed (`replyOk` true, and both stamps known),
- *  `reply failed` when it threw, nothing when none was measured — a fall-through
+ *  `no separate reply` when no channel remains to receive one, `reply failed`
+ *  when an addressed reply failed, and nothing when none was measured — a fall-through
  *  command run, a backstop or sweep seal, a record without the stamps. */
-export function deliveryCaption(run: { finishedAt?: number; sealedAt?: number; replyOk?: boolean }): string {
+export function deliveryCaption(run: {
+  finishedAt?: number;
+  sealedAt?: number;
+  replyOk?: boolean;
+  replyNote?: string;
+}): string {
+  if (run.replyOk === false && run.replyNote === "no channel to deliver to") return "no separate reply";
   if (run.replyOk === false) return "reply failed";
   if (run.replyOk !== true || run.finishedAt === undefined || run.sealedAt === undefined) return "";
   return `delivered in ${formatDuration(Math.max(0, run.sealedAt - run.finishedAt), "clock")}`;

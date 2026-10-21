@@ -35,7 +35,7 @@ export interface TimelineInput {
   /** `live` while the agent works; `delivering` after the `finished` frame; `ended` after `end` or on a record. */
   phase: TimelinePhase;
   /** The delivery caption's inputs (`ended` only). */
-  delivery?: { finishedAt?: number; sealedAt?: number; replyOk?: boolean };
+  delivery?: { finishedAt?: number; sealedAt?: number; replyOk?: boolean; replyNote?: string };
   /** The record was cut to its budget: `not recorded` reads `(too large)`. */
   truncated?: boolean;
   /** The record predates span schema (`RunHistorySeed.untimed`): no shape is

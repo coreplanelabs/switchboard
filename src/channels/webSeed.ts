@@ -125,6 +125,7 @@ export interface RunLiveSeed {
   finishedAt?: number;
   sealedAt?: number;
   replyOk?: boolean;
+  replyNote?: string;
   /** The runs this run spawned that the registry holds (agent-conductor item
    *  11) — the live path reads no store — oldest started first, each live child
    *  with its own token. Present only when there are any. */
@@ -179,6 +180,7 @@ export interface RunHistorySeed {
   finishedAt?: number;
   sealedAt?: number;
   replyOk?: boolean;
+  replyNote?: string;
   /** `runDurationMs(record)` — the one duration every surface prints. */
   durationMs?: number;
   /** What the run cost (costs.md item 4c): its dollars through the price table, or

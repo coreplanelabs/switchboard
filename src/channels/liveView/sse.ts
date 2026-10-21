@@ -84,7 +84,11 @@ function sseFinished(frame: FinishedFrame): string {
  *  has them; a stored stream ends with `{}`. Named, no `id:`. */
 function sseEnd(frame?: SealedFrame): string {
   const body = frame
-    ? { sealedAt: frame.sealedAt, ...(frame.replyOk !== undefined ? { replyOk: frame.replyOk } : {}) }
+    ? {
+        sealedAt: frame.sealedAt,
+        ...(frame.replyOk !== undefined ? { replyOk: frame.replyOk } : {}),
+        ...(frame.replyNote !== undefined ? { replyNote: frame.replyNote } : {}),
+      }
     : {};
   return `event: end\ndata: ${JSON.stringify(body)}\n\n`;
 }
@@ -262,7 +266,13 @@ export function serveLedgerEvents(
       finishSent = true;
     }
     if (terminal && (view.persisted || view.sealedAt !== undefined)) {
-      sink.write(sseEnd(view.sealedAt !== undefined ? { sealedAt: view.sealedAt, replyOk: view.replyOk } : undefined));
+      sink.write(
+        sseEnd(
+          view.sealedAt !== undefined
+            ? { sealedAt: view.sealedAt, replyOk: view.replyOk, replyNote: view.replyNote }
+            : undefined,
+        ),
+      );
       close();
       sink.end();
     }

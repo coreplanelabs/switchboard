@@ -5,6 +5,7 @@ import {
   AGENT_SMOKE_POLL_MS,
   AGENT_SMOKE_REVIEW_MINUTES,
   PRESET_FLOORS,
+  SECOND_MS,
   leaseMinimum,
   minutesToMs,
 } from "../core/budgets.js";
@@ -242,6 +243,7 @@ interface ScenarioReceipt {
   };
   evidence?: { identityVerified: boolean; record: unknown; unverifiedObservation?: unknown };
   failedChecks?: string[];
+  readRetry?: Pick<SmokeObservationError, "code" | "operation">;
   observationError?: SmokeObservationError;
   intake?: SmokeIntakeReceipt;
 }
@@ -658,7 +660,27 @@ export async function runAgentSmoke(input: {
           }
         }
       };
-      const originalRecord = await input.transport.readRun(response.run.id, retainRun);
+      let originalRecord: unknown;
+      try {
+        originalRecord = await input.transport.readRun(response.run.id, retainRun);
+      } catch (error) {
+        const observation = error instanceof SmokeReaderError ? error.observation : null;
+        if (
+          source !== "http" ||
+          !known.success ||
+          known.data.status !== "accepted" ||
+          !observation ||
+          !["runs_list", "runs_get"].includes(observation.operation ?? "") ||
+          !["mcp_transport_failed", "mcp_timeout"].includes(observation.code)
+        )
+          throw error;
+        // The admission may already be running. Retry only this read of its
+        // original ID; never send a second request or extend its deadline.
+        row.readRetry = { code: observation.code, operation: observation.operation };
+        await save();
+        await new Promise((resolve) => setTimeout(resolve, SECOND_MS));
+        originalRecord = await input.transport.readRun(response.run.id, retainRun);
+      }
       await retainRun(originalRecord);
       const decision = z
         .object({

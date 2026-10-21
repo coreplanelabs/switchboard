@@ -141,13 +141,15 @@ export interface RunView {
    *  falls back to `startedAt`). `sealedAt`: the stream closed, when the first
    *  reply attempt completed or the branch was abandoned; `replyOk` is
    *  tri-state — `true` a reply was attempted and delivered, `false` attempted
-   *  and threw, absent no delivery receipt was recorded. `stepCount`: content events only (span
+   *  but not delivered (with `replyNote` when there was no channel), absent no
+   *  delivery receipt was recorded. `stepCount`: content events only (span
    *  records excluded). `schema`: the stream schema — `SPAN_SCHEMA` on every
    *  registry and ledger view (a current runner emitted it); a STORED record
    *  absent it or below it carries no timing. All omitted when absent. */
   receivedAt?: number;
   sealedAt?: number;
   replyOk?: boolean;
+  replyNote?: string;
   stepCount?: number;
   schema?: number;
   finished: boolean;
@@ -746,6 +748,7 @@ function liveView(s: RunSummary): RunView {
     ...(s.receivedAt !== undefined ? { receivedAt: s.receivedAt } : {}),
     ...(s.sealedAt !== undefined ? { sealedAt: s.sealedAt } : {}),
     ...(s.replyOk !== undefined ? { replyOk: s.replyOk } : {}),
+    ...(s.replyNote !== undefined ? { replyNote: s.replyNote } : {}),
     ...(s.stepCount !== undefined ? { stepCount: s.stepCount } : {}),
     ...(s.schema !== undefined ? { schema: s.schema } : {}),
     ...(s.status !== undefined ? { status: s.status } : {}),
