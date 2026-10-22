@@ -162,6 +162,7 @@ export const reviewReadTool: RunnableTool = {
         !Number.isSafeInteger(page.size) ||
         page.size! < 0 ||
         page.size! > 10 * 1024 * 1024 ||
+        page.nextOffset === undefined ||
         page.nextOffset !== offset + Buffer.byteLength(page.text) ||
         page.nextOffset > page.size! ||
         page.eof !== (page.nextOffset === page.size) ||

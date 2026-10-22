@@ -17,6 +17,12 @@ describe("audience refusal diagnostics", () => {
       httpStatus: 403,
       requestId: "A1:B2",
       route: "contents",
+      rateLimitRemaining: 0,
+      rateLimitResetEpochSeconds: 1792700000,
+      rateLimitResource: "core",
+      retryAfterSeconds: 120,
+      responseReason: "primary-rate-limit-indicated",
+      responseMessage: "API rate limit exceeded",
       sourceCallHash: "a".repeat(64),
     };
     const trace: AudienceTrace = {};
@@ -51,6 +57,14 @@ describe("audience refusal diagnostics", () => {
       { ...expected.githubAccess, httpStatus: 999 },
       { ...expected.githubAccess, requestId: "secret query" },
       { ...expected.githubAccess, route: "private/path" },
+      { ...expected.githubAccess, rateLimitRemaining: -1 },
+      { ...expected.githubAccess, rateLimitResetEpochSeconds: 9999999999 },
+      { ...expected.githubAccess, rateLimitResource: "private/path" },
+      { ...expected.githubAccess, retryAfterSeconds: 9999999999 },
+      { ...expected.githubAccess, responseReason: "secret" },
+      { ...expected.githubAccess, reason: "unknown" },
+      { ...expected.githubAccess, httpStatus: 404 },
+      { ...expected.githubAccess, responseMessage: "https://private.test/secret" },
       { ...expected.githubAccess, sourceCallHash: "raw call id" },
     ])
       expect(audienceRefusalOf({ ...expected, githubAccess: diagnostic })).toBeUndefined();

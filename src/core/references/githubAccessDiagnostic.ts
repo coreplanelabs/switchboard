@@ -1,3 +1,9 @@
+import {
+  GITHUB_RESPONSE_REASONS,
+  safeGithubResponseMessage,
+  type GithubResponseReason,
+} from "../../execution/githubError.js";
+
 /** Closed diagnostic facts, shared with record readers; never source content. */
 export const GITHUB_ACCESS_TOOLS = [
   "unknown",
@@ -71,15 +77,44 @@ export interface GithubAccessDiagnostic {
   httpStatus?: number;
   requestId?: string;
   route?: (typeof GITHUB_ACCESS_ROUTES)[number];
+  rateLimitRemaining?: number;
+  rateLimitResetEpochSeconds?: number;
+  rateLimitResource?: string;
+  retryAfterSeconds?: number;
+  responseReason?: GithubResponseReason;
+  responseMessage?: string;
 }
 
 export function githubAccessDiagnosticOf(value: unknown): GithubAccessDiagnostic | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const v = value as Record<string, unknown>;
+  const responseFacts = [
+    v.rateLimitRemaining,
+    v.rateLimitResetEpochSeconds,
+    v.rateLimitResource,
+    v.retryAfterSeconds,
+    v.responseReason,
+    v.responseMessage,
+  ].some((fact) => fact !== undefined);
   if (
     Object.keys(v).some(
       (key) =>
-        !["tool", "stage", "reason", "operation", "sourceCallHash", "httpStatus", "requestId", "route"].includes(key),
+        ![
+          "tool",
+          "stage",
+          "reason",
+          "operation",
+          "sourceCallHash",
+          "httpStatus",
+          "requestId",
+          "route",
+          "rateLimitRemaining",
+          "rateLimitResetEpochSeconds",
+          "rateLimitResource",
+          "retryAfterSeconds",
+          "responseReason",
+          "responseMessage",
+        ].includes(key),
     ) ||
     !(GITHUB_ACCESS_TOOLS as readonly unknown[]).includes(v.tool) ||
     !(GITHUB_ACCESS_STAGES as readonly unknown[]).includes(v.stage) ||
@@ -93,7 +128,29 @@ export function githubAccessDiagnosticOf(value: unknown): GithubAccessDiagnostic
         !Number.isInteger(v.httpStatus) ||
         v.httpStatus < 100 ||
         v.httpStatus > 599)) ||
-    (v.requestId !== undefined && (typeof v.requestId !== "string" || !/^[0-9A-Fa-f:]{1,64}$/.test(v.requestId)))
+    (v.requestId !== undefined && (typeof v.requestId !== "string" || !/^[0-9A-Fa-f:]{1,64}$/.test(v.requestId))) ||
+    (responseFacts && (v.reason !== "http" || v.httpStatus === undefined || v.route === undefined)) ||
+    (v.rateLimitRemaining !== undefined &&
+      (!Number.isInteger(v.rateLimitRemaining) ||
+        (v.rateLimitRemaining as number) < 0 ||
+        (v.rateLimitRemaining as number) > 1_000_000_000)) ||
+    (v.rateLimitResetEpochSeconds !== undefined &&
+      (!Number.isInteger(v.rateLimitResetEpochSeconds) ||
+        (v.rateLimitResetEpochSeconds as number) < 0 ||
+        (v.rateLimitResetEpochSeconds as number) > 4_102_444_800)) ||
+    (v.rateLimitResource !== undefined &&
+      (typeof v.rateLimitResource !== "string" || !/^[a-z][a-z0-9_]{0,31}$/.test(v.rateLimitResource))) ||
+    (v.retryAfterSeconds !== undefined &&
+      (!Number.isInteger(v.retryAfterSeconds) ||
+        (v.retryAfterSeconds as number) < 0 ||
+        (v.retryAfterSeconds as number) > 604_800)) ||
+    (v.responseReason !== undefined &&
+      ((v.httpStatus !== 403 && v.httpStatus !== 429) ||
+        !(GITHUB_RESPONSE_REASONS as readonly unknown[]).includes(v.responseReason))) ||
+    (v.responseMessage !== undefined &&
+      (typeof v.responseMessage !== "string" ||
+        v.responseMessage.length > 241 ||
+        safeGithubResponseMessage(v.responseMessage) !== v.responseMessage))
   )
     return undefined;
   return {
@@ -105,5 +162,13 @@ export function githubAccessDiagnosticOf(value: unknown): GithubAccessDiagnostic
     ...(v.httpStatus !== undefined ? { httpStatus: v.httpStatus as number } : {}),
     ...(v.requestId !== undefined ? { requestId: v.requestId as string } : {}),
     ...(v.route !== undefined ? { route: v.route as GithubAccessDiagnostic["route"] } : {}),
+    ...(v.rateLimitRemaining !== undefined ? { rateLimitRemaining: v.rateLimitRemaining as number } : {}),
+    ...(v.rateLimitResetEpochSeconds !== undefined
+      ? { rateLimitResetEpochSeconds: v.rateLimitResetEpochSeconds as number }
+      : {}),
+    ...(v.rateLimitResource !== undefined ? { rateLimitResource: v.rateLimitResource as string } : {}),
+    ...(v.retryAfterSeconds !== undefined ? { retryAfterSeconds: v.retryAfterSeconds as number } : {}),
+    ...(v.responseReason !== undefined ? { responseReason: v.responseReason as GithubResponseReason } : {}),
+    ...(v.responseMessage !== undefined ? { responseMessage: v.responseMessage as string } : {}),
   };
 }
