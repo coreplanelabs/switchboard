@@ -230,6 +230,81 @@ describe("check-lockfile resolutionProblems", () => {
     expect(resolutionProblems(lock, { dependencies: { vite: "^6.4.4" }, overrides: { vite: "$vite" } })).toEqual([]);
   });
 
+  it("checks a version-qualified owner's descendant against its override", () => {
+    const packages = {
+      "": { dependencies: { owner: "^1.0.0" } },
+      "node_modules/owner": pinned("1.0.0", { dependencies: { target: "^1.0.0" } }),
+      "node_modules/target": pinned("1.0.0"),
+    };
+    const manifest = { overrides: { "owner@1.0.0": { target: "^2.0.0" } } };
+
+    expect(resolutionProblems({ packages }, manifest)).toEqual([
+      {
+        kind: "unsatisfied",
+        from: "node_modules/owner",
+        field: "dependencies",
+        name: "target",
+        spec: "^2.0.0",
+        at: "node_modules/target",
+        version: "1.0.0",
+      },
+    ]);
+    expect(resolutionProblems({ packages: { ...packages, "node_modules/target": pinned("2.0.0") } }, manifest)).toEqual(
+      [],
+    );
+    expect(
+      resolutionProblems(
+        { packages: { ...packages, "node_modules/owner": pinned("1.1.0", { dependencies: { target: "^1.0.0" } }) } },
+        manifest,
+      ),
+    ).toEqual([]);
+  });
+
+  it("uses the first matching owner override when bare and version-qualified rules overlap", () => {
+    const packages = {
+      "": { dependencies: { owner: "^1.0.0" } },
+      "node_modules/owner": pinned("1.0.0", { dependencies: { target: "^1.0.0" } }),
+      "node_modules/target": pinned("3.0.0"),
+    };
+    const manifest = { overrides: { owner: { target: "^3.0.0" }, "owner@1.0.0": { target: "^2.0.0" } } };
+
+    expect(resolutionProblems({ packages }, manifest)).toEqual([]);
+    expect(resolutionProblems({ packages: { ...packages, "node_modules/target": pinned("2.0.0") } }, manifest)).toEqual(
+      [
+        {
+          kind: "unsatisfied",
+          from: "node_modules/owner",
+          field: "dependencies",
+          name: "target",
+          spec: "^3.0.0",
+          at: "node_modules/target",
+          version: "2.0.0",
+        },
+      ],
+    );
+  });
+
+  it("keeps prerelease owners outside stable ranges but honors explicit prerelease rules", () => {
+    const packages = {
+      "": { dependencies: { owner: "1.1.0-beta.0" } },
+      "node_modules/owner": pinned("1.1.0-beta.0", { dependencies: { target: "^1.0.0" } }),
+      "node_modules/target": pinned("1.0.0"),
+    };
+
+    expect(resolutionProblems({ packages }, { overrides: { "owner@^1.0.0": { target: "^2.0.0" } } })).toEqual([]);
+    expect(resolutionProblems({ packages }, { overrides: { "owner@1.1.0-beta.0": { target: "^2.0.0" } } })).toEqual([
+      {
+        kind: "unsatisfied",
+        from: "node_modules/owner",
+        field: "dependencies",
+        name: "target",
+        spec: "^2.0.0",
+        at: "node_modules/target",
+        version: "1.0.0",
+      },
+    ]);
+  });
+
   it.each(["node_modules/bridge", "node_modules/vitepress/node_modules/bridge"])(
     "applies scoped overrides to descendants through %s without changing unrelated branches",
     (bridge) => {
