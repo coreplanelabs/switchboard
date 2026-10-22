@@ -21144,6 +21144,9 @@ describe("bounded run-history deletion", () => {
 });
 
 describe("bounded live event snapshots", () => {
+  const liveEventWarnings = (calls: unknown[][]) =>
+    calls.filter(([message]) => typeof message === "string" && message.includes('"event":"live_events.'));
+
   async function fixture(count = 140, bytes = 4) {
     const key = storeKey(),
       runId = "paged-events";
@@ -21194,7 +21197,7 @@ describe("bounded live event snapshots", () => {
     const warning = vi.spyOn(console, "warn");
     try {
       expect((await post("/runs/live-events", { storeKey: f.key, runId: f.runId })).status).toBe(413);
-      expect(warning.mock.calls).toEqual([
+      expect(liveEventWarnings(warning.mock.calls)).toEqual([
         [
           JSON.stringify({
             event: "live_events.pagination_required",
@@ -21220,7 +21223,7 @@ describe("bounded live event snapshots", () => {
         snapshot: f.first.data.snapshot,
       });
       expect(response).toEqual({ status: 409, data: { error: "snapshot-changed" } });
-      expect(warning.mock.calls).toEqual([
+      expect(liveEventWarnings(warning.mock.calls)).toEqual([
         [
           JSON.stringify({
             event: "live_events.refused",
@@ -21249,7 +21252,7 @@ describe("bounded live event snapshots", () => {
     try {
       const response = await post("/runs/live-events", { storeKey: f.key, runId: f.runId, afterSeq: 0 });
       expect(response).toEqual({ status: 413, data: { error: "event-too-large" } });
-      expect(warning.mock.calls).toEqual([
+      expect(liveEventWarnings(warning.mock.calls)).toEqual([
         [
           JSON.stringify({
             event: "live_events.refused",

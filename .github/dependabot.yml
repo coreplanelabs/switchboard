@@ -42,11 +42,10 @@ updates:
       # Lift once both run on TypeScript 7, then bump every package together.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
-      # @cloudflare/vitest-plugin (1.2.8) peers on vitest ^4.1, so the
-      # memory Worker stays on vitest 4 while the rest of the workspace is on
-      # 5 (npm nests its copy). One lockfile means one rule: no vitest major
-      # moves until a plugin release supports the current vitest; then
-      # bump the memory Worker and lift this.
+      # The memory Worker stays on vitest 4 while the rest of the workspace is
+      # on 5 (npm nests its copy). @cloudflare/vitest-plugin 1.4.0 supports
+      # both majors. Keep major bumps manual so the workerd suite is checked
+      # before changing its test runner. One lockfile means one ignore rule.
       - dependency-name: "vitest"
         update-types: ["version-update:semver-major"]
       # Effect decodes the pinned @opencode/schema and @opencode/protocol in
