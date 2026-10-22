@@ -429,6 +429,8 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
             requesterProfileId: profile.id,
             ...(profile.name ? { userName: msg.userName ?? profile.name } : {}),
           };
+        else if (kind === "human" && msg.userId === actor.id && !msg.userName && requesterEmail.includes("@"))
+          msg = { ...msg, userName: requesterEmail };
       }
       const authentication: OrganizationAuthentication = {
         source: evidence.source,
