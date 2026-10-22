@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { testSourceInputIntent } from "../../testing/sourceInputs.js";
 import { resolveControlResetWrite } from "../reattach.js";
 import { piExtensionSource, piSourceInputCommand } from "./extensionSource.js";
+import { readPiSourceInputReceipt } from "./sourceInputReceipt.js";
 import { parsePiLine, splitJsonl } from "./protocol.js";
 
 type Command = { handler: (args: string, ctx: unknown) => Promise<void> };
@@ -159,6 +160,15 @@ describe("host source-input command", () => {
           .map((line) => JSON.parse(line))
           .filter((entry) => entry.type === "custom_message"),
       ).toEqual(entries);
+      const originalFile = { path: file, content: readFileSync(file, "utf8") };
+      expect(readPiSourceInputReceipt(intent, originalFile)).toMatchObject({
+        ok: true,
+        receipt: { inputId: intent.id, native: { sessionFile: file, entryId: entries[0]!.id } },
+      });
+      expect(readPiSourceInputReceipt(secondIntent, originalFile)).toMatchObject({
+        ok: true,
+        receipt: { inputId: "second-original", native: { sessionFile: file, entryId: entries[1]!.id } },
+      });
       child.stdin.end();
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {

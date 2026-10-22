@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,6 +10,8 @@ import type { ServerResponse } from "node:http";
 import { describe, it } from "vitest";
 import { parsePiLine, splitJsonl } from "../protocol.js";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { testSourceInputIntent } from "../../../testing/sourceInputs.js";
+import { readPiSourceInputReceipt } from "../sourceInputReceipt.js";
 
 const BIN = resolve(import.meta.dirname, "../../../../../node_modules/.bin/pi");
 
@@ -243,7 +246,7 @@ describe.skipIf(!existsSync(BIN))("native Pi source input persistence", () => {
     pi.registerCommand("local-source-fixture", {
       description: "Isolated custom input persistence probe",
       handler: async (args) => {
-        pi.sendMessage({ customType: "source-input-fixture", content: "identical visible text", display: false,
+        pi.sendMessage({ customType: "switchboard-source-input", content: "identical visible text", display: false,
           details: JSON.parse(args) }, { triggerTurn: false });
       },
     });
@@ -253,7 +256,7 @@ describe.skipIf(!existsSync(BIN))("native Pi source input persistence", () => {
         const entries = result.entries;
         assert(Array.isArray(entries));
         return entries.filter(
-          (entry) => entry.type === "custom_message" && entry.customType === "source-input-fixture",
+          (entry) => entry.type === "custom_message" && entry.customType === "switchboard-source-input",
         );
       }
       const diskRows = (file: string) =>
@@ -261,7 +264,21 @@ describe.skipIf(!existsSync(BIN))("native Pi source input persistence", () => {
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line))
-          .filter((entry) => entry.type === "custom_message" && entry.customType === "source-input-fixture");
+          .filter((entry) => entry.type === "custom_message" && entry.customType === "switchboard-source-input");
+      const sourceDetails = (file: string, id: string, seq: number) => {
+        const intent = testSourceInputIntent().entries[0]!;
+        intent.id = id;
+        intent.phase = "begun";
+        intent.native.sessionId = file;
+        intent.witness.seq = seq;
+        intent.renderedHash = createHash("sha256").update("identical visible text").digest("hex");
+        return { version: 1, intent };
+      };
+      const fileReceipt = (details: ReturnType<typeof sourceDetails>) =>
+        readPiSourceInputReceipt(details.intent, {
+          path: details.intent.native.sessionId,
+          content: readFileSync(details.intent.native.sessionId, "utf8"),
+        });
       const send = (child: ReturnType<typeof start>, details: Record<string, unknown>) =>
         child.command({ type: "prompt", message: "/local-source-fixture " + JSON.stringify(details) });
       const seed = () => {
@@ -285,16 +302,18 @@ describe.skipIf(!existsSync(BIN))("native Pi source input persistence", () => {
       await uncertain.command({ type: "prompt", message: "Start the isolated crash arm." });
       const crashGate = await deadline(heldCrashCall);
       assert.equal((await uncertain.command({ type: "get_state" })).isStreaming, true);
-      const uncertainDetails = { version: 1, inputId: "uncertain-original", witness: { runId: "crash-arm", seq: 8 } };
+      const uncertainDetails = sourceDetails(uncertainFile, "uncertain-original", 8);
       const uncertainResponse = await send(uncertain, uncertainDetails);
       assert.equal(uncertainResponse.disposition, "handled");
       assert.deepEqual(rows(await uncertain.command({ type: "get_entries" })), []);
       assert.deepEqual(diskRows(uncertainFile), []);
+      assert.deepEqual(fileReceipt(uncertainDetails), { ok: false, reason: "native-unproved" });
       await uncertain.kill();
       crashGate.destroy();
       const uncertainRestart = start(uncertainFile);
       assert.equal((await uncertainRestart.command({ type: "get_state" })).sessionFile, uncertainFile);
       assert.deepEqual(rows(await uncertainRestart.command({ type: "get_entries" })), []);
+      assert.deepEqual(fileReceipt(uncertainDetails), { ok: false, reason: "native-unproved" });
       await uncertainRestart.close();
 
       // Distinct originals with the same text are retained only after native flush.
@@ -305,12 +324,14 @@ describe.skipIf(!existsSync(BIN))("native Pi source input persistence", () => {
       await stable.command({ type: "prompt", message: "Start the isolated retained arm." });
       const stableGate = await deadline(heldStableCall);
       assert.equal((await stable.command({ type: "get_state" })).isStreaming, true);
-      const first = { version: 1, inputId: "retained-first", witness: { runId: "retained-arm", seq: 8 } };
-      const second = { version: 1, inputId: "retained-second", witness: { runId: "retained-arm", seq: 9 } };
+      const first = sourceDetails(stableFile, "retained-first", 8);
+      const second = sourceDetails(stableFile, "retained-second", 9);
       assert.equal((await send(stable, first)).disposition, "handled");
       assert.equal((await send(stable, second)).disposition, "handled");
       assert.deepEqual(rows(await stable.command({ type: "get_entries" })), []);
       assert.deepEqual(diskRows(stableFile), []);
+      assert.deepEqual(fileReceipt(first), { ok: false, reason: "native-unproved" });
+      assert.deepEqual(fileReceipt(second), { ok: false, reason: "native-unproved" });
       stableGate.release();
       await stable.observe((event) => event.type === "agent_settled");
       const before = rows(await stable.command({ type: "get_entries" }));
@@ -324,10 +345,19 @@ describe.skipIf(!existsSync(BIN))("native Pi source input persistence", () => {
       for (const entry of before) assert(typeof entry.id === "string" && entry.id.length > 0);
       assert.notEqual(before[0]!.id, before[1]!.id);
       assert.deepEqual(diskRows(stableFile), before);
+      const firstReceipt = fileReceipt(first);
+      const secondReceipt = fileReceipt(second);
+      assert.equal(firstReceipt.ok, true);
+      assert.equal(secondReceipt.ok, true);
+      if (!firstReceipt.ok || !secondReceipt.ok) throw new Error("Original native receipt missing");
+      assert.equal(firstReceipt.receipt.native.entryId, before[0]!.id);
+      assert.equal(secondReceipt.receipt.native.entryId, before[1]!.id);
       await stable.close();
       const resumed = start(stableFile);
       assert.equal((await resumed.command({ type: "get_state" })).sessionFile, stableFile);
       assert.deepEqual(rows(await resumed.command({ type: "get_entries" })), before);
+      assert.deepEqual(fileReceipt(first), firstReceipt);
+      assert.deepEqual(fileReceipt(second), secondReceipt);
       await resumed.command({
         type: "compact",
         customInstructions: "Summarize only the synthetic fixture context.",
@@ -341,6 +371,8 @@ describe.skipIf(!existsSync(BIN))("native Pi source input persistence", () => {
       assert.equal((await afterCompaction.command({ type: "get_state" })).sessionFile, stableFile);
       assert.deepEqual(rows(await afterCompaction.command({ type: "get_entries" })), before);
       assert.deepEqual(diskRows(stableFile), before);
+      assert.deepEqual(fileReceipt(first), firstReceipt);
+      assert.deepEqual(fileReceipt(second), secondReceipt);
       await afterCompaction.close();
     } catch (error) {
       failures.push(error);
