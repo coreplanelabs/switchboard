@@ -107,6 +107,7 @@ src/deploy/wranglerTemplate.test.ts	'{ "name": "switchboard", "account_id": "123
 
 # The MCP protocol's own version identifier is a date string.
 src/channels/mcp.test.ts	const res = await handleMcpRequest(rpc("initialize", { protocolVersion: "2025-06-18" }), deps, { auth: good });
+src/channels/mcp.test.ts	const MODERN_PROTOCOL_VERSION = "2026-07-28";
 src/mcp/client.ts	export const MCP_PROTOCOL_VERSION = "2025-06-18";
 
 # The published npm package name is required in the local Codex MCP command and the browser's setup hint.

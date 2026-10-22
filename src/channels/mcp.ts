@@ -53,6 +53,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { type PersonLookup, type Requester } from "./requester.js";
 import { digestBearer, type PersonalTokenStore } from "../mcp/personalTokens.js";
 import { redactAndCap } from "../core/redact.js";
+import { captureException } from "../core/exceptionDiagnostic.js";
 import type { DashboardVerifier } from "./dashboardAuth.js";
 import { callerFor, callerIdFor, originAllowed, type CommandHttpOptions } from "./commandHttp.js";
 import { requesterOf } from "./web.js";
@@ -765,7 +766,13 @@ async function handleMcpMessage(
   return { status: response.status, ...(raw ? { body: JSON.parse(raw) } : {}) };
 }
 
-function sdkHandler(identity: McpIdentity, deps: CoreDeps, options: McpOptions, connectionId: string) {
+function sdkHandler(
+  identity: McpIdentity,
+  deps: CoreDeps,
+  options: McpOptions,
+  connectionId: string,
+  onError?: (error: Error) => void,
+) {
   const makeServer = () => {
     const server = new Server(SERVER_INFO, { capabilities: { tools: {} }, inputRequired: { legacyShim: false } });
     const lookup = options.grantsFor ?? ((actorId: string) => deps.config.grantsFor(actorId));
@@ -791,6 +798,7 @@ function sdkHandler(identity: McpIdentity, deps: CoreDeps, options: McpOptions, 
   const modern = createSdkHandler(makeServer, {
     legacy: "reject",
     maxRequestBodySize: options.maxBodyBytes ?? MAX_BODY_BYTES,
+    onerror: onError,
   });
   return {
     close: modern.close,
@@ -1109,6 +1117,14 @@ export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: Htt
   };
   return (req, res) => {
     void (async () => {
+      const requestId = randomUUID();
+      const startedAt = systemClock();
+      let phase: "authorize" | "body" | "handler" | "close" = "authorize";
+      let operation: "runs_get" | "runs_list" | "other" = "other";
+      let sdkError: Error | undefined;
+      const onSdkError = (error: Error) => {
+        sdkError ??= error;
+      };
       try {
         // Authenticate from headers BEFORE reading the body: an unauthorized/wrong-method/disabled
         // caller is rejected without buffering a body it has no right to send.
@@ -1119,6 +1135,8 @@ export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: Htt
           req.destroy();
           return;
         }
+        res.setHeader?.("x-request-id", requestId);
+        phase = "body";
         const read = await readBody(req, maxBytes);
         if (!read.ok) {
           write(res, 413, err(null, INVALID_REQUEST, "request body too large"));
@@ -1132,6 +1150,10 @@ export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: Htt
           write(res, 200, err(null, PARSE_ERROR, "parse error: invalid JSON"));
           return;
         }
+        const name = (parsed as { method?: unknown; params?: { name?: unknown } })?.params?.name;
+        if ((parsed as { method?: unknown })?.method === "tools/call" && (name === "runs_get" || name === "runs_list"))
+          operation = name;
+        phase = "handler";
         const handler = sdkHandler(
           gate.identity,
           deps,
@@ -1143,16 +1165,41 @@ export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: Htt
             revalidateConnection: gate.revalidateConnection ?? options.revalidateConnection,
           },
           gate.connectionId ?? digestBearer(bearerFrom(req.headers)),
+          onSdkError,
         );
         try {
-          await toNodeHandler(handler)(req, res, parsed);
+          await toNodeHandler(handler, { onerror: onSdkError })(req, res, parsed);
         } finally {
+          phase = "close";
           await handler.close();
         }
+        if (res.statusCode >= 500)
+          console.error(
+            JSON.stringify({
+              event: "mcp.request.failure",
+              requestId,
+              phase: "response",
+              operation,
+              status: res.statusCode,
+              elapsedMs: Math.max(0, systemClock() - startedAt),
+              ...(sdkError ? { exception: captureException(sdkError) } : {}),
+            }),
+          );
       } catch (e) {
         // dispatch() catches its own errors and replies, so reaching here means
         // a transport fault. Answer honestly; never leak internals.
-        console.error(`[mcp] ${e instanceof Error ? e.message : String(e)}`);
+        console.error(
+          JSON.stringify({
+            event: "mcp.request.failure",
+            requestId,
+            phase,
+            operation,
+            status: 500,
+            elapsedMs: Math.max(0, systemClock() - startedAt),
+            exception: captureException(e),
+          }),
+        );
+        if (!res.headersSent) res.setHeader?.("x-request-id", requestId);
         write(res, 500, err(null, INTERNAL_ERROR, "internal error"));
       }
     })();
