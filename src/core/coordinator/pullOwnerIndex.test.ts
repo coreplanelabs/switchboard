@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { analyzeRunFriction } from "../runFriction.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
+import { coordinatorReconciliationEffect } from "./workflowReconciliation.js";
 import type { RunRecord } from "../runRecord.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 
@@ -163,6 +164,60 @@ describe("bounded terminal pull-owner candidates", () => {
     });
     (store as unknown as { units: Map<string, string> }).units.set(`${instance.id}\0${unit.unit}`, "{");
     expect(await store.findPullOwners(target)).toEqual({ ok: false, reason: "incomplete" });
+  });
+  it("keeps the original unit owner despite a corrupt foreign unit", async () => {
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    expect(await store.put(instance)).toEqual({ ok: true });
+    expect(await store.putUnits([unit])).toEqual({ ok: true });
+    const foreign = { ...instance, id: "foreign_instance", repo: "other/api", threadKey: "cli:foreign" };
+    expect(await store.put(foreign)).toEqual({ ok: true });
+    const rows = store as unknown as { units: Map<string, string> };
+    rows.units.set(`${foreign.id}\0BROKEN`, JSON.stringify({ privateText: "secret-fixture" }));
+    expect(await store.findPullOwners({ repo: "acme/api", pr: 8 })).toEqual({
+      ok: true,
+      owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }],
+    });
+    rows.units.set(`${instance.id}\0BROKEN`, JSON.stringify({ privateText: "same-repo-secret" }));
+    expect(await store.findPullOwners({ repo: "acme/api", pr: 8 })).toEqual({ ok: false, reason: "incomplete" });
+  });
+  it("keeps a valid foreign unit needed by a pending report effect", async () => {
+    const ledger = new InMemoryRunLedger();
+    const store = new InMemoryCoordinatorInstanceStore(ledger);
+    expect(await store.put(instance)).toEqual({ ok: true });
+    expect(await store.putUnits([unit])).toEqual({ ok: true });
+    const foreign = {
+      ...instance,
+      id: "foreign_reconcile",
+      repo: "other/api",
+      branch: "fix/foreign",
+      threadKey: "cli:foreign",
+    };
+    const foreignUnit = { ...unit, instanceId: foreign.id, unit: "FOREIGN", branch: foreign.branch, pr: undefined };
+    expect(await store.put(foreign)).toEqual({ ok: true });
+    expect(await store.putUnits([foreignUnit])).toEqual({ ok: true });
+    const effect = await coordinatorReconciliationEffect(foreign, foreignUnit);
+    ledger.planeOffers.set(effect.id, effect);
+    expect(await store.findPullOwners({ repo: instance.repo, pr: 8 })).toEqual({
+      ok: true,
+      owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }],
+    });
+    const next = { ...instance, id: "next_owner", branch: "fix/next", threadKey: "cli:next" };
+    expect(await store.put(next)).toEqual({ ok: true });
+    expect(
+      await store.putUnits([
+        {
+          ...unit,
+          instanceId: next.id,
+          unit: "NEXT",
+          branch: next.branch,
+          pr: { number: 9, url: "https://github.com/acme/api/pull/9" },
+        },
+      ]),
+    ).toEqual({ ok: true });
+    expect(await store.findPullOwners({ repo: instance.repo, pr: 9 })).toEqual({
+      ok: true,
+      owners: [{ kind: "unit", instanceId: next.id, unit: "NEXT" }],
+    });
   });
   it("includes negative terminal candidates referenced by an audit or settlement", async () => {
     const ledger = new InMemoryRunLedger();
