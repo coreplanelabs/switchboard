@@ -12,6 +12,90 @@ import { githubFileTool } from "../../tools/github.js";
 import { sourceHash } from "../references/receipts.js";
 
 describe("current native execution read authority", () => {
+  it.each([
+    {
+      name: "primary limit from remaining zero",
+      headers: { "x-github-request-id": "A1:B2", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1792700000" },
+      message: "Request refused",
+      facts: {
+        rateLimitRemaining: 0,
+        rateLimitResetEpochSeconds: 1792700000,
+        responseReason: "primary-rate-limit-indicated",
+        responseMessage: "Request refused",
+      },
+    },
+    {
+      name: "secondary limit from GitHub message",
+      headers: { "x-github-request-id": "A1:B2", "x-ratelimit-remaining": "0", "retry-after": "120" },
+      message: "You have exceeded a secondary rate limit. Details: https://private.test/path?token=secret",
+      facts: {
+        rateLimitRemaining: 0,
+        retryAfterSeconds: 120,
+        responseReason: "secondary-rate-limit-indicated",
+        responseMessage: "You have exceeded a secondary rate limit. Details: «redacted-url»",
+      },
+    },
+    {
+      name: "generic 429 rate limit",
+      status: 429,
+      headers: { "x-github-request-id": "A1:B2" },
+      message: "Request refused",
+      facts: { responseReason: "rate-limit-indicated", responseMessage: "Request refused" },
+    },
+    {
+      name: "permission refusal from GitHub message",
+      headers: { "x-github-request-id": "A1:B2" },
+      message: "Resource not accessible by integration",
+      facts: { responseReason: "permission-indicated", responseMessage: "Resource not accessible by integration" },
+    },
+    {
+      name: "unknown plain 403",
+      headers: { "x-github-request-id": "A1:B2" },
+      message: "Request refused",
+      facts: { responseMessage: "Request refused" },
+    },
+  ])("retains safe $name evidence without replaying a catalog refusal", async ({ headers, message, facts, status }) => {
+    let requests = 0;
+    const api = new RestGithubApi({
+      token: async () => "read token",
+      fetch: async () => {
+        requests++;
+        return Response.json({ message }, { status: status ?? 403, headers: new Headers(Object.entries(headers)) });
+      },
+    });
+    const result = await currentGithubReadCapability(
+      {
+        version: 2,
+        runId: "run",
+        callId: "call",
+        tool: "github_file",
+        repos: ["acme/private"],
+        resultHash: "a".repeat(64),
+        inputHash: "b".repeat(64),
+        admissionHash: "c".repeat(64),
+      },
+      { repo: "acme/private", path: "private.ts" },
+      { api, canWrite: () => false },
+      "review",
+    );
+    expect(requests).toBe(1);
+    expect(result).toEqual({
+      ok: false,
+      githubAccess: {
+        tool: "github_file",
+        stage: "catalog",
+        operation: "listRepos",
+        reason: "http",
+        route: "installation_repos",
+        httpStatus: status ?? 403,
+        requestId: "A1:B2",
+        sourceCallHash: "9fd6fd2ffd299ff3691b5e216c4778afe73ff2b7e23fb14e138b032cfc0994e0",
+        ...facts,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private.test");
+  });
+
   it.each(["timeout", "transport"] as const)(
     "rechecks current access after one %s GitHub source read",
     async (kind) => {

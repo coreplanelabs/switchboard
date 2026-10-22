@@ -1250,52 +1250,60 @@ export class ExecHarnessContainer implements HarnessContainer {
         logObservation ? "harness_log" : undefined,
       );
     };
-    let rereadCause: "answered-resident" | "exit-137" | undefined;
+    let rereadSignal: "answered" | "worker-unavailable" | "exit-137" | undefined;
     try {
       const result = await send();
       // A container stop can return a normal exit 137 on a log read. The
       // original byte range is an observation, so ask for it once more. The
       // exit code does not identify why the command was killed.
       if (!logObservation || result.exitCode !== 137 || result.truncated) return result;
-      rereadCause = "exit-137";
+      rereadSignal = "exit-137";
     } catch (error) {
       annotateExecutionDiagnostic(error, {
         caller: "harness",
         operation: input.kind === "http" ? (input.observation ? "http_observation" : "http_control") : input.kind,
       });
       // A log read only observes the original path and byte range. Re-read it
-      // once after an answered infrastructure failure; no input is resent.
-      const reread =
-        logObservation && error instanceof ExecInfraError && error.origin === "resident" && error.reason === "answered";
-      if (reread) console.warn("[harness] a log observation is re-read once after an answered resident failure");
-      if (!(error instanceof ExecControlResetError) && !reread) throw error;
-      if (!idempotent) throw new HarnessContainerControlResetError(input.kind, error.message);
-      if (reread) rereadCause = "answered-resident";
+      // once after a closed Resident service failure; no input is resent.
+      let rereadReason: "answered" | "worker-unavailable" | undefined;
+      if (
+        logObservation &&
+        error instanceof ExecInfraError &&
+        error.origin === "resident" &&
+        (error.reason === "answered" || error.reason === "worker-unavailable")
+      )
+        rereadReason = error.reason;
+      if (!(error instanceof ExecControlResetError) && !rereadReason) throw error;
+      if (!idempotent)
+        throw new HarnessContainerControlResetError(input.kind, error instanceof Error ? error.message : String(error));
+      if (rereadReason) rereadSignal = rereadReason;
     }
     const runId = redactAndCap(this.scope?.runId ?? "unknown", 80);
-    if (rereadCause)
+    const rereadFields =
+      rereadSignal === "exit-137" ? { cause: "exit-137" } : rereadSignal ? { reason: rereadSignal } : {};
+    if (rereadSignal)
       console.warn("[harness-log-read]", {
         outcome: "retrying",
         runId,
-        ...(rereadCause === "exit-137" ? { cause: "exit-137" } : {}),
+        ...rereadFields,
       });
     try {
       const result = await send();
-      if (rereadCause) {
+      if (rereadSignal) {
         stdoutOf("read", result);
         console.info("[harness-log-read]", {
           outcome: "recovered",
           runId,
-          ...(rereadCause === "exit-137" ? { cause: "exit-137" } : {}),
+          ...rereadFields,
         });
       }
       return result;
     } catch (again) {
-      if (rereadCause)
+      if (rereadSignal)
         console.warn("[harness-log-read]", {
           outcome: "failed",
           runId,
-          ...(rereadCause === "exit-137" ? { cause: "exit-137" } : {}),
+          ...rereadFields,
         });
       annotateExecutionDiagnostic(again, {
         caller: "harness",

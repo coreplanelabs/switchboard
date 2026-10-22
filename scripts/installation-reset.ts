@@ -27,7 +27,7 @@ import {
 import { ResetCloudflare, resetHostingSettings } from "../src/deploy/resetCloudflare.js";
 import { initializeOnHost } from "./staging-initialize.js";
 import { DEFAULT_SECRETS_DIR } from "../src/deploy/secrets.js";
-import { ResetJournal } from "../src/deploy/resetJournal.js";
+import { ResetJournal, ResetJournalWriteError } from "../src/deploy/resetJournal.js";
 import { prepareResetSecrets } from "../src/deploy/resetSecrets.js";
 import { resetEndpointSettings, type ResetHostingCapture } from "../src/deploy/resetHosting.js";
 
@@ -601,7 +601,10 @@ if (!values.apply) {
   } catch (error) {
     if (recorded) {
       try {
-        await record("held", { failure: error instanceof Error ? error.message : "reset failed" });
+        await record("held", {
+          failure: error instanceof Error ? error.message : "reset failed",
+          ...(error instanceof ResetJournalWriteError ? { journalFailure: error.diagnostic } : {}),
+        });
       } catch (journalError) {
         throw new AggregateError([error, journalError], "Reset is held; the final journal write also failed", {
           cause: journalError,

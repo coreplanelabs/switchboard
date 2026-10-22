@@ -163,6 +163,18 @@ export function audienceCheckAttrs(check: AudienceCheck): SpanAttrs {
           ...(diagnostic.httpStatus !== undefined ? { httpStatus: diagnostic.httpStatus } : {}),
           ...(diagnostic.requestId ? { githubRequestId: diagnostic.requestId } : {}),
           ...(diagnostic.route ? { route: diagnostic.route } : {}),
+          ...(diagnostic.rateLimitRemaining !== undefined
+            ? { githubRateLimitRemaining: diagnostic.rateLimitRemaining }
+            : {}),
+          ...(diagnostic.rateLimitResetEpochSeconds !== undefined
+            ? { githubRateLimitResetEpochSeconds: diagnostic.rateLimitResetEpochSeconds }
+            : {}),
+          ...(diagnostic.rateLimitResource ? { githubRateLimitResource: diagnostic.rateLimitResource } : {}),
+          ...(diagnostic.retryAfterSeconds !== undefined
+            ? { githubRetryAfterSeconds: diagnostic.retryAfterSeconds }
+            : {}),
+          ...(diagnostic.responseReason ? { githubResponseReason: diagnostic.responseReason } : {}),
+          ...(diagnostic.responseMessage ? { githubResponseMessage: diagnostic.responseMessage } : {}),
         }
       : {}),
   };

@@ -10,6 +10,7 @@
     "types": ["@cloudflare/workers-types"],
     "strict": true,
     "noEmit": true,
+    "allowJs": true,
     "skipLibCheck": true,
     // worker.ts imports its own package.json for the @cloudflare/sandbox pin
     // (the version onStart compares the container against); wrangler bundles

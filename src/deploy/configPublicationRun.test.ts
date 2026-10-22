@@ -44,6 +44,7 @@ const processes = vi.hoisted(() => ({
   botCode: 1,
   residentCode: 1,
   botOutput: undefined as string | undefined,
+  tagCommit: undefined as string | undefined,
   residentOutput: undefined as string | undefined,
   wrangler: undefined as
     ((args: string[], env: Record<string, string>) => { output: string; code: number }) | undefined,
@@ -64,7 +65,8 @@ vi.mock("node:child_process", () => ({
       let code = 0;
       if (cmd === "npx" && args[0] === "wrangler" && processes.wrangler) {
         ({ output, code } = processes.wrangler(args, opts.env));
-      } else if (cmd === "git") output = "a".repeat(40);
+      } else if (cmd === "git")
+        output = args[1]?.startsWith("refs/tags/v") ? (processes.tagCommit ?? "a".repeat(40)) : "a".repeat(40);
       else if (args.includes("whoami")) output = TEST_PROFILE.account;
       else if (cmd === "npm" && args.includes("ci")) {
         processes.calls.push("install");
@@ -197,6 +199,7 @@ afterEach(() => {
   processes.botCode = 1;
   processes.residentCode = 1;
   processes.botOutput = undefined;
+  processes.tagCommit = undefined;
   processes.residentOutput = undefined;
   processes.wrangler = undefined;
   processes.onBot = () => {};
@@ -209,6 +212,7 @@ function runner(
   only: WorkerName[] = ["memory", "bot"],
   stateWorker = true,
   retained = false,
+  registry = false,
 ) {
   const dir = mkdtempSync(join(tmpdir(), "config-publication-"));
   dirs.push(dir);
@@ -217,6 +221,7 @@ function runner(
   writeFileSync(source, candidateText);
   const profile: DeploymentProfile = {
     ...TEST_PROFILE,
+    images: registry ? "registry" : "build",
     configSource: source,
     workers: stateWorker ? TEST_PROFILE.workers : { bot: TEST_PROFILE.workers.bot },
   };
@@ -249,7 +254,19 @@ function runner(
     },
     { root: { mode: "checkout", path: dir }, hasNodeModules: () => true },
     { profile, origin: "profile", path: profilePath },
-    { mode: "build" },
+    registry
+      ? {
+          mode: "registry",
+          published: {
+            version: "1.308.0",
+            names: {
+              bot: "ghcr.io/acme/switchboard",
+              resident: "ghcr.io/acme/switchboard-resident",
+              sandbox: "ghcr.io/acme/switchboard-sandbox",
+            },
+          },
+        }
+      : { mode: "build" },
   );
   plan.checks.cleanTree = false;
   const logs: string[] = [];
@@ -399,6 +416,53 @@ describe("config publication inputs", () => {
 });
 
 describe("runDeployPlan config publication", () => {
+  it.each([
+    [
+      "was built from another commit",
+      "b".repeat(40),
+      "Bot image 1.308.0 belongs to bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, but checkout is aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; build this checkout's image or deploy its matching release",
+    ],
+    [
+      "has no available release tag",
+      "",
+      "Bot image 1.308.0 has no verified release commit; build this checkout's image or deploy its matching release",
+    ],
+  ])("refuses a checkout whose selected release Bot image %s", async (_case, imageCommit, problem) => {
+    const store = stateStore();
+    const h = runner(store, ["memory", "bot"], true, false, true);
+    processes.tagCommit = imageCommit;
+    for (const step of h.plan.steps) {
+      step.requiredEnv = [];
+      step.capabilities = [];
+    }
+
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toEqual({
+      kind: "refused",
+      problems: [problem],
+    });
+    expect(store.calls).toEqual([]);
+    expect(processes.calls).toEqual([]);
+  });
+
+  it("publishes config for a checkout on the selected Bot image's release commit", async () => {
+    const store = stateStore();
+    const h = runner(store, ["memory", "bot"], true, false, true);
+    for (const step of h.plan.steps) {
+      step.requiredEnv = [];
+      step.capabilities = [];
+    }
+
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({
+      kind: "ran",
+      results: [
+        { name: "memory", status: "deployed" },
+        { name: "bot", status: "FAILED: upload failed" },
+      ],
+    });
+    expect(store.slotState.document?.yaml).toBe(candidateText);
+    expect(processes.calls).toEqual(["upload:memory", "upload:bot"]);
+  });
+
   it.each(["opaque", "recoverable"])("refuses a closed %s Resident hold before uploading Memory", async (kind) => {
     const store = stateStore();
     const h = runner(store, ["memory", "resident", "bot"]);

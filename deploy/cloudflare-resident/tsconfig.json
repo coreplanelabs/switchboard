@@ -13,6 +13,7 @@
     "types": ["@cloudflare/workers-types"],
     "strict": true,
     "noEmit": true,
+    "allowJs": true,
     "skipLibCheck": true
   },
   "include": ["worker.ts", "refresh.ts", "shared.ts", "threadErr.ts", "node-async-hooks.d.ts"]
