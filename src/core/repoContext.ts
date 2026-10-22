@@ -102,6 +102,18 @@ export interface PrFacts {
 /** The most body `RepoContext.prDescription` carries — GitHub's PR body limit. */
 export const PR_BODY_CAP = 65_536;
 
+export interface PrHeadFailure {
+  code:
+    | "credential_unavailable"
+    | "credential_failed"
+    | "http_failed"
+    | "invalid_response"
+    | "timeout"
+    | "transport_failed"
+    | "head_unknown";
+  httpStatus?: number;
+}
+
 /** What the thread's run records say, beside what its text says
  *  (docs/reference/specs/resident-repos.md item 29): the pull request the
  *  thread's newest finished run opened or edited (`RunRecord.pr`, handed in by
@@ -167,6 +179,8 @@ export function operationTargetOf(raw: unknown): OperationTarget | undefined {
 
 export interface RepoContext {
   repo?: string;
+  /** Safe lookup result retained with a refused PR review; no provider body or credential. */
+  prHeadFailure?: PrHeadFailure;
   /** Native read snapshot for later source matching; never cached authority. */
   githubSource?: GithubPullSourceContext;
   ref?: string;
@@ -1015,8 +1029,14 @@ export async function resolveRepoContext(
     if (!admitted) return { rejectedRepo: repo };
     const head = await prHead({ repo, number: prTarget.number }).catch(() => undefined);
     const matchesRef = ref === undefined || (head?.state === "open" && head.ref === ref);
-    if (!matchesRef) return { repo, ...(ref !== undefined ? { ref } : {}) };
+    if (!matchesRef)
+      return {
+        repo,
+        ...(ref !== undefined ? { ref } : {}),
+        ...(reviewBarePr && head?.failure ? { prHeadFailure: head.failure } : {}),
+      };
     const out: RepoContext = { repo, pr: prTarget.number };
+    if (reviewBarePr && head?.failure) out.prHeadFailure = head.failure;
     if (prTarget.source === "request") out.prFromMessage = true;
     if (isThreadOwnPr(records, repo, prTarget.number)) out.prIsThreadOwn = true;
     if (ref !== undefined) out.ref = ref;
@@ -1241,6 +1261,7 @@ export async function resolveRepoContext(
   // resident's worktree stale and the post refused. It now binds nothing; the
   // PR head is the ref when fetched, and a failed fetch stays repo-only.
   let headSha: string | undefined;
+  let headFailure: PrHeadFailure | undefined;
   let baseRef: string | undefined;
   let baseSha: string | undefined;
   let prSize: PrSize | undefined;
@@ -1266,6 +1287,7 @@ export async function resolveRepoContext(
       refFromPr = true;
     }
     headSha = head?.sha;
+    headFailure = head?.failure;
     baseRef = operationTarget?.ref === undefined || operationTarget.ref === head?.ref ? head?.base : undefined;
     baseSha = head?.baseSha;
     prSize = head?.size;
@@ -1299,6 +1321,7 @@ export async function resolveRepoContext(
   if (repo && namedPr && repo === namedPr.repo && namedPrMatchesOperation) {
     out.pr = namedPr.number;
     out.prFromMessage = true;
+    if (reviewBarePr && headSha === undefined && headFailure !== undefined) out.prHeadFailure = headFailure;
     // The message names the pull request the thread's own run opened or edited
     // (the run record's `pr`): the reference is the thread's own work, not a
     // stranger's PR cited as evidence, and ship's entry checks must not treat
@@ -1344,6 +1367,7 @@ export async function resolveRepoContext(
         }
       } else {
         out.prUnpostable = { number: inherited.number, reason: head.reason };
+        if (reviewBarePr && head.reason === "unreachable" && head.failure) out.prHeadFailure = head.failure;
         if (head.reason === "closed")
           out.closedPr = {
             number: inherited.number,
@@ -1466,7 +1490,7 @@ async function openPrHeadSha(pr: { repo: string; number: number }): Promise<
       githubSource?: GithubPullSourceContext;
     }
   | { reason: "closed"; sha?: string; ref?: string; merged: boolean; mergedAt?: string }
-  | { reason: "unreachable" }
+  | { reason: "unreachable"; failure?: PrHeadFailure }
 > {
   const head = await prHead(pr).catch(() => undefined);
   if (head?.state === "closed") {
@@ -1489,7 +1513,7 @@ async function openPrHeadSha(pr: { repo: string; number: number }): Promise<
       ...(head.githubSource ? { githubSource: head.githubSource } : {}),
     };
   }
-  return { reason: "unreachable" };
+  return { reason: "unreachable", ...(head?.failure ? { failure: head.failure } : {}) };
 }
 
 export type FetchPrBase = (pr: {
@@ -1593,6 +1617,7 @@ async function prHead(
       mergedAt?: string;
       facts?: PrFacts;
       githubSource?: GithubPullSourceContext;
+      failure?: PrHeadFailure;
     }
   | undefined
 > {
@@ -1604,20 +1629,21 @@ async function prHead(
     const http = error instanceof GithubApiError;
     const decode = error instanceof SyntaxError;
     const timeout = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+    const code: PrHeadFailure["code"] = credential
+      ? error.reason === "missing"
+        ? "credential_unavailable"
+        : "credential_failed"
+      : http
+        ? "http_failed"
+        : decode
+          ? "invalid_response"
+          : timeout
+            ? "timeout"
+            : "transport_failed";
     const diagnostic = {
       event: "github.pr_head.failure",
       stage: credential ? "credential" : decode ? "decode" : "read",
-      code: credential
-        ? error.reason === "missing"
-          ? "credential_unavailable"
-          : "credential_failed"
-        : http
-          ? "http_failed"
-          : decode
-            ? "invalid_response"
-            : timeout
-              ? "timeout"
-              : "transport_failed",
+      code,
       ...(http && (!credential || error.reason === "missing") ? { httpStatus: error.status } : {}),
       ...(error instanceof GithubResponseDecodeError ? { httpStatus: error.httpStatus } : {}),
       ...((http || error instanceof GithubResponseDecodeError) && error.requestId
@@ -1638,7 +1664,13 @@ async function prHead(
         ...(diagnostic.requestId ? { githubRequestId: diagnostic.requestId } : {}),
       });
     }
-    return undefined;
+    return {
+      merged: false,
+      failure: {
+        code,
+        ...(diagnostic.httpStatus === undefined ? {} : { httpStatus: diagnostic.httpStatus }),
+      },
+    };
   }
   const facts =
     data.headFacts?.title !== undefined ? prFacts(data.headFacts.title, data.headFacts.body ?? "") : undefined;
@@ -1687,6 +1719,7 @@ async function prHead(
     ...(mergedAt !== undefined ? { mergedAt } : {}),
     ...(facts ? { facts } : {}),
     ...(githubSource ? { githubSource } : {}),
+    ...(sha === undefined ? { failure: { code: "head_unknown" as const } } : {}),
   };
 }
 

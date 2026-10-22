@@ -242,6 +242,19 @@ describe("checkPrHeadPreflight (explicit AgentDef, before any model call)", () =
     if (!r.ok) expect(r.where).toBe("acme/api#7");
   });
 
+  it("a refused PR lookup names the safe HTTP result without its response body", () => {
+    const r = checkPrHeadPreflight({
+      agent: AGENTS.review,
+      requestText: "review https://github.com/acme/api/pull/42",
+      repoCtx: { repo: "acme/api", pr: 42, prHeadFailure: { code: "http_failed", httpStatus: 403 } },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok)
+      expect(r.reply).toBe(
+        "🔀 I couldn't verify the current version of acme/api#42, so the review did not start and nothing was posted to GitHub. GitHub returned HTTP 403. A Switchboard operator can check the GitHub lookup.",
+      );
+  });
+
   it("a resolved head, a slack-only opt-out, or a non-review AgentDef all pass", () => {
     expect(
       checkPrHeadPreflight({

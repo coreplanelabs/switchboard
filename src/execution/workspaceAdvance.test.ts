@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalExecutor } from "./executor.js";
@@ -35,7 +36,7 @@ async function repository() {
   expect((await executor.execResult("git add . && git commit -m after && git push origin HEAD:main")).exitCode).toBe(0);
   const target = (await executor.execResult("git rev-parse HEAD")).stdout.trim();
   expect((await executor.execResult(`git reset --hard ${old}`)).exitCode).toBe(0);
-  return { executor, old, target };
+  return { executor, old, target, root };
 }
 describe("executor workspace advance", () => {
   it("identifies the failed command stage, exit status and redacted output", async () => {
@@ -135,6 +136,31 @@ describe("review base preparation", () => {
         },
       ),
     ).rejects.toThrow("review base: Git credential unavailable");
+    expect((await w.executor.execResult("git rev-parse HEAD")).stdout.trim()).toBe(w.old);
+  });
+
+  it("reports a local ref update failure without exposing Git's raw error", async () => {
+    const w = await repository();
+    const bin = join(w.root, "bin");
+    mkdirSync(bin);
+    const git = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\ncase " $* " in\n  *" fetch "*) printf 'fatal: cannot lock ref password=private-value\\n' >&2; exit 128 ;;\nesac\nexec ${shellQuote(git)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const error = await prepareReviewBase(
+      (command, opts) =>
+        w.executor.execResult(command, {
+          ...opts,
+          env: { GH_ENTERPRISE_TOKEN: "test-token", PATH: `${bin}:${process.env.PATH}` },
+        }),
+      w.old,
+      "main",
+      { baseRef: "main", baseSha: w.target },
+    ).catch((cause: unknown) => cause);
+    expect(String(error)).toContain("base fetch failed (local ref update)");
+    expect(String(error)).not.toContain("private-value");
     expect((await w.executor.execResult("git rev-parse HEAD")).stdout.trim()).toBe(w.old);
   });
 });
