@@ -243,7 +243,7 @@ interface ScenarioReceipt {
   };
   evidence?: { identityVerified: boolean; record: unknown; unverifiedObservation?: unknown };
   failedChecks?: string[];
-  readRetry?: Pick<SmokeObservationError, "code" | "operation">;
+  readRetry?: Pick<SmokeObservationError, "code" | "operation" | "http">;
   observationError?: SmokeObservationError;
   intake?: SmokeIntakeReceipt;
 }
@@ -253,7 +253,7 @@ interface SmokeObservationError {
   operation?: "runs_list" | "runs_get";
   rpcCode?: number;
   fields?: Array<{ path: string; code: string }>;
-  http?: { status: number; authChallenge: boolean };
+  http?: { status: number; authChallenge: boolean; requestId?: string; rayId?: string };
 }
 
 export class SmokeReaderError extends Error {
@@ -405,6 +405,7 @@ export function smokeProgress(receipt: AgentSmokeReceipt) {
     ...(row.runId ? { runId: safeId(row.runId) } : {}),
     ...(row.receiptId ? { receiptId: safeId(row.receiptId) } : {}),
     ...(row.refusal ? { refusal: row.refusal } : {}),
+    ...(row.readRetry ? { readRetry: row.readRetry } : {}),
     ...(row.observationError
       ? {
           observationError: {
@@ -665,18 +666,25 @@ export async function runAgentSmoke(input: {
         originalRecord = await input.transport.readRun(response.run.id, retainRun);
       } catch (error) {
         const observation = error instanceof SmokeReaderError ? error.observation : null;
-        if (
-          source !== "http" ||
-          !known.success ||
-          known.data.status !== "accepted" ||
-          !observation ||
-          !["runs_list", "runs_get"].includes(observation.operation ?? "") ||
-          !["mcp_transport_failed", "mcp_timeout"].includes(observation.code)
-        )
-          throw error;
+        const retryableRead =
+          (source === "http" &&
+            observation &&
+            ["runs_list", "runs_get"].includes(observation.operation ?? "") &&
+            ["mcp_transport_failed", "mcp_timeout"].includes(observation.code)) ||
+          (source === "mcp" &&
+            observation?.operation === "runs_get" &&
+            observation.code === "mcp_http_failed" &&
+            observation.http !== undefined &&
+            observation.http.status >= 500 &&
+            observation.http.status < 600);
+        if (!known.success || known.data.status !== "accepted" || !retryableRead || !observation) throw error;
         // The admission may already be running. Retry only this read of its
         // original ID; never send a second request or extend its deadline.
-        row.readRetry = { code: observation.code, operation: observation.operation };
+        row.readRetry = {
+          code: observation.code,
+          operation: observation.operation,
+          ...(observation.http ? { http: observation.http } : {}),
+        };
         await save();
         await new Promise((resolve) => setTimeout(resolve, SECOND_MS));
         originalRecord = await input.transport.readRun(response.run.id, retainRun);
@@ -979,9 +987,20 @@ export function agentSmokeTransport(input: {
     fetch: async (url, init) => {
       if (url !== mcpUrl) throw new Error("mcp_destination_refused");
       const response = await fetch(url, { ...init, redirect: "manual" });
-      // Only closed facts are retained. Bodies, challenge values and headers
-      // can contain credentials or untrusted prose and never enter the receipt.
-      http = { status: response.status, authChallenge: response.headers.has("www-authenticate") };
+      // Only validated correlation IDs leave headers. Bodies and challenge
+      // values can contain credentials or untrusted prose.
+      const requestId = response.headers.get("x-request-id");
+      const rayId = response.headers.get("cf-ray");
+      http = {
+        status: response.status,
+        authChallenge: response.headers.has("www-authenticate"),
+        ...(requestId &&
+        (/^[a-f0-9]{32}$/.test(requestId) ||
+          /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(requestId))
+          ? { requestId }
+          : {}),
+        ...(rayId && /^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(rayId) ? { rayId } : {}),
+      };
       return response;
     },
   });

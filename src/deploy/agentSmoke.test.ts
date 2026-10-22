@@ -115,6 +115,58 @@ describe("bounded agent smoke", () => {
     expect(transport.request).toHaveBeenCalledTimes(3);
   });
 
+  it("finishes the original MCP Review after one HTTP 500 read", async () => {
+    const { transport } = fixture();
+    const request = transport.request;
+    transport.request = vi.fn(async (scenario, thread, onIntake) => {
+      const response = (await request(scenario, thread, onIntake)) as { run: { id: string }; build: unknown };
+      const source = scenario.transport ?? "http";
+      return {
+        ...response,
+        threadKey: `${source}:smoke:${thread}`,
+        run: { id: response.run.id, status: "started" },
+        admission: { status: "accepted", receiptId: `receipt-${scenario.id}`, runId: response.run.id },
+      };
+    });
+    const readRun = transport.readRun;
+    let failed = false;
+    transport.readRun = async (id, onRecord) => {
+      if (id === "run-review" && !failed) {
+        failed = true;
+        throw new SmokeReaderError({
+          code: "mcp_http_failed",
+          operation: "runs_get",
+          http: { status: 500, authChallenge: false, requestId: "e".repeat(32), rayId: `${"f".repeat(16)}-SFO` },
+        });
+      }
+      return readRun(id, onRecord);
+    };
+
+    const receipt = await runAgentSmoke({
+      config: {
+        ...config,
+        model: "openai/gpt-6.1-sol",
+        review: { ...config.review, transport: "mcp", effort: "high" },
+      },
+      expectedCommit: commit,
+      thread: "release-1",
+      transport,
+    });
+
+    expect(receipt.capabilityOutcome).toBe("passed");
+    expect(receipt.scenarios[2]).toMatchObject({
+      id: "review",
+      runId: "run-review",
+      outcome: "passed",
+      readRetry: {
+        code: "mcp_http_failed",
+        operation: "runs_get",
+        http: { status: 500, authChallenge: false, requestId: "e".repeat(32), rayId: `${"f".repeat(16)}-SFO` },
+      },
+    });
+    expect(transport.request).toHaveBeenCalledTimes(3);
+  });
+
   it("keeps a denied run read incomplete without another request", async () => {
     const { transport } = fixture();
     const request = transport.request;
@@ -331,6 +383,12 @@ describe("bounded agent smoke", () => {
     });
     row.receiptId = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     expect(smokeProgress(receipt)?.receiptId).toBe("«redacted-github-token»");
+    row.readRetry = {
+      code: "mcp_http_failed",
+      operation: "runs_get",
+      http: { status: 500, authChallenge: false, requestId: "a".repeat(32) },
+    };
+    expect(smokeProgress(receipt)?.readRetry).toEqual(row.readRetry);
     row.observationError = {
       code: "record_invalid",
       operation: "runs_get",
@@ -2000,6 +2058,36 @@ describe("bounded agent smoke", () => {
 });
 
 describe("machine MCP reader authentication", () => {
+  it("retains safe request correlation for an MCP HTTP 500 without its body", async () => {
+    const requestId = "c".repeat(32);
+    const rayId = `${"d".repeat(16)}-SFO`;
+    const transport = agentSmokeTransport({
+      origin: "https://bot.example.test",
+      healthUrl: "https://bot.example.test/healthz",
+      token: "fixture-only",
+      config,
+      fetch: async (url) =>
+        String(url).endsWith("/healthz")
+          ? Response.json({ ok: true, build: { commit } })
+          : new Response("Authorization: Bearer private-secret-value", {
+              status: 500,
+              headers: { "x-request-id": requestId, "cf-ray": rayId, "x-private": "private-header-value" },
+            }),
+    });
+
+    const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+    expect(receipt.scenarios[0]).toMatchObject({
+      outcome: "incomplete",
+      reason: "reader_unproven",
+      observationError: {
+        code: "mcp_http_failed",
+        operation: "runs_list",
+        http: { status: 500, authChallenge: false, requestId, rayId },
+      },
+    });
+    expect(JSON.stringify(receipt)).not.toMatch(/private-secret-value|private-header-value/);
+  });
+
   it.each([
     [true, "mcp_auth_required"],
     [false, "mcp_http_failed"],

@@ -1,4 +1,9 @@
-import { DEFAULT_NEGOTIATED_PROTOCOL_VERSION } from "@modelcontextprotocol/server";
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  PROTOCOL_VERSION_META_KEY,
+  Server,
+  DEFAULT_NEGOTIATED_PROTOCOL_VERSION,
+} from "@modelcontextprotocol/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders } from "node:http";
 import { readFileSync } from "node:fs";
@@ -61,6 +66,7 @@ const authConfig = (tokens: Record<string, IngressIdentity>): IngressConfig => {
 };
 const bearer = (token: string): IncomingHttpHeaders => ({ authorization: `Bearer ${token}` });
 const good = authConfig({ tok: { subject: "alice" } });
+const MODERN_PROTOCOL_VERSION = "2026-07-28";
 // `scoped` re-grants the same subject; every test starts from `good`'s dispatch-only alice.
 beforeEach(() => grant("alice", ["dispatch"]));
 
@@ -792,9 +798,16 @@ describe("createMcpHandler (node:http wrapper)", () => {
     });
     let statusCode = 0;
     let payload = "";
+    const responseHeaders: Record<string, string> = {};
     const res = {
-      writeHead: (code: number) => {
+      statusCode,
+      setHeader: (name: string, value: string) => {
+        responseHeaders[name.toLowerCase()] = value;
+      },
+      writeHead: (code: number, headers?: Record<string, string>) => {
         statusCode = code;
+        res.statusCode = code;
+        for (const [name, value] of Object.entries(headers ?? {})) responseHeaders[name.toLowerCase()] = value;
       },
       on: () => {},
       write: (chunk: string | Uint8Array) => {
@@ -809,6 +822,7 @@ describe("createMcpHandler (node:http wrapper)", () => {
       req: req as unknown as Parameters<ReturnType<typeof createMcpHandler>>[0],
       res: res as unknown as Parameters<ReturnType<typeof createMcpHandler>>[1],
       status: () => statusCode,
+      headers: () => responseHeaders,
       raw: () => payload,
       json: () =>
         JSON.parse(
@@ -841,6 +855,110 @@ describe("createMcpHandler (node:http wrapper)", () => {
     await vi.waitFor(() => expect(t.status()).toBe(200));
     expect(t.json().result).toEqual({ content: [{ type: "text", text: "wrapped" }] });
     expect(d.calls[0].msg.userId).toBe("mcp:alice");
+  });
+
+  it("reports a failed MCP request with a matching request ID and safe exception", async () => {
+    const inboundTraceId = "a".repeat(32);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const t = fakeReqRes(
+        "POST",
+        { ...bearer("tok"), traceparent: `00-${inboundTraceId}-${"b".repeat(16)}-01` },
+        JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "runs_get" } }),
+        () => {
+          throw new Error("Authorization: Bearer private-secret-value");
+        },
+      );
+      createMcpHandler(deps, { auth: good })(t.req, t.res);
+      await vi.waitFor(() => expect(t.status()).toBe(500));
+      const requestId = t.headers()["x-request-id"];
+      expect(requestId).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/);
+      expect(requestId).not.toBe(inboundTraceId);
+      expect(t.json().error).toEqual({ code: -32603, message: "internal error" });
+      const event = JSON.parse(String(log.mock.calls.at(-1)?.[0]));
+      expect(event).toMatchObject({
+        event: "mcp.request.failure",
+        requestId,
+        phase: "body",
+        status: 500,
+        exception: { name: "Error", message: "Authorization: Bearer «redacted»" },
+      });
+      expect(JSON.stringify(event)).not.toContain("private-secret-value");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("reports one correlated exception when the MCP adapter returns HTTP 500", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const t = fakeReqRes(
+        "POST",
+        { ...bearer("tok"), host: "[" },
+        JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "runs_get" } }),
+      );
+      createMcpHandler(deps, { auth: good })(t.req, t.res);
+      await vi.waitFor(() => expect(t.status()).toBe(500));
+
+      expect(t.json().error).toMatchObject({ code: -32603 });
+      const events = log.mock.calls.map(([line]) => JSON.parse(String(line)));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: "mcp.request.failure",
+        requestId: t.headers()["x-request-id"],
+        phase: "response",
+        operation: "runs_get",
+        status: 500,
+        exception: { name: "TypeError" },
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("reports one redacted exception when the MCP server returns HTTP 500", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const server = vi.spyOn(Server.prototype, "setRequestHandler").mockImplementationOnce(() => {
+      throw new Error("Authorization: Bearer private-secret-value");
+    });
+    try {
+      const t = fakeReqRes(
+        "POST",
+        {
+          ...bearer("tok"),
+          "mcp-protocol-version": MODERN_PROTOCOL_VERSION,
+          "mcp-method": "tools/call",
+          "mcp-name": "runs_get",
+        },
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 9,
+          method: "tools/call",
+          params: {
+            name: "runs_get",
+            _meta: { [PROTOCOL_VERSION_META_KEY]: MODERN_PROTOCOL_VERSION, [CLIENT_CAPABILITIES_META_KEY]: {} },
+          },
+        }),
+      );
+      createMcpHandler(deps, { auth: good })(t.req, t.res);
+      await vi.waitFor(() => expect(t.status()).toBe(500));
+
+      expect(t.json().error).toMatchObject({ code: -32603 });
+      expect(t.raw()).not.toContain("private-secret-value");
+      const events = log.mock.calls.map(([line]) => JSON.parse(String(line)));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: "mcp.request.failure",
+        requestId: t.headers()["x-request-id"],
+        phase: "response",
+        operation: "runs_get",
+        status: 500,
+        exception: { name: "Error", message: "Authorization: Bearer «redacted»" },
+      });
+    } finally {
+      server.mockRestore();
+      log.mockRestore();
+    }
   });
 
   it("authenticates SSO before body read and dispatches with the browser account", async () => {
