@@ -230,6 +230,36 @@ describe("check-lockfile resolutionProblems", () => {
     expect(resolutionProblems(lock, { dependencies: { vite: "^6.4.4" }, overrides: { vite: "$vite" } })).toEqual([]);
   });
 
+  it("checks a version-qualified owner's descendant against its override", () => {
+    const packages = {
+      "": { dependencies: { owner: "^1.0.0" } },
+      "node_modules/owner": pinned("1.0.0", { dependencies: { target: "^1.0.0" } }),
+      "node_modules/target": pinned("1.0.0"),
+    };
+    const manifest = { overrides: { "owner@1.0.0": { target: "^2.0.0" } } };
+
+    expect(resolutionProblems({ packages }, manifest)).toEqual([
+      {
+        kind: "unsatisfied",
+        from: "node_modules/owner",
+        field: "dependencies",
+        name: "target",
+        spec: "^2.0.0",
+        at: "node_modules/target",
+        version: "1.0.0",
+      },
+    ]);
+    expect(resolutionProblems({ packages: { ...packages, "node_modules/target": pinned("2.0.0") } }, manifest)).toEqual(
+      [],
+    );
+    expect(
+      resolutionProblems(
+        { packages: { ...packages, "node_modules/owner": pinned("1.1.0", { dependencies: { target: "^1.0.0" } }) } },
+        manifest,
+      ),
+    ).toEqual([]);
+  });
+
   it.each(["node_modules/bridge", "node_modules/vitepress/node_modules/bridge"])(
     "applies scoped overrides to descendants through %s without changing unrelated branches",
     (bridge) => {
