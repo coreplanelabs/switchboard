@@ -4179,7 +4179,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               const current = ctx.currentNativeMediaContext?.();
               return !!(current?.version === 3 || current?.nativeMediaSources?.length);
             },
-            confirmedFollowUps: (inputs) => mainSources.accept(inputs),
+            confirmedFollowUps: (inputs) => {
+              ledgerRun?.confirmInboxInputs(inputs);
+              mainSources.accept(inputs.filter((input) => input.userId !== PLANE_ACTOR_ID));
+            },
             onEvent,
             onProgress,
             // The provider park's capability (model-proxy item 12a; record

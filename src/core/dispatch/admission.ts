@@ -59,6 +59,9 @@ import { replyAck, replyOutcome, REFUSAL_SENTENCES } from "./reply.js";
 import { RESTART_CLAIM_GRACE_MS } from "../budgets.js";
 import type { RunStore } from "../runStore.js";
 import { cancellationOf, cancellationRecordMatches } from "../runLedger/cancellation.js";
+import { sourceHash } from "../references/receipts.js";
+import { sourceSnapshot } from "../runLedger/sourceEvents.js";
+import { inboxCustodyOf } from "../runLedger/inboxMessage.js";
 
 /** What thread admission reads off the dispatcher's dependencies. `CoreDeps`
  *  extends this; a caller's shape is unchanged. */
@@ -229,6 +232,33 @@ export function followUpFromInbox(
   if (!restored) return undefined;
   const { msg, at, from } = restored;
   return followUpOf(msg, msg.text, at, { ledgerSeq: item.seq, ...(from ? { from } : { io }) });
+}
+
+/** Capture before delivery. Missing or changed row proof cannot be replaced
+ * with a witness read after the native input was accepted. */
+async function witnessedFollowUp(
+  input: DispatchFollowUp,
+  runId: string,
+  item: InboxItem | undefined,
+  expected?: Record<string, unknown>,
+): Promise<DispatchFollowUp> {
+  if (!item || item.seq !== input.ledgerSeq || item.message.kind === "source-evidence") return input;
+  const original = structuredClone(item.message);
+  const custody = inboxCustodyOf(original.target);
+  if (original.target !== undefined && custody?.runId !== runId) return input;
+  const { target: _target, ...payload } = original;
+  if (expected && JSON.stringify(sourceSnapshot(payload)) !== JSON.stringify(sourceSnapshot(expected))) return input;
+  return { ...input, ledgerWitness: { version: 1, runId, seq: item.seq, digest: await sourceHash(original) } };
+}
+
+async function pushedFollowUp(
+  ledger: Partial<Pick<LedgerWriteThrough, "readInbox">>,
+  runId: string | undefined,
+  input: DispatchFollowUp,
+): Promise<DispatchFollowUp> {
+  if (runId === undefined || input.ledgerSeq === undefined || !ledger.readInbox) return input;
+  const original = (await ledger.readInbox(runId, input.ledgerSeq - 1)).find((item) => item.seq === input.ledgerSeq);
+  return witnessedFollowUp(input, runId, original, durableInboxMessage(input.msg, input.text, input.at, input.from));
 }
 
 /** Close a restart's row this dispatch will never run (item 42): the thread
@@ -668,6 +698,15 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
     const ledgerSeq = !beforeReservation
       ? await deps.runLedger.pushInbox(claim.live.runId!, durableInboxMessage(msg, directives.text, at))
       : undefined;
+    const input = await pushedFollowUp(
+      deps.runLedger,
+      claim.live.runId,
+      followUpOf(msg, directives.text, at, {
+        io,
+        ledgerSeq,
+        ...(beforeReservation ? { beforeReservation: true } : {}),
+      }),
+    );
     if (admission.get(msg.threadKey) !== claim.live) {
       // The run finished and released the thread during the round trip: an
       // item pushed now would sit on a dead slot (and its durable copy went
@@ -676,13 +715,7 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
       console.log(`[dispatch] ${msg.threadKey} the run finished during the steer — running the follow-up fresh`);
       return { kind: "redispatch" };
     }
-    claim.live.inbox.push(
-      followUpOf(msg, directives.text, at, {
-        io,
-        ledgerSeq,
-        ...(beforeReservation ? { beforeReservation: true } : {}),
-      }),
-    );
+    claim.live.inbox.push(input);
     console.log(
       `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
@@ -789,8 +822,14 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
       // adopt-time re-read ran before this push landed, or after — either
       // way the inbox folds one seq in once): hand the item to it as well.
       const nowLive = admission.get(msg.threadKey);
-      if (nowLive && nowLive.runId === elsewhere.runId)
-        nowLive.inbox.push(followUpOf(msg, directives.text, now, { io, ledgerSeq: seq }));
+      if (nowLive && nowLive.runId === elsewhere.runId) {
+        const input = await pushedFollowUp(
+          deps.runLedger,
+          elsewhere.runId,
+          followUpOf(msg, directives.text, now, { io, ledgerSeq: seq }),
+        );
+        if (admission.get(msg.threadKey) === nowLive) nowLive.inbox.push(input);
+      }
       console.log(
         `[dispatch] ${msg.threadKey} follow-up steered into run ${elsewhere.runId} live on another generation (durable seq ${seq}${nowLive ? ", now live here" : ""})`,
       );
@@ -884,7 +923,8 @@ export type SteerOutcome =
 export async function steerRun(
   deps: {
     config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
-    runLedger: Pick<LedgerWriteThrough, "pushInbox"> & Partial<Pick<LedgerWriteThrough, "sessionPersistence">>;
+    runLedger: Pick<LedgerWriteThrough, "pushInbox"> &
+      Partial<Pick<LedgerWriteThrough, "sessionPersistence" | "readInbox">>;
     clock?: Clock;
     admission: Pick<ThreadAdmission<DispatchFollowUp>, "get">;
   },
@@ -936,7 +976,14 @@ export async function steerRun(
   if (ledgerSeq === undefined && (deps.runLedger.sessionPersistence !== false || live?.runId !== target.runId))
     return { kind: "not_live" };
   if (live && live.runId === target.runId) {
-    live.inbox.push(followUpOf(msg, text, at, { ledgerSeq, ...(sender.from ? { from: sender.from } : {}) }));
+    const input = await pushedFollowUp(
+      deps.runLedger,
+      target.runId,
+      followUpOf(msg, text, at, { ledgerSeq, ...(sender.from ? { from: sender.from } : {}) }),
+    );
+    if (deps.admission.get(target.threadKey) !== live)
+      return ledgerSeq === undefined ? { kind: "not_live" } : { kind: "steered", where: "elsewhere", at, ledgerSeq };
+    live.inbox.push(input);
     console.log(
       `[steer] ${sender.from ? `the run ${sender.from.runId}` : sender.userId} → the ${target.agent} run ${target.runId} in ${target.threadKey} (${live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
@@ -994,7 +1041,8 @@ export const STEER_OWNER_REFUSED =
  */
 export function createSteerSender(deps: {
   config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
-  runLedger: Pick<LedgerWriteThrough, "pushInbox"> & Partial<Pick<LedgerWriteThrough, "sessionPersistence">>;
+  runLedger: Pick<LedgerWriteThrough, "pushInbox"> &
+    Partial<Pick<LedgerWriteThrough, "sessionPersistence" | "readInbox">>;
   /** The run the id names, as the process knows it (the registry's live row). */
   runs: { getById(id: string): SteerableRun | null | Promise<SteerableRun | null> };
   admission: Pick<ThreadAdmission<DispatchFollowUp>, "get">;
@@ -1198,7 +1246,7 @@ export async function foldCarriedInbox(
         );
         continue;
       }
-      admitted.inbox.push(followUp);
+      admitted.inbox.push(await witnessedFollowUp(followUp, carriedRow.runId, item));
       folded++;
     }
     if (folded > 0)

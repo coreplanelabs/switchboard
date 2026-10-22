@@ -109,6 +109,9 @@ import type { ToolContext } from "../../src/tools/runnableTool.ts";
 import { InMemoryGithubApi } from "../../src/execution/githubApi.ts";
 import { mergeContextDependencies } from "../../src/core/references/contextDependencies.ts";
 import { sourceSeedOriginalKey } from "../../src/core/runLedger/seedVerification.ts";
+import { checkpointPiSourceInput } from "../../src/core/harness/pi/sourceInputCheckpoint.ts";
+import { createHash } from "node:crypto";
+import { readSourceInputProof } from "../../src/core/references/sourceInputProof.ts";
 
 const unreadOrigin = {
   version: 1 as const,
@@ -21860,7 +21863,7 @@ describe("write trace failure propagation", () => {
 });
 
 describe("canonical native input checkpoint in SQLite", () => {
-  async function fixture() {
+  async function fixture(renderedText?: string) {
     const key = storeKey();
     const options = {
       baseUrl: BASE,
@@ -21870,13 +21873,143 @@ describe("canonical native input checkpoint in SQLite", () => {
     };
     const ledger = new WorkerRunLedger(options),
       store = new WorkerRunStore(options);
-    return { key, ledger, store, ...(await seedSourceInputCheckpoints(ledger)) };
+    return {
+      key,
+      ledger,
+      store,
+      ...(await seedSourceInputCheckpoints(
+        ledger,
+        renderedText === undefined ? undefined : createHash("sha256").update(renderedText).digest("hex"),
+      )),
+    };
   }
   async function unread(ledger: WorkerRunLedger, id: string, gen = "g1") {
     const peek = await ledger.peekInbox(id, gen, 0);
     if (!peek.ok) throw new Error("missing checkpoint fixture");
     return peek.items.filter(unreadInbox(peek.boundary.lastStep as StepRecord | null)).map((item) => item.seq);
   }
+  it.each(["commit", "ack"] as const)(
+    "reconciles a saved Pi fixture through the host and SQLite after a lost %s response without repeating it",
+    async (lostOperation) => {
+      const text = "Synthetic source input.";
+      const { key, ledger, id, gen, thread, intents } = await fixture(text);
+      const entry = intents.entries[0]!;
+      const file = {
+        path: entry.native.sessionId,
+        content:
+          [
+            { type: "session", version: 3, id: "native-session-uuid" },
+            {
+              type: "custom_message",
+              id: "native-entry-one",
+              parentId: null,
+              customType: "switchboard-source-input",
+              content: text,
+              display: false,
+              details: { version: 1, intent: entry },
+            },
+          ]
+            .map((record) => JSON.stringify(record))
+            .join("\n") + "\n",
+      };
+      const mutations: string[] = [];
+      let dropResponse = true,
+        holdReadback = false;
+      const wire = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: async (input, init) => {
+          if (String(input).endsWith("/runs/source-input/checkpoint")) {
+            const body = JSON.parse(String(init?.body)) as { request: { operation: string } };
+            const operation = body.request.operation;
+            if (operation === "read" && holdReadback) return new Response("fixture read held", { status: 503 });
+            if (operation !== "read") {
+              mutations.push(operation);
+              if (operation === lostOperation && dropResponse) {
+                dropResponse = false;
+                await fetchMemoryTest(String(input), init, (response) => response.json());
+                holdReadback = true;
+                throw new TypeError("fixture original response lost");
+              }
+            }
+          }
+          return fetchMemoryTest(String(input), init);
+        },
+      });
+      const writer = createLedgerWriteThrough({
+        ledger: wire,
+        gen,
+        warn() {},
+        fallback: { put: async () => {}, abandoned() {} },
+        setInterval: () => ({ unref() {} }),
+        clearInterval() {},
+        schedule: () => ({ cancel() {} }),
+      });
+      const row = (await ledger.listLive()).find((candidate) => candidate.runId === id);
+      if (!row) throw new Error("missing original live row");
+      const run = writer.adopt({
+        runId: id,
+        threadKey: thread,
+        state: row.state,
+        meta: row.meta,
+        startedAt: row.startedAt,
+        lastStep: 0,
+        lastSeq: 0,
+      });
+      const validate = async (context: ContextDependencies) => {
+        for (const reference of context.sourceInputs ?? []) {
+          const proof = await readSourceInputProof(reference, { ledger, checkAccess: async () => true });
+          if (proof.kind !== "consistent") return { ok: false as const, code: "saved-context-unproved" as const };
+        }
+        return { ok: true as const };
+      };
+      try {
+        expect(await checkpointPiSourceInput(entry, { ...file, path: file.path + ".copy" }, run, validate)).toBe(false);
+        expect(mutations).toEqual([]);
+        expect(await checkpointPiSourceInput(entry, file, run, validate)).toBe(false);
+        expect(mutations).toEqual(lostOperation === "commit" ? ["commit"] : ["commit", "ack"]);
+        expect(await unread(ledger, id)).toEqual(lostOperation === "commit" ? [1, 2, 3, 4] : [1, 3, 4]);
+        expect(await run.commitState({ fixtureAfterUnknown: true })).toBe("unavailable");
+        const held = await ledger.peekInbox(id, gen, 0);
+        expect(held.ok && held.boundary.state).not.toHaveProperty("fixtureAfterUnknown");
+        holdReadback = false;
+        const saved = await run.sourceInputCheckpoint({ operation: "read", inputId: entry.id }, validate);
+        expect(saved).toMatchObject({
+          ok: true,
+          checkpoint: {
+            acknowledged: lostOperation === "ack",
+            receipt: {
+              inputId: "source-input-one",
+              native: {
+                sessionId: "original-native-session",
+                sessionIdentity: "native-session-uuid",
+                entryId: "native-entry-one",
+              },
+            },
+          },
+        });
+        if (!saved.ok || !saved.checkpoint) throw new Error("missing original checkpoint readback");
+        if (!saved.checkpoint.acknowledged)
+          expect(
+            await run.sourceInputCheckpoint(
+              { operation: "ack", inputId: entry.id, receiptHash: saved.checkpoint.receiptHash },
+              validate,
+            ),
+          ).toMatchObject({ ok: true, checkpoint: { acknowledged: true } });
+        expect(mutations).toEqual(["commit", "ack"]);
+        expect(run.writeBoundaryFailure).toBeUndefined();
+        expect(await unread(ledger, id)).toEqual([1, 3, 4]);
+        expect(await ledger.sourceInputCheckpoint(id, gen, { operation: "read", inputId: entry.id })).toMatchObject({
+          ok: true,
+          checkpoint: { acknowledged: true, receipt: { inputId: "source-input-one" } },
+        });
+      } finally {
+        holdReadback = false;
+        await run.close();
+      }
+    },
+  );
   it("reports only safe checkpoint refusal fields and keeps successful requests silent", async () => {
     const { key, ledger, id, gen, receipt } = await fixture();
     const logs: unknown[][] = [];

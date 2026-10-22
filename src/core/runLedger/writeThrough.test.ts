@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { checkpointPiSourceInput } from "../harness/pi/sourceInputCheckpoint.js";
 import { captureSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
 import { testSourceInputIntent, seedSourceInputIntent } from "../testing/sourceInputs.js";
 import { readSourceInputProof } from "../references/sourceInputProof.js";
@@ -14,6 +20,10 @@ import { storeRequestWitness } from "../storeResponse.js";
 import { rememberStorageFailure } from "../storageFailureDiagnostic.js";
 import * as receipts from "../references/receipts.js";
 import { InMemoryRunLedger } from "./inMemory.js";
+import { unreadInbox } from "./decisions.js";
+import { sourceSnapshot } from "./sourceEvents.js";
+import type { StepRecord } from "./types.js";
+import { durableInboxMessage } from "./inboxMessage.js";
 import { WorkerRunLedger } from "../runLedgerWorker.js";
 import { PromotionPendingError } from "./promotion.js";
 import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../references/contextDependencies.js";
@@ -1291,7 +1301,84 @@ describe("mintGeneration", () => {
 });
 
 describe("source input admission", () => {
-  async function fixture(harnessName: "pi" | "opencode" = "pi") {
+  it("reconciles an adopted normal settlement after a lost stale-step reply without offering it again", async () => {
+    const f = harness();
+    const run = (await openRun(f.wt, openReq()))!;
+    await f.ledger.pushInbox("r1", { text: "confirmed ordinary input" });
+    const before = await f.ledger.peekInbox("r1", "gen-A", 0);
+    if (!before.ok) throw new Error("missing original inbox");
+    const original = before.items[0]!;
+    run.confirmInboxInputs([
+      {
+        text: "confirmed ordinary input",
+        userId: "slack:UALICE",
+        at: 1,
+        ledgerSeq: 1,
+        ledgerWitness: original.witness,
+      },
+    ]);
+    await run.step(step({ inboxConsumedSeq: 1 }));
+    const legacy = await f.ledger.peekInbox("r1", "gen-A", 0);
+    expect(legacy.ok && legacy.boundary.lastStep).toMatchObject({ step: 1, inboxConsumedSeq: 1 });
+    expect(legacy.ok && (legacy.boundary.lastStep as StepRecord).inboxAcknowledgedRows).toBeUndefined();
+    if (!legacy.ok) throw new Error("missing committed legacy step");
+    expect(
+      await f.ledger.step(
+        "r1",
+        "gen-A",
+        { ...(legacy.boundary.lastStep as StepRecord), step: 2, inboxAcknowledgedRows: [original.witness] },
+        [],
+        run.session!.key,
+      ),
+    ).toMatchObject({ ok: true });
+    await f.ledger.pushInbox("r1", { text: "still owed" });
+    const row = f.ledger.live.get("r1")!;
+    const session = run.session;
+    await run.close();
+    const adopted = f.wt.adopt({
+      runId: "r1",
+      threadKey: row.threadKey,
+      meta: row.meta,
+      state: row.state,
+      lastStep: 2,
+      lastSeq: 0,
+      session,
+      durableTurns: 4,
+    });
+    const execute = f.ledger.step.bind(f.ledger);
+    const replacing = vi.spyOn(f.ledger, "step").mockImplementation(async (...args) => {
+      await execute(...args);
+      throw new UncertainStoreError(
+        "adopted step reply lost",
+        await storeRequestWitness("/runs/step", JSON.stringify({ runId: args[0], gen: args[1], record: args[2] })),
+      );
+    });
+    try {
+      await adopted.step(step({ firstIdx: 4, turn: 2, inboxConsumedSeq: 0, inboxDeferredSeqs: [1] }));
+      expect(adopted.writeBoundaryFailure).toMatchObject({ kind: "step", step: 3 });
+      expect(await adopted.commitState({ progress: "original step read back" })).toBe("ok");
+      const after = await f.ledger.peekInbox("r1", "gen-A", 0);
+      expect(
+        after.ok && after.items.filter(unreadInbox(after.boundary.lastStep as StepRecord)).map((item) => item.seq),
+      ).toEqual([2]);
+      expect(after.ok && after.boundary.lastStep).toMatchObject({
+        inboxConsumedSeq: 1,
+        inboxDeferredSeqs: [],
+        inboxAcknowledgedRows: [],
+      });
+      expect(adopted.writeBoundaryFailure).toBeUndefined();
+    } finally {
+      replacing.mockRestore();
+      await adopted.close();
+    }
+  });
+
+  async function fixture(
+    harnessName: "pi" | "opencode" = "pi",
+    native?: { sessionId: string; renderedHash: string },
+    prefixNormal = false,
+    confirmBeforeSourceFrame = false,
+  ) {
     const inner = new InMemoryRunLedger(() => 10_000);
     const h = harness({ ledger: inner });
     const req = openReq({ meta: { ...openReq().meta, agent: "orchestrator" } });
@@ -1299,6 +1386,10 @@ describe("source input admission", () => {
     const run = (await openRun(h.wt, req))!;
     const input = testSourceInputIntent(harnessName),
       entry = input.entries[0]!;
+    if (native) {
+      entry.native.sessionId = native.sessionId;
+      entry.renderedHash = native.renderedHash;
+    }
     entry.owner = {
       runId: "r1",
       gen: "gen-A",
@@ -1320,7 +1411,29 @@ describe("source input admission", () => {
         },
       }),
     ).toBe("ok");
+    if (prefixNormal)
+      await inner.pushInbox(
+        "r1",
+        durableInboxMessage(
+          { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", text: "Ordinary follow-up" },
+          "Ordinary follow-up",
+          1,
+        ),
+      );
     const original = await seedSourceInputIntent(inner, input);
+    if (confirmBeforeSourceFrame) {
+      const observed = await inner.peekInbox("r1", "gen-A", 0);
+      if (!observed.ok) throw new Error("missing original normal row");
+      run.confirmInboxInputs([
+        {
+          text: "Ordinary follow-up",
+          userId: "slack:UALICE",
+          at: 1,
+          ledgerSeq: 1,
+          ledgerWitness: observed.items.find((item) => item.seq === 1)!.witness,
+        },
+      ]);
+    }
     expect(await run.commitState({ sourceInputIntents: original })).toBe("ok");
     let allowed = true;
     const validate = async (context: ContextDependencies) => {
@@ -1340,6 +1453,585 @@ describe("source input admission", () => {
       },
     };
   }
+
+  it("checks checkpoint reader capability without beginning or acknowledging the input", async () => {
+    const f = await fixture();
+    try {
+      const entry = f.original.entries[0]!;
+      expect(await f.run.sourceInputCheckpoint({ operation: "read", inputId: entry.id }, f.validate)).toEqual({
+        ok: true,
+        checkpoint: null,
+      });
+      expect(f.ledger.live.get("r1")?.state.sourceInputIntents).toEqual(f.original);
+      const peek = await f.ledger.peekInbox("r1", "gen-A", 0);
+      expect(
+        peek.ok && peek.items.filter(unreadInbox(peek.boundary.lastStep as StepRecord | null)).map((item) => item.seq),
+      ).toEqual([1]);
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it.each(["confirmed", "lost-reply", "before-source-frame"])(
+    "settles an original normal echo after source ACK without resurrecting it: boundary=%s",
+    async (boundary) => {
+      let lostReply = boundary === "lost-reply";
+      const f = await fixture("pi", undefined, true, boundary === "before-source-frame");
+      try {
+        const observed = await f.ledger.peekInbox("r1", "gen-A", 0);
+        if (!observed.ok) throw new Error("missing original inbox");
+        const normal = observed.items.find((item) => item.seq === 1)!;
+        const entry = f.original.entries[0]!;
+        expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+        const receipt = {
+          version: 1 as const,
+          inputId: entry.id,
+          intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+          native: {
+            harness: "pi" as const,
+            sessionId: entry.native.sessionId,
+            sessionIdentity: "original-session-header",
+            entryId: "source-entry",
+            entryHash: "b".repeat(64),
+          },
+        };
+        const saved = await f.run.sourceInputCheckpoint({ operation: "commit", receipt }, f.validate);
+        if (!saved.ok || !saved.checkpoint) throw new Error("missing native checkpoint");
+        expect(
+          await f.run.sourceInputCheckpoint(
+            { operation: "ack", inputId: entry.id, receiptHash: saved.checkpoint.receiptHash },
+            f.validate,
+          ),
+        ).toMatchObject({ ok: true, checkpoint: { acknowledged: true } });
+        const pending = await f.ledger.peekInbox("r1", "gen-A", 0);
+        expect(
+          pending.ok &&
+            pending.items.filter(unreadInbox(pending.boundary.lastStep as StepRecord)).map((item) => item.seq),
+        ).toEqual([1]);
+        if (boundary !== "before-source-frame")
+          f.run.confirmInboxInputs([
+            { text: "Ordinary follow-up", userId: "slack:UALICE", at: 1, ledgerSeq: 1, ledgerWitness: normal.witness },
+          ]);
+        const writes: StepRecord[] = [];
+        const execute = f.ledger.step.bind(f.ledger);
+        const replacing = vi.spyOn(f.ledger, "step").mockImplementation(async (...args) => {
+          writes.push(structuredClone(args[2]));
+          const result = await execute(...args);
+          if (lostReply) {
+            lostReply = false;
+            throw new UncertainStoreError(
+              "normal settlement reply lost",
+              await storeRequestWitness(
+                "/runs/step",
+                JSON.stringify({ runId: args[0], gen: args[1], record: args[2] }),
+              ),
+            );
+          }
+          return result;
+        });
+        await f.run.step(step({ inboxConsumedSeq: 1 }));
+        expect(await f.run.commitState({ progress: "after exact original readback" })).toBe("ok");
+        await f.run.step(step({ firstIdx: 4, turn: 2, inboxConsumedSeq: 0, inboxDeferredSeqs: [1] }));
+        const after = await f.ledger.peekInbox("r1", "gen-A", 0);
+        expect(
+          after.ok && after.items.filter(unreadInbox(after.boundary.lastStep as StepRecord)).map((item) => item.seq),
+        ).toEqual([]);
+        expect(writes.map((record) => record.inboxAcknowledgedRows ?? [])).toEqual([[normal.witness], []]);
+        expect(f.run.writeBoundaryFailure).toBeUndefined();
+        replacing.mockRestore();
+      } finally {
+        await f.run.close();
+      }
+    },
+  );
+
+  it("retains a first normal confirmation that arrives during an earlier source step read", async () => {
+    const f = await fixture("pi", undefined, true);
+    let release = () => {};
+    let replacing: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const original = await f.ledger.peekInbox("r1", "gen-A", 0);
+      if (!original.ok) throw new Error("missing original inbox");
+      const normal = original.items.find((item) => item.seq === 1)!;
+      const entry = f.original.entries[0]!;
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      const receipt = {
+        version: 1 as const,
+        inputId: entry.id,
+        intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+        native: {
+          harness: "pi" as const,
+          sessionId: entry.native.sessionId,
+          sessionIdentity: "original-session-header",
+          entryId: "source-entry",
+          entryHash: "b".repeat(64),
+        },
+      };
+      const saved = await f.run.sourceInputCheckpoint({ operation: "commit", receipt }, f.validate);
+      if (!saved.ok || !saved.checkpoint) throw new Error("missing native checkpoint");
+      expect(
+        await f.run.sourceInputCheckpoint(
+          { operation: "ack", inputId: entry.id, receiptHash: saved.checkpoint.receiptHash },
+          f.validate,
+        ),
+      ).toMatchObject({ ok: true, checkpoint: { acknowledged: true } });
+      let entered = () => {};
+      const readEntered = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const readRelease = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const execute = f.ledger.peekInbox.bind(f.ledger);
+      replacing = vi.spyOn(f.ledger, "peekInbox").mockImplementation(async (...args) => {
+        entered();
+        await readRelease;
+        return execute(...args);
+      });
+      const earlier = f.run.step(step());
+      await readEntered;
+      f.run.confirmInboxInputs([
+        { text: "Ordinary follow-up", userId: "slack:UALICE", at: 1, ledgerSeq: 1, ledgerWitness: normal.witness },
+      ]);
+      release();
+      await earlier;
+      replacing.mockRestore();
+      await f.run.step(step({ firstIdx: 4, turn: 2, inboxConsumedSeq: 1 }));
+      const after = await f.ledger.peekInbox("r1", "gen-A", 0);
+      expect(after.ok && after.boundary.lastStep).toMatchObject({
+        inboxConsumedSeq: 2,
+        inboxAcknowledgedRows: [normal.witness],
+      });
+      expect(
+        after.ok && after.items.filter(unreadInbox(after.boundary.lastStep as StepRecord)).map((item) => item.seq),
+      ).toEqual([]);
+    } finally {
+      release();
+      replacing?.mockRestore();
+      await f.run.close();
+    }
+  });
+
+  it("settles the original installed Pi session entry through canonical readback and exact ACK", async () => {
+    const root = mkdtempSync(join(tmpdir(), "switchboard-pi-checkpoint-"));
+    const manager = SessionManager.create(root, join(root, "sessions"));
+    manager.appendMessage({ role: "user", content: "Synthetic seed", timestamp: 1 });
+    const path = manager.getSessionFile()!,
+      text = "Synthetic source input.";
+    const f = await fixture("pi", { sessionId: path, renderedHash: createHash("sha256").update(text).digest("hex") });
+    try {
+      const entry = { ...structuredClone(f.original.entries[0]!), phase: "begun" as const };
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      manager.appendCustomMessageEntry("switchboard-source-input", text, false, { version: 1, intent: entry });
+      const content = readFileSync(path, "utf8");
+      const native = manager.getEntries().find((row) => row.type === "custom_message");
+      if (!native) throw new Error("missing actual native entry");
+      expect(await checkpointPiSourceInput(entry, { path: path + ".copy", content }, f.run, f.validate)).toBe(false);
+      const before = await f.ledger.peekInbox("r1", "gen-A", 0);
+      expect(
+        before.ok &&
+          before.items.filter(unreadInbox(before.boundary.lastStep as StepRecord | null)).map((item) => item.seq),
+      ).toEqual([1]);
+      expect(await checkpointPiSourceInput(entry, { path, content }, f.run, f.validate)).toBe(true);
+      expect(
+        await f.ledger.sourceInputCheckpoint("r1", "gen-A", { operation: "read", inputId: entry.id }),
+      ).toMatchObject({
+        ok: true,
+        checkpoint: {
+          acknowledged: true,
+          receipt: { inputId: entry.id, native: { harness: "pi", sessionId: path, entryId: native.id } },
+        },
+      });
+      const after = await f.ledger.peekInbox("r1", "gen-A", 0);
+      expect(
+        after.ok &&
+          after.items.filter(unreadInbox(after.boundary.lastStep as StepRecord | null)).map((item) => item.seq),
+      ).toEqual([]);
+      const reopened = SessionManager.open(path);
+      expect(reopened.getEntries()).toEqual(manager.getEntries());
+      expect(
+        await checkpointPiSourceInput(entry, { path, content: readFileSync(path, "utf8") }, f.run, f.validate),
+      ).toBe(true);
+      expect(readFileSync(path, "utf8")).toBe(content);
+    } finally {
+      await f.run.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads a native checkpoint before exact ACK and preserves it in later host state", async () => {
+    const f = await fixture();
+    try {
+      const entry = f.original.entries[0]!;
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      const receipt = {
+        version: 1 as const,
+        inputId: entry.id,
+        intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+        native: {
+          harness: "pi" as const,
+          sessionId: entry.native.sessionId,
+          sessionIdentity: "original-session-header",
+          entryId: "original-native-entry",
+          entryHash: "b".repeat(64),
+        },
+      };
+      const saved = await f.run.sourceInputCheckpoint({ operation: "commit", receipt }, f.validate);
+      expect(saved).toMatchObject({ ok: true, checkpoint: { receipt, acknowledged: false } });
+      if (!saved.ok || !saved.checkpoint) throw new Error("missing native checkpoint");
+      const peek = await f.ledger.peekInbox("r1", "gen-A", 0);
+      expect(
+        peek.ok && peek.items.filter(unreadInbox(peek.boundary.lastStep as StepRecord | null)).map((item) => item.seq),
+      ).toEqual([1]);
+      expect(
+        await f.run.sourceInputCheckpoint(
+          { operation: "ack", inputId: entry.id, receiptHash: saved.checkpoint.receiptHash },
+          f.validate,
+        ),
+      ).toMatchObject({ ok: true, checkpoint: { acknowledged: true } });
+      expect(await f.run.commitState({ progress: "later host state" })).toBe("ok");
+      expect(await f.run.sourceInputCheckpoint({ operation: "read", inputId: entry.id }, f.validate)).toMatchObject({
+        ok: true,
+        checkpoint: { receipt, acknowledged: true },
+      });
+      const after = await f.ledger.peekInbox("r1", "gen-A", 0);
+      expect(
+        after.ok &&
+          after.items.filter(unreadInbox(after.boundary.lastStep as StepRecord | null)).map((item) => item.seq),
+      ).toEqual([]);
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it("holds native checkpoint changes after source access is revoked", async () => {
+    const f = await fixture();
+    try {
+      const entry = f.original.entries[0]!;
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      const receipt = {
+        version: 1 as const,
+        inputId: entry.id,
+        intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+        native: {
+          harness: "pi" as const,
+          sessionId: entry.native.sessionId,
+          sessionIdentity: "original-session-header",
+          entryId: "original-native-entry",
+          entryHash: "b".repeat(64),
+        },
+      };
+      const saved = await f.run.sourceInputCheckpoint({ operation: "commit", receipt }, f.validate);
+      expect(saved).toMatchObject({ ok: true, checkpoint: { acknowledged: false } });
+      if (!saved.ok || !saved.checkpoint) throw new Error("missing native checkpoint");
+      f.revoke();
+      expect(
+        await f.run.sourceInputCheckpoint(
+          { operation: "ack", inputId: entry.id, receiptHash: saved.checkpoint.receiptHash },
+          f.validate,
+        ),
+      ).toEqual({ ok: false, reason: "unavailable" });
+      const peek = await f.ledger.peekInbox("r1", "gen-A", 0);
+      expect(
+        peek.ok && peek.items.filter(unreadInbox(peek.boundary.lastStep as StepRecord | null)).map((item) => item.seq),
+      ).toEqual([1]);
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it.each(["commit", "ack"] as const)(
+    "reconciles a lost host %s reply without repeating its mutation",
+    async (operation) => {
+      for (const committed of [false, true]) {
+        const f = await fixture();
+        try {
+          const entry = f.original.entries[0]!;
+          expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+          const receipt = {
+            version: 1 as const,
+            inputId: entry.id,
+            intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+            native: {
+              harness: "pi" as const,
+              sessionId: entry.native.sessionId,
+              sessionIdentity: "original-session-header",
+              entryId: "original-native-entry",
+              entryHash: "b".repeat(64),
+            },
+          };
+          let receiptHash = "";
+          if (operation === "ack") {
+            const saved = await f.run.sourceInputCheckpoint({ operation: "commit", receipt }, f.validate);
+            expect(saved).toMatchObject({ ok: true, checkpoint: { acknowledged: false } });
+            if (!saved.ok || !saved.checkpoint) throw new Error("missing native checkpoint");
+            receiptHash = saved.checkpoint.receiptHash;
+          }
+          let mutations = 0;
+          const execute = f.ledger.sourceInputCheckpoint.bind(f.ledger);
+          const replacing = vi.spyOn(f.ledger, "sourceInputCheckpoint").mockImplementation(async (...args) => {
+            if (args[2].operation !== operation) return execute(...args);
+            mutations++;
+            if (committed) await execute(...args);
+            throw new UncertainStoreError(
+              "original checkpoint reply lost",
+              await storeRequestWitness(
+                "/runs/source-input/checkpoint",
+                JSON.stringify({ runId: args[0], gen: args[1], request: args[2] }),
+              ),
+            );
+          });
+          const result = await f.run.sourceInputCheckpoint(
+            operation === "commit" ? { operation, receipt } : { operation, inputId: entry.id, receiptHash },
+            f.validate,
+          );
+          expect(result).toMatchObject(
+            committed
+              ? { ok: true, checkpoint: { receipt, acknowledged: operation === "ack" } }
+              : { ok: false, reason: "unavailable" },
+          );
+          expect(mutations).toBe(1);
+          const peek = await f.ledger.peekInbox("r1", "gen-A", 0);
+          expect(
+            peek.ok &&
+              peek.items.filter(unreadInbox(peek.boundary.lastStep as StepRecord | null)).map((item) => item.seq),
+          ).toEqual(operation === "ack" && committed ? [] : [1]);
+          replacing.mockRestore();
+        } finally {
+          await f.run.close();
+        }
+      }
+    },
+  );
+
+  it("retains a still-running checkpoint mutation through a null read and later ordinary writes", async () => {
+    const f = await fixture();
+    try {
+      const entry = f.original.entries[0]!;
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      const receipt = {
+        version: 1 as const,
+        inputId: entry.id,
+        intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+        native: {
+          harness: "pi" as const,
+          sessionId: entry.native.sessionId,
+          sessionIdentity: "original-session-header",
+          entryId: "original-native-entry",
+          entryHash: "b".repeat(64),
+        },
+      };
+      const execute = f.ledger.sourceInputCheckpoint.bind(f.ledger);
+      let late: (() => Promise<unknown>) | undefined,
+        mutations = 0;
+      const replacing = vi.spyOn(f.ledger, "sourceInputCheckpoint").mockImplementation(async (...args) => {
+        if (args[2].operation !== "commit") return execute(...args);
+        mutations++;
+        late = () => execute(...args);
+        throw new UncertainStoreError(
+          "original still in flight",
+          await storeRequestWitness(
+            "/runs/source-input/checkpoint",
+            JSON.stringify({ runId: args[0], gen: args[1], request: args[2] }),
+          ),
+        );
+      });
+      const request = { operation: "commit" as const, receipt };
+      expect(await f.run.sourceInputCheckpoint(request, f.validate)).toEqual({ ok: false, reason: "unavailable" });
+      expect(f.run.writeBoundaryFailure).toMatchObject({ kind: "source-input-checkpoint", runId: "r1", gen: "gen-A" });
+      expect(await f.run.commitState({ progress: "held pending original" })).toBe("unavailable");
+      expect(await f.run.sourceInputCheckpoint(request, f.validate)).toEqual({ ok: false, reason: "unavailable" });
+      expect(mutations).toBe(1);
+      if (!late) throw new Error("missing original in-flight mutation");
+      expect(await late()).toMatchObject({ ok: true, checkpoint: { acknowledged: false } });
+      expect(await f.run.sourceInputCheckpoint({ operation: "read", inputId: entry.id }, f.validate)).toMatchObject({
+        ok: true,
+        checkpoint: { receipt, acknowledged: false },
+      });
+      expect(f.run.writeBoundaryFailure).toBeUndefined();
+      expect(await f.run.commitState({ progress: "original reconciled" })).toBe("ok");
+      expect(mutations).toBe(1);
+      replacing.mockRestore();
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it.each([false, true])("checks access after the final ACK prerequisite read: revoked=%s", async (revoked) => {
+    const f = await fixture();
+    try {
+      const entry = f.original.entries[0]!;
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      const receipt = {
+        version: 1 as const,
+        inputId: entry.id,
+        intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+        native: {
+          harness: "pi" as const,
+          sessionId: entry.native.sessionId,
+          sessionIdentity: "original-session-header",
+          entryId: "original-native-entry",
+          entryHash: "b".repeat(64),
+        },
+      };
+      const saved = await f.run.sourceInputCheckpoint({ operation: "commit", receipt }, f.validate);
+      expect(saved).toMatchObject({ ok: true, checkpoint: { acknowledged: false } });
+      if (!saved.ok || !saved.checkpoint) throw new Error("missing native checkpoint");
+      const execute = f.ledger.sourceInputCheckpoint.bind(f.ledger);
+      const replacing = vi.spyOn(f.ledger, "sourceInputCheckpoint").mockImplementation(async (...args) => {
+        const result = await execute(...args);
+        if (revoked && args[2].operation === "read") f.revoke();
+        return result;
+      });
+      expect(
+        await f.run.sourceInputCheckpoint(
+          { operation: "ack", inputId: entry.id, receiptHash: saved.checkpoint.receiptHash },
+          f.validate,
+        ),
+      ).toMatchObject(
+        revoked ? { ok: false, reason: "unavailable" } : { ok: true, checkpoint: { acknowledged: true } },
+      );
+      const peek = await f.ledger.peekInbox("r1", "gen-A", 0);
+      expect(
+        peek.ok && peek.items.filter(unreadInbox(peek.boundary.lastStep as StepRecord | null)).map((item) => item.seq),
+      ).toEqual(revoked ? [1] : []);
+      replacing.mockRestore();
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it("retains a landed checkpoint before returning a later access hold", async () => {
+    const f = await fixture();
+    try {
+      const entry = f.original.entries[0]!;
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      const receipt = {
+        version: 1 as const,
+        inputId: entry.id,
+        intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+        native: {
+          harness: "pi" as const,
+          sessionId: entry.native.sessionId,
+          sessionIdentity: "original-session-header",
+          entryId: "original-native-entry",
+          entryHash: "b".repeat(64),
+        },
+      };
+      let checks = 0;
+      const validate = async (context: ContextDependencies) => {
+        if (++checks === 3) f.revoke();
+        return f.validate(context);
+      };
+      expect(await f.run.sourceInputCheckpoint({ operation: "commit", receipt }, validate)).toEqual({
+        ok: false,
+        reason: "unavailable",
+      });
+      expect(await f.run.commitState({ progress: "metadata retained while access is held" })).toBe("ok");
+      expect(
+        await f.ledger.sourceInputCheckpoint("r1", "gen-A", { operation: "read", inputId: entry.id }),
+      ).toMatchObject({ ok: true, checkpoint: { receipt, acknowledged: false } });
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it("begins another original without dropping the earlier canonical checkpoint", async () => {
+    const f = await fixture();
+    try {
+      const entry = f.original.entries[0]!;
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      const receipt = {
+        version: 1 as const,
+        inputId: entry.id,
+        intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+        native: {
+          harness: "pi" as const,
+          sessionId: entry.native.sessionId,
+          sessionIdentity: "original-session-header",
+          entryId: "original-native-entry",
+          entryHash: "b".repeat(64),
+        },
+      };
+      expect(await f.run.sourceInputCheckpoint({ operation: "commit", receipt }, f.validate)).toMatchObject({
+        ok: true,
+        checkpoint: { receipt, acknowledged: false },
+      });
+      const second = testSourceInputIntent();
+      second.entries[0] = { ...structuredClone(entry), id: "source-input-two", phase: "prepared" };
+      const next = await seedSourceInputIntent(f.ledger, second);
+      const original = f.ledger.live.get("r1")!.state.sourceInputIntents as typeof next;
+      expect(
+        await f.run.commitState({
+          sourceInputIntents: { ...original, entries: [...original.entries, ...next.entries] },
+        }),
+      ).toBe("ok");
+      expect(await f.run.beginSourceInput("source-input-two", f.validate)).toBe(true);
+      expect(f.ledger.live.get("r1")?.state.sourceInputIntents).toMatchObject({
+        version: 2,
+        entries: [
+          { id: entry.id, phase: "begun" },
+          { id: "source-input-two", phase: "begun" },
+        ],
+        checkpoints: [{ receipt, acknowledged: false }],
+      });
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it("reconciles the exact protected step after an ACK and a lost step reply", async () => {
+    const f = await fixture();
+    try {
+      const entry = f.original.entries[0]!;
+      expect(await f.run.beginSourceInput(entry.id, f.validate)).toBe(true);
+      const receipt = {
+        version: 1 as const,
+        inputId: entry.id,
+        intentHash: await receipts.sourceHash(sourceSnapshot({ ...entry, phase: "begun" })),
+        native: {
+          harness: "pi" as const,
+          sessionId: entry.native.sessionId,
+          sessionIdentity: "original-session-header",
+          entryId: "original-native-entry",
+          entryHash: "b".repeat(64),
+        },
+      };
+      const saved = await f.run.sourceInputCheckpoint({ operation: "commit", receipt }, f.validate);
+      if (!saved.ok || !saved.checkpoint) throw new Error("missing native checkpoint");
+      expect(
+        await f.run.sourceInputCheckpoint(
+          { operation: "ack", inputId: entry.id, receiptHash: saved.checkpoint.receiptHash },
+          f.validate,
+        ),
+      ).toMatchObject({ ok: true, checkpoint: { acknowledged: true } });
+      let loseReply = true;
+      const writes: StepRecord[] = [],
+        execute = f.ledger.step.bind(f.ledger);
+      const replacing = vi.spyOn(f.ledger, "step").mockImplementation(async (...args) => {
+        writes.push(structuredClone(args[2]));
+        const result = await execute(...args);
+        if (loseReply)
+          throw new UncertainStoreError(
+            "protected step reply lost",
+            await storeRequestWitness("/runs/step", JSON.stringify({ runId: args[0], gen: args[1], record: args[2] })),
+          );
+        return result;
+      });
+      await f.run.step(step());
+      expect(f.run.writeBoundaryFailure).toMatchObject({ kind: "step", step: 1 });
+      loseReply = false;
+      await f.run.step(step({ firstIdx: 4, turn: 2 }));
+      expect(f.run.writeBoundaryFailure).toBeUndefined();
+      expect(writes.map((record) => ({ step: record.step, inboxConsumedSeq: record.inboxConsumedSeq }))).toEqual([
+        { step: 1, inboxConsumedSeq: 1 },
+        { step: 2, inboxConsumedSeq: 1 },
+      ]);
+      replacing.mockRestore();
+    } finally {
+      await f.run.close();
+    }
+  });
 
   it.each(["pi", "opencode"] as const)(
     "retains the exact %s source before beginning its original input",
@@ -3287,10 +3979,17 @@ describe("events, state, heartbeat", () => {
         plane: { steer: "reissue", provider: "anthropic" },
       },
     };
-    expect(deliverPlaneSteer(effect, { runId: "r1", inbox })).toBe("done");
-    expect(inbox.drain()[0].text).toBe(
-      "the model provider anthropic is answering again — re-issue the held turn and continue",
-    );
+    const witness = {
+      version: 1 as const,
+      runId: "r1",
+      seq: 8,
+      digest: createHash("sha256").update(JSON.stringify(effect.message)).digest("hex"),
+    };
+    expect(deliverPlaneSteer(effect, { runId: "r1", inbox }, { ...witness, seq: 9 })).toBe("deferred");
+    expect(deliverPlaneSteer(effect, { runId: "r1", inbox }, witness)).toBe("done");
+    const [input] = inbox.drain();
+    expect(input.ledgerWitness).toEqual(witness);
+    expect(input.text).toBe("the model provider anthropic is answering again — re-issue the held turn and continue");
   });
 
   it("heartbeat steers reject malformed version, target, principal and sequence before queue delivery", () => {

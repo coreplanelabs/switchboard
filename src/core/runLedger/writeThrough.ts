@@ -55,6 +55,9 @@ import { sealPausedHardStop } from "./pausedStop.js";
 import type { SourceReadState } from "../../mcp/sourceReadState.js";
 import { sourceTaskSnapshotOf } from "../references/sourceTaskSnapshot.js";
 import type { StepReport } from "./stepReport.js";
+import { inboxAcknowledgedRowsOf, prepareInboxAcknowledgments } from "./inboxAcknowledgments.js";
+import type { InboxRowWitness } from "./types.js";
+import type { FollowUpInput } from "../threadAdmission.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { ToolDef } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
@@ -71,7 +74,15 @@ import {
   type UncertainStoreDiagnosis,
 } from "../storeFailure.js";
 import { preserveHarnessPolicy } from "./checkpointState.js";
-import { sourceInputIntentsOf, sourceInputNativeMatches } from "./sourceInputIntent.js";
+import {
+  sourceInputIntentsOf,
+  sourceInputNativeMatches,
+  protectSourceInputStep,
+  sourceInputCheckpointRequestOf,
+  type SourceInputCheckpointRequest,
+  type SourceInputCheckpointResult,
+  type SourceInputCheckpoint,
+} from "./sourceInputIntent.js";
 import { sourceSnapshot } from "./sourceEvents.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 import { assignLedgerLiveState } from "./decisions.js";
@@ -184,6 +195,7 @@ export function deliverPlaneSteer(
             userId: string;
             userName?: string;
             ledgerSeq: number;
+            ledgerWitness?: InboxRowWitness;
             msg: {
               channelId: string;
               threadKey: string;
@@ -195,6 +207,7 @@ export function deliverPlaneSteer(
         };
       }
     | undefined,
+  originalWitness?: InboxRowWitness,
 ): PlaneAckOutcome {
   if (live?.runId !== effect.runId) return "deferred";
   const message = effect.message;
@@ -217,6 +230,8 @@ export function deliverPlaneSteer(
     threadKey: message.threadKey,
   });
   if (restored?.control?.kind !== "provider-reissue") return "deferred";
+  const witness = originalWitness && inboxAcknowledgedRowsOf([originalWitness])?.[0];
+  if (originalWitness && (!witness || witness.runId !== effect.runId || witness.seq !== effect.seq)) return "deferred";
   const before = live.inbox.arrived;
   live.inbox.push({
     text: restored.msg.text,
@@ -224,6 +239,7 @@ export function deliverPlaneSteer(
     userId: restored.msg.userId,
     userName: restored.msg.userName,
     ledgerSeq: effect.seq,
+    ...(witness ? { ledgerWitness: witness } : {}),
     msg: restored.msg,
   });
   return live.inbox.arrived === before ? "skipped" : "done";
@@ -411,7 +427,7 @@ export type WriteBoundaryFailure = {
       version: 1;
       runId: string;
       gen: string;
-      kind: "live-state" | "context-checkpoint";
+      kind: "live-state" | "context-checkpoint" | "source-input-checkpoint";
       requestDigest: string;
       expectedDigest: string;
     }
@@ -427,6 +443,7 @@ export function writeBoundaryDiagnosticSummary(failure: WriteBoundaryFailure | u
     step: "/runs/step",
     "live-state": "/runs/live-state",
     "context-checkpoint": "/runs/session/checkpoint",
+    "source-input-checkpoint": "/runs/source-input/checkpoint",
   }[failure.kind];
   return storeWriteDiagnosisSummary(operation, failure.diagnosis);
 }
@@ -445,6 +462,9 @@ export interface LedgerRun {
   tracked(): boolean;
   /** The runner's step hook: the step's turns, then its record — awaited. */
   step(report: StepReport): Promise<void>;
+  /** Positive native acceptance of original normal/control rows. Source input
+   * uses its separate native receipt and exact checkpoint acknowledgment. */
+  confirmInboxInputs(inputs: readonly FollowUpInput[]): void;
   /** A registry event, in publish order, with the registry's `seq`. */
   event(event: RunEvent, seq: number): void;
   /** Reconcile uncertain snapshots before a live-state assignment can change their canonical readback. */
@@ -461,6 +481,12 @@ export interface LedgerRun {
    * input begun. A begun or uncertain original cannot be begun again. This
    * neither sends native input nor proves native admission or inbox ACK. */
   beginSourceInput(id: string, validate: (context: ContextDependencies) => Promise<AudienceCheck>): Promise<boolean>;
+  /** One explicit checkpoint operation. Mutations require fresh canonical
+   * readback; an unknown result never resubmits native input or retries a write. */
+  sourceInputCheckpoint(
+    request: SourceInputCheckpointRequest,
+    validate: (context: ContextDependencies) => Promise<AudienceCheck>,
+  ): Promise<SourceInputCheckpointResult | { ok: false; reason: "unavailable" }>;
   /** Persist one controller-admitted result before handing its bytes to a model. */
   recordSourceResult(receipt: SourceResultReceipt): Promise<boolean>;
   /** Freeze an acknowledged source cursor in the owned live row before handoff. */
@@ -812,6 +838,9 @@ export class NullLedgerRun implements LedgerRun {
   async step(_report: StepReport): Promise<void> {
     // no ledger to mirror onto
   }
+  confirmInboxInputs(_inputs: readonly FollowUpInput[]): void {
+    // No canonical inbox belongs to an untracked run.
+  }
   event(_event: RunEvent, _seq: number): void {
     // no ledger to mirror onto
   }
@@ -829,6 +858,9 @@ export class NullLedgerRun implements LedgerRun {
     _validate: (context: ContextDependencies) => Promise<AudienceCheck>,
   ): Promise<boolean> {
     return false;
+  }
+  async sourceInputCheckpoint(): Promise<{ ok: false; reason: "unavailable" }> {
+    return { ok: false, reason: "unavailable" };
   }
   async recordSourceResult(_receipt: SourceResultReceipt): Promise<boolean> {
     return false;
@@ -1372,6 +1404,25 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       request: StoreRequestWitness;
       expected: unknown;
     }> = [];
+    private readonly confirmedInbox = new Map<number, InboxRowWitness>();
+    private inboxAcknowledgmentsActive = false;
+    private inboxBoundaryUnobserved = false;
+    confirmInboxInputs(inputs: readonly FollowUpInput[]): void {
+      if (!this.tracked() || this.finished || this.handedOff || this.finishLanding) return;
+      for (const input of inputs) {
+        const witness = input.ledgerWitness && inboxAcknowledgedRowsOf([input.ledgerWitness])?.[0];
+        if (witness?.runId === this.runId && witness.seq === input.ledgerSeq && !this.confirmedInbox.has(witness.seq)) {
+          this.confirmedInbox.set(witness.seq, witness);
+          this.inboxAcknowledgmentsActive ||= this.state.sourceInputIntents !== undefined;
+        }
+      }
+    }
+    private forgetConfirmedInbox(rows: readonly InboxRowWitness[] | undefined): void {
+      for (const row of rows ?? []) {
+        if (JSON.stringify(this.confirmedInbox.get(row.seq)) === JSON.stringify(row))
+          this.confirmedInbox.delete(row.seq);
+      }
+    }
     get writeBoundaryFailure(): WriteBoundaryFailure | undefined {
       const pending = this.pendingBoundaries[0];
       return pending && structuredClone(pending.failure);
@@ -1408,7 +1459,28 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           if (!this.pendingBoundaries.includes(pending)) continue;
           if (!observed.ok) return false;
           const state = observed.boundary.state as RunState | undefined;
-          if (pending.failure.kind === "context-checkpoint") {
+          if (pending.failure.kind === "source-input-checkpoint") {
+            const request = pending.expected as Exclude<SourceInputCheckpointRequest, { operation: "read" }>;
+            const id = request.operation === "commit" ? request.receipt.inputId : request.inputId;
+            const read = await ledger.sourceInputCheckpoint(this.runId, gen, { operation: "read", inputId: id });
+            if (
+              !read.ok ||
+              !read.checkpoint ||
+              (request.operation === "commit"
+                ? JSON.stringify(sourceSnapshot(read.checkpoint.receipt)) !==
+                  JSON.stringify(sourceSnapshot(request.receipt))
+                : !read.checkpoint.acknowledged || read.checkpoint.receiptHash !== request.receiptHash)
+            )
+              return false;
+            const retained = sourceInputIntentsOf(state?.sourceInputIntents);
+            if (
+              !retained?.checkpoints?.some(
+                (checkpoint) => JSON.stringify(checkpoint) === JSON.stringify(read.checkpoint),
+              )
+            )
+              return false;
+            this.state = { ...this.state, sourceInputIntents: retained };
+          } else if (pending.failure.kind === "context-checkpoint") {
             const expected = pending.expected as ContextBoundaryExpected;
             const receipt = state?.contextCheckpointReceipt;
             if (!this.checkpointMatches(receipt, expected)) return false;
@@ -1453,6 +1525,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           if (pending.failure.kind === "step") {
             const expected = pending.expected as StepRecord;
             this.turnsWritten = Math.max(this.turnsWritten ?? 0, expected.turnIndex);
+            this.forgetConfirmedInbox(expected.inboxAcknowledgedRows);
           } else if (pending.failure.kind === "state") {
             this.acknowledgedStateVersion = Math.max(this.acknowledgedStateVersion, pending.failure.stateVersion);
           }
@@ -1581,6 +1654,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.onStop = req.onStop;
       this.onFenced = req.onFenced;
       this.stepNo = from.stepNo;
+      this.inboxBoundaryUnobserved = from.resumable === true;
       // An adopted run's next heartbeat says the round it is on, not round zero.
       this.factRound = from.stepNo;
       this.lastSeq = from.lastSeq;
@@ -2015,7 +2089,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const pending = sourceInputIntentsOf(this.state.sourceInputIntents);
         if (JSON.stringify(pending) !== JSON.stringify(original)) return hold("intent-changed");
         const begun = {
-          version: 1 as const,
+          ...original,
           entries: original.entries.map((input) => (input.id === id ? { ...input, phase: "begun" as const } : input)),
         };
         if (!(await this.setStateAndFlush({ sourceInputIntents: begun }))) return hold("begin-unconfirmed");
@@ -2040,6 +2114,171 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       });
       this.sourceSending = sending.catch(() => false);
       return sending;
+    }
+
+    sourceInputCheckpoint(
+      request: SourceInputCheckpointRequest,
+      validate: (context: ContextDependencies) => Promise<AudienceCheck>,
+    ): Promise<SourceInputCheckpointResult | { ok: false; reason: "unavailable" }> {
+      const frozen = sourceInputCheckpointRequestOf(request);
+      const sending = this.sourceSending.then(() =>
+        this.trackBoundary(async (prior) => {
+          await prior;
+          return this.serializeState(async () => {
+            const unavailable = { ok: false, reason: "unavailable" } as const;
+            const held = (reason: string) => {
+              try {
+                warn(
+                  JSON.stringify({
+                    event: "source.input.checkpoint.held",
+                    runId: this.runId,
+                    operation: frozen?.operation ?? "invalid",
+                    reason,
+                  }),
+                );
+              } catch {
+                /* A diagnostic failure cannot permit an input. */
+              }
+              return unavailable;
+            };
+            try {
+              if (!frozen || !this.tracked() || this.finished || this.handedOff || this.finishLanding)
+                return held("owner-unavailable");
+              if (!(await this.reconcilePendingBoundary())) return held("write-unconfirmed");
+              const before = await ledger.peekInbox(this.runId, gen, 0);
+              if (!before.ok) return held("readback-unavailable");
+              const state = before.boundary.state as RunState;
+              const id = frozen.operation === "commit" ? frozen.receipt.inputId : frozen.inputId;
+              const inputs = sourceInputIntentsOf(state.sourceInputIntents);
+              const entry = inputs?.entries.find((input) => input.id === id);
+              const context = state.contextDependencies;
+              if (
+                !entry ||
+                (frozen.operation !== "read" && entry.phase !== "begun") ||
+                !sourceInputNativeMatches(state, entry) ||
+                !isContextDependencies(context) ||
+                context.status !== "known"
+              )
+                return held("input-unproved");
+              // Check only custody and source state. Progress counters can move
+              // without changing which original input this host can settle.
+              const binding = (value: RunState) =>
+                JSON.stringify(
+                  sourceSnapshot({
+                    entries: sourceInputIntentsOf(value.sourceInputIntents)?.entries ?? null,
+                    harness: value.harness ?? null,
+                    launch: value.harnessLaunch ?? null,
+                    context: value.contextDependencies ?? null,
+                    task: value.sourceTask ?? null,
+                  }),
+                );
+              const checked = binding(state),
+                local = binding(this.state);
+              if (!(await validate(structuredClone(context))).ok) return held("access-refused");
+              const current = await ledger.peekInbox(this.runId, gen, 0);
+              if (
+                !current.ok ||
+                binding(current.boundary.state as RunState) !== checked ||
+                binding(this.state) !== local
+              )
+                return held("context-changed");
+              if (frozen.operation === "ack") {
+                const saved = await ledger.sourceInputCheckpoint(this.runId, gen, { operation: "read", inputId: id });
+                if (!saved.ok || !saved.checkpoint || saved.checkpoint.receiptHash !== frozen.receiptHash)
+                  return held("checkpoint-unproved");
+              }
+              // Access can be revoked while either prerequisite read waits.
+              if (!(await validate(structuredClone(context))).ok) return held("access-refused");
+              if (
+                !this.tracked() ||
+                this.finished ||
+                this.handedOff ||
+                this.finishLanding ||
+                binding(this.state) !== local
+              )
+                return held("context-changed");
+              let result: SourceInputCheckpointResult | undefined;
+              try {
+                result = await ledger.sourceInputCheckpoint(this.runId, gen, frozen);
+              } catch (error) {
+                if (frozen.operation === "read" || !(error instanceof UncertainStoreError)) throw error;
+                // A late mutation can still commit. Read its original identity;
+                // never repeat it from a timeout or missing response.
+                this.pendingBoundaries.push({
+                  failure: {
+                    version: 1,
+                    kind: "source-input-checkpoint",
+                    runId: this.runId,
+                    gen,
+                    requestDigest: error.request.digest,
+                    expectedDigest: await sourceHash(sourceSnapshot(frozen)),
+                    ...(error.diagnosis ? { diagnosis: error.diagnosis } : {}),
+                    storageDiagnostic: originalStorageFailure(error),
+                  },
+                  request: error.request,
+                  expected: frozen,
+                });
+                if (!(await this.reconcilePendingBoundary())) return held("write-unconfirmed");
+              }
+              if (result && !result.ok) return result;
+              if (result?.ok && result.checkpoint && !this.retainSourceCheckpoint(result.checkpoint))
+                return held("checkpoint-unproved");
+              const observed =
+                frozen.operation === "read"
+                  ? result
+                  : await ledger.sourceInputCheckpoint(this.runId, gen, { operation: "read", inputId: id });
+              if (!observed?.ok) return held("readback-unavailable");
+              if (observed.checkpoint && !this.retainSourceCheckpoint(observed.checkpoint))
+                return held("checkpoint-unproved");
+              if (
+                frozen.operation === "commit" &&
+                (!observed.checkpoint ||
+                  JSON.stringify(sourceSnapshot(observed.checkpoint.receipt)) !==
+                    JSON.stringify(sourceSnapshot(frozen.receipt)))
+              )
+                return held("checkpoint-unproved");
+              if (
+                frozen.operation === "ack" &&
+                (!observed.checkpoint?.acknowledged || observed.checkpoint.receiptHash !== frozen.receiptHash)
+              )
+                return held("ack-unproved");
+              if (!(await validate(structuredClone(context))).ok) return held("access-refused");
+              const after = await ledger.peekInbox(this.runId, gen, 0);
+              if (!after.ok || binding(after.boundary.state as RunState) !== checked || binding(this.state) !== local)
+                return held("context-changed");
+              const retained = sourceInputIntentsOf((after.boundary.state as RunState).sourceInputIntents);
+              if (!retained) return held("checkpoint-unproved");
+              // Later ordinary state writes must carry the store's immutable
+              // checkpoint frame, including a newly acknowledged exact witness.
+              this.state = { ...this.state, sourceInputIntents: retained };
+              return observed;
+            } catch {
+              return held("storage-or-access-unavailable");
+            }
+          });
+        }),
+      );
+      this.sourceSending = sending.then(
+        (result) => result.ok,
+        () => false,
+      );
+      return sending;
+    }
+
+    private retainSourceCheckpoint(checkpoint: SourceInputCheckpoint): boolean {
+      const inputs = sourceInputIntentsOf(this.state.sourceInputIntents);
+      if (!inputs?.entries.some((entry) => entry.id === checkpoint.receipt.inputId)) return false;
+      const retained = sourceInputIntentsOf({
+        version: 2,
+        entries: inputs.entries,
+        checkpoints: [
+          ...(inputs.checkpoints ?? []).filter((saved) => saved.receipt.inputId !== checkpoint.receipt.inputId),
+          structuredClone(checkpoint),
+        ],
+      });
+      if (!retained) return false;
+      this.state = { ...this.state, sourceInputIntents: retained };
+      return true;
     }
 
     private async saveSources(sources: SessionSources): Promise<boolean> {
@@ -2401,7 +2640,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     step(report: StepReport): Promise<void> {
       if (this.finished || this.finishLanding) return Promise.resolve();
-      return this.trackBoundary(() => this.sendStep(report));
+      return this.trackBoundary(async (prior) => {
+        await prior;
+        return this.sendStep(report);
+      });
     }
 
     private async sendStep(report: StepReport): Promise<void> {
@@ -2419,18 +2661,48 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       );
       if (report.compaction)
         turns.push({ idx: this.rowIndex(report.firstIdx + report.turns.length), compaction: report.compaction });
-      const record: StepRecord = {
+      const confirmedInbox = [...this.confirmedInbox.values()].sort((a, b) => a.seq - b.seq);
+      this.inboxAcknowledgmentsActive ||= this.state.sourceInputIntents !== undefined && confirmedInbox.length > 0;
+      let record: StepRecord = {
         step: ++this.stepNo,
         seq: this.lastSeq,
         turnIndex: report.firstIdx + turns.length,
         ...(report.publicationAnswer !== undefined ? { publicationAnswer: report.publicationAnswer } : {}),
         inFlight: report.inFlight,
         inboxConsumedSeq: report.inboxConsumedSeq,
+        ...(this.inboxAcknowledgmentsActive ? { inboxAcknowledgedRows: confirmedInbox } : {}),
         ...(report.inboxDeferredSeqs?.length ? { inboxDeferredSeqs: report.inboxDeferredSeqs } : {}),
         remainingMs: report.remainingMs,
         turn: report.turn,
         iteration: report.iteration,
       };
+      if (
+        this.state.sourceInputIntents !== undefined ||
+        this.inboxAcknowledgmentsActive ||
+        this.inboxBoundaryUnobserved ||
+        confirmedInbox.length > 0
+      ) {
+        const observed = await ledger.peekInbox(this.runId, gen, 0);
+        if (!observed.ok) throw new TransientStoreError("source input step boundary is unavailable");
+        const state = observed.boundary.state as RunState;
+        const prior = observed.boundary.lastStep as StepRecord | undefined;
+        if (
+          record.inboxAcknowledgedRows === undefined &&
+          (prior?.inboxAcknowledgedRows !== undefined ||
+            (state.sourceInputIntents !== undefined && confirmedInbox.length > 0))
+        )
+          record.inboxAcknowledgedRows = confirmedInbox;
+        const prepared = await prepareInboxAcknowledgments(this.runId, record, observed.items);
+        if (!prepared) throw new TransientStoreError("original inbox acknowledgment proof is unavailable");
+        const protectedRecord = protectSourceInputStep(state, record, observed.items, prior, prepared.witnesses);
+        const inputs = sourceInputIntentsOf(state.sourceInputIntents);
+        if (!protectedRecord || (state.sourceInputIntents !== undefined && !inputs))
+          throw new TransientStoreError("source input step proof is unavailable");
+        record = protectedRecord;
+        this.inboxAcknowledgmentsActive ||= record.inboxAcknowledgedRows !== undefined;
+        this.inboxBoundaryUnobserved = false;
+        if (inputs) this.state = { ...this.state, sourceInputIntents: inputs };
+      }
       const expected = structuredClone(record);
       const expectedDigest = await sourceHash(expected);
       // The heartbeat body's step facts (record 0064): the round is the step
@@ -2455,7 +2727,20 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         try {
           const result = await ledger.step(this.runId, gen, record, turns, this.sessionRow?.key);
           if (!result.ok) this.detach(`step ${record.step} refused (${result.reason})`, result.reason === "fenced");
-          else this.turnsWritten = record.turnIndex;
+          else {
+            this.turnsWritten = record.turnIndex;
+            this.forgetConfirmedInbox(record.inboxAcknowledgedRows);
+            if (
+              record.inboxAcknowledgedRows === undefined &&
+              this.state.sourceInputIntents === undefined &&
+              !this.inboxAcknowledgmentsActive
+            )
+              this.forgetConfirmedInbox(
+                confirmedInbox.filter(
+                  (row) => row.seq <= record.inboxConsumedSeq && !record.inboxDeferredSeqs?.includes(row.seq),
+                ),
+              );
+          }
           return;
         } catch (err) {
           if (err instanceof UncertainStoreError) {
