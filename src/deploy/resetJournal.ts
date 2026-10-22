@@ -10,6 +10,30 @@ const envelope = z
   .object({ serverId: z.string(), keyId: z.string(), sealed: z.string(), updatedAt: z.number() })
   .strict();
 
+interface ResetJournalWriteDiagnostic {
+  account: string;
+  bucket: string;
+  keySha256: string;
+  stage: "absence" | "put" | "readback";
+  reason: "http" | "body-mismatch";
+  httpStatus: number;
+  requestId: string | null;
+  writeOutcome: "unknown";
+  reporting?: "failed";
+  reportingError?: "TypeError" | "RangeError" | "SyntaxError" | "Error" | "non-error";
+}
+
+/** Safe facts also survive in the controller's held receipt if log delivery fails. */
+export class ResetJournalWriteError extends Error {
+  constructor(
+    message: string,
+    readonly diagnostic: ResetJournalWriteDiagnostic,
+  ) {
+    super(message, { cause: diagnostic });
+    this.name = "ResetJournalWriteError";
+  }
+}
+
 /** This private control bucket is outside the two application buckets being cleared. */
 export class ResetJournal {
   readonly bucket: string;
@@ -121,6 +145,43 @@ export class ResetJournal {
     if ((await this.inspect()).status !== "owned") throw new Error("reset journal is absent");
     return (await this.native.bucket(this.bucket)).objects.filter((object) => object.key.startsWith(`runs/${run}/`));
   }
+  private writeFailure(
+    key: string,
+    stage: ResetJournalWriteDiagnostic["stage"],
+    response: Response,
+    message: string,
+    reason: ResetJournalWriteDiagnostic["reason"] = "http",
+  ): never {
+    const ray = response.headers.get("cf-ray");
+    const diagnostic: ResetJournalWriteDiagnostic = {
+      account: this.native.account,
+      bucket: this.bucket,
+      keySha256: createHash("sha256").update(key).digest("hex"),
+      stage,
+      reason,
+      httpStatus: response.status,
+      requestId: ray && /^[a-f0-9]{16,32}(?:-[a-z]{3})?$/i.test(ray) ? ray : null,
+      writeOutcome: "unknown",
+    };
+    const error = new ResetJournalWriteError(message, diagnostic);
+    try {
+      console.error(JSON.stringify({ event: "installation.reset.journal.failure", ...diagnostic }));
+    } catch (reportingError) {
+      // Built-in classes identify the sink failure without copying arbitrary names or private prose.
+      diagnostic.reporting = "failed";
+      diagnostic.reportingError =
+        reportingError instanceof TypeError
+          ? "TypeError"
+          : reportingError instanceof RangeError
+            ? "RangeError"
+            : reportingError instanceof SyntaxError
+              ? "SyntaxError"
+              : reportingError instanceof Error
+                ? "Error"
+                : "non-error";
+    }
+    throw error;
+  }
   /** Unique immutable names plus the shared deployment lock preserve the original write. */
   async write(key: string, sealed: SealedCredential) {
     if (
@@ -130,17 +191,28 @@ export class ResetJournal {
       throw new Error("reset journal accepts only this account's sealed records");
     const path = this.objectPath(key);
     const existing = await this.native.response(path);
-    if (existing.status !== 404) throw new Error("reset journal key exists or its absence is unverified");
+    if (existing.status !== 404) {
+      if (existing.ok) throw new Error("reset journal key exists or its absence is unverified");
+      this.writeFailure(key, "absence", existing, "reset journal key absence is unverified; no write is allowed");
+    }
     const text = JSON.stringify(sealed) + "\n";
     const put = await this.native.response(path, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: text,
     });
-    if (!put.ok) throw new Error("original reset journal write is unverified; no retry is allowed");
+    if (!put.ok) this.writeFailure(key, "put", put, "original reset journal write is unverified; no retry is allowed");
     const read = await this.native.response(path);
-    if (!read.ok || (await read.text()) !== text)
-      throw new Error("original reset journal readback differs; no deletion is allowed");
+    if (!read.ok)
+      this.writeFailure(key, "readback", read, "original reset journal readback is unverified; no deletion is allowed");
+    if ((await read.text()) !== text)
+      this.writeFailure(
+        key,
+        "readback",
+        read,
+        "original reset journal readback differs; no deletion is allowed",
+        "body-mismatch",
+      );
     return {
       bucket: this.bucket,
       key,
