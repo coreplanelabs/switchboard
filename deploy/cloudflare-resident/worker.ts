@@ -11083,12 +11083,13 @@ export class ResidentDO extends Sandbox<Env> {
     return {
       request: async (value, timeout) => {
         if (!this.ctx.container?.running) {
-          if (
-            this.destroying ||
-            (await this.ctx.storage.get(CLEANUP_PENDING_KEY)) ||
-            (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))
-          )
-            throw new Error("native-scope runtime unavailable");
+          let refusal: string | undefined;
+          if (this.recreateAdmission.pending) refusal = "recreate-pending";
+          else if (this.destroying) refusal = "destroying";
+          else if (await this.recreateAdmission.blocked()) refusal = "recreate-held";
+          else if (await this.ctx.storage.get(CLEANUP_PENDING_KEY)) refusal = "cleanup-pending";
+          else if (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) refusal = "destroy-unconfirmed";
+          if (refusal) throw new Error(`native-scope runtime unavailable (${refusal})`);
           await this.start();
         }
         return this.nativeScopeTransport().request(value, timeout);
@@ -14577,7 +14578,7 @@ export class ResidentDO extends Sandbox<Env> {
       try {
         finalization = await journal.resumeProducerFinalization(
           origin,
-          native,
+          this.nativeScopeRecoveryTransport(),
           async (record) => "opOwner" in record && !this.activeOperatorRequests.has(record.opOwner),
         );
         for (const saved of await journal.producerAdmissions(origin, (previous) => previous !== owner)) {

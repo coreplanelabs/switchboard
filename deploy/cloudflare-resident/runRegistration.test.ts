@@ -4211,6 +4211,127 @@ describe("resident workload admission", () => {
     },
   );
 
+  it.each([
+    "same boot",
+    "replacement boot",
+    "destroying",
+    "cleanup",
+    "destroy-unconfirmed",
+    "recreate",
+    "recreate pending",
+    "start failed",
+    "still inactive",
+    "active original",
+    "payload pending",
+  ])("resumes original producer cleanup after an inactive runtime: %s", async (boundary) => {
+    const h = workloadResident();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    h.native.closeError = new Error("original closure reply unavailable");
+    let builds = 0;
+    expect(
+      await h.instance.runInstanceStep("refresh-original", "build", async () => {
+        builds++;
+        const result = await h.instance.run(["true"]);
+        if (boundary === "payload pending")
+          await new NativeOperationJournal(h.instance.ctx.storage).begin(
+            h.instance.opOperationScope.getStore().key,
+            "process",
+          );
+        return { status: "done", value: result.exitCode };
+      }),
+    ).toMatchObject({ status: "done", value: 0 });
+    const [originalKey, original] = [...h.rows].find(([key]) => key.startsWith("native-operation:op:"))!;
+    const [permitKey, permit] = [...h.registryRows].find(([key]) => key.startsWith("deploy:admission:"))! as [
+      string,
+      { requestHash: string },
+    ];
+    const permitIdentity = { id: permitKey.slice("deploy:admission:".length), requestHash: permit.requestHash };
+    const before = structuredClone(original);
+    h.native.closeError = undefined;
+    h.instance.ctx.container.running = false;
+    let starts = 0;
+    h.instance.start = async () => {
+      starts++;
+      if (boundary === "start failed") throw new Error("runtime start unavailable");
+      h.instance.ctx.container.running = boundary !== "still inactive";
+    };
+    h.instance.ensureHydrated = async () => {
+      throw new Error("cleanup must not restore a checkout");
+    };
+    const transport = h.instance.nativeScopeTransport();
+    h.instance.nativeScopeTransport = () => ({
+      request: async (value: Record<string, any>) => {
+        if (!h.instance.ctx.container.running) throw new Error("native-scope runtime unavailable");
+        const answer = await transport.request(value);
+        if (boundary === "replacement boot" && value.mode === "inspect")
+          return {
+            ...answer,
+            stdout: JSON.stringify({ version: 1, boot: "22222222-2222-4222-8222-222222222222" }),
+          };
+        return answer;
+      },
+    });
+    if (boundary === "destroying") h.instance.destroying = true;
+    if (["cleanup", "destroy-unconfirmed"].includes(boundary))
+      h.rows.set(boundary, { privateContext: "must-stay-out-of-telemetry" });
+    if (boundary === "recreate") h.instance.recreateAdmission.blocked = async () => true;
+    if (boundary === "recreate pending") h.instance.recreateAdmission.pending = true;
+    if (boundary === "active original")
+      h.instance.activeOperatorRequests.add(originalKey.slice("native-operation:".length));
+    let fetches = 0;
+    const recovery = () =>
+      h.instance.runInstanceStep("refresh-next", boundary === "payload pending" ? "build" : "fetch", async () => {
+        fetches++;
+        return { status: "done", value: "fetched" };
+      });
+    const canEnd = ["same boot", "replacement boot"].includes(boundary);
+    expect(await recovery()).toMatchObject({
+      status: "stopped",
+      why: canEnd ? "producer-cleanup-completed" : "producer-cleanup-pending",
+    });
+    expect(await h.registry.readDeployAdmissionReceipt(permitIdentity)).toMatchObject({
+      state: canEnd ? "released" : "admitted",
+      ...permitIdentity,
+    });
+    expect({ builds, fetches, starts }).toEqual({
+      builds: 1,
+      fetches: 0,
+      starts: canEnd || ["start failed", "still inactive"].includes(boundary) ? 1 : 0,
+    });
+    const refusalReasons: Record<string, string> = {
+      "recreate pending": "recreate-pending",
+      destroying: "destroying",
+      recreate: "recreate-held",
+      cleanup: "cleanup-pending",
+      "destroy-unconfirmed": "destroy-unconfirmed",
+    };
+    const reason = refusalReasons[boundary];
+    if (reason) {
+      const prefix = "[resident-deploy-admission] ";
+      const signals = h.native.logs
+        .filter((line) => line.startsWith(prefix))
+        .map((line) => JSON.parse(line.slice(prefix.length)))
+        .filter((event) => event.phase === "operator-ending" && event.stage === "resume");
+      expect(signals).toEqual([
+        expect.objectContaining({
+          commit: "unverified",
+          failure: "storage-or-rpc",
+          errorName: "Error",
+          errorMessage: `native-scope runtime unavailable (${reason})`,
+        }),
+      ]);
+      expect(JSON.stringify(signals)).not.toContain("must-stay-out-of-telemetry");
+    }
+    if (canEnd) {
+      expect(h.rows.get("native-operation-ending:" + originalKey)).toMatchObject({
+        receipt: { callback: "unknown", originalOperationOutcome: "unknown" },
+      });
+      expect(await recovery()).toMatchObject({ status: "done", value: "fetched" });
+      expect({ builds, fetches, starts }).toEqual({ builds: 1, fetches: 1, starts: 1 });
+      expect(h.native.scopeCalls.filter((call) => call.mode === "launch")).toHaveLength(1);
+    } else expect(h.rows.get(originalKey)).toEqual(before);
+  });
+
   it.each(["acknowledged", "lost-release-reply", "release-unavailable", "completion-write-failed", "metadata-failed"])(
     "resumes saved producer cleanup on the next refresh without repeating its build: %s",
     async (fault) => {
