@@ -3224,6 +3224,33 @@ async function runSelectedDeployPlan(
     };
   }
 
+  // A registry tag names the Bot image built at its release commit. A later
+  // checkout can deploy a newer Worker while still selecting that old image;
+  // its config slot would then belong to the checkout, not the image consumer.
+  if (plan.root.mode === "checkout" && plan.images.mode === "registry" && plan.steps.some((s) => s.name === "bot")) {
+    const version = plan.images.version;
+    const tag = await run("git", ["rev-parse", `refs/tags/v${version}^{commit}`], {
+      cwd: OPERATOR_ROOT.root,
+      signal: deps.signal,
+    });
+    if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
+    const imageCommit = tag.code === 0 ? tag.output.trim() : "";
+    if (!/^[0-9a-f]{40}$/.test(imageCommit))
+      return {
+        kind: "refused",
+        problems: [
+          `Bot image ${version} has no verified release commit; build this checkout's image or deploy its matching release`,
+        ],
+      };
+    if (imageCommit !== expectedCommit)
+      return {
+        kind: "refused",
+        problems: [
+          `Bot image ${version} belongs to ${imageCommit}, but checkout is ${expectedCommit}; build this checkout's image or deploy its matching release`,
+        ],
+      };
+  }
+
   // The bot reads its config from the state Worker, so the bot step is preceded
   // by a push of this installation's config from wherever the profile says it
   // lives. Read and validated HERE, before any Worker deploys: an unreadable
