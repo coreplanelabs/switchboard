@@ -3190,6 +3190,12 @@ async function runSelectedDeployPlan(
       signal: deps.signal,
       readHealth: deps.readHealth,
       postJson: deps.postJson,
+      ...(plan.force
+        ? {
+            onClosedOperation: (problem: string) =>
+              io.warn(`[deploy:all] WARNING --force: ${problem}; original operation outcomes remain unknown`),
+          }
+        : {}),
     });
     if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
     if (earlyHold) return { kind: "refused", problems: [earlyHold] };

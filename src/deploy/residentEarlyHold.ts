@@ -13,6 +13,7 @@ interface EarlyHoldReader {
   baseUrl: string;
   bearer: string | undefined;
   signal?: AbortSignal;
+  onClosedOperation?: (problem: string) => void;
   readHealth(url: string, bearer?: string, timeoutMs?: number, signal?: AbortSignal): Promise<HealthRead>;
   postJson?(url: string, bearer: string, body: Record<string, unknown>): Promise<PostAnswer>;
 }
@@ -187,8 +188,11 @@ export async function residentEarlyHoldProblem(reader: EarlyHoldReader): Promise
           typeof (operation.journal as Record<string, unknown>).closed !== "boolean"
         )
           return unavailable(`native operation status incomplete for ${resident}`);
-        if ((operation.journal as Record<string, unknown>).closed === true)
-          return `resident deployment blocked before any Worker upload: ${resident} has closed ${JSON.stringify(operation.key)} at ${operation.recordHash} without original ending evidence; resolve that exact record before deployment`;
+        if ((operation.journal as Record<string, unknown>).closed === true) {
+          const problem = `resident deployment blocked before any Worker upload: ${resident} has closed ${JSON.stringify(operation.key)} at ${operation.recordHash} without original ending evidence; resolve that exact record before deployment`;
+          if (!reader.onClosedOperation) return problem;
+          reader.onClosedOperation(problem);
+        }
       }
       if (next === null) break;
       cursor = next;
