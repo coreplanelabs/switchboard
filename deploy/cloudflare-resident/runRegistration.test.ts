@@ -1530,6 +1530,7 @@ function workloadResident(
        "clearRuntimeUnreachable",
        "beginThreadNativeOperation",
        "getNativeOperations",
+       "nativeScopeRecoveryTransport",
        "recoverNativeOperation",
        "withRecreateSafeAdmin",
        "registeredRunsBeyondOps",
