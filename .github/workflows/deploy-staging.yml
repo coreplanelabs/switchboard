@@ -447,7 +447,7 @@ jobs:
   acceptance:
     name: staging / live Review
     needs: [authorize, validate, deploy]
-    if: always() && (github.event_name == 'pull_request_target' || inputs.pr != '') && (github.event.action != 'labeled' || github.event.label.name == 'deploy:staging')
+    if: always() && !cancelled() && (github.event_name == 'pull_request_target' || inputs.pr != '') && (github.event.action != 'labeled' || github.event.label.name == 'deploy:staging')
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 5
     steps:
