@@ -1,3 +1,5 @@
+import { custodyPinRevisionOf, type CustodyPinRevision } from "./custodyPinRevision.js";
+export { custodyPinRevisionOf, type CustodyPinRevision } from "./custodyPinRevision.js";
 import { allocationAckOf } from "./allocationAck.js";
 import { promotionConfirmationOf, confirmationMatchesPreparation } from "./seedVerification.js";
 import type { RunRecord } from "../runRecord.js";
@@ -40,23 +42,6 @@ export function isCustodyRangePins(value: unknown): value is SessionRangePins {
   );
 }
 
-export interface CustodyPinRevision {
-  version: 1;
-  revision: number;
-  guarded: boolean;
-}
-export function custodyPinRevisionOf(value: unknown): CustodyPinRevision | undefined {
-  if (
-    !object(value) ||
-    Object.keys(value).some((k) => !["version", "revision", "guarded"].includes(k)) ||
-    value.version !== 1 ||
-    !natural(value.revision) ||
-    typeof value.guarded !== "boolean" ||
-    (value.guarded && value.revision === 0)
-  )
-    return;
-  return { version: 1, revision: value.revision, guarded: value.guarded };
-}
 export function nextCustodyPinRevision(value: CustodyPinRevision): number | undefined {
   return custodyPinRevisionOf(value) && value.revision < Number.MAX_SAFE_INTEGER ? value.revision + 1 : undefined;
 }

@@ -23,7 +23,7 @@ export type SourceJobClaimPlan =
 
 /** Queue ownership is separate from a task's execution lease and permissions. */
 export function planSourceJobClaim(job: SourceEventJob, owner: string, now: number): SourceJobClaimPlan {
-  if (job.nextAttemptAt === null || job.nextAttemptAt > now) return { kind: "not-due" };
+  if (job.version === 4 || job.nextAttemptAt === null || job.nextAttemptAt > now) return { kind: "not-due" };
   const releases = job.version !== 1 ? job.releases : [];
   const saved = job.version === 3 ? { version: 3 as const, relevance: job.relevance } : { version: 2 as const };
   if (job.attempts >= SOURCE_JOB_MAX_ATTEMPTS)
@@ -67,7 +67,7 @@ export function planSourceJobRelease(
   request: SourceJobReleaseRequest,
   now: number,
 ): SourceJobReleasePlan {
-  if (job.version === 1) return { kind: "refused", reason: "fenced" };
+  if (job.version === 1 || job.version === 4) return { kind: "refused", reason: "fenced" };
   const prior = job.releases.find((receipt) => receipt.token === request.token);
   if (prior)
     return prior.owner === request.owner && prior.disposition === request.disposition && prior.reason === request.reason
@@ -136,6 +136,7 @@ export function planSourceRelevanceSave(
   | { kind: "changed"; job: ClaimedSourceEventJob; record: SourceRelevanceRecord }
   | { kind: "replayed"; record: SourceRelevanceRecord }
   | Extract<SourceRelevanceSaveResult, { kind: "refused" }> {
+  if (job.version === 4) return { kind: "refused", reason: "fenced" };
   const relevance = job.version === 3 ? job.relevance : [];
   const prior = relevance.find((record) => JSON.stringify(record.context) === JSON.stringify(request.result.context));
   if (prior) {

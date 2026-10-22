@@ -1,3 +1,6 @@
+import { testSourceObligationJob } from "../../src/core/testing/sourceObligations.ts";
+import { sourceObligationHolder } from "../../src/core/runLedger/sourceObligations.ts";
+import type { SourceEventReceipt } from "../../src/core/runLedger/sourceEvents.ts";
 import { testSourceInput, testSourceInputIntent, seedSourceInputIntent } from "../../src/core/testing/sourceInputs.ts";
 import { captureSourceTaskSnapshot } from "../../src/core/references/sourceTaskSnapshot.ts";
 import { checkStateFixture } from "../../src/core/testing/checkState.ts";
@@ -18752,7 +18755,7 @@ describe("saved source-event jobs in SQLite", () => {
       const now = Date.now();
       for (let i = 0; i < 64; i++) await owner.receiveSourceEvent({ ...event, deliveryId: `future-${i}` }, now);
       const future = '{"version":9,"state":"future"}';
-      state.storage.sql.exec(`UPDATE source_events SET job_json = ?`, future);
+      state.storage.sql.exec(`UPDATE source_events SET job_json = ?, bytes = 131072`, future);
       const known = await owner.receiveSourceEvent({ ...event, deliveryId: "known" }, now);
       if (known.kind === "refused") throw new Error("expected reception");
       expect(await owner.claimSourceEvents(request, now)).toEqual({
@@ -18768,6 +18771,9 @@ describe("saved source-event jobs in SQLite", () => {
       expect(
         state.storage.sql.exec(`SELECT COUNT(*) AS count FROM source_events WHERE job_json = ?`, future).one(),
       ).toEqual({ count: 64 });
+      expect(
+        state.storage.sql.exec(`SELECT SUM(bytes) AS bytes FROM source_events WHERE job_json = ?`, future).one(),
+      ).toEqual({ bytes: 8_388_608 });
       await state.storage.deleteAlarm();
     });
   });
@@ -21849,5 +21855,214 @@ describe("write trace failure propagation", () => {
       expect(trace.filter((e) => e.objectId === target && e.outcome === "returned")).toEqual([]);
     }
     expect(JSON.stringify(trace)).not.toContain("PRIVATE_");
+  });
+});
+
+describe("reader-first source obligation compatibility in SQLite", () => {
+  const source = {
+    version: 1,
+    sourceId: "fixture:installation:reader",
+    deliveryId: "one",
+    objectId: "comment:one",
+    changeId: "revision:one",
+    kind: "source-evidence",
+    payload: { text: "retained evidence" },
+  };
+  async function seed(key: string) {
+    const accepted = await post("/runs/source-events/receive", { storeKey: key, event: source });
+    expect(accepted).toMatchObject({ status: 200, data: { kind: "received" } });
+    const receipt = accepted.data.receipt as SourceEventReceipt;
+    const job = testSourceObligationJob(receipt);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        "UPDATE source_events SET job_json = ?, due_at = ? WHERE key = ?",
+        JSON.stringify(job),
+        receipt.receivedAt,
+        receipt.key,
+      );
+    });
+    return { receipt, job };
+  }
+
+  it("reads future waiting metadata and holds old claimants without consuming retries", async () => {
+    const key = storeKey(),
+      { receipt, job } = await seed(key);
+    expect((await post("/runs/source-events/read", { storeKey: key, key: receipt.key })).data).toMatchObject({
+      record: { job },
+    });
+    expect(
+      await post("/runs/source-events/claim", {
+        storeKey: key,
+        request: { owner: "old-reader", readerVersion: 3, limit: 1 },
+      }),
+    ).toEqual({ status: 200, data: { kind: "claimed", claims: [], held: 1, failed: [] } });
+    expect((await post("/runs/source-events/read", { storeKey: key, key: receipt.key })).data).toMatchObject({
+      record: { job },
+    });
+    expect(await post("/runs/source-events/receive", { storeKey: key, event: source })).toEqual({
+      status: 200,
+      data: { kind: "duplicate", receipt },
+    });
+  });
+
+  it.each(["waiting", "expired", "unreadable", "unknown-holder"])(
+    "keeps %s obligation sources through trim and the orphan sweep",
+    async (kind) => {
+      const key = storeKey(),
+        { receipt, job } = await seed(key);
+      const holder =
+        kind === "unknown-holder"
+          ? "@source-obligation:future-format"
+          : sourceObligationHolder(job.obligations[0]!.reference);
+      const original = { ...record("source-root", "cli:thread"), finishedAt: Date.now() - 1000 };
+      expect(
+        (
+          await post("/runs/put", {
+            storeKey: key,
+            record: { ...record("unpinned-obligation-reader", "cli:unpinned"), finishedAt: Date.now() - 2000 },
+          })
+        ).status,
+      ).toBe(200);
+      expect((await post("/runs/put", { storeKey: key, record: original })).status).toBe(200);
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        const stored =
+          kind === "unreadable"
+            ? { ...job, future: true }
+            : kind === "expired"
+              ? { ...job, nextAttemptAt: null, obligations: job.obligations.map((o) => ({ ...o, state: "expired" })) }
+              : job;
+        state.storage.sql.exec(
+          "UPDATE source_events SET job_json = ? WHERE key = ?",
+          JSON.stringify(stored),
+          receipt.key,
+        );
+        state.storage.sql.exec(
+          "INSERT INTO context_refs(holder_run_id,source_run_id,session_key,retention_pin) VALUES(?,?,?,1)",
+          holder,
+          "source-root",
+          "",
+        );
+      });
+      await post("/runs/put", {
+        storeKey: key,
+        record: { ...record("newest-obligation-reader", "cli:newest"), finishedAt: Date.now() },
+        policy: { maxRuns: 1, maxBytes: 1000000, retentionDays: 1 },
+        policyUpdatedAt: Date.now(),
+      });
+      expect((await post("/runs/get", { storeKey: key, id: "source-root" })).data).toMatchObject({
+        record: { id: "source-root" },
+      });
+      await runDurableObjectAlarm(stub);
+      await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+        expect((await owner.get("source-root"))?.id).toBe("source-root");
+        expect(await owner.get("unpinned-obligation-reader")).toBeNull();
+        expect(
+          state.storage.sql
+            .exec<{ holder_run_id: string }>(
+              "SELECT holder_run_id FROM context_refs WHERE source_run_id = ?",
+              "source-root",
+            )
+            .toArray(),
+        ).toEqual([{ holder_run_id: holder }]);
+      });
+    },
+  );
+
+  it("charges pending reservations, including undercharged fixtures, and fails closed on unreadable metadata", async () => {
+    const key = storeKey(),
+      { receipt, job } = await seed(key);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    for (const stored of [
+      { ...job, obligations: job.obligations.map((o) => ({ ...o, reservedBytes: 32 * 1024 * 1024 })) },
+      { ...job, future: true },
+    ]) {
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        state.storage.sql.exec(
+          "UPDATE source_events SET job_json = ? WHERE key = ?",
+          JSON.stringify(stored),
+          receipt.key,
+        );
+      });
+      expect(
+        await post("/runs/source-events/receive", { storeKey: key, event: { ...source, deliveryId: "over-capacity" } }),
+      ).toEqual({ status: 200, data: { kind: "refused", reason: "capacity" } });
+      expect(await post("/runs/source-events/receive", { storeKey: key, event: source })).toEqual({
+        status: 200,
+        data: { kind: "duplicate", receipt },
+      });
+    }
+  });
+
+  it.each(["invalid-json", "invalid-obligation", "future-obligation"] as const)(
+    "identifies unreadable quota metadata and retains its exact duplicate: %s",
+    async (kind) => {
+      const key = storeKey(),
+        { receipt, job } = await seed(key);
+      const stored =
+        kind === "invalid-json"
+          ? '{"private-source-text":'
+          : JSON.stringify({
+              ...job,
+              ...(kind === "future-obligation" ? { version: 9 } : {}),
+              future: "private-source-text",
+            });
+      const warnings: unknown[][] = [];
+      const originalWarn = console.warn;
+      const warn = vi.spyOn(console, "warn").mockImplementation((...args) => {
+        if (typeof args[0] === "string" && args[0].startsWith("[source-events/receive]")) warnings.push(args);
+        else originalWarn(...args);
+      });
+      try {
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+          state.storage.sql.exec("UPDATE source_events SET job_json = ? WHERE key = ?", stored, receipt.key);
+          expect(await owner.receiveSourceEvent({ ...source, deliveryId: "quota-refused" })).toEqual({
+            kind: "refused",
+            reason: "capacity",
+          });
+          expect(
+            warnings.filter((warning) => warning[0] === "[source-events/receive] retained unreadable job"),
+          ).toEqual([
+            ["[source-events/receive] retained unreadable job", { eventKey: receipt.key, reason: "unreadable-job" }],
+          ]);
+          expect(JSON.stringify(warnings)).not.toContain("private-source-text");
+          expect(await owner.receiveSourceEvent(source)).toEqual({ kind: "duplicate", receipt });
+          expect(state.storage.sql.exec("SELECT job_json FROM source_events WHERE key = ?", receipt.key).one()).toEqual(
+            { job_json: stored },
+          );
+          await state.storage.deleteAlarm();
+        });
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+
+  it("keeps an unresolved remote holder during revision-fenced pruning and refuses a stale revision", async () => {
+    const key = storeKey(),
+      { job } = await seed(key),
+      holder = sourceObligationHolder(job.obligations[0]!.reference);
+    const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(`obligation-log:${key}`));
+    await runInDurableObject(log, async (owner: SessionLogDO, state) => {
+      state.storage.sql.exec("INSERT INTO turns(idx,part,kind,bytes,json,text) VALUES(0,0,'user',2,'{}','')");
+      expect(await owner.protectCustodyRanges(holder, [{ from: 0, to: 0 }])).toMatchObject({ ok: true, guarded: true });
+      expect(await owner.protectRanges("ordinary", [{ from: 0, to: 0 }])).toEqual({ ok: true });
+      const revision = await owner.custodyPinRevision();
+      if (!revision) throw new Error("expected source protection revision");
+      expect(await owner.retainRangePinsIfRevision(revision, [])).toMatchObject({
+        ok: true,
+        revision: revision.revision + 1,
+      });
+      expect(
+        state.storage.sql
+          .exec<{ value: string }>("SELECT value FROM meta WHERE key = 'range_pins'")
+          .toArray()
+          .map((row) => JSON.parse(row.value)),
+      ).toEqual([{ [holder]: [{ from: 0, to: 0 }] }]);
+      expect(await owner.retainRangePinsIfRevision(revision, [])).toMatchObject({
+        ok: false,
+        reason: "revision-changed",
+      });
+    });
   });
 });
