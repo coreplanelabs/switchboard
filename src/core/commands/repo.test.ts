@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
 import { callerWith } from "../testing/callers.js";
-import { parseInvocation } from "../commandSurface.js";
+import { parseInvocation, tokenize } from "../commandSurface.js";
 import type { OperationResult, Operations } from "../operations.js";
 import type { ResidentAdminClient, ResidentAdminResponse } from "../residentAdmin.js";
 import { sanitizeResidentBody } from "../../execution/residentText.js";
@@ -961,6 +961,38 @@ describe("repo offboard / rebuild (--dry-run)", () => {
 });
 
 describe("repo rebuild --full", () => {
+  it("sends a complete exact native restore set from the public command", async () => {
+    const targets = [
+      { key: "native-operation:op:first", recordHash: "a".repeat(64) },
+      { key: "native-operation:op:second", recordHash: "b".repeat(64) },
+    ];
+    const client = mockClient({ rebuild: ok({ wouldRemove: {}, reprovision: { defaultRef: "main" } }) });
+    const commands = bind({ admin: client });
+    const line = tokenize(
+      `repo rebuild acme/api --full --dry-run --discard-native-records-json '${JSON.stringify(targets)}'`,
+    );
+    expect(line.ok).toBe(true);
+    if (!line.ok) throw new Error(line.error);
+    const bound = parseInvocation(commands.get("repo.rebuild")!, line.tokens.slice(2));
+    expect(bound.kind).toBe("invoke");
+    if (bound.kind !== "invoke") throw new Error(JSON.stringify(bound));
+    const result = await commands.invoke("repo.rebuild", bound.input, admin);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.message);
+    expect(renderText(commands.get("repo.rebuild")!, result.value)).toContain("Nothing was changed.");
+    expect(client.rebuild).toHaveBeenCalledWith("repo:acme/api", true, true, undefined, targets);
+    const duplicate = await commands.invoke(
+      "repo.rebuild",
+      {
+        args: ["acme/api"],
+        options: { full: true, discardNativeRecordsJson: JSON.stringify([targets[0], targets[0]]) },
+      },
+      admin,
+    );
+    expect(duplicate).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(client.rebuild).toHaveBeenCalledTimes(1);
+  });
+
   it("sends one exact emergency native selector only with a full reset", async () => {
     const target = { key: "native-operation:op:archive", recordHash: "a".repeat(64) };
     const client = mockClient({

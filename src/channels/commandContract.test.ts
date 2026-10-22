@@ -537,7 +537,7 @@ describe("derived naming across surfaces", () => {
       "repo reconfigure <slug> [--warm-residents <integer>] [--ref <string>] [--test <string>] [--build <string>] [--install <string>]",
     );
     expect(byId["repo.rebuild"]).toBe(
-      "repo rebuild <slug> [--dry-run] [--resident <integer>] [--full] [--discard-native-key <string>] [--discard-native-record-hash <string>]",
+      "repo rebuild <slug> [--dry-run] [--resident <integer>] [--full] [--discard-native-key <string>] [--discard-native-record-hash <string>] [--discard-native-records-json <string>]",
     );
     expect(byId["repo.test"]).toBe("repo test <slug> [ref]");
     expect(byId["repo.build"]).toBe("repo build <slug> [ref]");
