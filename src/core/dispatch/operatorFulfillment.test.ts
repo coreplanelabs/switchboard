@@ -549,16 +549,25 @@ describe("terminal command fulfillment", () => {
   });
 
   it("an aborted shared signal refuses a late positive verdict", async () => {
+    const controller = new AbortController();
+    let verifierStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      verifierStarted = resolve;
+    });
     const model = vi.fn<RouteModel>(async (prompt, { signal }) => {
       if (prompt.tool.name !== VERIFY_TOOL_NAME) return listing;
+      verifierStarted();
       await new Promise<void>((resolve) => {
         if (signal.aborted) resolve();
         else signal.addEventListener("abort", () => resolve(), { once: true });
       });
       return verdict(true);
     });
-    const answer = await runOperator(fix, model, { timeoutMs: 5 });
-    expect(answer.decision.kind).toBe("non_decision");
+    const running = runOperator(fix, model, { signal: controller.signal });
+    await started;
+    controller.abort();
+    const answer = await running;
+    expect(answer.decision).toMatchObject({ kind: "non_decision", reason: "command fulfillment deadline expired" });
     expect(model).toHaveBeenCalledTimes(2);
   });
 
