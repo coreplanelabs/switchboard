@@ -53,6 +53,7 @@ export interface ToolContext {
   reviewHistory?: ReviewHistoryContext;
   /** Current controller-bound review identity; tool arguments never choose the repository or revision. */
   reviewReadTarget?: () => import("./reviewRead.js").ReviewReadTarget | undefined;
+  onReviewReadPage?: (page: import("./reviewRead.js").ReviewReadPageReceipt) => void;
   /** Durable read actions bound by dispatch, never authority supplied by tool arguments. */
   sourceReads?: SourceReads;
   executor: Executor;

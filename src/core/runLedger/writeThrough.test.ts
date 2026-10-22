@@ -40,6 +40,7 @@ import {
 import {
   createLedgerWriteThrough,
   NativeClaimUnknownError,
+  ReviewClaimOccupiedError,
   deliverPlaneSteer,
   LANDED_MAX,
   mintGeneration,
@@ -161,6 +162,48 @@ const openReq = (over: Partial<OpenRunRequest> = {}): OpenRunRequest => ({
   tools: [{ name: "bash", description: "run", inputSchema: { type: "object" } }],
   seed: { messages: [user("earlier"), assistant("sure"), user("go")], budgetMs: 600_000 },
   ...over,
+});
+
+it("keeps a Review owner after its claim acknowledgment is lost and returns that owner to another channel", async () => {
+  const store = new InMemoryRunLedger(() => 10_000);
+  const originalClaim = store.claim.bind(store);
+  let lost = true;
+  const first = harness({
+    ledger: overriding(store, {
+      claim: async (request, body) => {
+        const result = await originalClaim(request, body);
+        if (lost) {
+          lost = false;
+          throw new TransientStoreError("claim reply lost");
+        }
+        return result;
+      },
+    }),
+  });
+  const original = openReq({ seed: undefined });
+  original.meta = {
+    ...original.meta,
+    residentExecution: "native-v1",
+    repo: "acme/api",
+    pr: 42,
+    headSha: "a".repeat(40),
+  };
+  await expect(first.wt.reserve(original)).rejects.toBeInstanceOf(NativeClaimUnknownError);
+  const other = harness({ ledger: store });
+  const duplicate = openReq({
+    runId: "other-run",
+    threadKey: "mcp:review:42",
+    seed: undefined,
+    meta: { ...original.meta, channelId: "mcp:review", threadKey: "mcp:review:42" },
+  });
+  const refused = await other.wt.reserve(duplicate).catch((error: unknown) => error);
+  expect(refused).toBeInstanceOf(ReviewClaimOccupiedError);
+  expect(refused).toMatchObject({
+    name: "ReviewClaimOccupiedError",
+    claim: { reason: "review-owned", live: { runId: "r1", headSha: "a".repeat(40) } },
+  });
+  expect(store.live.has("r1")).toBe(true);
+  expect(store.live.has("other-run")).toBe(false);
 });
 
 describe("unknown native initial claim", () => {

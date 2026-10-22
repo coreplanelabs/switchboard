@@ -144,6 +144,151 @@ const putDirectMany = (key: string, records: RunRecord[]) =>
     for (const rec of records) await inst.put(rec);
   });
 
+describe("cross-channel Review claims", () => {
+  const headA = "a".repeat(40);
+  const headB = "b".repeat(40);
+  const claim = (key: string, runId: string, threadKey: string, headSha = headA, ship = false) => ({
+    storeKey: key,
+    run: {
+      runId,
+      threadKey,
+      gen: "g1",
+      leaseMs: LEASE_MS,
+      startedAt: 1_000,
+      meta: {
+        agent: "review",
+        repo: "acme/api",
+        pr: 42,
+        headSha,
+        channelId: threadKey.split(":").slice(0, 2).join(":"),
+        userId: "slack:UALICE",
+        channelVisibility: "private" as const,
+        threadKey,
+        ...(ship ? { parentInstanceId: "plan-example-1", idempotencyKey: "plan-example-1:U12/0/review" } : {}),
+      },
+      card: null,
+      system: "review",
+      tools: [],
+    },
+  });
+
+  it("returns one owner across threads and moves that owner's head only with a complete source receipt", async () => {
+    const key = storeKey();
+    expect((await post("/runs/claim", claim(key, "owner", "slack:C1:1"))).status).toBe(200);
+    expect((await post("/runs/claim", claim(key, "owner", "slack:C1:1"))).status).toBe(200);
+    expect((await post("/runs/claim", claim(key, "same-thread", "slack:C1:1"))).data).toMatchObject({
+      ok: false,
+      reason: "thread-live",
+      live: { runId: "owner" },
+    });
+    expect(await post("/runs/claim", claim(key, "duplicate", "mcp:review:42"))).toEqual({
+      status: 409,
+      data: {
+        ok: false,
+        reason: "review-owned",
+        live: {
+          runId: "owner",
+          agent: "review",
+          startedAt: 1_000,
+          channelId: "slack:C1",
+          userId: "slack:UALICE",
+          channelVisibility: "private",
+          headSha: headA,
+        },
+      },
+    });
+    expect((await post("/runs/claim", claim(key, "moved", "slack:C2:2", headB))).data).toMatchObject({
+      ok: false,
+      reason: "review-owned",
+      live: { runId: "owner", headSha: headA },
+    });
+    const source = {
+      kind: "diff",
+      repo: "acme/api",
+      pr: 42,
+      headSha: headB,
+      baseSha: "c".repeat(40),
+      sourceHash: "d".repeat(64),
+      size: 99,
+      complete: true,
+    };
+    const advance = { storeKey: key, request: { runId: "owner", gen: "g1", from: headA, to: headB, source } };
+    expect(
+      (
+        await post("/runs/review-head/advance", {
+          ...advance,
+          request: { ...advance.request, source: { ...source, complete: false } },
+        })
+      ).data,
+    ).toEqual({
+      ok: false,
+      reason: "source-unproved",
+    });
+    expect(await post("/runs/review-head/advance", advance)).toEqual({ status: 200, data: { ok: true } });
+    expect(
+      (await post("/runs/state", { storeKey: key, runId: "owner", gen: "g1", state: { notes: "later" } })).status,
+    ).toBe(200);
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+      expect((await inst.listLive())[0]).toMatchObject({
+        meta: { headSha: headB },
+        state: { reviewClaimSource: source, notes: "later" },
+      });
+    });
+    expect((await post("/runs/claim", claim(key, "moved", "slack:C2:2", headB))).data).toMatchObject({
+      ok: false,
+      reason: "review-owned",
+      live: { runId: "owner", headSha: headB },
+    });
+    expect((await post("/runs/handoff", { storeKey: key, gen: "g1", runIds: ["owner"] })).status).toBe(200);
+    expect((await post("/runs/claim", claim(key, "moved", "slack:C2:2", headB))).data).toMatchObject({
+      ok: false,
+      reason: "review-owned",
+      live: { runId: "owner", headSha: headB },
+    });
+    expect((await post("/runs/reclaim", { storeKey: key, gen: "g2", leaseMs: LEASE_MS, now: Date.now() })).status).toBe(
+      200,
+    );
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId: "owner",
+          gen: "g2",
+          record: record("owner", Date.now(), {
+            repo: "acme/api",
+            targetPr: 42,
+            reviewHead: headB,
+            threadKey: "slack:C1:1",
+          }),
+        })
+      ).data,
+    ).toMatchObject({ ok: true, stored: true });
+    expect((await post("/runs/claim", claim(key, "successor", "slack:C2:2", headB, true))).status).toBe(200);
+    expect((await post("/runs/claim", claim(key, "outside", "mcp:review:42", headB))).data).toMatchObject({
+      ok: false,
+      reason: "review-owned",
+      live: { runId: "successor", parentInstanceId: "plan-example-1" },
+    });
+  });
+
+  it("holds a new request when older live rows already disagree on the PR owner", async () => {
+    const key = storeKey();
+    expect((await post("/runs/claim", claim(key, "first", "slack:C1:first"))).status).toBe(200);
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO live_runs (run_id, thread_key, owner_gen, lease_until, started_at, phase, stop, meta_json, card_json, system_text, tools_json, state_json)
+         SELECT 'legacy-second', 'slack:C2:second', owner_gen, lease_until, started_at, phase, stop, meta_json, card_json, system_text, tools_json, state_json
+         FROM live_runs WHERE run_id='first'`,
+      );
+    });
+    expect(await post("/runs/claim", claim(key, "third", "mcp:review:third"))).toEqual({
+      status: 409,
+      data: { ok: false, reason: "review-conflict" },
+    });
+    expect(await rowCount(key, "live_runs")).toBe(2);
+  });
+});
+
 describe("unit context retention work", () => {
   it("a near-limit terminal record saves shutdown proof without replacing its events", async () => {
     const key = storeKey();

@@ -89,7 +89,7 @@ describe("decideClaim — one live run per thread", () => {
     });
     const plain = { runId: "r0", agent: "coding", startedAt: 1_000, ownerGen: "g1" };
     const refused = decideClaim(plain, { runId: "r1", gen: "g1" });
-    expect(refused.ok === false && "idempotencyKey" in refused.live).toBe(false);
+    expect(refused.ok === false && refused.reason === "thread-live" && "idempotencyKey" in refused.live).toBe(false);
   });
 });
 
