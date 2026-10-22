@@ -230,6 +230,27 @@ describe("check-lockfile resolutionProblems", () => {
     expect(resolutionProblems(lock, { dependencies: { vite: "^6.4.4" }, overrides: { vite: "$vite" } })).toEqual([]);
   });
 
+  it.each(["node_modules/bridge", "node_modules/vitepress/node_modules/bridge"])(
+    "applies scoped overrides to descendants through %s without changing unrelated branches",
+    (bridge) => {
+      const packages = {
+        "": { dependencies: { vitepress: "^1.6.4", other: "^1.0.0" } },
+        "node_modules/vitepress": pinned("1.6.4", { dependencies: { bridge: "^1.0.0", vite: "^5.4.14" } }),
+        "node_modules/vitepress/node_modules/vite": pinned("6.4.4"),
+        [bridge]: pinned("1.0.0", { peerDependencies: { vite: "^5 || ^6" } }),
+        "node_modules/other": pinned("1.0.0", { dependencies: { vite: "^5.4.14" } }),
+        "node_modules/vite": pinned("5.4.21"),
+      };
+      const manifest = { overrides: { vitepress: { vite: "^6.4.4" } } };
+      const stale = { ...packages, [`${bridge}/node_modules/vite`]: pinned("5.4.21") };
+      expect(resolutionProblems({ packages: stale }, manifest)).toEqual([
+        expect.objectContaining({ from: bridge, name: "vite", spec: "^6.4.4", version: "5.4.21" }),
+      ]);
+      const patched = { ...packages, [`${bridge}/node_modules/vite`]: pinned("6.4.4") };
+      expect(resolutionProblems({ packages: patched }, manifest)).toEqual([]);
+    },
+  );
+
   it("names the defect that motivated the gate: a nested copy that violates its dependant's range, and the unpinned records beside it", () => {
     const broken = {
       packages: {
