@@ -25,15 +25,14 @@ import type { AgentDef } from "../agents/registry.js";
 import type { ToolContext } from "../tools/runnableTool.js";
 import type { FollowUpTurn } from "./harness/contract.js";
 import type { ReviewVerdict } from "./reviewVerdict.js";
-import { postStepLease } from "./budgets.js";
+import { minutesToMs, reviewVerdictLease } from "./budgets.js";
 import type { RunEvent } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
 
 /** The turn's turn guard, well under the review agent's own: one
- *  `git rev-parse HEAD`, one submit, one line back. Its minutes are the review
- *  post-step's allowance carved from the lease's remainder (`postStepLease`,
- *  decision 0046). */
+ *  `git rev-parse HEAD`, one submit, one line back. It leaves the native
+ *  publication reserve untouched. */
 export const VERDICT_TURN_MAX_TURNS = 4;
 /** The tools the turn may call (model-proxy item 6): read the head, submit
  *  the verdict, report on the card — nothing that writes. */
@@ -71,13 +70,15 @@ export interface ReviewVerdictTurnSpec {
   /** What the run's lease still holds, read at the call (`HarnessSession.remainingMs`):
    *  the turn's minutes are carved from it. Absent, the allowance stands. */
   remainingMs?: () => number;
+  /** The run's clock, shared with the harness deadline. */
+  clock?: () => number;
 }
 
 /**
  * Run the verdict turn: publish the `verdict_turn` run note and prompt the
  * run's pi session once more with the follow-up (`followUp`), under a clip
  * below the agent's own budgets (`VERDICT_TURN_MAX_TURNS`; the review
- * post-step's minutes, carved from the lease's remainder). The verdict arrives through the tool context's
+ * verdict minute, carved before publication). The verdict arrives through the tool context's
  * `onVerdict` hook — the same one the loop fed — and is ALSO returned, so the
  * caller can tell "submitted" from "the turn ran and still submitted nothing"
  * without reaching into its own state. Never throws past a turn failure: a
@@ -90,9 +91,16 @@ export async function runVerdictTurn(input: {
   target: VerdictTurnTarget;
   turn: ReviewVerdictTurnSpec;
   logKey: string;
-}): Promise<{ verdict: ReviewVerdict | undefined }> {
+}): Promise<{ verdict: ReviewVerdict | undefined; incompleteReason?: string }> {
   const { target: t, turn, logKey } = input;
   const where = `${t.repo}#${t.number}`;
+  const leaseMinutes = reviewVerdictLease(turn.remainingMs?.());
+  const deadlineAt = (turn.clock ?? systemClock)() + minutesToMs(Math.min(turn.agent.maxMinutes, leaseMinutes));
+  if (leaseMinutes <= 0) {
+    const summary = `review incomplete for ${where}: no time remains for a verdict turn before the publication reserve`;
+    turn.onEvent({ type: "run_note", kind: "review_incomplete", summary, at: systemClock() });
+    return { verdict: undefined, incompleteReason: summary };
+  }
   if (!turn.followUp) {
     const summary = `the review of ${where} ended without submit_verdict — no session to ask on (the loop answered before a restart), so it posts as not approving`;
     console.log(`[verdict-turn] ${logKey} ${summary}`);
@@ -124,7 +132,8 @@ export async function runVerdictTurn(input: {
     await turn.followUp({
       text: verdictFollowUp(t),
       maxTurns: Math.min(turn.agent.maxTurns, VERDICT_TURN_MAX_TURNS),
-      maxMinutes: Math.min(turn.agent.maxMinutes, postStepLease("review", turn.remainingMs?.())),
+      maxMinutes: Math.min(turn.agent.maxMinutes, leaseMinutes),
+      deadlineAt,
       tools: VERDICT_TURN_TOOLS,
       toolContext,
       ...(input.span ? { span: input.span } : {}),

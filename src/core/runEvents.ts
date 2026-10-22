@@ -206,6 +206,8 @@ export type RunNoteKind =
    *  (docs/reference/specs/agent-review.md item 5; verdictTurn.ts). Published by
    *  the dispatcher before that turn. */
   | "verdict_turn"
+  /** Exact-head source or completion time was insufficient for a verdict. */
+  | "review_incomplete"
   /** The run is on a cold per-thread sandbox instead of a warm resident, and
    *  the summary says why — the resident attach failed (its steps so far are
    *  grafted under the attach span), the resident was unreachable or not
@@ -403,6 +405,7 @@ export const RUN_NOTE_KINDS = [
   "description_turn",
   "description_refused",
   "verdict_turn",
+  "review_incomplete",
   "cold_sandbox",
   "ledger_untracked",
   "rebind_refused",

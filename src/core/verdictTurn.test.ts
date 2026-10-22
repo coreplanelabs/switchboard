@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { submitVerdictTool } from "../tools/submit.js";
-import { MINUTE_MS, POST_STEP_MINUTES } from "./budgets.js";
+import { MINUTE_MS, REVIEW_COMPLETION } from "./budgets.js";
 import { AGENTS } from "../agents/registry.js";
 import type { Executor } from "../execution/executor.js";
 import type { FollowUpTurnInput } from "./harness/contract.js";
@@ -102,19 +102,34 @@ describe("runVerdictTurn — one clipped prompt on the run's own pi session (har
     expect(stages).toEqual(["pending", "accepted", "pending", "rejected"]);
   });
 
-  it("the turn's minutes are carved from the lease's remainder: twenty minutes left give the review post-step's three, one minute left gives one", async () => {
+  it("the turn uses at most one minute and preserves two minutes for publication", async () => {
     for (const [remainingMs, minutes] of [
-      [20 * MINUTE_MS, POST_STEP_MINUTES.review],
-      [MINUTE_MS, 1],
+      [20 * MINUTE_MS, 1],
+      [2.5 * MINUTE_MS, 0.5],
     ] as const) {
       const followUp = vi.fn(async (input: FollowUpTurnInput) => {
         input.toolContext.onVerdict?.(VERDICT);
         return "ok";
       });
-      const { turn } = turnSpec({ followUp, remainingMs: () => remainingMs });
+      const { turn } = turnSpec({ followUp, remainingMs: () => remainingMs, clock: () => 1_000 });
       await runVerdictTurn({ target: PR, turn, logKey: "t" });
       expect(followUp.mock.calls[0][0].maxMinutes).toBe(minutes);
+      expect(followUp.mock.calls[0][0].deadlineAt).toBe(1_000 + minutes * MINUTE_MS);
     }
+  });
+
+  it("skips the model when only the publication reserve remains", async () => {
+    const followUp = vi.fn(async () => "unused");
+    const { turn, events } = turnSpec({ followUp, remainingMs: () => 2 * MINUTE_MS });
+    expect(await runVerdictTurn({ target: PR, turn, logKey: "t" })).toMatchObject({
+      verdict: undefined,
+      incompleteReason: expect.stringContaining("no time remains"),
+    });
+    expect(followUp).not.toHaveBeenCalled();
+    expect(events[0]).toMatchObject({
+      kind: "review_incomplete",
+      summary: expect.stringContaining("review incomplete"),
+    });
   });
 
   it("publishes the verdict_turn note and prompts the session once: the follow-up text, the clipped budget (never the shared def's), the turn's tool context with the hook under the caller's span; the verdict reaches the hook and the return value", async () => {
@@ -139,9 +154,9 @@ describe("runVerdictTurn — one clipped prompt on the run's own pi session (har
     expect(input.text).toBe(verdictFollowUp(PR));
     expect(input.maxTurns).toBe(VERDICT_TURN_MAX_TURNS);
     expect(input.tools).toEqual(VERDICT_TURN_TOOLS); // read the head, submit, report — nothing that writes (model-proxy item 6)
-    expect(input.maxMinutes).toBe(POST_STEP_MINUTES.review); // no lease remainder was handed: the allowance stands
+    expect(input.maxMinutes).toBe(REVIEW_COMPLETION.verdictMinutes); // no lease remainder was handed
     expect(AGENTS.review.maxTurns).toBeGreaterThan(VERDICT_TURN_MAX_TURNS); // the clip is a clip
-    expect(AGENTS.review.maxMinutes).toBeGreaterThan(POST_STEP_MINUTES.review);
+    expect(AGENTS.review.maxMinutes).toBeGreaterThan(REVIEW_COMPLETION.verdictMinutes);
     expect(input.span).toBe(span); // the turn's `run.agent` hangs under `run.verdict_turn` (tracing.md item 17)
     expect(input.toolContext.executor).toBe(executor);
     // the verdict reached BOTH the caller's hook and the return value
