@@ -95,7 +95,8 @@
     "staging:reset": "tsx scripts/staging-reset.ts",
     "staging:validate": "tsx scripts/staging-validate.ts",
     "check:native-scope": "node scripts/native-scope-qualify.mjs",
-    "staging:bootstrap-held": "tsx scripts/staging-held-bootstrap.ts"
+    "staging:bootstrap-held": "tsx scripts/staging-held-bootstrap.ts",
+    "staging:recover": "tsx scripts/staging-reset-recover.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.2.0",

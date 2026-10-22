@@ -6,7 +6,7 @@ Read this first. Details: [README.md](README.md), [docs](docs/README.md) at <htt
 
 ## How a change is made
 
-1. **The spec says what should be true.** Every behavior has a row in a spec under `docs/reference/specs/`: the criterion and its proof — a `file::describe::it` test, a procedure an agent runs live, or a `[gap]` still to be proven. A change starts with that row, in the same PR as the code. A spec describing code that no longer exists is a bug — and the review agent reads the specs a PR touches (`specs:coverage`) and files a contradiction as a finding.
+1. **The spec says what should be true.** Each behavior has a row under `docs/reference/specs/`: a criterion and proof (`file::describe::it`, a live procedure, or `[gap]`). Change the row with the code in the same PR. Stale specs are bugs. The review agent reads touched specs (`specs:coverage`) and reports contradictions as findings.
 2. **A failing test, then the code.** Unit tests are the default proof. The loop is `npx vitest run` on the test files you touched, by name, once before the push — never `--changed`, never a directory: on a moving base `--changed` is most of the suite. CI runs the full suite and typecheck when the change needs them. Local human session: `npm test` before pushing.
 3. **`npm run fix`, then the checks the change needs.** `fix` regenerates every generated artifact and repairs lint and formatting. CI selects checks and builds from the push's inputs, so a pipeline agent validates its own change at the changed-set scope (`npx prettier --check` on the changed files, `tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`, `npm run hygiene:check`, `npm run specs:check`) and uses judgement beyond that. Local human session: `npm run verify` before requesting review — it runs every CI gate locally, and a unit test holds the workflow to those scripts.
 4. **A PR written for the reader.** The title is the changelog line, 72 characters at most: `type(scope): what a reader can now do or expect`, scope from the code map's Areas, `!` plus a migration note when it breaks ([the rule](CONTRIBUTING.md#the-pr-title-is-the-changelog-line)); a required check refuses the rest. Body: the fixed-size map of [pr-description.md](docs/reference/specs/pr-description.md); decisions and receipts fold below. Docs for changed behavior change in the same PR.
@@ -99,6 +99,7 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run staging:validate` | Checks PR eligibility before staging. | Staging CI and queued-head recheck. |
 | `npm run check:native-scope` | Tests the native gate and kill. | Docker; see the containment plan. |
 | `npm run staging:bootstrap-held` | Installs Resident support and keeps maintenance held. | Manual staging CI; separate readiness artifact. |
+| `npm run staging:recover` | Recovers a held reset. | CI preview; approved continuation. |
 
 <!-- /generated:commands -->
 

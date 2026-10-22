@@ -1,0 +1,93 @@
+name: recover staging reset
+run-name: staging reset recovery ${{ inputs.mode }} ${{ inputs.operation }} ${{ inputs.recovery_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Read-only preview, or one approved original-tail continuation
+        type: choice
+        options: [preview, continue]
+        default: preview
+      operation:
+        description: Exact original reset operation UUID
+        required: true
+        type: string
+      recovery_id:
+        description: Exact existing recovery UUID
+        required: true
+        type: string
+      request:
+        description: Exact recovery request JSON from the operator procedure
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  recover:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.run_attempt == 1
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 30
+    environment: staging
+    concurrency:
+      group: deploy-staging
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - name: download the exact approved preview
+        if: inputs.mode == 'continue'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVERY_REQUEST: ${{ inputs.request }}
+        run: |
+          preview_run=$(node --input-type=module -e 'const r=JSON.parse(process.env.RECOVERY_REQUEST); if(!Number.isSafeInteger(r.preview?.run)||r.preview.run<1)process.exit(1);process.stdout.write(String(r.preview.run))')
+          gh run download "$preview_run" --name "staging-reset-recovery-$preview_run" --dir "$RUNNER_TEMP/reset-recovery-preview"
+      - name: read the original configuration
+        id: config-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.STAGING_CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.STAGING_CONFIG_REPO_APP_PRIVATE_KEY }}
+          owner: ${{ vars.CONFIG_REPO_OWNER }}
+          repositories: ${{ vars.CONFIG_REPO_NAME }}
+          permission-contents: read
+      - name: preview or continue the original staging reset
+        env:
+          STAGING_RESET_RECOVERY_REQUEST: ${{ inputs.request }}
+          STAGING_RESET_RECOVERY_MODE: ${{ inputs.mode }}
+          STAGING_RESET_RECOVERY_ID: ${{ inputs.recovery_id }}
+          STAGING_RESET_ORIGINAL_OPERATION: ${{ inputs.operation }}
+          SWITCHBOARD_STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          SWITCHBOARD_PRODUCTION_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          CONFIG_REPO_OWNER: ${{ vars.CONFIG_REPO_OWNER }}
+          CONFIG_REPO_NAME: ${{ vars.CONFIG_REPO_NAME }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_CLOUDFLARE_DEPLOY_TOKEN }}
+          STAGING_RUNTIME_SECRETS_JSON: ${{ secrets.STAGING_RUNTIME_SECRETS_JSON }}
+          MEMORY_TOKEN: ${{ secrets.STAGING_MEMORY_TOKEN }}
+          SANDBOX_TOKEN: ${{ secrets.STAGING_SANDBOX_TOKEN }}
+          RESIDENT_READ_TOKEN: ${{ secrets.STAGING_RESIDENT_READ_TOKEN }}
+          RESIDENT_DRAIN_TOKEN: ${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--receipt "$RUNNER_TEMP/staging-reset-recovery/receipt.json")
+          if [ "$STAGING_RESET_RECOVERY_MODE" = continue ]; then args+=(--preview "$RUNNER_TEMP/reset-recovery-preview/receipt.json"); fi
+          npm run --silent staging:recover -- "${args[@]}"
+      - name: retain the bounded recovery receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: staging-reset-recovery-${{ github.run_id }}
+          path: ${{ runner.temp }}/staging-reset-recovery/receipt.json
+          if-no-files-found: ignore
