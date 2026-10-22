@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.308.0](https://github.com/coreplanelabs/switchboard/compare/v1.307.3...v1.308.0) (2026-10-22)
+
+
+### Features
+
+* **core:** bind source input intent to its inbox row ([#3387](https://github.com/coreplanelabs/switchboard/issues/3387)) ([3264786](https://github.com/coreplanelabs/switchboard/commit/32647860ee26a6fc573e35a5ad53447c6c2573b6))
+* **core:** carry typed source input into Pi sessions ([#3418](https://github.com/coreplanelabs/switchboard/issues/3418)) ([138a2b9](https://github.com/coreplanelabs/switchboard/commit/138a2b9e2f6541e270d560aabdb3ad136e192f9c))
+* **core:** retain source context before native input ([#3388](https://github.com/coreplanelabs/switchboard/issues/3388)) ([9856a87](https://github.com/coreplanelabs/switchboard/commit/9856a87854f411f6cbf9574dbc3bf7cb9f9b8576))
+* **deploy:** deploy current main without a release ([#3411](https://github.com/coreplanelabs/switchboard/issues/3411)) ([1e20771](https://github.com/coreplanelabs/switchboard/commit/1e20771fc5c6fa5a5131ff648ffe7e2b6186f177))
+* **deploy:** recover an original staging reset ([dcc3f77](https://github.com/coreplanelabs/switchboard/commit/dcc3f779be6b9486459fa0d12d26f0973b78aba4))
+* **deploy:** target affected staging workers ([#3415](https://github.com/coreplanelabs/switchboard/issues/3415)) ([36dc753](https://github.com/coreplanelabs/switchboard/commit/36dc753a7dd77c6d9febeeb695eca2fc0aa86a4b))
+* **release:** deploy affected production workers ([#3416](https://github.com/coreplanelabs/switchboard/issues/3416)) ([4ab9707](https://github.com/coreplanelabs/switchboard/commit/4ab9707f2212579564bbb30fab3c362ada7aee75))
+
+
+### Bug fixes
+
+* **core:** end stalled routing at its deadline ([#3412](https://github.com/coreplanelabs/switchboard/issues/3412)) ([ea11e95](https://github.com/coreplanelabs/switchboard/commit/ea11e95b743f3f91006fa05f1d42ca206166c7bc))
+* **core:** expose retained shutdown evidence ([#3420](https://github.com/coreplanelabs/switchboard/issues/3420)) ([e4a2db9](https://github.com/coreplanelabs/switchboard/commit/e4a2db9b9390f2c3a4602e873425b601ce090b38))
+* **core:** record HTTP transport across live services ([#3426](https://github.com/coreplanelabs/switchboard/issues/3426)) ([21979ac](https://github.com/coreplanelabs/switchboard/commit/21979ac3e88c5cbdd68463255b65307292d08f0c))
+* **core:** recover a killed harness log read ([#3399](https://github.com/coreplanelabs/switchboard/issues/3399)) ([46b26a8](https://github.com/coreplanelabs/switchboard/commit/46b26a82b5692141121b37c4b3ec378e88f716b3))
+* **core:** retry transient GitHub source checks once ([#3410](https://github.com/coreplanelabs/switchboard/issues/3410)) ([066b969](https://github.com/coreplanelabs/switchboard/commit/066b969a224ce84e7398ed54eca3bcb330ce8390))
+* **core:** retry transient source checks before model calls ([#3389](https://github.com/coreplanelabs/switchboard/issues/3389)) ([ae751ab](https://github.com/coreplanelabs/switchboard/commit/ae751abd07ad0a88bc83432aabcfccbb3b314aca))
+* **core:** show where routing model calls stall ([#3421](https://github.com/coreplanelabs/switchboard/issues/3421)) ([035aa58](https://github.com/coreplanelabs/switchboard/commit/035aa58d32e85ddf010a3e7a263546d152fcd94e))
+* **deploy:** retry smoke reads of the original run ([#3413](https://github.com/coreplanelabs/switchboard/issues/3413)) ([f2b0f56](https://github.com/coreplanelabs/switchboard/commit/f2b0f5693dc43707c6f2c1f328d7c2c68296155c))
+* **deploy:** retry transient staging GitHub reads ([#3423](https://github.com/coreplanelabs/switchboard/issues/3423)) ([90b7084](https://github.com/coreplanelabs/switchboard/commit/90b708457c0e42388c9e04ebb2a50c5f61912bd3))
+* **deploy:** select workers from exact live inputs ([#3414](https://github.com/coreplanelabs/switchboard/issues/3414)) ([3f95d37](https://github.com/coreplanelabs/switchboard/commit/3f95d37a6adc9e1800953a38ff9864fd1bc21314))
+* **review:** name failed Git source reads ([#3400](https://github.com/coreplanelabs/switchboard/issues/3400)) ([0b66235](https://github.com/coreplanelabs/switchboard/commit/0b66235489b33caa9eaa929419457c7b34d3bc1b))
+* **runs:** keep held work under its original run ID ([#3401](https://github.com/coreplanelabs/switchboard/issues/3401)) ([9047a82](https://github.com/coreplanelabs/switchboard/commit/9047a829cf82d67c04dd2f75a2e26f88fb86253f))
+* **runs:** record title generation outcomes ([#3424](https://github.com/coreplanelabs/switchboard/issues/3424)) ([fa5ee80](https://github.com/coreplanelabs/switchboard/commit/fa5ee80998be69353f8853f28116efb8d2eed5b3))
+* **runs:** show each MCP requester's photo ([#3397](https://github.com/coreplanelabs/switchboard/issues/3397)) ([13a5276](https://github.com/coreplanelabs/switchboard/commit/13a52761297c3709e1873a50c618e3a5bcb30195))
+
 ## [1.307.3](https://github.com/coreplanelabs/switchboard/compare/v1.307.2...v1.307.3) (2026-10-21)
 
 
