@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
@@ -104,5 +105,8 @@ describe("the production process boot fixture", () => {
     const blocked = await fetch(`http://127.0.0.1:${botPort}/ingress`, { method: "POST" });
     expect(blocked.status).toBe(503);
     expect(child.exitCode).toBeNull();
+    expect(child.kill("SIGTERM")).toBe(true);
+    const [code, signal] = await once(child, "exit", { signal: AbortSignal.timeout(5_000) });
+    expect({ code, signal }).toEqual({ code: 0, signal: null });
   }, 90_000);
 });

@@ -283,13 +283,33 @@ export function parseRestartRequest(text: string): ParsedRestartRequest {
   return { ok: true, force: force === true };
 }
 
+/** A hard stop is only for one refusal-only process that a prior graceful
+ * restart did not remove. The caller must name that process exactly. */
+export function parseHardRestartRequest(
+  text: string,
+): { ok: true; expectedStartedAt: string } | { ok: false; reason: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: "body is not valid JSON" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return { ok: false, reason: "body must be a JSON object" };
+  const body = parsed as { force?: unknown; expectedStartedAt?: unknown };
+  if (body.force !== true) return { ok: false, reason: "`force` must be true" };
+  if (typeof body.expectedStartedAt !== "string" || !Number.isFinite(Date.parse(body.expectedStartedAt)))
+    return { ok: false, reason: "`expectedStartedAt` must be an ISO timestamp" };
+  return { ok: true, expectedStartedAt: body.expectedStartedAt };
+}
+
 /** What the Container DO reports back to the Worker route. */
 export type RestartOutcome =
   /** The container is not running: nothing to stop; the next request starts it with the current env. */
   | { kind: "not-running" }
   | { kind: "refused"; problems: string[] }
   /** SIGTERM sent; `previousStartedAt` is what the OLD container reported (the CLI's baseline). */
-  | { kind: "stopping"; forced: boolean; inFlight: number; previousStartedAt: string | undefined };
+  | { kind: "stopping"; forced: boolean; inFlight: number; previousStartedAt: string | undefined; hard?: true };
 
 export interface RestartHttpResponse {
   status: number;
@@ -307,6 +327,7 @@ export function restartResponse(outcome: RestartOutcome): RestartHttpResponse {
           forced: outcome.forced,
           inFlight: outcome.inFlight,
           previousStartedAt: outcome.previousStartedAt,
+          ...(outcome.hard ? { hard: true } : {}),
         },
       };
     case "refused":

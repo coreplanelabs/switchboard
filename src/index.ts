@@ -370,6 +370,15 @@ export async function runBot(): Promise<void> {
       server.once("error", reject);
       server.listen(Number(process.env.PORT), resolve);
     });
+    // This refusal path returns before the normal drain handlers below. A
+    // container running Node as PID 1 needs its own signal handler to exit.
+    const exitRefusal = (signal: "SIGTERM" | "SIGINT") => {
+      console.error(`[config] refusal health server exiting on ${signal}`);
+      server.close();
+      process.exit(0);
+    };
+    process.once("SIGTERM", () => exitRefusal("SIGTERM"));
+    process.once("SIGINT", () => exitRefusal("SIGINT"));
     console.error(`config refusal health server on :${process.env.PORT} — no runtime routes are serving`);
     return;
   }

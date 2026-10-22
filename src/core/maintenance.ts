@@ -153,6 +153,7 @@ export function maintenanceControlPath(path: string): boolean {
     /^\/admin\/coordinator\/instances\/[A-Za-z0-9_-]+(?:\/events)?$/.test(path) ||
     [
       "/admin/restart",
+      "/admin/restart/hard",
       "/admin/crash",
       "/admin/model-proxy/bearer",
       "/admin/reply-probe",
