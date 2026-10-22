@@ -421,6 +421,8 @@ The top-right user menu shows the actual signed-in person's display name and pro
 
 ## Run reading and navigation
 
+When a run ID has no readable agent run, `/runs/<id>` checks the original request owner by that exact assigned ID. A current authorized reader sees a separate request-status page with its receipt, recorded owner state, time and closed failure fields. The page does not label the owner's creation time as the run start or expose model output, controls or the original request body. A missing, expired or unauthorized original keeps the ordinary non-revealing 404; a known original refused by policy writes the deny reason to the audit line, while an unknown ID writes none. The events route remains run-only. An owner still marked `dispatching` does not prove that an agent started or that receipt settlement completed.
+
 The index row leads with its description. The requester and date share one line. Agent, source and any recorded PR form the context line. Duration, event count, warnings and outcome occupy the right-hand facts column at every width. Outcome badges sit at its bottom. Every non-control area opens the run, including its description and requester; source links and PR controls keep their own destinations.
 
 The run page uses one compact sticky header. Runtime facts (agent, model, effort and harness) have their own line. The agent uses the index chip's color and padding. A PR run shows its repository and PR number beside the heading on desktop and in a separate compact row on narrow screens. Reading diff stays in that group. Branch and commit links are available through a details control, with a hover summary. Runs without a PR omit the group.
@@ -431,6 +433,7 @@ The sticky header also holds the output controls, clear of the message composer.
 
 | Criterion | Proof |
 | --- | --- |
+| An authorized original with no run opens a request-status page, while a refused viewer gets the same 404 as an unknown ID and a deny audit line; an unknown ID has no audit line. The page distinguishes dispatching, uncertain and completed owner states without a run timeline or controls | `[unit]` `src/channels/liveView.test.ts::live view on RunsService: history pages + index toggle::404 shapes::serves an authorized original request status when its assigned run has no record`, `web/src/pages/notFound.test.ts::RunRoutePage (the /runs/:id dispatch)::shows the original %s status when its assigned run has no record` |
 | Requester/date stay together and duration/events/warnings use the right facts column | `[unit]` `web/src/components/runs/RunRow.test.ts::RunRow::keeps the date with the requester and the timer, events and warnings in the right facts column` |
 | Non-control row areas open the run | `[unit]` `web/src/components/runs/RunRow.test.ts::RunRow::opens the run from description, requester, date, event count and outcome` |
 | Runtime and PR groups are separate; sticky request/summary controls remain available | `[unit]` `web/src/pages/runPage.test.ts::RunPage — compact navigation::*` |

@@ -53,6 +53,34 @@ const origin = {
   },
 };
 describe("original ingress owner", () => {
+  it("retains a closed dispatch outcome and failure stage beside the original receipt", async () => {
+    const ledger = new InMemoryRunLedger(() => 1);
+    const owned = await ledger.consumeIngress({ ...request, origin, receiptId: "organization:org:test:7" });
+    if (owned.status !== "claimed") throw new Error("original owner not claimed");
+    expect(
+      await ledger.finishIngress({
+        effectKey: request.effectKey,
+        digest: request.digest,
+        runId: owned.record.runId,
+        status: "uncertain",
+        outcome: "The original owner could not be scheduled.",
+        handlerOutcome: "uncertain",
+        ownerStage: "schedule",
+        failure: { stage: "schedule", kind: "transport" },
+      }),
+    ).toMatchObject({
+      status: "record",
+      record: {
+        receiptId: "organization:org:test:7",
+        status: "uncertain",
+        settledAt: 1,
+        handlerOutcome: "uncertain",
+        ownerStage: "schedule",
+        failure: { stage: "schedule", kind: "transport" },
+      },
+    });
+  });
+
   it.each(["completed", "content cleared", "pending", "uncertain", "refusal", "live custody", "dependent consumer"])(
     "bounds unread continuation metadata after its original horizon: %s",
     async (kind) => {

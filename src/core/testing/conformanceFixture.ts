@@ -621,6 +621,25 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   };
   const runs = async () => ({
     ...createRunsService({ registry: s.reg, store: s.store, clock: () => NOW, units: s.units, sessions: s.ledger }),
+    getAdmission: async (id: string) =>
+      id === FIXTURE.persistedRun
+        ? ({
+            kind: "known" as const,
+            resource: {
+              type: "run" as const,
+              id,
+              channelId: "slack:C1",
+              userId: "slack:UALICE",
+              channelVisibility: "unknown" as const,
+            },
+            value: {
+              runId: id,
+              receiptId: "organization:acme:7",
+              ownerStatus: "dispatching" as const,
+              createdAt: NOW,
+            },
+          } as const)
+        : { kind: "not_found" as const },
     writeReceipt: createRunsService({ registry: s.reg, store: s.store, ledger: s.ledger }).writeReceipt,
     originalEvidence: createRunsService({ registry: s.reg, store: s.store, ledger: s.ledger }).originalEvidence,
     listClaimObservations: ({

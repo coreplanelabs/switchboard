@@ -187,6 +187,49 @@ describe("runs original evidence", () => {
   });
 });
 
+describe("runs admission status", () => {
+  it("returns safe original status to the run reader and hides it from another credential", async () => {
+    const { registry, reg, store } = await setup();
+    const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    const runs = createRunsService({ registry: reg, store });
+    vi.spyOn(runs, "getAdmission").mockResolvedValue({
+      kind: "known",
+      resource: {
+        type: "run",
+        id,
+        channelId: "mcp:X",
+        userId: "access:alice",
+        channelVisibility: "unknown",
+      },
+      value: {
+        runId: id,
+        receiptId: "organization:acme:7",
+        ownerStatus: "uncertain",
+        createdAt: NOW,
+        settledAt: NOW + 2,
+        handlerOutcome: "uncertain",
+        ownerStage: "schedule",
+        failure: { stage: "schedule", kind: "transport" },
+      },
+    });
+    const deps: RunsCommandDeps = { runs: async () => runs };
+    expect(value(await registry.invoke("runs.request", { args: [id] }, pinnedX, deps))).toEqual({
+      runId: id,
+      receiptId: "organization:acme:7",
+      ownerStatus: "uncertain",
+      createdAt: NOW,
+      settledAt: NOW + 2,
+      handlerOutcome: "uncertain",
+      ownerStage: "schedule",
+      failure: { stage: "schedule", kind: "transport" },
+    });
+    expect(await registry.invoke("runs.request", { args: [id] }, unpinned, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+  });
+});
+
 describe("runs write receipt access", () => {
   it("returns unknown for an unsupported store and hides unauthorized or private reads", async () => {
     const { registry, reg, store } = await setup();
@@ -633,6 +676,7 @@ describe("runs.* registrations", () => {
       "runs.list",
       "runs.original",
       "runs.receipt",
+      "runs.request",
       "runs.search",
       "runs.settlecheck",
       "runs.stop",
@@ -641,6 +685,7 @@ describe("runs.* registrations", () => {
     for (const id of [
       "runs.list",
       "runs.original",
+      "runs.request",
       "runs.receipt",
       "runs.claims",
       "runs.get",
@@ -661,7 +706,7 @@ describe("runs.* registrations", () => {
     expect(byId["runs.findings"].enabledWhen).toBeDefined();
     expect(byId["runs.claims"].enabledWhen).toBeDefined();
     for (const id of Object.keys(byId).filter(
-      (id) => !["runs.findings", "runs.claims", "runs.original", "runs.receipt"].includes(id),
+      (id) => !["runs.findings", "runs.claims", "runs.original", "runs.request", "runs.receipt"].includes(id),
     ))
       expect(byId[id].enabledWhen, id).toBeUndefined();
     // The listings of run metadata are chat-shaped; what carries stored free text is not.
@@ -674,6 +719,7 @@ describe("runs.* registrations", () => {
       "runs.search",
       "runs.claims",
       "runs.original",
+      "runs.request",
       "runs.receipt",
     ])
       expect(byId[id].surfaces?.chat).toBe(false);

@@ -219,6 +219,13 @@ export interface RunNotFoundSeed {
   retentionDays: number | null;
 }
 
+/** The original request is known, while no agent run can be read under its assigned id. */
+export interface RunAdmissionSeed {
+  page: "runAdmission";
+  id: string;
+  admission: import("../core/runsService.js").AdmissionView;
+}
+
 /** One run in a unit's or a conductor's listing: the view `runs unit` and
  *  `runs children` answer plus, for a LIVE row only, its capability token —
  *  the same rule as an index row (`RunIndexRowSeed`). A conductor's child
@@ -586,6 +593,7 @@ type PageData =
   | RunLiveSeed
   | RunHistorySeed
   | RunNotFoundSeed
+  | RunAdmissionSeed
   | UnitSeed
   | ResidentsIndexSeed
   | ResidentDetailSeed

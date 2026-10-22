@@ -463,22 +463,27 @@ export const ORGANIZATION_HISTORY_FAILURE_CODES = [
 ] as const;
 export type OrganizationHistoryFailureCode = (typeof ORGANIZATION_HISTORY_FAILURE_CODES)[number];
 
-export type OrganizationOwnerStage =
-  | "actor"
-  | "authorization"
-  | "execution-fence"
-  | "source-snapshot"
-  | "request"
-  | "sink"
-  | "execute"
-  | "settlement"
-  | "uncertain-settlement"
-  | "schedule";
-interface OwnerFailure {
-  stage: OrganizationOwnerStage;
-  kind: ErrorKind;
-  code?: OrganizationHistoryFailureCode;
-}
+export const ORGANIZATION_OWNER_STAGES = [
+  "actor",
+  "authorization",
+  "execution-fence",
+  "source-snapshot",
+  "request",
+  "sink",
+  "execute",
+  "settlement",
+  "uncertain-settlement",
+  "schedule",
+] as const;
+export type OrganizationOwnerStage = (typeof ORGANIZATION_OWNER_STAGES)[number];
+export const organizationOwnerFailureFactSchema = z
+  .object({
+    stage: z.enum(ORGANIZATION_OWNER_STAGES),
+    kind: z.enum(["timeout", "transport", "http", "refused", "infra", "other"] satisfies [ErrorKind, ...ErrorKind[]]),
+    code: z.enum(ORGANIZATION_HISTORY_FAILURE_CODES).optional(),
+  })
+  .strict();
+type OwnerFailure = z.infer<typeof organizationOwnerFailureFactSchema>;
 export interface OrganizationOwnerFailure {
   runId: string;
   receiptId: string;

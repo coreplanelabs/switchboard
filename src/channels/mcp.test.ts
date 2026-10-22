@@ -1207,6 +1207,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
       "dispatch",
       "runs_list",
       "runs_original",
+      "runs_request",
       "runs_receipt",
       "runs_claims",
       "runs_get",
@@ -1225,6 +1226,8 @@ describe("handleMcpRequest — registry commands as tools", () => {
       "approval_cancel",
     ]);
     const list = tools.find((t) => t.name === "runs_list")!;
+    const request = tools.find((t) => t.name === "runs_request")!;
+    expect(request.inputSchema).toMatchObject({ required: ["id"] });
     expect(list.description).toBeTruthy();
     expect((list.inputSchema.properties as Record<string, { enum?: string[] }>).status.enum).toEqual([
       "active",

@@ -153,11 +153,14 @@ When organization admission is configured, `dispatch` returns a durable admissio
 
 An asynchronous caller reads its result from that exact original run through authenticated `runs_get`. The saved output and physical reply delivery are separate facts. Release acceptance records a bounded native-output readback only after the receipt, source identity, candidate, profile, seal, persistence, complete events and scenario output pass. Legacy channel responses still require their reply-delivery receipt.
 
+`runs request <assigned-id>` reads the original request owner by its assigned ID under `runs:read`. It reports the owner's recorded state and safe failure facts even when `runs get` has no agent run. A missing original, an expired source proof and a reader outside the original run scope have the same `not_found` result; an unreadable source reports `unavailable`. The command never returns request text, source credentials or a replay instruction. `runs get` remains the separate proof of an actual agent run.
+
 | Criterion | Proof |
 |---|---|
 | An exact keyed retry returns the original admitted owner; changed text conflicts and email cannot become sender proof | `[unit]` `src/channels/mcpAdmission.test.ts::MCP organization admission::retries one exact input under its original receipt and owner without borrowing an email identity` |
 | Malformed keys and lost current policy refuse admission; a valid key returns a pending receipt | `[unit]` `src/channels/mcpAdmission.test.ts::MCP organization admission::refuses malformed retry keys and lost current policy while a valid key admits one receipt` |
 | Unkeyed submissions remain distinct; the unactivated adapter keeps its reply behavior | `[unit]` `src/channels/mcpAdmission.test.ts::MCP organization admission::keeps unkeyed submissions distinct and preserves the unactivated reply path` |
+| The request status command reads the exact original owner before a run exists, returns only safe recorded facts to an authorized viewer and hides it from another credential | `[unit]` `src/core/runsService.test.ts::RunsService — original organization admission::reads the accepted original under its assigned id before any agent run exists`, `src/core/commands/runs.test.ts::runs admission status::returns safe original status to the run reader and hides it from another credential` |
 
 
 

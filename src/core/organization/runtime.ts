@@ -490,13 +490,20 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
         continue;
       }
       const runId = owner.record.runId;
-      const finish = async (outcome: OrganizationOwnerOutcome) => {
+      const finish = async (
+        outcome: OrganizationOwnerOutcome,
+        ownerStage?: OrganizationOwnerStage,
+        failure?: OrganizationOwnerFailure["failure"],
+      ) => {
         const finished = await options.ledger.finishIngress({
           effectKey: receipt.effectKey!,
           digest: envelope.digest,
           runId,
           status: outcome.status === "uncertain" ? "uncertain" : "completed",
           outcome: outcome.reason ?? outcome.status,
+          handlerOutcome: outcome.status,
+          ...(ownerStage ? { ownerStage } : {}),
+          ...(failure ? { failure } : {}),
           ...(outcome.status === "refused" ? { refusalPending: true } : {}),
         });
         if (finished.status === "record" && outcome.status === "refused") await repairRefusals(organization);
@@ -526,7 +533,7 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
         const firstFailure = ownerFailureAt(stage, error);
         report(firstFailure);
         try {
-          await finish({ status: "uncertain", reason });
+          await finish({ status: "uncertain", reason }, stage, firstFailure);
         } catch (error) {
           report(ownerFailureAt("uncertain-settlement", error), firstFailure);
           throw error;
@@ -536,8 +543,9 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
         options.launch(async () => {
           let stage: OrganizationOwnerStage = "actor";
           const settleOwner = (outcome: OrganizationOwnerOutcome) => {
+            const ownerStage = stage;
             stage = "settlement";
-            return finish(outcome);
+            return finish(outcome, ownerStage);
           };
           try {
             // Authority can change while the host waits to start this task.

@@ -57,6 +57,7 @@ import type { RunSnapshot, RunStopStatus, RunSummary } from "./runRegistry/proje
 import type { InFlightCall } from "./runPace.js";
 import type { RunStore } from "./runStore.js";
 import type { RunLedger } from "./runLedger/ledger.js";
+import type { IngressRecord } from "./runLedger/ingress.js";
 import type { LiveRunRow } from "./runLedger/types.js";
 import { snippetOf } from "./runLedger/sessionLog.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
@@ -382,11 +383,27 @@ export interface RunRecordView extends RunView {
   events?: RunEvent[];
 }
 
+/** The original organization owner is distinct from the agent run it may start. */
+export interface AdmissionView {
+  runId: string;
+  receiptId: string;
+  ownerStatus: IngressRecord["status"];
+  createdAt: number;
+  settledAt?: number;
+  handlerOutcome?: IngressRecord["handlerOutcome"];
+  ownerStage?: IngressRecord["ownerStage"];
+  failure?: IngressRecord["failure"];
+}
+export type AdmissionRead =
+  | { kind: "known"; value: AdmissionView; resource: Extract<Resource, { type: "run" }> }
+  | { kind: "not_found" }
+  | { kind: "unavailable" };
+
 /** The run as the typed `Resource` the policy rows read (authorization.md
  *  item 3) — exactly its channel, user, repo and stamped visibility — for the
  *  point-read `authorize` every surface makes on a view (`runs.*`, the
  *  tokenless run page). A view without the stamp is `unknown`, never public. */
-export function runResource(view: RunView): Resource {
+export function runResource(view: RunView): Extract<Resource, { type: "run" }> {
   return {
     type: "run",
     id: view.id,
@@ -554,6 +571,7 @@ export interface LiveRunAccess {
 }
 
 export interface RunsService {
+  getAdmission(id: string): Promise<AdmissionRead>;
   writeReceipt(selector: WriteReceiptSelector): Promise<WriteReceiptRead>;
   originalEvidence(
     selector: import("./runLedger/originalEvidence.js").OriginalSelector,
@@ -689,6 +707,7 @@ export interface RunsServiceDeps {
             | "listClaimObservations"
             | "readOriginal"
             | "readWriteReceipt"
+            | "readIngressByRun"
           >
         >)
     | null;
@@ -1386,6 +1405,56 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   };
 
   const service: RunsService = {
+    async getAdmission(id) {
+      if (!RUN_ID_PATTERN.test(id) || !ledger) return { kind: "not_found" };
+      if (!ledger.readIngressByRun) return { kind: "unavailable" };
+      let stage: "deletion-check" | "source-read" = "deletion-check";
+      try {
+        if ((await deletedRuns([id])).includes(id)) return { kind: "not_found" };
+        stage = "source-read";
+        const read = await ledger.readIngressByRun(id);
+        if (read.status !== "record") return { kind: "not_found" };
+        const { record } = read;
+        const source = record.origin?.sourceReference;
+        if (
+          record.runId !== id ||
+          !record.receiptId ||
+          !source ||
+          record.origin?.digest !== record.digest ||
+          source.userId !== record.requester ||
+          source.threadKey !== record.threadKey
+        )
+          return { kind: "not_found" };
+        return {
+          kind: "known",
+          resource: {
+            type: "run",
+            id,
+            channelId: source.channelId,
+            userId: record.requester,
+            channelVisibility: "unknown",
+          },
+          value: {
+            runId: id,
+            receiptId: record.receiptId,
+            ownerStatus: record.status,
+            createdAt: record.createdAt,
+            ...(record.settledAt !== undefined ? { settledAt: record.settledAt } : {}),
+            ...(record.handlerOutcome !== undefined ? { handlerOutcome: record.handlerOutcome } : {}),
+            ...(record.ownerStage !== undefined ? { ownerStage: record.ownerStage } : {}),
+            ...(record.failure !== undefined ? { failure: record.failure } : {}),
+          },
+        };
+      } catch (error) {
+        const phase = originalStorageFailure(error)?.phase ?? "unclassified";
+        try {
+          warn(`[runs] original request status unavailable for ${id} stage=${stage} phase=${phase}`);
+        } catch {
+          // A failed log sink cannot change the unavailable read result.
+        }
+        return { kind: "unavailable" };
+      }
+    },
     async deletionTarget(id) {
       const identity = await store?.deletionIdentity?.(id);
       if (identity) return { ok: true, value: { type: "run", ...identity } };

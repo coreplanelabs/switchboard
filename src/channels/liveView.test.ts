@@ -21,6 +21,7 @@ import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import {
   SEED_ELEMENT_ID,
   type RunHistorySeed,
+  type RunAdmissionSeed,
   type RunLiveSeed,
   type RunNotFoundSeed,
   type RunsIndexSeed,
@@ -2548,6 +2549,60 @@ describe("live view on RunsService: history pages + index toggle", () => {
   });
 
   describe("404 shapes", () => {
+    it("serves an authorized original request status when its assigned run has no record", async () => {
+      const audit = vi.fn();
+      const h = harness({ audit });
+      const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+      vi.spyOn(h.service, "getAdmission").mockImplementation(async (requestedId) => {
+        if (requestedId !== id) return { kind: "not_found" };
+        return {
+          kind: "known",
+          resource: {
+            type: "run",
+            id,
+            channelId: "mcp:default",
+            userId: "access:alice",
+            channelVisibility: "unknown",
+          },
+          value: {
+            runId: id,
+            receiptId: "organization:acme:7",
+            ownerStatus: "dispatching",
+            createdAt: NOW,
+          },
+        };
+      });
+      const page = fakeReqRes("GET", `/runs/${id}`);
+      h.handler(page.req, page.res);
+      await done(page);
+      expect(page.status).toBe(200);
+      expect(seedOf(page.body()) as RunAdmissionSeed).toMatchObject({
+        page: "runAdmission",
+        id,
+        admission: {
+          receiptId: "organization:acme:7",
+          ownerStatus: "dispatching",
+          createdAt: NOW,
+        },
+      });
+      const denied = fakeReqRes("GET", `/runs/${id}`);
+      h.handler(denied.req, denied.res, {
+        actor: accessActor({ sub: "outsider" }, () => NO_GRANTS),
+      });
+      await done(denied);
+      expect(denied.status).toBe(404);
+      expect(seedOf(denied.body()).page).toBe("runNotFound");
+      const unknown = fakeReqRes("GET", "/runs/bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
+      h.handler(unknown.req, unknown.res);
+      await done(unknown);
+      expect(unknown.status).toBe(404);
+      expect(seedOf(unknown.body()).page).toBe("runNotFound");
+      expect(audit.mock.calls.map(([entry]) => entry)).toEqual([
+        { route: "page", runId: id, identity: "access:admin" },
+        { route: "page", identity: "access:outsider", denied: "missing-grant" },
+      ]);
+    });
+
     it("unknown, expired, and wrong-token-on-live give the identical 404 page seed; events and friction keep the text body", async () => {
       const h = harness();
       await h.store!.put(record("old", { finishedAt: NOW - 31 * 86_400_000 }));

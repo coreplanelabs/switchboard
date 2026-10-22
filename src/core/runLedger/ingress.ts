@@ -2,7 +2,11 @@ import { z } from "zod";
 import { redactSecrets } from "../redact.js";
 import { ORG_RECEIPT_TTL_MS } from "../budgets.js";
 import { TRANSCRIPT_REQUEST_BYTES } from "./types.js";
-import { envelopeSchema } from "../organization/contract.js";
+import {
+  envelopeSchema,
+  ORGANIZATION_OWNER_STAGES,
+  organizationOwnerFailureFactSchema,
+} from "../organization/contract.js";
 
 const name = z.string().min(1).max(2048);
 const instant = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -52,6 +56,10 @@ export const ingressRecordSchema = ingressRequestSchema
     status: z.enum(["dispatching", "completed", "uncertain"]),
     outcome: z.string().max(2048).nullable(),
     createdAt: instant,
+    settledAt: instant.optional(),
+    handlerOutcome: z.enum(["completed", "refused", "uncertain"]).optional(),
+    ownerStage: z.enum(ORGANIZATION_OWNER_STAGES).optional(),
+    failure: organizationOwnerFailureFactSchema.optional(),
     refusalPending: z.boolean().optional(),
     unread: unreadIngressSchema.optional(),
   })
@@ -102,6 +110,9 @@ export const ingressSettlementSchema = z
     runId: name,
     status: z.enum(["completed", "uncertain"]),
     outcome: z.string().max(2048),
+    handlerOutcome: z.enum(["completed", "refused", "uncertain"]).optional(),
+    ownerStage: z.enum(ORGANIZATION_OWNER_STAGES).optional(),
+    failure: organizationOwnerFailureFactSchema.optional(),
     refusalPending: z.boolean().optional(),
   })
   .strict();
@@ -161,6 +172,10 @@ export function finishIngress(prior: IngressRecord | null, input: IngressSettlem
       ...retainedIngress(prior, now),
       status: input.status,
       outcome,
+      settledAt: now,
+      ...(input.handlerOutcome ? { handlerOutcome: input.handlerOutcome } : {}),
+      ...(input.ownerStage ? { ownerStage: input.ownerStage } : {}),
+      ...(input.failure ? { failure: input.failure } : {}),
       ...(input.refusalPending ? { refusalPending: true } : {}),
     }),
   };

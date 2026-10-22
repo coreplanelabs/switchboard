@@ -322,11 +322,12 @@ const RUNS_STOP: Resource = { type: "command", id: "runs.stop" };
 /** The table's decision on ONE finished run the viewer asked for tokenless
  *  (authorization.md item 5): admitted to run reads, and allowed this run by
  *  its own attributes — channel, user, stamped visibility. */
-function readDecision(actor: Actor, view: RunView): Decision {
+function readDecision(actor: Actor, view: RunView | Extract<Resource, { type: "run" }>): Decision {
+  const resource = "type" in view ? view : runResource(view);
   const admitted = authorize(actor, "runs:read", RUNS_GET);
-  const decision = admitted.allow ? authorize(actor, "runs:read", runResource(view)) : admitted;
+  const decision = admitted.allow ? authorize(actor, "runs:read", resource) : admitted;
   if (!decision.allow || !hasWorkViewScope(actor)) return decision;
-  return matchesPredicate(workReadPredicate(actor, { kind: "all" }), view)
+  return matchesPredicate(workReadPredicate(actor, { kind: "all" }), resource)
     ? decision
     : { allow: false, reason: "outside-work-view" };
 }
@@ -1098,6 +1099,22 @@ export function createLiveViewHandler(
       // by page. The same read carries the attributes the decision needs.
       const found = await service.getRun(route.id, { include: "messages" });
       if (!found.ok || !servable(found.value) || !readable(actor, found.value, route.kind)) {
+        if (route.kind === "page" && !found.ok && found.error === "not_found") {
+          const admission = await service.getAdmission(route.id);
+          if (admission.kind === "known") {
+            const decision = readDecision(actor, admission.resource);
+            if (decision.allow) {
+              audit({ route: "page", runId: route.id, identity: actor.id });
+              deps.page(req, res, 200, ctx.actor, "Request status", {
+                page: "runAdmission",
+                id: route.id,
+                admission: admission.value,
+              });
+              return;
+            }
+            audit({ route: "page", identity: actor.id, denied: decision.reason });
+          }
+        }
         if (route.kind === "events") {
           // the same 404 shape the live stream writes
           const sink = nodeSseSink(req, res);

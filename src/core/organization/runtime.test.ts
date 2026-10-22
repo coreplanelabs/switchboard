@@ -202,6 +202,9 @@ describe("organization runtime", () => {
       expect(original.record).toMatchObject({
         status: "uncertain",
         outcome: "The original owner's outcome could not be confirmed.",
+        handlerOutcome: "uncertain",
+        ownerStage: "execute",
+        failure: { stage: "execute", kind: "refused", code: "history_producer_unavailable" },
       });
     });
 
@@ -259,8 +262,14 @@ describe("organization runtime", () => {
             runId: original.record.runId,
             status: "uncertain",
             outcome: "The original owner's outcome could not be confirmed.",
+            handlerOutcome: "uncertain",
+            ownerStage: stage,
+            failure: { stage, kind: "transport" },
           },
         });
+        expect(JSON.stringify(await s.ledger.readIngress(admitted.receipt.effectKey!))).not.toContain(
+          "private-credential",
+        );
         expect(s.effects).toEqual(
           stage === "settlement"
             ? [
@@ -1077,7 +1086,7 @@ describe("organization runtime", () => {
     ]);
     expect(await s.runtime.readOwner(admitted.receipt.effectKey)).toMatchObject({
       status: "record",
-      record: { status: "completed", outcome: "completed" },
+      record: { status: "completed", outcome: "completed", handlerOutcome: "completed", ownerStage: "execute" },
     });
   });
   it("refuses revoked or replaced credentials after admission without dispatching a rival owner", async () => {
@@ -1135,11 +1144,23 @@ describe("organization runtime", () => {
     const original = await s.ledger.readIngress(admitted.receipt.effectKey);
     expect(original).toMatchObject({
       status: "record",
-      record: { status: "uncertain", outcome: "The original owner could not be scheduled." },
+      record: {
+        status: "uncertain",
+        outcome: "The original owner could not be scheduled.",
+        handlerOutcome: "uncertain",
+        ownerStage: "schedule",
+        failure: { stage: "schedule", kind: "other" },
+      },
     });
     expect(await runtime.readOwner(admitted.receipt.effectKey)).toMatchObject({
       status: "record",
-      record: { status: "completed", outcome: "Original run succeeded" },
+      record: {
+        status: "completed",
+        outcome: "Original run succeeded",
+        handlerOutcome: "uncertain",
+        ownerStage: "schedule",
+        failure: { stage: "schedule", kind: "other" },
+      },
     });
     expect(s.effects).toEqual([]);
   });
