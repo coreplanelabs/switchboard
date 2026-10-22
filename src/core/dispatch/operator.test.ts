@@ -901,6 +901,68 @@ describe("explicit PR directives at the operator stage", () => {
       expect(model.mock.calls).toHaveLength(calls);
     },
   );
+  it.each(["signal", "elapsed time"] as const)(
+    "ends a stalled source check without starting a late routing model call: %s",
+    async (deadline) => {
+      const dir = mkdtempSync(join(tmpdir(), "swb-stalled-source-"));
+      const path = join(dir, "config.yaml");
+      writeFileSync(
+        path,
+        "organization: acme\nproviders:\n  anthropic: {type: anthropic}\ndefaults:\n  agent: general\n  models: {general: anthropic/general-model}\n",
+      );
+      let now = 0;
+      const controller = new AbortController();
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      let releaseSource!: () => void;
+      let sourceStarted!: () => void;
+      const sourceStartedPromise = new Promise<void>((resolve) => (sourceStarted = resolve));
+      const source = new Promise<void>((resolve) => (releaseSource = resolve));
+      const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "What next?" } }));
+      try {
+        const pending = operatorStage(
+          { config: new ConfigStore(path, join(dir, "overrides.json")), clock: () => now, operatorModel: model },
+          {
+            mode: "on",
+            msg: {
+              channelId: "mcp:default",
+              userId: "access:requester",
+              threadKey: "mcp:default:review-pr-7",
+              text: "Review https://github.com/acme/api/pull/7",
+            },
+            beforeModel: () => {
+              sourceStarted();
+              return source;
+            },
+          },
+        );
+        await sourceStartedPromise;
+        if (deadline === "signal") controller.abort();
+        else {
+          now = 61_000;
+          releaseSource();
+        }
+        expect(await pending).toMatchObject({ outcome: "refusal", reason: "operator_timeout" });
+        releaseSource();
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(model).not.toHaveBeenCalled();
+        const event = log.mock.calls
+          .map(([line]) => {
+            try {
+              return JSON.parse(String(line));
+            } catch {
+              return undefined;
+            }
+          })
+          .find((line) => line?.type === "routing_timeout");
+        expect(event).toMatchObject({ phase: "context", budgetMs: 60_000 });
+      } finally {
+        releaseSource();
+        log.mockRestore();
+        timeout.mockRestore();
+      }
+    },
+  );
   it("holds revoked required media before a repaired provider attempt", async () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-native-repair-"));
     const path = join(dir, "config.yaml");

@@ -2429,6 +2429,7 @@ export async function runOperator(
     now?: () => number;
     startedAt?: number;
     signal?: AbortSignal;
+    beforeModel?: () => Promise<void>;
     maxOutputTokens?: number;
     includeAllowance?: boolean;
     smokeDiagnosticScope?: "candidate-smoke-v1";
@@ -2456,6 +2457,11 @@ export async function runOperator(
   const recorder = opts.recorder ?? new RoutingRecorder(now, started, started + timeoutMs, signal);
   const expired = () => signal.aborted || now() - started >= timeoutMs;
   const withinDeadline = <T>(value: Promise<T>) => withinOperatorDeadline(value, signal);
+  const beforeModel = async () => {
+    if (!opts.beforeModel) return;
+    await recorder.during("context", () => withinDeadline(opts.beforeModel!()));
+    if (expired()) throw new DOMException("operator_timeout", "AbortError");
+  };
   let offered = actionProjection(input);
   let prompt = buildOperatorPrompt(input, offered);
   // The turn parse reads the author's FULL projection even on an owned thread
@@ -2594,6 +2600,7 @@ export async function runOperator(
     sourceTurns.push(input.text);
     let answer: RouteToolCall | string;
     try {
+      await beforeModel();
       answer = await recorder.during("command_fulfillment", (observe) =>
         withinDeadline(
           model(
@@ -2646,6 +2653,7 @@ export async function runOperator(
     for (;;) {
       let answer: RouteToolCall | string;
       try {
+        await beforeModel();
         answer = await recorder.during("model", (observe) =>
           withinDeadline(model({ ...prompt, retries: turns }, { maxTokens: maxOutputTokens, signal, observe })),
         );
@@ -2677,7 +2685,7 @@ export async function runOperator(
           // abort or an unknown generic error is the deadline itself.
           const localAbort = err instanceof Error && err.name === "AbortError";
           if (
-            signal.aborted &&
+            expired() &&
             typedFailure === undefined &&
             (localAbort || (failure.cause === "permanent" && failure.status === undefined))
           ) {
@@ -3495,13 +3503,6 @@ export async function operatorStage(
       return unavailable();
     }
   }
-  if (ctx.beforeModel) {
-    const selected = model;
-    model = async (...args) => {
-      await ctx.beforeModel!();
-      return selected(...args);
-    };
-  }
   const presets = operatorPresets(cfg);
   const actor = chatActorOf(deps.config, msg);
   const projection = operatorProjection({
@@ -3571,6 +3572,7 @@ export async function operatorStage(
             startedAt,
             signal,
             recorder,
+            ...(ctx.beforeModel ? { beforeModel: ctx.beforeModel } : {}),
             ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
             ...(!needsSavedContext ? { readContext } : {}),
           });
