@@ -14,6 +14,10 @@ import { displayNameOf } from "@core/core/trace/displayNames.js";
 import { createLossTracker, foldSpanRecord } from "@core/core/normalizeSpans.js";
 import { isSpanRecord, type RunEvent } from "@core/core/runEvents.js";
 import type { ArtifactsSeed } from "@core/channels/webSeed.js";
+import {
+  isOrganizationResumeHoldReason,
+  type OrganizationResumeHoldReason,
+} from "@core/core/runLedger/organizationResumeHold.js";
 import type { LossInterval } from "@core/core/trace/partition.js";
 import type { SpanRecord } from "@core/core/trace/types.js";
 import { classOf } from "@core/core/trace/streamSpans.js";
@@ -296,7 +300,7 @@ export function artifactHref(links: ArtifactsSeed, key: string): string {
 
 export interface RunPageModel {
   state: {
-    recoveryHold: "private_context" | null | undefined;
+    recoveryHold: "private_context" | OrganizationResumeHoldReason | null | undefined;
     recoveryPending: boolean | undefined;
     producerUnconfirmed: boolean | undefined;
     title: string | null;
@@ -884,7 +888,8 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     if (e?.type === "recovery_state") {
       const recovery = event as { hold?: unknown; pending?: unknown; producerUnconfirmed?: unknown };
       const hold = recovery.hold;
-      if (hold === null || hold === "private_context") state.recoveryHold = hold;
+      if (hold === null || hold === "private_context" || isOrganizationResumeHoldReason(hold))
+        state.recoveryHold = hold;
       if (typeof recovery.pending === "boolean") state.recoveryPending = recovery.pending;
       if (typeof recovery.producerUnconfirmed === "boolean") state.producerUnconfirmed = recovery.producerUnconfirmed;
       return;

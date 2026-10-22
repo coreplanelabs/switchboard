@@ -1898,6 +1898,35 @@ describe("RunsService with the run ledger — one registry across generations (r
     expect(ledger.live.get("far-1")?.liveState?.state).toBe("working");
   });
 
+  it("shows the original source hold and attempt count instead of a stale working state", async () => {
+    const { svc, ledger } = ledgerSetup();
+    await farRun(ledger);
+    await ledger.setState("far-1", "g-OTHER", {
+      organizationResumeHold: {
+        version: 1,
+        revision: 2,
+        status: "held",
+        reason: "source_not_verified",
+        since: NOW - 1_000,
+        attempts: 2,
+        nextCheckAt: NOW + 10_000,
+      },
+    });
+    const row = ledger.live.get("far-1")!;
+    row.liveState = { state: "working", since: NOW - 4_000, bound: NOW + 10_000 };
+    expect(await svc.getRun("far-1")).toMatchObject({
+      ok: true,
+      value: {
+        finished: false,
+        recoveryPending: true,
+        recoveryHold: "source_not_verified",
+        recoveryHoldAttempts: 2,
+        activity: "held while the original browser source is checked",
+      },
+    });
+    expect((await svc.listRuns({ visibleTo: ALL, status: "active" })).runs[0]?.liveState).toBeUndefined();
+  });
+
   it("lists a run live on the ledger under another generation as a live row — its agent, sender, repo, event count and activity from the ledger, its owner generation named — under `all` and `active`, never under `finished`; its store tombstone never surfaces", async () => {
     const { svc, store, ledger } = ledgerSetup();
     await farRun(ledger);

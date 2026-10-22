@@ -35,7 +35,7 @@ export function stopLabel(stop: { state: string; mode: string }): string {
 
 export function statusWord(run: IndexRow, now?: number): string {
   if (!run.finished) {
-    if (run.recoveryHold === "private_context") return "held";
+    if (run.recoveryHold) return "held";
     if (run.recoveryPending) return "recovery not confirmed";
     if (run.pausedForRetry) return "paused";
     if (run.producerUnconfirmed) return "execution not confirmed";

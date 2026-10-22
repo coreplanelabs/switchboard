@@ -1,5 +1,6 @@
 import { harnessLaunchIntentOf, originalSessionPolicyOf, sameOriginalSessionPolicy } from "../harness/sessionPolicy.js";
 import type { LiveRunRow, RunState } from "./types.js";
+import { organizationResumeHoldOf } from "./organizationResumeHold.js";
 import { preserveSourceInputIntents } from "./sourceInputIntent.js";
 import { isRunWorkEvidence } from "../runRecord.js";
 import { isBranchIdentityBaseline } from "../branchIdentityBaseline.js";
@@ -175,5 +176,17 @@ export function preserveCheckpointState(
     )
   )
     return undefined;
+  const beforeHold = organizationResumeHoldOf(prior);
+  const afterHold = organizationResumeHoldOf(incoming);
+  if (
+    (prior.organizationResumeHold !== undefined && !beforeHold) ||
+    (incoming.organizationResumeHold !== undefined && !afterHold) ||
+    (beforeHold &&
+      afterHold &&
+      (afterHold.revision < beforeHold.revision ||
+        (afterHold.revision === beforeHold.revision && JSON.stringify(afterHold) !== JSON.stringify(beforeHold))))
+  )
+    return undefined;
+  if (beforeHold && !afterHold) next.organizationResumeHold = beforeHold;
   return next;
 }

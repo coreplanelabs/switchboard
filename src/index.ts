@@ -28,6 +28,8 @@ import {
   canRestoreOrganizationRun,
   organizationResumeIo,
 } from "./channels/browserHomeWiring.js";
+import { createOrganizationResumeHold } from "./core/organizationResumeHold.js";
+import { organizationResumeHoldOf } from "./core/runLedger/organizationResumeHold.js";
 import { isHomeRuntimePath, type HomeRuntimeContext } from "./channels/homeRuntime.js";
 import { workViewScopeOf } from "./channels/workViewScope.js";
 import { isIdentityPath } from "./channels/identityRuntime.js";
@@ -2620,18 +2622,38 @@ export async function runBot(): Promise<void> {
   // 38): mark the cards other generations hold, close the cards of runs that had
   // replied, and launch the resumes. Used at boot and by the periodic sweep.
   const ledgerReclaim = capabilities.runLedger && ledgerClient ? { client: ledgerClient } : undefined;
+  const sourceHolds = ledgerReclaim
+    ? createOrganizationResumeHold({
+        ledger: ledgerReclaim.client,
+        gen: generation,
+        now: systemClock,
+        binding: async (runId) => browserWiring?.originalBinding(runId),
+        eligible: canRestoreOrganizationRun,
+        refusalReason: (run, source) =>
+          source.originalStatus === "completed" && run.kind !== "rehost" ? "intake_completed" : "source_ineligible",
+        warn: (line) => console.warn(line),
+        log: (line) => console.log(line),
+        onDiscard: (runId) => takeover.done(runId),
+      })
+    : undefined;
+  const heldCards = () => sourceHolds?.pendingRows().flatMap((run) => (run.row.card ? [run.row.card] : [])) ?? [];
+  const heldThreads = () =>
+    sourceHolds
+      ?.pendingRows()
+      .filter((run) => run.kind !== "rehost")
+      .map((run) => run.row) ?? [];
   // Two acts, because the boot performs them at different times: the cards
   // before the socket opens (the sweep must see them), the resumes after it.
   const guardCards = async (outcome: ReclaimOutcome): Promise<void> => {
     // Only a complete listing may replace the foreign-card view. A failed
     // listing is no evidence that another generation stopped owning its rows.
     if (outcome.liveListingComplete)
-      markForeignLiveCards(outcome.liveElsewhere.flatMap((r) => (r.card ? [r.card] : [])));
+      markForeignLiveCards([...outcome.liveElsewhere.flatMap((r) => (r.card ? [r.card] : [])), ...heldCards()]);
     // …and the threads a follow-up must be steered into rather than run afresh:
     // rows other generations hold, plus the ones just reclaimed and not yet
     // launched (the launcher runs after this, and in-process admission takes
     // over the moment a resume is dispatched).
-    threadsElsewhere.replace(threadsElsewhereOf(outcome));
+    threadsElsewhere.replace([...threadsElsewhereOf(outcome), ...heldThreads()]);
     const closedCards = await closeReclaimedCards(
       app.client,
       outcome.closed.map((c) => ({
@@ -2660,24 +2682,22 @@ export async function runBot(): Promise<void> {
       }
     }
   };
-  const launch = async (outcome: ReclaimOutcome): Promise<void> => {
-    if (!ledgerReclaim || outcome.resumable.length === 0) return;
-    const verified = new Map<
-      string,
-      NonNullable<Awaited<ReturnType<ReturnType<typeof createBrowserHomeWiring>["originalBinding"]>>>
-    >();
-    const runnable: typeof outcome.resumable = [];
-    for (const run of outcome.resumable) {
-      const originalRunId = run.row.meta.organizationIngressRunId;
-      if (!originalRunId) {
-        runnable.push(run);
-        continue;
-      }
-      const source = await browserWiring?.originalBinding(originalRunId);
-      if (!source || !canRestoreOrganizationRun(run, source)) continue;
-      verified.set(run.row.runId, source);
-      runnable.push(run);
-    }
+  const launch = async (outcome: ReclaimOutcome, retryHeld = false): Promise<void> => {
+    if (!ledgerReclaim || !sourceHolds) return;
+    const retried = retryHeld ? await sourceHolds.retry() : undefined;
+    const selected = await sourceHolds.select(outcome.resumable);
+    const runnable = [...(retried?.runnable ?? []), ...selected.runnable];
+    const verified = new Map([...(retried?.sources ?? []), ...selected.sources]);
+    for (const run of sourceHolds.pendingRows())
+      if (run.kind !== "rehost")
+        threadsElsewhere.remember(run.row.threadKey, {
+          runId: run.row.runId,
+          startedAt: run.row.startedAt,
+          ...(run.row.meta.agent ? { agent: run.row.meta.agent } : {}),
+        });
+    if (outcome.liveListingComplete)
+      markForeignLiveCards([...outcome.liveElsewhere.flatMap((r) => (r.card ? [r.card] : [])), ...heldCards()]);
+    if (runnable.length === 0) return;
     await launchResumes(deps, runnable, {
       agentFor: (name) => {
         try {
@@ -2776,8 +2796,13 @@ export async function runBot(): Promise<void> {
     const client = ledgerReclaim.client;
     setForeignLiveCardsSource(async () =>
       (await client.listLive())
-        .filter((r) => r.ownerGen !== generation && r.leaseUntil > systemClock())
-        .flatMap((r) => (r.card ? [r.card] : [])),
+        .filter(
+          (r) =>
+            (r.ownerGen !== generation && r.leaseUntil > systemClock()) ||
+            organizationResumeHoldOf(r.state)?.status === "held",
+        )
+        .flatMap((r) => (r.card ? [r.card] : []))
+        .concat(heldCards()),
     );
   } else {
     // No ledger: nothing is ever on its way back, so the door's verdict is final from the start.
@@ -2817,7 +2842,7 @@ export async function runBot(): Promise<void> {
       onOutcome: async (outcome) => {
         takeover.take(outcome);
         await guardCards(outcome);
-        await launch(outcome);
+        await launch(outcome, true);
       },
     });
   }

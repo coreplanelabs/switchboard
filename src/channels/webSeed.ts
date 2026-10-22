@@ -1,4 +1,5 @@
 import type { RunStatus } from "../core/runRecord.js";
+import type { OrganizationResumeHoldReason } from "../core/runLedger/organizationResumeHold.js";
 import type { FindingsLedgerView, RunView } from "../core/runsService.js";
 import type { UnitFacts, UnitRun, UnitRunsView } from "../core/unitRuns.js";
 import type { CostReport } from "../core/costs.js";
@@ -96,7 +97,7 @@ export interface ArtifactsSeed {
 /** The live run page follows SSE from its local registry or durable ledger.
  *  Registry URLs carry a capability; ledger URLs use the viewer decision. */
 export interface RunLiveSeed {
-  recoveryHold?: "private_context";
+  recoveryHold?: "private_context" | OrganizationResumeHoldReason;
   recoveryPending?: true;
   producerUnconfirmed?: true;
   runTitle?: string;

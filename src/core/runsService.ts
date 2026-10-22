@@ -57,6 +57,7 @@ import type { RunSnapshot, RunStopStatus, RunSummary } from "./runRegistry/proje
 import type { InFlightCall } from "./runPace.js";
 import type { RunStore } from "./runStore.js";
 import type { RunLedger } from "./runLedger/ledger.js";
+import { organizationResumeHoldOf, type OrganizationResumeHoldReason } from "./runLedger/organizationResumeHold.js";
 import type { IngressRecord } from "./runLedger/ingress.js";
 import type { LiveRunRow } from "./runLedger/types.js";
 import { snippetOf } from "./runLedger/sessionLog.js";
@@ -169,7 +170,10 @@ export interface RunView {
   /** The ledger cannot confirm that its claimed producer is still executing. This is not an ending receipt. */
   producerUnconfirmed?: true;
   /** The original producer is retained without replay of unverified private context. */
-  recoveryHold?: "private_context";
+  recoveryHold?: "private_context" | OrganizationResumeHoldReason;
+  recoveryHoldAttempts?: number;
+  recoveryHeldAt?: number;
+  recoveryNextCheckAt?: number;
   /** A saved execution pause overrides an older working-state deadline. */
   pausedForRetry?: true;
   /** Total events published (monotonic; the backlog/record may hold fewer). */
@@ -742,12 +746,23 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[], producerUnconf
     else if (event.kind === "resumed") recoveryPending = false;
   }
   const contextHeld = row.state.contextRecoveryHeld === true;
+  const sourceHold = organizationResumeHoldOf(row.state);
+  const sourceHeld = sourceHold?.status === "held";
   recoveryPending ||= contextHeld;
-  const activity = contextHeld
-    ? "held for private context verification"
-    : recoveryPending
-      ? "paused for storage recovery"
-      : activityOfEvents(events);
+  recoveryPending ||= sourceHeld;
+  const activity = sourceHeld
+    ? sourceHold.reason === "stop_pending"
+      ? "held while the stop request is checked"
+      : sourceHold.reason === "intake_completed"
+        ? "held: completed browser request cannot restart this run"
+        : sourceHold.reason === "source_ineligible"
+          ? "held: original browser source did not pass verification"
+          : "held while the original browser source is checked"
+    : contextHeld
+      ? "held for private context verification"
+      : recoveryPending
+        ? "paused for storage recovery"
+        : activityOfEvents(events);
   // A hosted parent live under another generation still names its instance:
   // the ledger mirrors the run's events, so the record's rule reads it here.
   const instanceId = instanceIdOfEvents(events);
@@ -771,10 +786,19 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[], producerUnconf
     finished: false,
     ...(recoveryPending ? { recoveryPending: true as const } : {}),
     ...(producerUnconfirmed ? { producerUnconfirmed: true as const } : {}),
-    ...(contextHeld ? { recoveryHold: "private_context" as const } : {}),
+    ...(sourceHeld
+      ? {
+          recoveryHold: sourceHold.reason,
+          recoveryHoldAttempts: sourceHold.attempts,
+          recoveryHeldAt: sourceHold.since,
+          recoveryNextCheckAt: sourceHold.nextCheckAt,
+        }
+      : contextHeld
+        ? { recoveryHold: "private_context" as const }
+        : {}),
     ...(row.state.pausedForRetry === true ? { pausedForRetry: true as const } : {}),
-    ...(!contextHeld && row.liveState !== undefined ? { liveState: row.liveState } : {}),
-    ...(!contextHeld && row.liveStateSeq !== undefined ? { liveStateSeq: row.liveStateSeq } : {}),
+    ...(!contextHeld && !sourceHeld && row.liveState !== undefined ? { liveState: row.liveState } : {}),
+    ...(!contextHeld && !sourceHeld && row.liveStateSeq !== undefined ? { liveStateSeq: row.liveStateSeq } : {}),
     eventCount: events.length,
     ...(activity !== undefined ? { activity } : {}),
     ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
