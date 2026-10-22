@@ -50,7 +50,7 @@ import { checkReviewedHead, normalizeHead, sameCommit } from "./reviewedHead.js"
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { checkDigestCoverage, type PrSize } from "./digestCoverage.js";
 import type { DigestReport } from "./diffDigest.js";
-import type { RepoContext } from "./repoContext.js";
+import type { PrHeadFailure, RepoContext } from "./repoContext.js";
 import type { RunEvent } from "./runEvents.js";
 import type { RunControl } from "./runRegistry/runControl.js";
 import { systemClock } from "./trace/clock.js";
@@ -277,7 +277,7 @@ export type PrHeadPreflight = { ok: true } | { ok: false; where: string; reply: 
 export function checkPrHeadPreflight(input: {
   agent: AgentDef;
   requestText: string;
-  repoCtx: Pick<RepoContext, "repo" | "pr" | "headSha" | "prUnpostable">;
+  repoCtx: Pick<RepoContext, "repo" | "pr" | "headSha" | "prUnpostable" | "prHeadFailure">;
 }): PrHeadPreflight {
   const { repoCtx } = input;
   if (!repoCtx.repo || !reviewPostIntended({ agentName: input.agent.name, requestText: input.requestText }))
@@ -290,11 +290,33 @@ export function checkPrHeadPreflight(input: {
         : undefined;
   if (unknownHead === undefined) return { ok: true };
   const where = `${repoCtx.repo}#${unknownHead}`;
+  const failure = prHeadFailureText(repoCtx.prHeadFailure);
   return {
     ok: false,
     where,
-    reply: `🔀 I couldn't verify the current version of ${where}, so the review did not start and nothing was posted to GitHub. A Switchboard operator can check the GitHub lookup.`,
+    reply: `🔀 I couldn't verify the current version of ${where}, so the review did not start and nothing was posted to GitHub.${failure ? ` ${failure}.` : ""} A Switchboard operator can check the GitHub lookup.`,
   };
+}
+
+function prHeadFailureText(failure: PrHeadFailure | undefined): string | undefined {
+  switch (failure?.code) {
+    case "credential_unavailable":
+      return "GitHub credential unavailable";
+    case "credential_failed":
+      return "GitHub credential request failed";
+    case "http_failed":
+      return failure.httpStatus ? `GitHub returned HTTP ${failure.httpStatus}` : "GitHub request failed";
+    case "invalid_response":
+      return "GitHub returned an invalid response";
+    case "timeout":
+      return "GitHub lookup timed out";
+    case "transport_failed":
+      return "GitHub connection failed";
+    case "head_unknown":
+      return "GitHub did not provide a valid head commit";
+    default:
+      return undefined;
+  }
 }
 
 // ---- attach-head guard (agent-review.md items 10 + 12) ----------------------
