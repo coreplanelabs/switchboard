@@ -7417,6 +7417,19 @@ describe("typed action acceptance", () => {
     }));
     expect(answer.decision).toMatchObject({ kind: "question", text: "Which review scope?" });
   });
+  it("shows a formal budget only in the authored request while the tool constrains its typed value", () => {
+    const text = `agent:review budget:15 Review ${url}.`;
+    const request = input({ text, projection });
+    const prompt = buildOperatorPrompt(request, projection);
+    expect(prompt.user).toContain(text);
+    expect(prompt.user).not.toContain('{"budget":15}');
+    expect(prompt.system).toContain("copy its literal token from `<request>`");
+    expect(
+      operatorTools(request, projection).find((tool) => tool.name === OPERATOR_BIND_TOOL)?.inputSchema,
+    ).toMatchObject({
+      properties: { budget: { enum: [15] } },
+    });
+  });
   it.each([undefined, 16])("repairs a missing or mismatched formal budget: %s", async (budget) => {
     const text = `agent:review budget:15 Review ${url}. Publish; do not change files.`;
     const bind = (value: number | undefined) => ({
