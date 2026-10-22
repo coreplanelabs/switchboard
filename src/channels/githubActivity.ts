@@ -61,7 +61,7 @@ function sourceUrl(value: unknown, host: string): value is string {
 }
 
 export type GithubActivityTaskMatch =
-  | { kind: "candidate"; relation: "pull-request" }
+  | { kind: "candidate"; relation: "pull-request" | "ref" | "head-commit" | "repository" | "installation" }
   | { kind: "unrelated" }
   | { kind: "held"; reason: "invalid-record" | "invalid-task" | "unsupported-relationship" | "identity-conflict" };
 
@@ -88,15 +88,71 @@ export async function githubActivityTaskMatch(value: unknown, taskValue: unknown
   if (event.version !== 2 || event.kind === "request") return held("unsupported-relationship");
   const { host, appId, installationId } = task.source;
   if (event.sourceId !== `github:${host}:app:${appId}:installation:${installationId}`) return { kind: "unrelated" };
+  const data = event.payload;
+  const facts = event.content.kind === "facts" && object(event.content.facts) ? event.content.facts : undefined;
+  // A generic source receipt proves its saved bytes, not that those bytes
+  // still agree with the adapter's retained native snapshot.
+  const nativeFactMatches = async (nativeEvent: string): Promise<boolean> => {
+    const normalized = await normalizeGithubActivity(
+      { ...task.source, repositoryId: task.repositoryId },
+      { event: nativeEvent, delivery: event.deliveryId },
+      object(data) ? data.native : undefined,
+    );
+    return normalized.kind === "normalized" && (await sourceHash(normalized.event)) === (await sourceHash(event));
+  };
+  if (facts?.surface === "installation-access") {
+    if (
+      (facts.event !== "installation" && facts.event !== "installation_repositories") ||
+      !(await nativeFactMatches(facts.event))
+    )
+      return held("identity-conflict");
+    // Selection changes can affect the stored installation even when a
+    // supplied delta omits this repository. They prove no current access.
+    return { kind: "candidate", relation: "installation" };
+  }
   const prefix = `github:${host}:repository:`;
   if (!event.objectId.startsWith(prefix)) return held("unsupported-relationship");
   const [repository, surface, ...parts] = event.objectId.slice(prefix.length).split(":");
   const repositoryId = Number(repository);
   if (!id(repositoryId) || String(repositoryId) !== repository) return held("invalid-record");
   if (repositoryId !== task.repositoryId) return { kind: "unrelated" };
+  const nativeEvent =
+    surface === "ref"
+      ? facts?.action
+      : surface === undefined || surface === "repository"
+        ? "repository"
+        : ["check_run", "check_suite", "status"].includes(surface)
+          ? surface
+          : undefined;
+  if (nativeEvent !== undefined) {
+    if (!facts || typeof nativeEvent !== "string" || !(await nativeFactMatches(nativeEvent)))
+      return held("identity-conflict");
+    if (nativeEvent === "repository") return { kind: "candidate", relation: "repository" };
+    if (nativeEvent === "push" || nativeEvent === "delete") {
+      const ref = facts.ref;
+      return ref === `refs/heads/${task.baseRef}` ||
+        (task.head.repositoryId === repositoryId && ref === `refs/heads/${task.head.ref}`)
+        ? { kind: "candidate", relation: "ref" }
+        : held("unsupported-relationship");
+    }
+    if (nativeEvent === "check_run" || nativeEvent === "check_suite" || nativeEvent === "status") {
+      if (
+        Array.isArray(facts.pullRequests) &&
+        facts.pullRequests.some(
+          (pull) => object(pull) && (pull.id === task.pullRequestId) !== (pull.number === task.number),
+        )
+      )
+        return held("identity-conflict");
+      // Associations do not establish the checked commit or a fork's source
+      // membership. Only the saved repository and exact selected SHA do.
+      return task.head.repositoryId === repositoryId && facts.commitSha === task.head.sha
+        ? { kind: "candidate", relation: "head-commit" }
+        : held("unsupported-relationship");
+    }
+    return held("unsupported-relationship");
+  }
   if (!["conversation", "inline", "review", "pull-request", "thread"].includes(surface ?? ""))
     return held("unsupported-relationship");
-  const data = event.payload;
   if (!object(data) || data.version !== 1 || !object(data.repository) || !object(data.native) || !id(data.pullNumber))
     return held("invalid-record");
   const native = data.native;
