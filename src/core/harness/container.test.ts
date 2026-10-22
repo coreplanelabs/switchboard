@@ -1084,6 +1084,19 @@ describe("ExecHarnessContainer — log observation recovery", () => {
     { status: 500, body: { error: "request refusal", cause: "request" } },
     { status: 500, body: { error: "unknown refusal", cause: "future-cause" } },
     { status: 500, body: { error: "future metadata refusal", futureCode: "not-admitted" } },
+    {
+      status: 200,
+      body: {
+        error: "Container connectivity was lost",
+        status: 500,
+        transient: true,
+        cause: "system",
+        stdout: "",
+        stderr: "Container connectivity was lost",
+        exitCode: 127,
+        futureCode: "not-admitted",
+      },
+    },
   ])("does not repeat a Resident refusal: $status $body.error", async ({ status, body }) => {
     const requests: unknown[] = [];
     vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
@@ -1148,11 +1161,10 @@ describe("ExecHarnessContainer — log observation recovery", () => {
       expect(requests).toHaveLength(2);
       expect(requests.map((request) => request.timeoutMs)).toEqual([5000, 4000]);
       expect(vi.mocked(console.warn).mock.calls).toEqual([
-        ["[harness] a log observation is re-read once after an answered resident failure"],
-        ["[harness-log-read]", { outcome: "retrying", runId: "original-run" }],
+        ["[harness-log-read]", { outcome: "retrying", runId: "original-run", reason: "answered" }],
       ]);
       expect(vi.mocked(console.info).mock.calls).toEqual([
-        ["[harness-log-read]", { outcome: "recovered", runId: "original-run" }],
+        ["[harness-log-read]", { outcome: "recovered", runId: "original-run", reason: "answered" }],
       ]);
       for (const request of requests)
         expect(request).toMatchObject({
@@ -1163,6 +1175,58 @@ describe("ExecHarnessContainer — log observation recovery", () => {
           ownerFence: 7,
           command: `tail -c +18 '${paths.log}' | head -c 128 | base64 | tr -d '\\n'`,
         });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("re-reads the original log bytes after a streamed Resident connection loss", async () => {
+    const requests: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      return Response.json(
+        requests.length === 1
+          ? {
+              error: "Container connectivity was lost",
+              status: 500,
+              transient: true,
+              cause: "system",
+              stdout: "",
+              stderr: "Container connectivity was lost",
+              exitCode: 127,
+            }
+          : {
+              stdout: Buffer.from("original event\n").toString("base64"),
+              stderr: "",
+              exitCode: 0,
+              truncated: false,
+            },
+      );
+    });
+    try {
+      const container = new ExecHarnessContainer(
+        new ResidentExecutor({
+          baseUrl: "https://resident.example",
+          token: "test-token",
+          resource: "repo:owner/project",
+          threadKey: "original-thread",
+          runId: "original-run",
+          ownerGen: "original-generation",
+          ownerFence: 7,
+        }),
+        { runId: "original-run", clock: () => 0 },
+      );
+      expect(Buffer.from(await container.readLog(paths.log, 17, 128)).toString()).toBe("original event\n");
+      expect(requests.map((request) => request.command)).toEqual([
+        `tail -c +18 '${paths.log}' | head -c 128 | base64 | tr -d '\\n'`,
+        `tail -c +18 '${paths.log}' | head -c 128 | base64 | tr -d '\\n'`,
+      ]);
+      expect(vi.mocked(console.warn).mock.calls).toEqual([
+        ["[harness-log-read]", { outcome: "retrying", runId: "original-run", reason: "worker-unavailable" }],
+      ]);
+      expect(vi.mocked(console.info).mock.calls).toEqual([
+        ["[harness-log-read]", { outcome: "recovered", runId: "original-run", reason: "worker-unavailable" }],
+      ]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1221,9 +1285,8 @@ describe("ExecHarnessContainer — log observation recovery", () => {
     await expect(new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).rejects.toBe(second);
     expect(calls).toHaveLength(2);
     expect(vi.mocked(console.warn).mock.calls).toEqual([
-      ["[harness] a log observation is re-read once after an answered resident failure"],
-      ["[harness-log-read]", { outcome: "retrying", runId: "unknown" }],
-      ["[harness-log-read]", { outcome: "failed", runId: "unknown" }],
+      ["[harness-log-read]", { outcome: "retrying", runId: "unknown", reason: "answered" }],
+      ["[harness-log-read]", { outcome: "failed", runId: "unknown", reason: "answered" }],
     ]);
     expect(vi.mocked(console.info).mock.calls).toEqual([]);
   });
@@ -1239,14 +1302,13 @@ describe("ExecHarnessContainer — log observation recovery", () => {
       result,
     });
     expect(vi.mocked(console.warn).mock.calls).toEqual([
-      ["[harness] a log observation is re-read once after an answered resident failure"],
-      ["[harness-log-read]", { outcome: "retrying", runId: "unknown" }],
-      ["[harness-log-read]", { outcome: "failed", runId: "unknown" }],
+      ["[harness-log-read]", { outcome: "retrying", runId: "unknown", reason: "answered" }],
+      ["[harness-log-read]", { outcome: "failed", runId: "unknown", reason: "answered" }],
     ]);
     expect(vi.mocked(console.info).mock.calls).toEqual([]);
   });
 
-  it.each(["aborted", "deadline-passed", "refused", "transport-lost", "worker-unavailable"] as const)(
+  it.each(["aborted", "deadline-passed", "refused", "transport-lost"] as const)(
     "keeps a log observation's %s failure single-send",
     async (reason) => {
       const error = new ExecInfraError("original failure", reason, "resident");
@@ -1255,6 +1317,13 @@ describe("ExecHarnessContainer — log observation recovery", () => {
       expect(calls).toHaveLength(1);
     },
   );
+
+  it("keeps an unqualified worker-unavailable log failure single-send", async () => {
+    const error = new ExecInfraError("original failure", "worker-unavailable");
+    const { executor, calls } = recordingExecutor([error]);
+    await expect(new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).rejects.toBe(error);
+    expect(calls).toHaveLength(1);
+  });
 
   it.each(["cancelled", "deadline"] as const)("does not re-read after the original run is %s", async (ending) => {
     const stop = new AbortController();
