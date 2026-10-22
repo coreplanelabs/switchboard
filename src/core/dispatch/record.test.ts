@@ -1,5 +1,6 @@
 import type { AudienceTrace } from "../audienceDecision.js";
 import { captureSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
+import { testSourceInputIntent } from "../testing/sourceInputs.js";
 import type { RunEvent } from "../runEvents.js";
 import { describe, expect, it, vi } from "vitest";
 import { createRunHistoryWriter, type RunHistoryWriter } from "../runHistoryWriter.js";
@@ -359,6 +360,31 @@ describe("durable source archive assembly", () => {
         task: { ref: "accepted-branch", headSha: "a".repeat(40) },
       },
     });
+    const inputs = testSourceInputIntent(),
+      entry = inputs.entries[0]!;
+    entry.owner = {
+      ...entry.owner,
+      runId: row.runId,
+      requester: meta.userId,
+      channelId: meta.channelId,
+      threadKey: meta.threadKey,
+    };
+    entry.reference.root = {
+      runId: row.runId,
+      requester: meta.userId,
+      channelId: meta.channelId,
+      threadKey: meta.threadKey,
+    };
+    entry.witness.runId = row.runId;
+    row.state.sourceInputIntents = inputs;
+    expect(reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 50 }).sourceInputIntents).toEqual(
+      inputs,
+    );
+    row.state.sourceInputIntents = { ...inputs, version: 99 };
+    expect(() => reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 50 })).toThrow(
+      "The retained source input could not be verified.",
+    );
+    row.state.sourceInputIntents = inputs;
     row.state.sourceTask = { ...sourceTask, version: 2 };
     expect(() => reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 50 })).toThrow(
       "The retained source task could not be verified.",

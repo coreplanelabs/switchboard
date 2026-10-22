@@ -21,6 +21,13 @@ import {
   type OriginalSelector,
 } from "../../src/core/runLedger/originalEvidence.js";
 import { sameSourceTaskSnapshot } from "../../src/core/references/sourceTaskSnapshot.js";
+import {
+  pendingSourceInputRetentionRequired,
+  sourceInputArchiveState,
+  sourceInputArchiveMatches,
+  sourceInputArchiveRefusal,
+  sourceInputIntentsOf,
+} from "../../src/core/runLedger/sourceInputIntent.js";
 import type { StorageOperation } from "../../src/core/storageRequestContext.js";
 import {
   validUnitGroupIds,
@@ -3894,7 +3901,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
   }
   private ingressOwnerProtected(runId: string, now: number, expected?: IngressRecord): boolean {
-    if (this.ingressCustodyProtected(runId, expected) || this.publicationRetains(runId)) return true;
+    if (this.ingressCustodyProtected(runId, expected) || this.privateEvidenceRetains(runId)) return true;
     try {
       const { policy } = this.policyState();
       return this.sql
@@ -6912,6 +6919,16 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.withInputGate("archiveCheckpoint", record.id, async (observe) => {
       await this.recoverPendingCheckpoint(record.id, observe);
       const live = this.liveRow(record.id);
+      if (live) {
+        const inputs = sourceInputArchiveState(
+          live.state.sourceInputIntents,
+          record.sourceInputIntents,
+          record.contextDependencies ?? live.state.contextDependencies,
+          { runId: live.runId, operation: "archive" },
+        );
+        if (!inputs) throw new CanonicalArchiveRefusal("source input evidence is not canonical");
+        record = { ...record, ...inputs };
+      }
       for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline", "sourceTask"] as const) {
         const canonical = live?.state[field];
         if (canonical === undefined) continue;
@@ -7746,7 +7763,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Derive protective roots from private facts only for policy-excluded records. */
-  private publicationRetentionIds(rows: readonly RetentionRow[], policy: RetentionPolicy, now: number): string[] {
+  private privateEvidenceRetentionIds(rows: readonly RetentionRow[], policy: RetentionPolicy, now: number): string[] {
     const ordinary = RunHistoryDO.keptIds(rows, policy, now);
     return this.sql
       .exec<{ run_id: string; summary_json: string; work_evidence_json: string | null }>(
@@ -7754,11 +7771,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify([...ordinary]),
       )
       .toArray()
-      .filter((row) => this.publicationRetainsRow(row))
+      .filter((row) => this.privateEvidenceRetainsRow(row))
       .map((row) => row.run_id);
   }
 
-  private publicationRetainsRow(row: { summary_json: string; work_evidence_json: string | null }): boolean {
+  private privateEvidenceRetainsRow(row: { summary_json: string; work_evidence_json: string | null }): boolean {
     const summary = parseSummary(row);
     if (!summary) return true;
     try {
@@ -7772,21 +7789,22 @@ export class RunHistoryDO extends DurableObject<Env> {
         evidence?.branchPublication !== undefined ||
         evidence?.doorPublicationPending !== undefined ||
         evidence?.reviewPublication !== undefined ||
-        evidence?.branchPushReceipts !== undefined
+        evidence?.branchPushReceipts !== undefined ||
+        evidence?.sourceInputIntents !== undefined
       );
     } catch {
       return true;
     }
   }
 
-  private publicationRetains(runId: string): boolean {
+  private privateEvidenceRetains(runId: string): boolean {
     const row = this.sql
       .exec<{ summary_json: string; work_evidence_json: string | null }>(
         `SELECT summary_json, work_evidence_json FROM runs WHERE run_id = ?`,
         runId,
       )
       .toArray()[0];
-    return row !== undefined && this.publicationRetainsRow(row);
+    return row !== undefined && this.privateEvidenceRetainsRow(row);
   }
 
   private contextKeptIds(rows: readonly RetentionRow[], policy: RetentionPolicy, now: number): Set<string> {
@@ -7796,7 +7814,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       now,
       {
         references: this.contextReferences(),
-        protectedIds: this.publicationRetentionIds(rows, policy, now),
+        protectedIds: this.privateEvidenceRetentionIds(rows, policy, now),
         liveHolderIds: this.sql
           .exec<{ run_id: string }>(`SELECT run_id FROM live_runs`)
           .toArray()
@@ -8035,6 +8053,15 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
       if (!retainedTask || !workEvidenceBelongsToRun(retainedTask, owner)) return undefined;
       incoming = { ...incoming, ...retainedTask };
+    }
+    if (evidence?.sourceInputIntents !== undefined) {
+      const kept = sourceInputIntentsOf(evidence.sourceInputIntents);
+      const supplied =
+        incoming.sourceInputIntents === undefined ? kept : sourceInputIntentsOf(incoming.sourceInputIntents);
+      if (!kept || !supplied) return sourceInputArchiveRefusal({ runId, operation: "rewrite" }, "invalid-metadata");
+      if (JSON.stringify(kept) !== JSON.stringify(supplied))
+        return sourceInputArchiveRefusal({ runId, operation: "rewrite" }, "original-changed");
+      incoming = { ...incoming, sourceInputIntents: kept };
     }
     const baseline =
       evidence && Object.hasOwn(evidence, "branchIdentityBaseline")
@@ -9569,6 +9596,10 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** Remove an unstarted reservation, or settle its verified final result
    *  while preserving checks. Neither path writes another close. Fenced. */
   async abandon(runId: string, gen: string, opts?: { settleTerminal: true }): Promise<FenceResult> {
+    if (!opts?.settleTerminal && pendingSourceInputRetentionRequired(this.liveRow(runId)?.state ?? {})) {
+      sourceInputArchiveRefusal({ runId, operation: "abandon" }, "pending-input");
+      return { ok: false, reason: "fenced" };
+    }
     if (!opts?.settleTerminal && hasRecordedCheckEvidence(this.liveRow(runId)?.state.checkExecutions))
       return { ok: false, reason: "fenced" };
     if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
@@ -9591,6 +9622,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         const row = this.liveRow(runId);
         out = checkFence(row, gen);
         if (!out.ok) return;
+        if (!opts?.settleTerminal && pendingSourceInputRetentionRequired(row?.state ?? {})) {
+          sourceInputArchiveRefusal({ runId, operation: "abandon" }, "pending-input");
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
         if (opts?.settleTerminal) {
           const stored = this.sql
             .exec<{ summary_json: string; work_evidence_json: string | null; bytes: number }>(
@@ -9607,6 +9643,14 @@ export class RunHistoryDO extends DurableObject<Env> {
           const evidence =
             stored.work_evidence_json === null ? { version: 1 } : parseStoredJson(stored.work_evidence_json);
           if (!parseWorkEvidence(evidence, record)) throw new Error("work evidence is unreadable");
+          if (
+            pendingSourceInputRetentionRequired(row.state) &&
+            !sourceInputArchiveMatches(row.state.sourceInputIntents, evidence.sourceInputIntents)
+          ) {
+            sourceInputArchiveRefusal({ runId, operation: "abandon" }, "pending-input");
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
           const prior = checkArchiveOf(evidence.checkArchive);
           if (
             (evidence.checkArchive !== undefined && !prior) ||
@@ -10909,7 +10953,7 @@ export class RunHistoryDO extends DurableObject<Env> {
    * order is the JS string order `newestFirst` uses.
    */
   private isKept(row: RetentionRow, policy: RetentionPolicy, now: number): boolean {
-    if (this.isKeptByPolicy(row, policy, now) || this.publicationRetains(row.run_id)) return true;
+    if (this.isKeptByPolicy(row, policy, now) || this.privateEvidenceRetains(row.run_id)) return true;
     const holders = this.sql
       .exec<{ holder_run_id: string }>(
         `SELECT DISTINCT holder_run_id FROM context_refs WHERE source_run_id = ? AND (retention_pin = 1 OR ordinary_pin = 1)`,
@@ -10927,7 +10971,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const holder = this.sql
       .exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs WHERE run_id = ?`, runId)
       .toArray()[0];
-    return holder !== undefined && (this.isKeptByPolicy(holder, policy, now) || this.publicationRetains(runId));
+    return holder !== undefined && (this.isKeptByPolicy(holder, policy, now) || this.privateEvidenceRetains(runId));
   }
 
   private isKeptByPolicy(row: RetentionRow, policy: RetentionPolicy, now: number): boolean {
@@ -11175,6 +11219,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         stored,
       );
       if (!canonicalWork) throw new Error("original branch identity baseline is immutable");
+      const inputs = sourceInputArchiveState(
+        canonicalWork.sourceInputIntents,
+        stored.sourceInputIntents,
+        stored.contextDependencies ?? canonicalWork.contextDependencies,
+        { runId: stored.id, operation: "put" },
+      );
+      if (!inputs) throw new CanonicalArchiveRefusal("source input evidence is not canonical");
+      Object.assign(stored, inputs);
       if (stored.sourceTask !== undefined && !sameSourceTaskSnapshot(stored.sourceTask, canonicalWork.sourceTask))
         throw new Error("source task evidence is not canonical");
       // Terminal outcome and cost do not depend on a process-local publication
@@ -11240,6 +11292,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         unitSeedReceipt,
         branchIdentityBaseline,
         sourceTask,
+        sourceInputIntents,
         contextCheckpointReceipt,
         directAudience,
         ...summary
@@ -11253,6 +11306,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         unitSeedReceipt === undefined &&
         branchIdentityBaseline === undefined &&
         sourceTask === undefined &&
+        sourceInputIntents === undefined &&
         !(branchPublication === undefined && canonicalWork.branchPublication !== undefined) &&
         Object.keys(unreadablePush).length === 0 &&
         Object.keys(unreadableReview).length === 0 &&
@@ -11269,6 +11323,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               unitSeedReceipt,
               branchIdentityBaseline,
               sourceTask,
+              sourceInputIntents,
               ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
                 ? { branchPublication: canonicalWork.branchPublication }
                 : {}),
@@ -11292,6 +11347,10 @@ export class RunHistoryDO extends DurableObject<Env> {
             );
       if (sourceTask !== undefined && bytes > MAX_RECORD_BYTES)
         throw new Error("source task evidence exceeds record byte limit");
+      if (sourceInputIntents !== undefined && bytes > MAX_RECORD_BYTES) {
+        sourceInputArchiveRefusal({ runId: stored.id, operation: "put" }, "record-capacity");
+        throw new Error("source input evidence exceeds record byte limit");
+      }
       if (checkArchive !== undefined && bytes > MAX_RECORD_BYTES)
         throw new Error("check evidence exceeds record byte limit");
       const existing = this.sql
@@ -11753,7 +11812,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         if (force && this.deletionIdentity(id)) deleted = true;
         // Retention may have removed the record while its checkpoint alias
         // survives. Explicit deletion still revokes the alias.
-        if (!destructive && this.publicationRetains(id)) {
+        if (!destructive && this.privateEvidenceRetains(id)) {
           refused = true;
           return;
         }
@@ -12041,6 +12100,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     let unitSeedReceipt: unknown;
     let branchIdentityBaseline: unknown;
     let sourceTask: unknown;
+    let sourceInputIntents: unknown;
     let contextCheckpointReceipt: unknown;
     let directAudience: unknown;
     try {
@@ -12068,6 +12128,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         unitSeedReceipt = (evidence as { unitSeedReceipt?: unknown }).unitSeedReceipt;
         branchIdentityBaseline = evidence.branchIdentityBaseline;
         sourceTask = evidence.sourceTask;
+        sourceInputIntents = evidence.sourceInputIntents;
       }
 
       contextCheckpointReceipt =
@@ -12090,6 +12151,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
       ...(branchIdentityBaseline === undefined ? {} : { branchIdentityBaseline }),
       ...(sourceTask === undefined ? {} : { sourceTask }),
+      ...(sourceInputIntents === undefined ? {} : { sourceInputIntents }),
       ...(contextCheckpointReceipt === undefined ? {} : { contextCheckpointReceipt }),
       ...(directAudience === undefined ? {} : { directAudience }),
     };
@@ -12533,6 +12595,7 @@ function parseWorkEvidence(value: unknown, owner: RunWorkOwner): Record<string, 
         field !== "unitSeedReceipt" &&
         field !== "branchIdentityBaseline" &&
         field !== "sourceTask" &&
+        field !== "sourceInputIntents" &&
         field !== "branchPublication" &&
         field !== "reviewPublication" &&
         field !== "branchPushReceipts" &&

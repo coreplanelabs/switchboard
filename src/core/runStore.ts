@@ -1,5 +1,10 @@
 import type { StorageFailureNotice } from "./storageFailureDiagnostic.js";
 import { terminalPublicationRetentionRequired } from "./branchPublication.js";
+import {
+  pendingSourceInputRetentionRequired,
+  sourceInputArchiveState,
+  sourceInputArchiveRefusal,
+} from "./runLedger/sourceInputIntent.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { RunEvent } from "./runEvents.js";
@@ -23,6 +28,7 @@ import {
   isAfterCursor,
   isRunListItem,
   isRunRecord,
+  MAX_RECORD_BYTES,
   confirmRuntimeShutdownRecord,
   matchesVisibility,
   matchesRecoveryEvidence,
@@ -267,6 +273,7 @@ export function toListItem(record: RunRecord, bytes: number): RunListItem {
     sourceReads: _sourceReads,
     githubSource: _githubSource,
     sourceTask: _sourceTask,
+    sourceInputIntents: _sourceInputIntents,
     orchestratorDecisions: _orchestratorDecisions,
     branchIdentityBaseline: _branchIdentityBaseline,
     workReads: _workReads,
@@ -312,7 +319,9 @@ export class InMemoryRunStore implements RunStore {
   private retained(): RunListItem[] {
     return applyRetention(this.items(), this.policy, this.now(), {
       protectedIds: [...this.records.values()]
-        .filter(({ record }) => terminalPublicationRetentionRequired(record))
+        .filter(
+          ({ record }) => terminalPublicationRetentionRequired(record) || pendingSourceInputRetentionRequired(record),
+        )
         .map(({ record }) => record.id),
     });
   }
@@ -323,8 +332,21 @@ export class InMemoryRunStore implements RunStore {
   async put(record: RunRecord): Promise<PutResult> {
     if (!isRunRecord(record)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
     if (this.killed.has(record.id)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
-    const bytes = utf8ByteLength(JSON.stringify(record));
     const prev = this.records.get(record.id);
+    const input = sourceInputArchiveState(
+      prev?.record.sourceInputIntents ?? record.sourceInputIntents,
+      record.sourceInputIntents,
+      record.contextDependencies ?? prev?.record.contextDependencies,
+      { runId: prev?.record.id ?? record.id, operation: "put" },
+    );
+    if (!input) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
+    record = { ...record, ...input };
+    if (!isRunRecord(record)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
+    const bytes = utf8ByteLength(JSON.stringify(record));
+    if (pendingSourceInputRetentionRequired(record) && bytes > MAX_RECORD_BYTES) {
+      sourceInputArchiveRefusal({ runId: record.id, operation: "put" }, "record-capacity");
+      throw new Error("source input evidence exceeds record byte limit");
+    }
     const rewritten =
       prev !== undefined && !sameStoredVersion({ ...prev.record, bytes: prev.bytes }, { ...record, bytes });
     this.records.set(record.id, { record: clone(record), bytes });
@@ -375,6 +397,8 @@ export class InMemoryRunStore implements RunStore {
       this.deletionIdentities.set(id, deletionIdentityOf(record));
     if (!opts?.destructive && record && terminalPublicationRetentionRequired(record))
       throw new Error("unresolved publication prevents history deletion");
+    if (!opts?.destructive && record && pendingSourceInputRetentionRequired(record))
+      throw new Error("unresolved source input prevents history deletion");
     if (opts?.destructive) this.killed.add(id);
     if (opts?.force) this.forceDeleted.add(id);
     this.records.delete(id);
@@ -499,7 +523,8 @@ export class FileRunStore implements RunStore {
             !this.fileIntact(item) ||
             !isRunRecord(record) ||
             record.id !== item.id ||
-            terminalPublicationRetentionRequired(record)
+            terminalPublicationRetentionRequired(record) ||
+            pendingSourceInputRetentionRequired(record)
           );
         } catch {
           return existsSync(this.recordPath(item.id));
@@ -536,10 +561,25 @@ export class FileRunStore implements RunStore {
     if (existsSync(join(this.dir, `${record.id}.killed`)))
       return { ok: true, retained: this.readIndex().length, stored: false, rewritten: false };
     this.ensureDir();
-    const content = JSON.stringify(record);
-    const bytes = utf8ByteLength(content);
     const index = this.readIndex();
     const prev = index.find((r) => r.id === record.id);
+    const prior: unknown = prev ? JSON.parse(readFileSync(this.recordPath(record.id), "utf8")) : undefined;
+    if (prior !== undefined && !isRunRecord(prior)) throw new Error("prior archive evidence is unreadable");
+    const input = sourceInputArchiveState(
+      prior?.sourceInputIntents ?? record.sourceInputIntents,
+      record.sourceInputIntents,
+      record.contextDependencies ?? prior?.contextDependencies,
+      { runId: prior?.id ?? record.id, operation: "put" },
+    );
+    if (!input) return { ok: true, retained: index.length, stored: false, rewritten: false };
+    record = { ...record, ...input };
+    if (!isRunRecord(record)) return { ok: true, retained: index.length, stored: false, rewritten: false };
+    const content = JSON.stringify(record);
+    const bytes = utf8ByteLength(content);
+    if (pendingSourceInputRetentionRequired(record) && bytes > MAX_RECORD_BYTES) {
+      sourceInputArchiveRefusal({ runId: record.id, operation: "put" }, "record-capacity");
+      throw new Error("source input evidence exceeds record byte limit");
+    }
     const rewritten = prev !== undefined && !sameStoredVersion(prev, { ...record, bytes });
     this.writeAtomic(this.recordPath(record.id), content);
     const item = toListItem(record, bytes);
@@ -656,7 +696,8 @@ export class FileRunStore implements RunStore {
         !isRunRecord(record) ||
         record.id !== id ||
         (item && !this.fileIntact(item)) ||
-        terminalPublicationRetentionRequired(record)
+        terminalPublicationRetentionRequired(record) ||
+        pendingSourceInputRetentionRequired(record)
       )
         throw new Error("unresolved publication prevents history deletion");
     }

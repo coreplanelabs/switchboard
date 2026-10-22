@@ -1878,6 +1878,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
             }
           : {}),
         ...(sourceTask ? { sourceTask } : {}),
+        ...(this.state.sourceInputIntents !== undefined
+          ? { sourceInputIntents: structuredClone(this.state.sourceInputIntents) as RunRecord["sourceInputIntents"] }
+          : {}),
         ...(this.state.sourceReads !== undefined
           ? { sourceReads: structuredClone(this.state.sourceReads) as SourceReadState }
           : {}),

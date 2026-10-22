@@ -7,7 +7,16 @@ import {
   type OriginalSelector,
 } from "./originalEvidence.js";
 import { sameSourceTaskSnapshot } from "../references/sourceTaskSnapshot.js";
-import { prepareSourceInputRows, sourceInputRowsUnchanged, sourceInputWriteSnapshot } from "./sourceInputIntent.js";
+import {
+  prepareSourceInputRows,
+  sourceInputRowsUnchanged,
+  sourceInputWriteSnapshot,
+  pendingSourceInputRetentionRequired,
+  sourceInputArchiveState,
+  sourceInputArchiveMatches,
+  sourceInputArchiveRefusal,
+  sourceInputIntentsOf,
+} from "./sourceInputIntent.js";
 import { INBOX_DELIVERY_RECEIPTS_MAX } from "../budgets.js";
 import { nativeClaimObservationOf, claimObservationKey, claimObservationQueryOf } from "./claimObservation.js";
 import { matchesVisibility } from "../runRecord.js";
@@ -486,6 +495,8 @@ export class InMemoryRunLedger implements RunLedger {
     const evidence = this.finishedWorkEvidence.get(runId);
     if (
       (record && terminalPublicationRetentionRequired(record)) ||
+      (record && pendingSourceInputRetentionRequired(record)) ||
+      evidence?.sourceInputIntents !== undefined ||
       evidence?.branchPublication !== undefined ||
       evidence?.doorPublicationPending !== undefined ||
       evidence?.reviewPublication !== undefined ||
@@ -1595,6 +1606,16 @@ export class InMemoryRunLedger implements RunLedger {
     if (!restoredChecks) return undefined;
     if (restoredChecks.checks !== undefined) incoming = { ...incoming, checkExecutions: restoredChecks.checks };
     const sourceTask = evidence?.sourceTask ?? record?.sourceTask;
+    const priorInputs = evidence?.sourceInputIntents ?? record?.sourceInputIntents;
+    if (priorInputs !== undefined) {
+      const kept = sourceInputIntentsOf(priorInputs);
+      const supplied =
+        incoming.sourceInputIntents === undefined ? kept : sourceInputIntentsOf(incoming.sourceInputIntents);
+      if (!kept || !supplied) return sourceInputArchiveRefusal({ runId, operation: "rewrite" }, "invalid-metadata");
+      if (JSON.stringify(kept) !== JSON.stringify(supplied))
+        return sourceInputArchiveRefusal({ runId, operation: "rewrite" }, "original-changed");
+      incoming = { ...incoming, sourceInputIntents: kept };
+    }
     if (sourceTask !== undefined) {
       const retainedTask = preserveCheckpointState({ sourceTask }, { sourceTask: incoming.sourceTask });
       if (!retainedTask || !workEvidenceBelongsToRun(retainedTask, owner)) return undefined;
@@ -2583,6 +2604,19 @@ export class InMemoryRunLedger implements RunLedger {
       return { ok: false as const, reason: "fenced" as const };
     if (Object.hasOwn(record, "checkArchive") || Object.hasOwn(record, "checkExecutions"))
       return { ok: false as const, reason: "fenced" as const };
+    const inputs = sourceInputArchiveState(
+      row.state.sourceInputIntents,
+      record.sourceInputIntents,
+      record.contextDependencies ?? row.state.contextDependencies,
+      { runId: row.runId, operation: "cancel" },
+    );
+    if (!inputs) return { ok: false as const, reason: "fenced" as const };
+    record = { ...record, ...inputs };
+    if (!workEvidenceBelongsToRun(record, record)) return { ok: false as const, reason: "fenced" as const };
+    if (record.sourceInputIntents !== undefined && utf8ByteLength(JSON.stringify(record)) > MAX_RECORD_BYTES) {
+      sourceInputArchiveRefusal({ runId: row.runId, operation: "cancel" }, "record-capacity");
+      throw new Error("source input evidence exceeds record byte limit");
+    }
     const checkArchive = captureCheckArchive(row, true);
     const priorCheckValue = this.finishedWorkEvidence.get(row.runId)?.checkArchive;
     const priorCheck = checkArchiveOf(priorCheckValue);
@@ -2718,6 +2752,14 @@ export class InMemoryRunLedger implements RunLedger {
     const retainedSteps = this.prepareInboxSegment(runId);
     const canonicalWork = this.preserveArchivedBaseline(runId, row.state, record);
     if (!canonicalWork) return { ok: false, reason: "fenced" };
+    const inputs = sourceInputArchiveState(
+      canonicalWork.sourceInputIntents,
+      record.sourceInputIntents,
+      record.contextDependencies ?? canonicalWork.contextDependencies,
+      { runId: row.runId, operation: "finish" },
+    );
+    if (!inputs) return { ok: false, reason: "fenced" };
+    record = { ...record, ...inputs };
     if (record.sourceTask !== undefined && !sameSourceTaskSnapshot(record.sourceTask, canonicalWork.sourceTask))
       return { ok: false, reason: "fenced" };
     const {
@@ -2765,6 +2807,10 @@ export class InMemoryRunLedger implements RunLedger {
     if (!workEvidenceBelongsToRun(record, record)) return { ok: false, reason: "fenced" };
     if (record.sourceTask !== undefined && utf8ByteLength(JSON.stringify(record)) > MAX_RECORD_BYTES)
       throw new Error("source task evidence exceeds record byte limit");
+    if (record.sourceInputIntents !== undefined && utf8ByteLength(JSON.stringify(record)) > MAX_RECORD_BYTES) {
+      sourceInputArchiveRefusal({ runId: row.runId, operation: "finish" }, "record-capacity");
+      throw new Error("source input evidence exceeds record byte limit");
+    }
     const priorReceipt =
       this.live.get(runId)?.state.contextCheckpointReceipt ?? this.finished.get(runId)?.contextCheckpointReceipt;
     if (
@@ -3108,9 +3154,18 @@ export class InMemoryRunLedger implements RunLedger {
     if (!fence.ok) return fence;
     if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const current = this.live.get(runId)!;
+    const stored = opts?.settleTerminal ? this.finished.get(runId) : undefined;
+    if (
+      pendingSourceInputRetentionRequired(current.state) &&
+      (!opts?.settleTerminal ||
+        !matchesStoredTerminal(current, stored) ||
+        !sourceInputArchiveMatches(current.state.sourceInputIntents, stored?.sourceInputIntents))
+    ) {
+      sourceInputArchiveRefusal({ runId: current.runId, operation: "abandon" }, "pending-input");
+      return { ok: false, reason: "fenced" };
+    }
     let checkEvidence: RunState | undefined;
     if (opts?.settleTerminal) {
-      const stored = this.finished.get(runId);
       if (!matchesStoredTerminal(current, stored)) return { ok: false, reason: "fenced" };
       const snapshot = captureCheckArchive(current, true);
       const prior = this.finishedWorkEvidence.get(runId);
