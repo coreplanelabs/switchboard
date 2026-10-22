@@ -141,6 +141,7 @@ import {
 import type { SessionCapability } from "../../tools/session.js";
 import {
   ModelPolicyRefusedError,
+  ModelSourceUnavailableError,
   ModelStreamIncompleteError,
   ModelTransientFailureError,
   ModelTurnBudgetExhaustedError,
@@ -792,6 +793,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("retains an exhausted source read on the run and refuses the next model call", async () => {
     const decisions: boolean[] = [];
+    const modelDecisions: Array<boolean | "retryable"> = [];
     let failed = false;
     const wire = new WorkerRunLedger({
       baseUrl: "https://memory.test",
@@ -803,7 +805,9 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     harness.harness.open = async () => {
       decisions.push(await bearers.sourceGuardFor(s.run.id).check());
       failed = true;
-      decisions.push(await bearers.sourceGuardFor(s.run.id).check());
+      const modelDecision = await bearers.sourceGuardFor(s.run.id).checkForModel();
+      modelDecisions.push(modelDecision);
+      decisions.push(modelDecision === true);
       return { answer: "Guard checked.", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
     };
     const s = setup("unused", {
@@ -833,6 +837,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         ),
     });
     expect(decisions).toEqual([true, false]);
+    expect(modelDecisions).toEqual(["retryable"]);
     s.ending.drain(true);
     await s.writer.settled();
     const record = (await s.store.get(s.run.id))!;
@@ -5721,6 +5726,28 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       status: "failed",
       failure: { kind: "model_stream_incomplete" },
     });
+  });
+
+  it("an exhausted source recheck records source_unavailable without claiming a provider failure", async () => {
+    const s = setup("", {
+      agent: "coding",
+      harness: {
+        harnesses: roster({
+          ...watched(piHarness).harness,
+          open: async () => {
+            throw new ModelSourceUnavailableError();
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      bearer: "sbr_run-l.s3cret",
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("source before its retry window ended");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect((await s.store.get("run-l"))!).toMatchObject({ status: "failed", failure: { kind: "source_unavailable" } });
   });
 
   it.each(["transport retry budget", "model call limit"] as const)(
