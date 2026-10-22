@@ -180,29 +180,98 @@ function rangeOf(spec) {
  *  `{ kind: "unpinned", at, version }` for a fetched record without `resolved`
  *  (the root, a workspace, a link and a bundled copy are not fetched). In lock
  *  order, a record's edges before its own pin. */
-export function resolutionProblems(lock) {
+function dependencyFields(path) {
+  return [
+    "dependencies",
+    "optionalDependencies",
+    "peerDependencies",
+    ...(!path.includes("node_modules/") ? ["devDependencies"] : []),
+  ];
+}
+
+function overrideContexts(packages, overrides) {
+  const contexts = new Map();
+  const seen = new Set();
+  const ids = new Map();
+  const paths = Object.keys(packages);
+  const roots = paths.filter((path) => !path.includes("node_modules/"));
+  for (const seed of [...roots, ...paths]) {
+    if (contexts.has(seed) || packages[seed].link) continue;
+    const pending = [{ path: seed, rules: [overrides] }];
+    for (let index = 0; index < pending.length; index++) {
+      const { path, rules } = pending[index];
+      const record = packages[path];
+      const owner = record.name ?? path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length);
+      const active = [...rules];
+      for (const rule of rules) {
+        const nested = rule[owner];
+        if (nested && typeof nested === "object" && !active.includes(nested)) active.push(nested);
+      }
+      const key = `${path}:${active
+        .map((rule) => {
+          if (!ids.has(rule)) ids.set(rule, ids.size);
+          return ids.get(rule);
+        })
+        .join(",")}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!contexts.has(path)) contexts.set(path, []);
+      contexts.get(path).push(active);
+      for (const field of dependencyFields(path)) {
+        for (const name of Object.keys(record[field] ?? {})) {
+          if (bundledNames(record).has(name)) continue;
+          const hit = resolveDependency(packages, path, name);
+          if (hit) pending.push({ path: hit.path, rules: active });
+        }
+      }
+    }
+  }
+  return contexts;
+}
+
+function overriddenSpec(name, declared, rules, manifest) {
+  for (let index = rules.length - 1; index >= 0; index--) {
+    const override = rules[index][name];
+    const selected = typeof override === "object" ? override?.["."] : override;
+    if (typeof selected !== "string") continue;
+    if (!selected.startsWith("$")) return selected;
+    const reference = selected.slice(1);
+    return (
+      manifest.dependencies?.[reference] ??
+      manifest.devDependencies?.[reference] ??
+      manifest.optionalDependencies?.[reference] ??
+      declared
+    );
+  }
+  return declared;
+}
+
+export function resolutionProblems(lock, manifest = {}) {
   const packages = lock.packages ?? {};
   const problems = [];
+  const contexts = overrideContexts(packages, manifest.overrides ?? {});
   for (const [from, record] of Object.entries(packages)) {
     if (record.link) continue;
     const top = !from.includes("node_modules/");
     const bundled = bundledNames(record);
-    const fields = ["dependencies", "optionalDependencies", "peerDependencies"];
-    if (top) fields.push("devDependencies");
-    for (const field of fields) {
-      for (const [name, spec] of Object.entries(record[field] ?? {})) {
+    for (const field of dependencyFields(from)) {
+      for (const [name, declared] of Object.entries(record[field] ?? {})) {
         if (bundled.has(name)) continue;
+        const specs = new Set(contexts.get(from).map((rules) => overriddenSpec(name, declared, rules, manifest)));
         const hit = resolveDependency(packages, from, name);
         if (!hit) {
           const optional = field === "optionalDependencies" || record.optionalDependencies?.[name] !== undefined;
-          if (!optional && field !== "peerDependencies") problems.push({ kind: "missing", from, field, name, spec });
+          if (!optional && field !== "peerDependencies")
+            problems.push({ kind: "missing", from, field, name, spec: [...specs][0] });
           continue;
         }
-        const range = rangeOf(spec);
-        if (range === undefined) continue;
-        const version = hit.record.version;
-        if (typeof version !== "string" || !semver.satisfies(version, range, { includePrerelease: true }))
-          problems.push({ kind: "unsatisfied", from, field, name, spec, at: hit.path, version });
+        for (const spec of specs) {
+          const range = rangeOf(spec);
+          if (range === undefined) continue;
+          const version = hit.record.version;
+          if (typeof version !== "string" || !semver.satisfies(version, range, { includePrerelease: true }))
+            problems.push({ kind: "unsatisfied", from, field, name, spec, at: hit.path, version });
+        }
       }
     }
     if (!top && !record.inBundle && !pinned(record))
@@ -264,7 +333,7 @@ function main() {
     console.error("Refresh the records without touching node_modules: npm install --package-lock-only");
     process.exit(1);
   }
-  const problems = resolutionProblems(lock);
+  const problems = resolutionProblems(lock, readJson("package.json"));
   if (problems.length > 0) {
     console.error(
       `check:lockfile FAILED — ${problems.length} lockfile edge(s) npm cannot honour or record(s) it cannot pin:`,
