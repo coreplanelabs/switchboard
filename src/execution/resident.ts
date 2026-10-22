@@ -2307,10 +2307,9 @@ export class ResidentExecutor implements Executor {
       const said = answeredStatus(status, data);
       const reason = residentAnswerReason(said, data);
       const message = `resident /exec: ${data.error}`;
-      // Only an unnamed service failure may qualify a fixed log re-read.
-      // Authentication, ownership and lifecycle refusals keep one send, even
-      // when an older Worker reports their typed reason as "answered".
-      const observationFailure =
+      // Only closed Resident service failures may qualify a fixed log re-read.
+      // Authentication, ownership and lifecycle refusals keep one send.
+      const answeredObservationFailure =
         said >= 500 &&
         said <= 599 &&
         (data.status === undefined || data.status === said) &&
@@ -2318,9 +2317,22 @@ export class ResidentExecutor implements Executor {
         (data.cause === undefined || data.cause === "system") &&
         (data.transient === undefined || data.transient === false) &&
         Object.keys(data).every((key) => ["error", "status", "transient", "cause", "trace"].includes(key));
-      const failure = observationFailure
-        ? new ExecInfraError(message, reason, "resident")
-        : new ExecInfraError(message, reason);
+      const streamedPlatformFailure =
+        status === 200 &&
+        said === 500 &&
+        reason === "worker-unavailable" &&
+        data.transient === true &&
+        data.cause === "system" &&
+        data.stdout === "" &&
+        data.stderr === data.error &&
+        data.exitCode === 127 &&
+        Object.keys(data).every((key) =>
+          ["error", "status", "transient", "cause", "stdout", "stderr", "exitCode", "trace"].includes(key),
+        );
+      const failure =
+        answeredObservationFailure || streamedPlatformFailure
+          ? new ExecInfraError(message, reason, "resident")
+          : new ExecInfraError(message, reason);
       // The memory gate returns this typed refusal before thread preflight
       // or command dispatch. Display text alone cannot prove that phase.
       const memoryRefused =
