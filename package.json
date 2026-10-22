@@ -2,7 +2,7 @@
   "name": "switchboard",
   "version": "1.308.2",
   "private": true,
-  "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question — on the model you choose, with its tools running where you decide.",
+  "description": "Mention it in Slack and an agent reviews the PR, ships the fix, or answers the question \u2014 on the model you choose, with its tools running where you decide.",
   "license": "Apache-2.0",
   "homepage": "https://github.com/coreplanelabs/switchboard#readme",
   "repository": {
@@ -130,7 +130,7 @@
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.71.2",
-    "vitest": "^5.0.0",
+    "vitest": "^5.0.5",
     "vue-eslint-parser": "^10.4.1"
   },
   "overrides": {
@@ -140,6 +140,13 @@
     "@earendil-works/pi-mcp": "1.2.0",
     "@earendil-works/pi-tui": "1.2.0",
     "@earendil-works/pi-telemetry": "1.2.0",
-    "@earendil-works/pi-ai": "$@earendil-works/pi-ai"
+    "@earendil-works/pi-ai": "$@earendil-works/pi-ai",
+    "esbuild": "^0.28.2",
+    "vitepress": {
+      "vite": "^6.4.4"
+    },
+    "fflate": "^0.8.3",
+    "postcss-selector-parser": "^7.1.7",
+    "katex": "^0.18.2"
   }
 }

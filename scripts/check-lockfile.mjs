@@ -180,7 +180,7 @@ function rangeOf(spec) {
  *  `{ kind: "unpinned", at, version }` for a fetched record without `resolved`
  *  (the root, a workspace, a link and a bundled copy are not fetched). In lock
  *  order, a record's edges before its own pin. */
-export function resolutionProblems(lock) {
+export function resolutionProblems(lock, manifest = {}) {
   const packages = lock.packages ?? {};
   const problems = [];
   for (const [from, record] of Object.entries(packages)) {
@@ -190,8 +190,18 @@ export function resolutionProblems(lock) {
     const fields = ["dependencies", "optionalDependencies", "peerDependencies"];
     if (top) fields.push("devDependencies");
     for (const field of fields) {
-      for (const [name, spec] of Object.entries(record[field] ?? {})) {
+      for (const [name, declared] of Object.entries(record[field] ?? {})) {
         if (bundled.has(name)) continue;
+        const owner = record.name ?? from.slice(from.lastIndexOf("node_modules/") + "node_modules/".length);
+        const scoped = manifest.overrides?.[owner];
+        const override = (typeof scoped === "object" ? scoped?.[name] : undefined) ?? manifest.overrides?.[name];
+        const selected = typeof override === "object" ? override?.["."] : override;
+        const reference = typeof selected === "string" && selected.startsWith("$") ? selected.slice(1) : undefined;
+        const spec = reference
+          ? (manifest.dependencies?.[reference] ?? manifest.devDependencies?.[reference] ?? declared)
+          : typeof selected === "string"
+            ? selected
+            : declared;
         const hit = resolveDependency(packages, from, name);
         if (!hit) {
           const optional = field === "optionalDependencies" || record.optionalDependencies?.[name] !== undefined;
@@ -264,7 +274,7 @@ function main() {
     console.error("Refresh the records without touching node_modules: npm install --package-lock-only");
     process.exit(1);
   }
-  const problems = resolutionProblems(lock);
+  const problems = resolutionProblems(lock, readJson("package.json"));
   if (problems.length > 0) {
     console.error(
       `check:lockfile FAILED — ${problems.length} lockfile edge(s) npm cannot honour or record(s) it cannot pin:`,

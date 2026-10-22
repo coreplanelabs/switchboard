@@ -33,4 +33,11 @@ export type ResolutionProblem =
   | { kind: "missing"; from: string; field: string; name: string; spec: string }
   | { kind: "unpinned"; at: string; version: unknown };
 /** Edges the lock declares that npm cannot honour, and fetched records it cannot pin — in lock order. */
-export function resolutionProblems(lock: { packages?: Record<string, PackageRecord> }): ResolutionProblem[];
+export function resolutionProblems(
+  lock: { packages?: Record<string, PackageRecord> },
+  manifest?: {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+    overrides?: Record<string, string | Record<string, string>>;
+  },
+): ResolutionProblem[];

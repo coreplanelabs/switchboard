@@ -203,6 +203,33 @@ describe("check-lockfile resolutionProblems", () => {
     expect(resolutionProblems(valid)).toEqual([]);
   });
 
+  it("checks security overrides instead of the replaced dependency range", () => {
+    const lock = {
+      packages: {
+        "node_modules/fontless": pinned("0.2.1", { dependencies: { esbuild: "^0.27.0" } }),
+        "node_modules/esbuild": pinned("0.28.2"),
+      },
+    };
+    expect(resolutionProblems(lock, { overrides: { esbuild: "^0.28.2" } })).toEqual([]);
+    expect(resolutionProblems(lock, { overrides: { esbuild: "^0.29.0" } })).toEqual([
+      expect.objectContaining({ kind: "unsatisfied", name: "esbuild", spec: "^0.29.0", version: "0.28.2" }),
+    ]);
+  });
+
+  it("limits a nested override to its owner and resolves root dependency references", () => {
+    const lock = {
+      packages: {
+        "node_modules/vitepress": pinned("1.6.4", { dependencies: { vite: "^5.4.14" } }),
+        "node_modules/other": pinned("1.0.0", { dependencies: { vite: "^5.4.14" } }),
+        "node_modules/vite": pinned("6.4.4"),
+      },
+    };
+    expect(resolutionProblems(lock, { overrides: { vitepress: { vite: "^6.4.4" } } })).toEqual([
+      expect.objectContaining({ kind: "unsatisfied", from: "node_modules/other", spec: "^5.4.14" }),
+    ]);
+    expect(resolutionProblems(lock, { dependencies: { vite: "^6.4.4" }, overrides: { vite: "$vite" } })).toEqual([]);
+  });
+
   it("names the defect that motivated the gate: a nested copy that violates its dependant's range, and the unpinned records beside it", () => {
     const broken = {
       packages: {
@@ -308,7 +335,7 @@ describe("the repository's package-lock.json", () => {
   });
 
   it("has every declared edge satisfied by the record npm resolves for it, and every fetched record pinned", () => {
-    expect(resolutionProblems(lock)).toEqual([]);
+    expect(resolutionProblems(lock, readJson("package.json"))).toEqual([]);
   });
 
   it("mirrors package.json and every workspace's package.json in its records", () => {
