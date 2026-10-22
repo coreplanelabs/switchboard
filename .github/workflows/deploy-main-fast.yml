@@ -35,6 +35,8 @@ jobs:
     uses: ./.github/workflows/deploy-production.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
+      actions: read
+      deployments: read
     with:
       targets: ${{ inputs.targets }}
       force: ${{ inputs.force }}

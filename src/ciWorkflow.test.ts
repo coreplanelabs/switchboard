@@ -1963,6 +1963,14 @@ describe("one-click MCP access sync", () => {
 });
 
 describe("emergency main deploy", () => {
+  it("grants the reusable deploy job every GitHub read scope it requests", () => {
+    const fast = parse(read(".github/workflows/deploy-main-fast.yml")) as Workflow;
+    const called = parse(read(".github/workflows/deploy-production.yml")) as Workflow;
+    const caller = fast.jobs.deploy as Job & { permissions: Record<string, string> };
+    const receiver = called.jobs.deploy as Job & { permissions: Record<string, string> };
+    expect(caller.permissions).toEqual(receiver.permissions);
+  });
+
   it("is an idle manual entry point that validates and deploys the captured main checkout", () => {
     const workflow = parse(read(".github/workflows/deploy-main-fast.yml")) as Workflow & {
       permissions: Record<string, string>;
