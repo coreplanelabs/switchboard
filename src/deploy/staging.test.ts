@@ -946,6 +946,21 @@ globalThis.fetch = async (url, init) => {
       "github.event.action != 'labeled' || github.event.label.name == 'deploy:staging'",
     );
     expect(workflow.jobs.acceptance.if).toContain("always()");
+    for (const cancelled of [false, true]) {
+      expect(
+        runInNewContext(
+          workflow.jobs.acceptance.if,
+          {
+            always: () => true,
+            cancelled: () => cancelled,
+            github: { event_name: "pull_request_target", event: { action: "synchronize" } },
+            inputs: {},
+          },
+          { timeout: 100 },
+        ),
+        `cancelled=${cancelled}`,
+      ).toBe(!cancelled);
+    }
     expect(workflow.jobs.acceptance.needs).toEqual(["authorize", "validate", "deploy"]);
     const gate = workflow.jobs.acceptance.steps[0];
     for (const scenario of [
