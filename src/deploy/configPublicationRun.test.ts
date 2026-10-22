@@ -451,6 +451,99 @@ describe("runDeployPlan config publication", () => {
     expect(store.calls.filter((call) => call === "put")).toEqual([]);
   });
 
+  it("warns and starts a forced deployment with a closed native operation", async () => {
+    const store = stateStore();
+    const h = runner(store, ["memory", "resident"]);
+    h.plan.force = true;
+    h.plan.steps.find((step) => step.name === "resident")!.forcedBy = "RESIDENT_DEPLOY_FORCE";
+    for (const step of h.plan.steps) {
+      step.requiredEnv = [];
+      step.capabilities = [];
+    }
+    const readHealth = h.deps.readHealth;
+    h.deps.readHealth = async (...args) =>
+      args[0].endsWith("/residents")
+        ? {
+            status: 200,
+            body: {
+              draining: null,
+              count: 1,
+              inFlightUnknown: 0,
+              residents: [{ resource: "repo:acme/widgets", live: { inFlight: 0 } }],
+            },
+          }
+        : readHealth(...args);
+    h.deps.postJson = async (url) =>
+      url.endsWith("/debug")
+        ? {
+            status: 200,
+            body: {
+              operations: [
+                {
+                  key: "native-operation:op:original-restore",
+                  recordHash: "a".repeat(64),
+                  recoverable: false,
+                  recoveryReason: "original-native-evidence-unavailable",
+                  journal: { closed: true },
+                },
+              ],
+              cursor: null,
+            },
+          }
+        : { status: 200, body: {} };
+
+    await runDeployPlan(h.plan, h.io, h.deps);
+    expect(h.logs).toContain(
+      '[deploy:all] WARNING --force: resident deployment blocked before any Worker upload: repo:acme/widgets has closed "native-operation:op:original-restore" at aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa without original ending evidence; resolve that exact record before deployment; original operation outcomes remain unknown',
+    );
+    expect(processes.calls).toContain("upload:memory");
+    expect(processes.calls).toContain("upload:resident");
+  });
+
+  it("refuses incomplete native evidence even when force is selected", async () => {
+    const h = runner(stateStore(), ["memory", "resident"]);
+    h.plan.force = true;
+    for (const step of h.plan.steps) {
+      step.requiredEnv = [];
+      step.capabilities = [];
+    }
+    h.deps.readHealth = async (url) =>
+      url.endsWith("/residents")
+        ? {
+            status: 200,
+            body: {
+              draining: null,
+              count: 1,
+              inFlightUnknown: 0,
+              residents: [{ resource: "repo:acme/widgets", live: { inFlight: 0 } }],
+            },
+          }
+        : { status: 200, body: { ok: true } };
+    h.deps.postJson = async () => ({
+      status: 200,
+      body: {
+        operations: [
+          {
+            key: "native-operation:op:unreadable",
+            recordHash: "a".repeat(64),
+            recoverable: false,
+            recoveryReason: "original-native-evidence-unavailable",
+            journal: { closed: "unknown" },
+          },
+        ],
+        cursor: null,
+      },
+    });
+
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toEqual({
+      kind: "refused",
+      problems: [
+        "resident deployment inventory unavailable before any Worker upload: native operation status incomplete for repo:acme/widgets",
+      ],
+    });
+    expect(processes.calls).toEqual([]);
+  });
+
   function installedRunner() {
     const store = stateStore();
     const h = runner(store);
