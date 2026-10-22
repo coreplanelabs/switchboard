@@ -1,6 +1,7 @@
 import { ref, type Ref } from "vue";
 import { EVENT_SOURCE_CLOSED, type EventSourceFactory, type EventSourceLike } from "./eventSource";
 import { parseEndFrame, parseFinishedFrame, parseReplayElided, type RunPageModel } from "./runPageModel";
+import { isOrganizationResumeHoldReason } from "@core/core/runLedger/organizationResumeHold.js";
 
 // The ONE way a page follows a run's live stream (docs/reference/specs/live-view.md
 // items 6 and 22; docs/reference/specs/web-chat.md item 4): the run page and a
@@ -72,7 +73,10 @@ export function attachRunStream(opts: RunStreamOptions): RunStream {
     } catch {
       return;
     }
-    if (frame && (frame.hold === null || frame.hold === "private_context"))
+    if (
+      frame &&
+      (frame.hold === null || frame.hold === "private_context" || isOrganizationResumeHoldReason(frame.hold))
+    )
       opts.handle({
         type: "recovery_state",
         hold: frame.hold,

@@ -3,6 +3,31 @@ import { preserveCheckpointState } from "./checkpointState.js";
 import { testSourceInputIntent as inputIntent, seedSourceInputIntent } from "../testing/sourceInputs.js";
 import { sourceInputIntentsOf } from "./sourceInputIntent.js";
 
+describe("organization source hold ordering", () => {
+  it("keeps a released hold released when an older write arrives late", () => {
+    const held = {
+      version: 1 as const,
+      revision: 2,
+      status: "held" as const,
+      reason: "source_not_verified" as const,
+      since: 1_000,
+      attempts: 2,
+      nextCheckAt: 31_000,
+    };
+    const released = { ...held, revision: 3, status: "released" as const };
+    expect(preserveCheckpointState({ organizationResumeHold: held }, { organizationResumeHold: released })).toEqual({
+      organizationResumeHold: released,
+    });
+    expect(
+      preserveCheckpointState({ organizationResumeHold: released }, { organizationResumeHold: held }),
+    ).toBeUndefined();
+    expect(preserveCheckpointState({ organizationResumeHold: released }, { progress: "later" })).toEqual({
+      progress: "later",
+      organizationResumeHold: released,
+    });
+  });
+});
+
 const inputOwner = {
   runId: "source-consumer",
   ownerGen: "g1",

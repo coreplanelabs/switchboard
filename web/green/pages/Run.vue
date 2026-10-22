@@ -180,6 +180,12 @@ const contextRecoveryHeld = computed(() => {
   }
   return seed?.mode === "live" && seed.recoveryHold === "private_context";
 });
+const sourceRecoveryHold = computed(() => {
+  if (isHistory || phase.value === "ended" || phase.value === "finished") return undefined;
+  const hold =
+    state.recoveryHold !== undefined ? state.recoveryHold : seed?.mode === "live" ? seed.recoveryHold : undefined;
+  return hold && hold !== "private_context" ? hold : undefined;
+});
 const recoveryPending = computed(() => {
   if (isHistory || phase.value === "ended" || phase.value === "finished") return false;
   return state.recoveryPending !== undefined
@@ -208,6 +214,14 @@ const failedEndingUnconfirmed = computed(() => {
 const headerText = computed(() => {
   if (stopError.value) return stopError.value;
   if (contextRecoveryHeld.value && phase.value !== "stopping") return "held · private context could not be verified";
+  if (sourceRecoveryHold.value && phase.value !== "stopping")
+    return sourceRecoveryHold.value === "intake_completed"
+      ? "held · completed browser request cannot restart this run"
+      : sourceRecoveryHold.value === "stop_pending"
+        ? "held · checking stop request"
+        : sourceRecoveryHold.value === "source_ineligible"
+          ? "held · original browser source did not pass verification"
+          : "held · checking original browser source";
   if (recoveryPending.value && phase.value !== "stopping") return "recovery not confirmed";
   if (producerUnconfirmed.value && phase.value !== "stopping") return "execution not confirmed";
   if (failedEndingUnconfirmed.value && phase.value !== "stopping") return "execution not confirmed";

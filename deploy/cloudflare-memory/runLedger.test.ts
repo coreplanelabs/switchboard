@@ -7439,6 +7439,48 @@ describe("run ledger — claim and admission (item 29)", () => {
 });
 
 describe("run ledger — the fence (item 28)", () => {
+  it("keeps a released source hold when an older state request arrives late", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "held-run", "slack:C1:held-run"));
+    const held = {
+      version: 1,
+      revision: 1,
+      status: "held",
+      reason: "source_not_verified",
+      since: 1_000,
+      attempts: 1,
+      nextCheckAt: 1_000 + LEASE_MS,
+    };
+    const released = { ...held, revision: 2, status: "released" };
+    expect(
+      await post("/runs/state", {
+        storeKey: key,
+        runId: "held-run",
+        gen: "g1",
+        state: { organizationResumeHold: held },
+      }),
+    ).toEqual({ status: 200, data: { ok: true } });
+    expect(
+      await post("/runs/state", {
+        storeKey: key,
+        runId: "held-run",
+        gen: "g1",
+        state: { organizationResumeHold: released },
+      }),
+    ).toEqual({ status: 200, data: { ok: true } });
+    expect(
+      await post("/runs/state", {
+        storeKey: key,
+        runId: "held-run",
+        gen: "g1",
+        state: { organizationResumeHold: held },
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "fenced" } });
+    expect((await post("/runs/live", { storeKey: key })).data.runs).toMatchObject([
+      { runId: "held-run", state: { organizationResumeHold: released } },
+    ]);
+  });
+
   it("heartbeat, append, step, state, finishing and finish from another generation → 409 fenced; an unknown run → 409 unknown-run", async () => {
     const key = storeKey();
     await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"));

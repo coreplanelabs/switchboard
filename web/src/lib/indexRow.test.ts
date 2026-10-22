@@ -55,6 +55,8 @@ describe("status vocabulary", () => {
   it("marks a private context recovery hold as held and amber without a terminal claim", () => {
     const held = row({ recoveryHold: "private_context", recoveryPending: true });
     expect([statusWord(held), statusDot(held)]).toEqual(["held", "amber"]);
+    const sourceHeld = row({ recoveryHold: "source_not_verified", recoveryPending: true });
+    expect([statusWord(sourceHeld), statusDot(sourceHeld), statusPulse(sourceHeld)]).toEqual(["held", "amber", false]);
     expect([statusWord(row()), statusDot(row())]).toEqual(["live", "green"]);
   });
   it("does not present a recovery hold or unconfirmed producer as active execution", () => {

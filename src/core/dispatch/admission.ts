@@ -33,6 +33,7 @@ import { terminalCommitmentUnknown, TerminalCommitmentUnknownError } from "../ru
 import { UncertainStoreError } from "../storeFailure.js";
 import { putOnce } from "../runHistoryWriter.js";
 import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
+import type { OrganizationResumeHoldReason } from "../runLedger/organizationResumeHold.js";
 import type { ThreadsElsewhere } from "../runLedger/threadsElsewhere.js";
 import type { ResumePlan } from "../runLedger/resume.js";
 import { directAudienceStampOf, durableInboxMessage, messageFromInbox } from "../runLedger/inboxMessage.js";
@@ -1043,7 +1044,7 @@ export function createSteerSender(deps: {
         case "steered":
           if (out.where === "elsewhere" && run.recoveryPending)
             return {
-              text: `↪ Saved your message for the *${run.agent}* work (${runId}). ${run.recoveryHold === "private_context" ? "This run is held for private context verification" : "This run is paused for storage recovery"}; your message does not resume it.`,
+              text: `↪ Saved your message for the *${run.agent}* work (${runId}). ${run.recoveryHold === "private_context" ? "This run is held for private context verification" : run.recoveryHold ? "This run is held while its original browser source is checked" : "This run is paused for storage recovery"}; your message does not resume it.`,
               recoveryPending: true,
             };
           return `↪ Added your message to the *${run.agent}* work (${runId}). It will read it at its next step.`;
@@ -1070,7 +1071,7 @@ export interface SteerableRun {
   id: string;
   finished: boolean;
   recoveryPending?: true;
-  recoveryHold?: "private_context";
+  recoveryHold?: "private_context" | OrganizationResumeHoldReason;
   finishedAt?: number;
   agent?: string;
   threadKey?: string;

@@ -476,6 +476,26 @@ describe("RunPage — recovery notices", () => {
     expect(w.find("#thinking").exists()).toBe(false);
     expect(w.find("#statedot").classes()).toContain("text-warn");
   });
+  it.each(["seed", "stream"])("shows an original source hold from the %s", async (source) => {
+    const { created, factory } = fakeEventSourceFactory();
+    const w = mountApp(RunPage, {
+      seed: {
+        ...liveSeed,
+        ...(source === "seed" ? { recoveryHold: "source_not_verified" as const, recoveryPending: true as const } : {}),
+      },
+      eventSource: factory,
+    });
+    await flushPromises();
+    created[0].emitOpen();
+    if (source === "stream")
+      created[0].emitNamed("recovery", JSON.stringify({ hold: "source_not_verified", pending: true }));
+    await flushPromises();
+    expect(w.find("#state").text()).toBe("held · checking original browser source");
+    expect(w.find("#thinking").exists()).toBe(false);
+    created[0].emitNamed("recovery", JSON.stringify({ hold: null, pending: false }));
+    await flushPromises();
+    expect(w.find("#state").text()).toContain("running");
+  });
 
   it.each(["seed", "stream"])("shows an unconfirmed producer without a running pulse from the %s", async (source) => {
     const { created, factory } = fakeEventSourceFactory();
