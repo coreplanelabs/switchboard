@@ -41,6 +41,7 @@ import { handleAdminReplyProbe, REPLY_PROBE_PATH } from "./channels/adminReplyPr
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
 import { configuredModelRefs } from "./core/commands/providers.js";
 import { LEASE_MS, type IntakeReceipt } from "./core/runLedger/types.js";
+import { sourceHash } from "./core/references/receipts.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 import { createSlackApp, wireIntakeGate, type SlackIntakeGate } from "./channels/slack.js";
@@ -600,13 +601,20 @@ export async function runBot(): Promise<void> {
       return "done";
     },
     steer: async (effect: Extract<PlaneEffect, { kind: "steer" }>): Promise<PlaneAckOutcome> => {
+      effect = structuredClone(effect);
+      const witness = {
+        version: 1 as const,
+        runId: effect.runId,
+        seq: effect.seq,
+        digest: await sourceHash(effect.message),
+      };
       const run = defaultRunRegistry.getById(effect.runId);
       if (!run || run.finished || !run.threadKey) return "deferred";
       // The push route checks the ledger's generation fence before reaching
       // this local lookup. The heartbeat path is already owner-fenced by the
       // heartbeat that carried the effect; the admission slot then prevents a
       // different run on the same thread from receiving it.
-      return deliverPlaneSteer(effect, defaultAdmission.get(run.threadKey));
+      return deliverPlaneSteer(effect, defaultAdmission.get(run.threadKey), witness);
     },
   };
   const runLedger = ledgerClient

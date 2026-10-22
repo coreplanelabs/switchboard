@@ -1,6 +1,7 @@
 import { attributedText, foldThreadEvents } from "./threadEvents.js";
 import type { DocumentAttachment, ImageAttachment, IncomingMessage, SlackDirectAudience, StagedFile } from "./types.js";
 import { systemClock } from "./trace/clock.js";
+import type { InboxRowWitness } from "./runLedger/types.js";
 
 // Thread admission (docs/reference/specs/thread-admission.md): ONE live run per thread.
 //
@@ -62,6 +63,9 @@ export interface FollowUpInput {
    *  how far the run has consumed the durable inbox. Absent when the ledger
    *  is off, refused the push, or the run had no row yet. */
   ledgerSeq?: number;
+  /** Original stored row observed before native delivery. A later callback
+   * can settle this row only; source evidence has its separate native proof. */
+  ledgerWitness?: InboxRowWitness;
   /** The run that sent it, when a run did rather than a person — a parent's
    *  `send_to_run` (docs/reference/specs/agent-conductor.md item 8). The
    *  stream's `input` event names it, and the settle never runs it fresh:

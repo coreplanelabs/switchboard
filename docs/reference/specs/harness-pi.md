@@ -333,6 +333,9 @@ No production caller enables this command. Canonical source admission, current a
 
 ## Native source input file readback
 
+- **Code**: `src/core/harness/pi/sourceInputCheckpoint.ts`
+- **Tests**: `src/core/runLedger/writeThrough.test.ts`
+
 The disabled host path can read one begun original from its exact Pi session file. The file must be complete, within the existing session-log byte bound, and use the supported native session format. Duplicate native entry IDs, broken parent links and duplicate source input identities hold the read. A command response or live entry list is not file proof.
 
 The readback receipt retains the host input ID, the complete original intent digest, native session and entry identities, and the exact entry digest. The stored metadata and rendered text must match the original input. This is private readback evidence. It grants no submission, canonical checkpoint, inbox acknowledgment or retention release. No production reader or delivery caller is enabled by this component.
@@ -345,3 +348,12 @@ The readback receipt retains the host input ID, the complete original intent dig
 | During native streaming, a handled command produces no file receipt. A confirmed process kill and restart still produce no receipt for the lost original. Settled originals retain exact file receipts through native restart and compaction/restart without resubmission. | `[unit]` `src/core/harness/pi/testing/sourceInput.native.test.ts::native Pi source input persistence::distinguishes a handled command from saved input through crash, restart and compaction` |
 | The installed Pi process and host extension produce native file entries that the same reader binds to each original typed input. | `[unit]` `src/core/harness/pi/sourceInputCommand.test.ts::host source-input command::carries the host command through the real Pi RPC process into the original native file` |
 | Owning executor read, current access, canonical checkpoint commit and exact inbox witness acknowledgment form one integrated path through restart and uncertain writes. | `[gap]` Source input integration; component file readback does not close this gate. |
+
+### Canonical settlement of an existing native entry
+
+The host can pass an original file observation to `checkpointPiSourceInput`. It maps the native file and header identities to the shared admission receipt. The tracked writer checks current cumulative access, commits once, reads the canonical receipt, and acknowledges only its exact inbox witness. A lost mutation response requires exact readback; a missing first read retains the original operation because it can still commit later. This helper sends no native command, starts no model turn and releases no source retention pins.
+
+| Criterion | Proof |
+| --- | --- |
+| An installed native session entry reaches canonical receipt readback and exact ACK; a copied path holds, and reopening the original does not submit new native input. | `[unit]` `src/core/runLedger/writeThrough.test.ts::source input admission::settles the original installed Pi session entry through canonical readback and exact ACK` |
+| The production executor reader, native submission owner, recovery path and source-job settlement remain connected under current access and original custody. | `[gap]` Runtime delivery callers remain disabled; this local host settlement proof does not close production or staging acceptance. |
