@@ -259,6 +259,8 @@ export interface StepRecord {
   /** Seqs at or below `inboxConsumedSeq` the run has not consumed yet: a
    *  reclaim offers them again with every row past the cursor. */
   inboxDeferredSeqs?: number[];
+  /** Exact original non-source rows positively accepted by this step's native/control path. */
+  inboxAcknowledgedRows?: InboxRowWitness[];
   remainingMs: number;
   turn: number;
   iteration: number;
