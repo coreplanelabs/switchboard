@@ -286,6 +286,10 @@
     "emoji:sync": {
       "does": "Downloads custom Slack emoji.",
       "when": "Manual; emoji:read."
+    },
+    "staging:recover": {
+      "does": "Recovers a held reset.",
+      "when": "CI preview; approved continuation."
     }
   },
   "websiteMaintenance": false
