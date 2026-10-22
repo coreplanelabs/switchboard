@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.308.1](https://github.com/coreplanelabs/switchboard/compare/v1.308.0...v1.308.1) (2026-10-22)
+
+
+### Bug fixes
+
+* **deploy:** allow fast production cleanup to start ([#3436](https://github.com/coreplanelabs/switchboard/issues/3436)) ([c2bcbb1](https://github.com/coreplanelabs/switchboard/commit/c2bcbb1b2b38b7452044912e81f78468d4e60ba4))
+* **deploy:** let explicit force pass closed native holds ([#3438](https://github.com/coreplanelabs/switchboard/issues/3438)) ([aac6061](https://github.com/coreplanelabs/switchboard/commit/aac606164396d50bbd46724c884f53cbbfd9f6cb))
+
 ## [1.308.0](https://github.com/coreplanelabs/switchboard/compare/v1.307.3...v1.308.0) (2026-10-22)
 
 
