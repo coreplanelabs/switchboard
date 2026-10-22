@@ -23,7 +23,9 @@ describe("POST /await-restore — the one held request while the resident restor
   it("the route exists at operator scope, streams through the heartbeat convention and is dispatched to the handler", async () => {
     expect(source).toMatch(/"\/await-restore": \{ scope: "operator", method: "POST" \}/);
     expect(source).toMatch(/STREAMED_ROUTES: ReadonlySet<string> = new Set\(\[[^\]]*"\/await-restore"/);
-    expect(source).toMatch(/case "\/await-restore":\s*\n\s*return await handleAwaitRestore\(env, body\);/);
+    expect(source).toMatch(
+      /case "\/await-restore":\s*\n\s*return await handleAwaitRestore\(env, body, requestContext\(\)\);/,
+    );
     const start = source.indexOf("async function handleAwaitRestore(");
     expect(start, "worker.ts declares handleAwaitRestore").toBeGreaterThan(-1);
     const handler = source.slice(start, source.indexOf("\n}\n", start) + 2);
@@ -36,6 +38,7 @@ describe("POST /await-restore — the one held request while the resident restor
     const residentStub = vi.fn((_env: unknown, residentId: string) => ({
       awaitRestore: async () => ({ state: "warm", reason: residentId }),
     }));
+    let streamCorrelation: unknown;
     const handleAwaitRestore = runInNewContext(`${compiled}\nhandleAwaitRestore`, {
       Response,
       parseResource: (resource: unknown) =>
@@ -44,11 +47,21 @@ describe("POST /await-restore — the one held request while the resident restor
       residentRouteFor: async () => selected,
       residentStub,
       json: (body: unknown, status: number) => Response.json(body, { status }),
-      streamHeartbeatJson: async (pending: Promise<unknown>, payload: (value: unknown) => object) =>
-        Response.json(payload(await pending)),
+      streamHeartbeatJson: async (
+        pending: Promise<unknown>,
+        payload: (value: unknown) => object,
+        _error: (value: unknown) => object,
+        correlation: unknown,
+      ) => {
+        streamCorrelation = correlation;
+        return Response.json(payload(await pending));
+      },
     });
     const body = { resource: "repo:acme/api", threadKey: "mcp:default:t" };
-    expect(await (await handleAwaitRestore({}, body)).json()).toEqual({ state: "warm", reason: "resident-secondary" });
+    expect(
+      await (await handleAwaitRestore({}, body, { requestId: "11111111-1111-4111-a111-111111111111" })).json(),
+    ).toEqual({ state: "warm", reason: "resident-secondary" });
+    expect(streamCorrelation).toEqual({ route: "/await-restore", requestId: "11111111-1111-4111-a111-111111111111" });
     selected = undefined;
     expect(await (await handleAwaitRestore({}, body)).json()).toEqual({ state: "warm", reason: "repo:acme/api" });
     selected = Response.json({ error: "resident address does not match the saved placement" }, { status: 409 });

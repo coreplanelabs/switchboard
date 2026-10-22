@@ -5,7 +5,7 @@ import { recordingSink } from "../testing/recordingSink.js";
 import { classificationOf } from "./classify.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "./internalHosts.js";
 import { tracedFetch } from "./tracedFetch.js";
-import { parseTraceparent } from "./traceparent.js";
+import { formatTraceparent, parseTraceparent } from "./traceparent.js";
 import { createTracer } from "./tracer.js";
 
 function harness() {
@@ -38,6 +38,66 @@ describe("internalHostsOf", () => {
 });
 
 describe("Worker request correlation transport", () => {
+  it("joins a run-bound internal request without creating a span for each harness poll", async () => {
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    const { parent } = harness();
+    const traceparent = formatTraceparent(parent.traceId, parent.id);
+    const runId = "8a34a203-d379-419c-bf5c-1ebf62734dc0";
+    let sent: Headers | undefined;
+    try {
+      await tracedFetch(undefined, "https://resident.example/exec", undefined, {
+        hosts,
+        route: "/exec",
+        runId,
+        traceparent,
+        fetchImpl: async (_url, init) => {
+          sent = new Headers(init?.headers);
+          return Response.json({ ok: true });
+        },
+      });
+      expect(sent?.get("traceparent")).toBe(traceparent);
+      const requestId = sent?.get("x-switchboard-request-id");
+      expect(requestId).toMatch(/^[a-f0-9-]{36}$/);
+      const recorded = logs.map((line) => JSON.parse(line));
+      expect(recorded).toMatchObject([
+        {
+          event: "cloudflare.request.sent",
+          requestId,
+          route: "/exec",
+          host: "resident.example",
+          runId,
+          traceId: parent.traceId,
+        },
+        {
+          event: "http.transport",
+          id: requestId,
+          stage: "headers",
+          host: "resident.example",
+          traceId: parent.traceId,
+          status: 200,
+        },
+      ]);
+      await tracedFetch(undefined, "https://foreign.example/exec", undefined, {
+        hosts,
+        route: "/exec",
+        runId,
+        traceparent,
+        fetchImpl: async (_url, init) => {
+          expect(new Headers(init?.headers).has("traceparent")).toBe(false);
+          return Response.json({ ok: true });
+        },
+      });
+      expect(logs.map((line) => JSON.parse(line))).toMatchObject([
+        ...recorded,
+        { event: "http.transport", stage: "send", host: "foreign.example" },
+        { event: "http.transport", stage: "headers", host: "foreign.example", status: 200 },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("records the original request before a failed send and keeps foreign requests and telemetry failures isolated", async () => {
     const logs: string[] = [];
     const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));

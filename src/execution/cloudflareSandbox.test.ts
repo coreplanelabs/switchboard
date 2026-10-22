@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTracer } from "../core/trace/tracer.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../core/trace/internalHosts.js";
-import { parseTraceparent } from "../core/trace/traceparent.js";
+import { formatTraceparent, parseTraceparent } from "../core/trace/traceparent.js";
+import { ExecHarnessContainer } from "../core/harness/container.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
 import { SANDBOX_CREDENTIAL_FILE } from "./sandboxCredentials.js";
@@ -44,6 +45,19 @@ function stubFetch(body: unknown) {
 
 const sentBody = (c: { init: RequestInit }) => JSON.parse(String(c.init.body)) as Record<string, unknown>;
 
+function expectRetryHeaders(calls: Array<{ init: RequestInit }>): void {
+  const headers = calls.map(({ init }) => Object.fromEntries(new Headers(init.headers)));
+  expect(headers).toEqual(
+    calls.map(() => ({
+      authorization: "Bearer t",
+      "content-type": "application/json",
+      "x-switchboard-request-id": expect.stringMatching(/^[a-f0-9-]{36}$/),
+      "x-thread-key": "slack:CX:1.0",
+    })),
+  );
+  expect(new Set(headers.map((item) => item["x-switchboard-request-id"])).size).toBe(calls.length);
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -74,6 +88,44 @@ describe("Cloudflare reused sandbox credential boundary", () => {
 // the caller's span; the trace context rides to the sandbox Worker only because
 // it is one of our hosts.
 describe("CloudflareSandboxExecutor trace context", () => {
+  it("joins a sandbox harness log read to its run in both the header and safe send log", async () => {
+    const root = createTracer({ clock: () => 5_000 }).start("run.agent", { sinks: [] });
+    const traceparent = formatTraceparent(root.traceId, root.id);
+    const runId = "11111111-1111-4111-a111-111111111111";
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    configureInternalHosts(internalHostsOf([OPTS.url]));
+    try {
+      const { calls } = stubFetch({
+        stdout: Buffer.from("original event\n").toString("base64"),
+        stderr: "",
+        exitCode: 0,
+        truncated: false,
+      });
+      const container = new ExecHarnessContainer(new CloudflareSandboxExecutor({ ...OPTS, runId }), {
+        runId,
+        clock: () => 5_000,
+        traceparent,
+      });
+      await expect(container.readLog("/tmp/private/log", 0, 100)).resolves.toEqual(
+        new Uint8Array(Buffer.from("original event\n")),
+      );
+      const headers = new Headers(calls[0]!.init.headers);
+      expect(headers.get("traceparent")).toBe(traceparent);
+      expect(logs.map((line) => JSON.parse(line))).toContainEqual({
+        event: "cloudflare.request.sent",
+        requestId: headers.get("x-switchboard-request-id"),
+        route: "/exec",
+        host: "sandbox.example",
+        runId,
+        traceId: root.traceId,
+      });
+    } finally {
+      configureInternalHosts(NO_INTERNAL_HOSTS);
+      log.mockRestore();
+    }
+  });
+
   it("an exec with a span is an http.client child carrying host/route/method/status and traceparent for the configured host; without a span it is a plain fetch", async () => {
     const log = recordingSink();
     const root = createTracer({ clock: () => 5_000 }).start("request", { sinks: [log] });
@@ -319,10 +371,12 @@ describe("CloudflareSandboxExecutor env transport", () => {
       expect(sentHeaders(c)).toEqual({
         authorization: "Bearer t",
         "content-type": "application/json",
+        "x-switchboard-request-id": expect.stringMatching(/^[a-f0-9-]{36}$/),
         "x-thread-key": "slack:CX:1.0",
       });
       expect(Object.keys(sentHeaders(c)).some((h) => h.toLowerCase().startsWith("x-env-"))).toBe(false);
     }
+    expect(new Set(calls.map((call) => sentHeaders(call)["x-switchboard-request-id"])).size).toBe(3);
   });
 
   it("an empty env is still the one body shape: `env: {}`, so the Worker reads one field on every route", async () => {
@@ -385,7 +439,7 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
     vi.useRealTimers();
   });
 
-  it("re-sends the SAME route, body and headers after 10 s then 20 s and returns the eventual result", async () => {
+  it("re-sends the same route, body and authorization with a fresh request ID after 10 s then 20 s and returns the result", async () => {
     const { calls } = scriptedFetch([{ body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: OK }]);
     const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x" }) });
     const p = ex.exec("npm test", { timeoutMs: 120_000 });
@@ -408,8 +462,8 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
       expect(c.url).toBe(calls[0].url);
       expect(c.init.method).toBe("POST");
       expect(String(c.init.body)).toBe(String(calls[0].init.body));
-      expect(c.init.headers).toEqual(calls[0].init.headers);
     }
+    expectRetryHeaders(calls);
     expect(sentBody(calls[2])).toEqual({ command: "npm test", timeoutMs: 120_000, env: { GH_TOKEN: "ghs_x" } });
   });
 
@@ -542,13 +596,25 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
         },
       },
     ]);
-    const ex = new CloudflareSandboxExecutor(OPTS);
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, runId: "11111111-1111-4111-a111-111111111111" });
     const outcome = ex.exec("echo hi").catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(FLEET_BUSY_WAIT_MAX_MS);
     const err = await outcome;
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toBe("sandbox worker /exec: Command execution failed");
     expect(calls).toHaveLength(1);
+    const requestId = new Headers(calls[0]!.init.headers).get("x-switchboard-request-id");
+    expect((err as ExecInfraError).execFailureDiagnostic).toEqual({
+      version: 1,
+      backend: "sandbox",
+      route: "/exec",
+      phase: "answer",
+      requestId,
+      httpStatus: 200,
+      answerStatus: 200,
+      reason: "answered",
+      commandOutcome: "unknown",
+    });
   });
 
   it("an OLD Worker's bare Failed-to-create-session 503 (no reason) still reads as infra — one send", async () => {
@@ -925,7 +991,7 @@ describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
     vi.useRealTimers();
   });
 
-  it("re-sends the SAME request after 5 s, 10 s, then 15 s while the container starts, and returns the eventual result", async () => {
+  it("re-sends the same operation with a fresh request ID after 5 s, 10 s, then 15 s while the container starts", async () => {
     const { calls } = scriptedFetch([
       { body: STARTING_EXEC },
       { body: STARTING_EXEC },
@@ -951,8 +1017,8 @@ describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
     await expect(p).resolves.toBe("ok");
     for (const c of calls) {
       expect(String(c.init.body)).toBe(String(calls[0].init.body));
-      expect(c.init.headers).toEqual(calls[0].init.headers);
     }
+    expectRetryHeaders(calls);
     expect(sentBody(calls[3])).toEqual({ command: "git clone …", timeoutMs: 60_000, env: { GH_TOKEN: "ghs_x" } });
   });
 
@@ -1224,7 +1290,7 @@ describe("CloudflareSandboxExecutor runtime-busy wait", () => {
     vi.useRealTimers();
   });
 
-  it("re-sends the SAME request after 3 s, 5 s, then 10 s while the container refuses the connect, and returns the eventual result", async () => {
+  it("re-sends the same operation with a fresh request ID after 3 s, 5 s, then 10 s while the container refuses the connect", async () => {
     const { calls } = scriptedFetch([{ body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: OK }]);
     const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x" }) });
     const p = ex.exec("kill -0 44 && echo alive", { timeoutMs: 60_000 });
@@ -1245,8 +1311,8 @@ describe("CloudflareSandboxExecutor runtime-busy wait", () => {
     await expect(p).resolves.toBe("alive");
     for (const c of calls) {
       expect(String(c.init.body)).toBe(String(calls[0].init.body));
-      expect(c.init.headers).toEqual(calls[0].init.headers);
     }
+    expectRetryHeaders(calls);
     expect(sentBody(calls[3])).toEqual({
       command: "kill -0 44 && echo alive",
       timeoutMs: 60_000,
@@ -1432,10 +1498,20 @@ describe("Cloudflare typed command outcome", () => {
       effects.push("native attempt");
       return Response.json({ ...runtimeBusyExecAnswer("not proven"), stdout: "some effect completed" });
     });
-    await expect(new CloudflareSandboxExecutor(OPTS).execResult("effectful command")).rejects.toMatchObject({
+    const failure = await new CloudflareSandboxExecutor(OPTS).execResult("effectful command").catch((error) => error);
+    expect(failure).toMatchObject({
       message: "sandbox /exec: dispatch refusal could not be verified",
       commandOutcome: "unknown",
       reason: "answered",
+    });
+    expect(failure.execFailureDiagnostic).toMatchObject({
+      backend: "sandbox",
+      route: "/exec",
+      phase: "answer",
+      httpStatus: 200,
+      answerStatus: 200,
+      reason: "answered",
+      commandOutcome: "unknown",
     });
     expect(effects).toEqual(["native attempt"]);
   });
@@ -1474,8 +1550,20 @@ describe("Cloudflare typed command outcome", () => {
     expect(sentBody(calls[0]!)).toMatchObject({ timeoutMs: 12_000 });
   });
   it("refuses malformed or legacy result fields", async () => {
-    stubFetch({ stdout: "", stderr: "", exitCode: 0 });
-    await expect(new CloudflareSandboxExecutor(OPTS).execResult("test")).rejects.toThrow("invalid command result");
+    const { calls } = stubFetch({ stdout: "", stderr: "", exitCode: 0 });
+    const failure = await new CloudflareSandboxExecutor(OPTS).execResult("test").catch((error) => error);
+    expect(failure).toMatchObject({ message: "sandbox /exec: invalid command result", commandOutcome: "unknown" });
+    expect(failure.execFailureDiagnostic).toEqual({
+      version: 1,
+      backend: "sandbox",
+      route: "/exec",
+      phase: "answer",
+      requestId: new Headers(calls[0]!.init.headers).get("x-switchboard-request-id"),
+      httpStatus: 200,
+      answerStatus: 200,
+      reason: "worker-unavailable",
+      commandOutcome: "unknown",
+    });
   });
   it.each([-1, 256, 1.5])("refuses an invalid command exit status (%s)", async (exitCode) => {
     stubFetch({ stdout: "exit 0: successful", stderr: "", exitCode, truncated: false });

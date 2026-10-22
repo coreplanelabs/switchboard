@@ -784,6 +784,8 @@ export type RunEvent =
       storageFailure?: import("./storageFailureDiagnostic.js").StorageFailureDiagnostic;
       /** Closed observation only; never a command outcome or recovery receipt. */
       executionDiagnostic?: import("../execution/typedExecutionDiagnostic.js").TypedExecutionDiagnostic;
+      /** One closed remote request on an infrastructure failure; never retry authority. */
+      execFailureDiagnostic?: import("../execution/execFailureDiagnostic.js").ExecFailureDiagnostic;
       /** A bounded private source decision; never includes a message, actor or repository. */
       sourceReason?: MainSourceFailureCode;
       /** Bounded capture-stage or typed checkpoint cause; no private source bytes. */

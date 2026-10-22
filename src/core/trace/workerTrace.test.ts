@@ -10,6 +10,7 @@ import type { SpanRootIdentity } from "./types.js";
 import {
   adoptedParent,
   refusalFilter,
+  sandboxRoute,
   shimRoute,
   startAdoptedRoot,
   stripTraceContext,
@@ -96,6 +97,15 @@ describe("shimRoute", () => {
     expect(shimRoute("/harness/tool")).toBe("harness");
     expect(shimRoute("/harness/compaction")).toBe("harness");
     expect(shimRoute("/harness/other")).toBe("other");
+  });
+});
+
+describe("sandboxRoute", () => {
+  it("names authenticated execution routes without logging an arbitrary path", () => {
+    expect(sandboxRoute("/exec")).toBe("/exec");
+    expect(sandboxRoute("/publish")).toBe("/publish");
+    expect(sandboxRoute("/install-repair/inspect")).toBe("/install-repair/inspect");
+    expect(sandboxRoute("/private/credential?value=SECRET")).toBe("other");
   });
 });
 

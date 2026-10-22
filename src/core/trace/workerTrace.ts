@@ -76,6 +76,23 @@ export function shimRoute(pathname: string): string | undefined {
   return "other";
 }
 
+/** A closed route word for the authenticated sandbox Worker. */
+const SANDBOX_ROUTES = new Set([
+  "/exec",
+  "/read",
+  "/write",
+  "/seed",
+  "/publish",
+  "/install-repair",
+  "/install-repair/inspect",
+  "/preservation/slot",
+  "/preservation/receipt",
+  "/cancel-run",
+]);
+export function sandboxRoute(pathname: string): string {
+  return SANDBOX_ROUTES.has(pathname) ? pathname : "other";
+}
+
 /** A sink that drops the records an unauthenticated refusal would leave: a
  *  root that ended with HTTP 401 or 403 is never written. */
 export function refusalFilter(sink: SpanSink): SpanSink {

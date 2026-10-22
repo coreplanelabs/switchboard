@@ -52,6 +52,8 @@ import {
 } from "./sandboxCredentials.js";
 import { systemClock } from "../core/trace/clock.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
+import { WORKER_REQUEST_ID_HEADER } from "../core/trace/workerCorrelation.js";
+import { attachExecFailureDiagnostic } from "./execFailureDiagnostic.js";
 import { SANDBOX_CREDENTIAL_FILE } from "./sandboxCredentials.js";
 import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
 import type { Span } from "../core/trace/types.js";
@@ -70,6 +72,8 @@ export interface CloudflareSandboxOptions {
   /** Bearer token shared with the Worker (SANDBOX_TOKEN secret). */
   token: string;
   threadKey: string;
+  /** The original run for Cloudflare request correlation. */
+  runId?: string;
   /** Trusted admission's remaining setup time before the model starts.
    *  Zero ends capacity waiting; undefined restores ordinary command caps. */
   setupRemainingMs?: () => number | undefined;
@@ -204,7 +208,7 @@ export class CloudflareSandboxExecutor implements Executor {
   /** The Worker reconnects by thread key, so scrub a reused sandbox before
    * seed, checkout, or any model-visible command can touch its old store. */
   async prepareCredentialBoundary(opts?: { signal?: AbortSignal; span?: Span }): Promise<void> {
-    const result = await this.call(
+    const { data: result } = await this.call(
       "/exec",
       { command: legacySandboxCredentialScrub(SANDBOX_CREDENTIAL_FILE) },
       opts?.signal,
@@ -239,7 +243,13 @@ export class CloudflareSandboxExecutor implements Executor {
     // The write is its own exec — never through exec(), which would re-enter
     // this refresh. The credential line rides the body's env beside the
     // resolved credential map, never the command text.
-    const r = await this.call("/exec", { command: write.script, env: write.env }, opts?.signal, undefined, opts?.span);
+    const { data: r } = await this.call(
+      "/exec",
+      { command: write.script, env: write.env },
+      opts?.signal,
+      undefined,
+      opts?.span,
+    );
     if (Number(r.exitCode ?? 0) !== 0) {
       throw new ExecInfraError(
         `sandbox git credential write failed (exit ${Number(r.exitCode ?? 0)}): ${String(r.stderr ?? "").slice(0, 200)}`,
@@ -280,7 +290,8 @@ export class CloudflareSandboxExecutor implements Executor {
     singleSend = false,
     logObservation = false,
     waitForKnownBusy = false,
-  ): Promise<Record<string, unknown>> {
+    traceparent?: string,
+  ): Promise<{ data: Record<string, unknown>; requestId: string }> {
     if (signal?.aborted) throw sandboxStopped(route);
     if (this.opts.scrubLegacyCredentials && !skipScrub) {
       this.scrubbed ??= this.prepareCredentialBoundary({ signal, span });
@@ -317,16 +328,32 @@ export class CloudflareSandboxExecutor implements Executor {
     let attempt = 0;
     let lastReason: WaitReason | undefined;
     for (;;) {
-      const answer = await this.send(route, sent, headers, budgetMs, signal, span, singleSend);
-      if (answer.kind === "ok") return answer.data;
+      const answer = await this.send(route, sent, headers, budgetMs, signal, span, singleSend, traceparent);
+      if (answer.kind === "ok") return { data: answer.data, requestId: answer.requestId };
       if (
         singleSend &&
         !(answer.executionDiagnostic && (logObservation ? answer.knownLogWait === true : waitForKnownBusy))
       ) {
-        if (!answer.executionDiagnostic)
-          throw Object.assign(new ExecInfraError("sandbox /exec: dispatch refusal could not be verified", "answered"), {
-            commandOutcome: "unknown" as const,
+        if (!answer.executionDiagnostic) {
+          const failure = Object.assign(
+            new ExecInfraError("sandbox /exec: dispatch refusal could not be verified", "answered"),
+            {
+              commandOutcome: "unknown" as const,
+            },
+          );
+          attachExecFailureDiagnostic(failure, {
+            version: 1,
+            backend: "sandbox",
+            route,
+            phase: "answer",
+            requestId: answer.requestId,
+            httpStatus: answer.httpStatus,
+            answerStatus: answer.answerStatus,
+            reason: failure.reason,
+            commandOutcome: "unknown",
           });
+          throw failure;
+        }
         throw new ExecCapacityError(
           "The typed command was refused before execution.",
           undefined,
@@ -381,12 +408,16 @@ export class CloudflareSandboxExecutor implements Executor {
     signal?: AbortSignal,
     span?: Span,
     singleSend = false,
+    traceparent?: string,
   ): Promise<
-    | { kind: "ok"; data: Record<string, unknown> }
+    | { kind: "ok"; data: Record<string, unknown>; requestId: string }
     | {
         kind: "busy";
         reason: WaitReason;
         refusal: string;
+        requestId: string;
+        httpStatus: number;
+        answerStatus: number;
         containerId?: string;
         executionDiagnostic?: TypedExecutionDiagnostic;
         /** Fresh native refusal qualification, never a replayed diagnostic. */
@@ -401,11 +432,29 @@ export class CloudflareSandboxExecutor implements Executor {
     const delays = singleSend ? [0] : [0, 3000, 6000, 12000];
     let lastErr = "";
     let lastStatus = 0;
+    let lastRequestId = "";
     for (const delay of delays) {
       if (delay > 0) await waitForRetry(delay, route, signal);
       if (signal?.aborted) throw sandboxStopped(route);
-      let res: Response;
+      const requestId = crypto.randomUUID();
+      const attemptHeaders = { ...headers, [WORKER_REQUEST_ID_HEADER]: requestId };
+      lastRequestId = requestId;
+      let res: Response | undefined;
       let text: string;
+      const diagnose = (failure: ExecInfraError, phase: "send" | "body" | "answer", answerStatus?: number) => {
+        attachExecFailureDiagnostic(failure, {
+          version: 1,
+          backend: "sandbox",
+          route,
+          phase,
+          requestId,
+          reason: failure.reason,
+          ...(res ? { httpStatus: res.status } : {}),
+          ...(answerStatus ? { answerStatus } : {}),
+          ...(failure.commandOutcome ? { commandOutcome: failure.commandOutcome } : {}),
+        });
+        return failure;
+      };
       // The deadline covers the whole exchange: `/exec` answers HTTP 200 at
       // once and streams heartbeat whitespace until the command's outcome, so
       // a Worker whose sandbox died mid-command keeps the body open forever
@@ -419,14 +468,14 @@ export class CloudflareSandboxExecutor implements Executor {
           `${this.opts.url.replace(/\/$/, "")}${route}`,
           {
             method: "POST",
-            headers,
+            headers: attemptHeaders,
             body: JSON.stringify(body),
             // A hard run stop drops the bot-side request. The sandbox
             // Worker has no kill route, so the command itself runs on to its own
             // `timeout` inside the sandbox — the runner has already moved on.
             signal: deadline,
           },
-          { route },
+          { route, runId: this.opts.runId, traceparent },
         );
         text = await res.text();
       } catch (err) {
@@ -441,7 +490,7 @@ export class CloudflareSandboxExecutor implements Executor {
             ? new ExecInfraError(sandboxNoAnswerMessage(route, budgetMs), "deadline-passed")
             : new ExecInfraError(requestFailedMessage("sandbox", route, err), infraReasonOfRequestFailure(err, signal));
         Object.defineProperty(failure, "cause", { value: err });
-        throw unconfirmed(failure);
+        throw diagnose(unconfirmed(failure), res ? "body" : "send");
       }
       // Heartbeat whitespace around one JSON document parses unchanged; a
       // non-JSON body (an edge error page) is {} and the status speaks below.
@@ -453,6 +502,10 @@ export class CloudflareSandboxExecutor implements Executor {
       } catch {
         // fall through with {} — the HTTP status decides
       }
+      const answerStatus =
+        typeof data.status === "number" && Number.isInteger(data.status) && data.status >= 100 && data.status <= 599
+          ? data.status
+          : res.status;
       // A full fleet, a starting container or a container that did not
       // accept the connection are the answers that are re-sent (by `call`):
       // the Worker names them only before any command or file op started, so
@@ -476,6 +529,9 @@ export class CloudflareSandboxExecutor implements Executor {
         return {
           kind: "busy",
           reason,
+          requestId,
+          httpStatus: res.status,
+          answerStatus,
           ...(qualified && (reason === RUNTIME_BUSY_REASON || reason === SANDBOX_STARTING_REASON)
             ? { knownLogWait: true as const }
             : {}),
@@ -505,7 +561,11 @@ export class CloudflareSandboxExecutor implements Executor {
       // exit 127 with no output and NO error key is not
       // this: `foo 2>/dev/null` is a legitimate silent 127.
       if (res.ok && "error" in data && data.error === "") {
-        throw unconfirmed(new ExecInfraError(sandboxEmptyFailureMessage(route), "empty-failure"));
+        throw diagnose(
+          unconfirmed(new ExecInfraError(sandboxEmptyFailureMessage(route), "empty-failure")),
+          "answer",
+          answerStatus,
+        );
       }
       // /exec streams its response (heartbeat whitespace + one JSON document,
       // always HTTP 200 since headers are sent before the outcome is known),
@@ -518,9 +578,13 @@ export class CloudflareSandboxExecutor implements Executor {
         // even a bare echo). Infra, not a command exit — counts toward fail-fast.
         // The Worker's own words: their meaning is in the words (the harness's
         // seam reads the container-down ones), so no wait on the type alone.
-        throw unconfirmed(new ExecInfraError(`sandbox worker ${route}: ${data.error}`, "answered"));
+        throw diagnose(
+          unconfirmed(new ExecInfraError(`sandbox worker ${route}: ${data.error}`, "answered")),
+          "answer",
+          answerStatus,
+        );
       }
-      if (res.ok) return { kind: "ok", data };
+      if (res.ok) return { kind: "ok", data, requestId };
       lastErr = `sandbox worker ${route} HTTP ${res.status}: ${String(data.error ?? "")}`;
       lastStatus = res.status;
       if (res.status < 500) break; // 4xx is not retryable
@@ -528,7 +592,19 @@ export class CloudflareSandboxExecutor implements Executor {
     // Exhausted retries against an unreachable worker — infra, not a command
     // exit; a 5xx the Worker may yet clear, a 4xx a refusal.
     const failure = new ExecInfraError(lastErr, infraReasonOfStatus(lastStatus));
-    throw lastStatus >= 500 ? unconfirmed(failure) : failure;
+    if (lastStatus >= 500) unconfirmed(failure);
+    attachExecFailureDiagnostic(failure, {
+      version: 1,
+      backend: "sandbox",
+      route,
+      phase: "answer",
+      requestId: lastRequestId,
+      reason: failure.reason,
+      httpStatus: lastStatus,
+      answerStatus: lastStatus,
+      ...(failure.commandOutcome ? { commandOutcome: failure.commandOutcome } : {}),
+    });
+    throw failure;
   }
 
   /** Facts for runner-owned effects. A possibly executed command is never replayed. */
@@ -548,7 +624,7 @@ export class CloudflareSandboxExecutor implements Executor {
     if (opts?.timeoutMs !== undefined) body.timeoutMs = timeoutMs;
     if (opts?.env !== undefined) body.env = opts.env;
     await this.refreshCredential({ signal: opts?.signal, span: opts?.span });
-    const r = await this.call(
+    const { data: r, requestId } = await this.call(
       "/exec",
       body,
       opts?.signal,
@@ -558,6 +634,7 @@ export class CloudflareSandboxExecutor implements Executor {
       true,
       opts?.busyObservation === "harness_log",
       waitForKnownBusy,
+      opts?.traceparent,
     );
     if (
       typeof r.stdout !== "string" ||
@@ -567,10 +644,23 @@ export class CloudflareSandboxExecutor implements Executor {
       r.exitCode < 0 ||
       r.exitCode > 255 ||
       typeof r.truncated !== "boolean"
-    )
-      throw Object.assign(new ExecInfraError("sandbox /exec: invalid command result", "worker-unavailable"), {
+    ) {
+      const failure = Object.assign(new ExecInfraError("sandbox /exec: invalid command result", "worker-unavailable"), {
         commandOutcome: "unknown" as const,
       });
+      attachExecFailureDiagnostic(failure, {
+        version: 1,
+        backend: "sandbox",
+        route: "/exec",
+        phase: "answer",
+        requestId,
+        httpStatus: 200,
+        answerStatus: 200,
+        reason: failure.reason,
+        commandOutcome: "unknown",
+      });
+      throw failure;
+    }
     return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode, truncated: r.truncated };
   }
 
@@ -597,54 +687,64 @@ export class CloudflareSandboxExecutor implements Executor {
     // The bounded base fetch, source export, graph import and one push may
     // outlive an ordinary command's budget; it remains a single HTTP send.
     const signal = execDeadline(BASH_TIMEOUT_MAX_MS + EXEC_CALL_MARGIN_MS, input.signal);
-    let response: Response;
+    const requestId = crypto.randomUUID();
+    let response: Response | undefined;
     let text: string;
-    try {
-      // No generic tracedFetch here: it records transport exception messages
-      // before this boundary can replace them with a fixed unknown outcome.
-      response = await fetch(`${this.opts.url.replace(/\/$/, "")}/publish`, {
-        method: "POST",
-        redirect: "manual",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.opts.token}`,
-          "x-thread-key": this.opts.threadKey,
-        },
-        body: JSON.stringify({
-          repo: input.repo,
-          doorOrigin: input.doorOrigin,
-          branch: input.branch,
-          next: input.next,
-          ...(input.old === undefined ? {} : { old: input.old }),
-          bearer: input.bearer,
-        }),
-        signal,
+    const unknown = (reason: "answered" | "worker-unavailable", phase: "send" | "body" | "answer") => {
+      const failure = new ExecInfraError(
+        "cold publication outcome unknown; reconcile the durable effect before retry",
+        reason,
+      );
+      attachExecFailureDiagnostic(failure, {
+        version: 1,
+        backend: "sandbox",
+        route: "/publish",
+        phase,
+        requestId,
+        reason,
+        ...(response ? { httpStatus: response.status } : {}),
+        ...(phase === "answer" && response ? { answerStatus: response.status } : {}),
       });
+      return failure;
+    };
+    try {
+      // Keep this call unspanned: transport errors must reach the fixed unknown
+      // outcome below without a span recording their private exception text.
+      response = await tracedFetch(
+        undefined,
+        `${this.opts.url.replace(/\/$/, "")}/publish`,
+        {
+          method: "POST",
+          redirect: "manual",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${this.opts.token}`,
+            "x-thread-key": this.opts.threadKey,
+            [WORKER_REQUEST_ID_HEADER]: requestId,
+          },
+          body: JSON.stringify({
+            repo: input.repo,
+            doorOrigin: input.doorOrigin,
+            branch: input.branch,
+            next: input.next,
+            ...(input.old === undefined ? {} : { old: input.old }),
+            bearer: input.bearer,
+          }),
+          signal,
+        },
+        { route: "/publish", runId: this.opts.runId },
+      );
       text = await response.text();
     } catch {
-      throw new ExecInfraError(
-        "cold publication outcome unknown; reconcile the durable effect before retry",
-        "worker-unavailable",
-      );
+      throw unknown("worker-unavailable", response ? "body" : "send");
     }
-    if (response.status >= 500)
-      throw new ExecInfraError(
-        "cold publication outcome unknown; reconcile the durable effect before retry",
-        "worker-unavailable",
-      );
-    if (text.length > 2048)
-      throw new ExecInfraError(
-        "cold publication outcome unknown; reconcile the durable effect before retry",
-        "answered",
-      );
+    if (response.status >= 500) throw unknown("worker-unavailable", "answer");
+    if (text.length > 2048) throw unknown("answered", "answer");
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(text) as Record<string, unknown>;
     } catch {
-      throw new ExecInfraError(
-        "cold publication outcome unknown; reconcile the durable effect before retry",
-        "answered",
-      );
+      throw unknown("answered", "answer");
     }
     if (response.status === 409) {
       const diagnostics =
@@ -667,11 +767,7 @@ export class CloudflareSandboxExecutor implements Executor {
       )
         return { ...refusal, stderr: `publication refused by cold controller (phase: ${data.phase})` };
     }
-    if (!response.ok)
-      throw new ExecInfraError(
-        "cold publication outcome unknown; reconcile the durable effect before retry",
-        "answered",
-      );
+    if (!response.ok) throw unknown("answered", "answer");
     if (
       data === null ||
       typeof data !== "object" ||
@@ -682,10 +778,7 @@ export class CloudflareSandboxExecutor implements Executor {
       data.exitCode !== 0 ||
       data.truncated !== false
     )
-      throw new ExecInfraError(
-        "cold publication outcome unknown; reconcile the durable effect before retry",
-        "answered",
-      );
+      throw unknown("answered", "answer");
     return { stdout: "", stderr: "", exitCode: 0, truncated: false };
   }
 
@@ -717,17 +810,22 @@ export class CloudflareSandboxExecutor implements Executor {
       return { kind: "unknown" };
     try {
       const deadline = execDeadline(EXEC_CALL_MARGIN_MS, signal);
-      const response = await fetch(`${this.opts.url.replace(/\/$/, "")}/install-repair/inspect`, {
-        method: "POST",
-        redirect: "manual",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.opts.token}`,
-          "x-thread-key": this.opts.threadKey,
+      const response = await tracedFetch(
+        undefined,
+        `${this.opts.url.replace(/\/$/, "")}/install-repair/inspect`,
+        {
+          method: "POST",
+          redirect: "manual",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${this.opts.token}`,
+            "x-thread-key": this.opts.threadKey,
+          },
+          body: JSON.stringify({ owner, targetHead, policyVersion: policy.policyVersion }),
+          signal: deadline,
         },
-        body: JSON.stringify({ owner, targetHead, policyVersion: policy.policyVersion }),
-        signal: deadline,
-      });
+        { route: "/install-repair/inspect", runId: this.opts.runId },
+      );
       if (!response.ok) return { kind: "unknown" };
       const result: unknown = await response.json();
       if (!result || typeof result !== "object" || Array.isArray(result)) return { kind: "unknown" };
@@ -766,17 +864,22 @@ export class CloudflareSandboxExecutor implements Executor {
       return null;
     try {
       const deadline = execDeadline(BASH_TIMEOUT_MAX_MS + EXEC_CALL_MARGIN_MS, signal);
-      const response = await fetch(`${this.opts.url.replace(/\/$/, "")}/install-repair`, {
-        method: "POST",
-        redirect: "manual",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.opts.token}`,
-          "x-thread-key": this.opts.threadKey,
+      const response = await tracedFetch(
+        undefined,
+        `${this.opts.url.replace(/\/$/, "")}/install-repair`,
+        {
+          method: "POST",
+          redirect: "manual",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${this.opts.token}`,
+            "x-thread-key": this.opts.threadKey,
+          },
+          body: JSON.stringify({ owner, targetHead, policyVersion: policy.policyVersion }),
+          signal: deadline,
         },
-        body: JSON.stringify({ owner, targetHead, policyVersion: policy.policyVersion }),
-        signal: deadline,
-      });
+        { route: "/install-repair", runId: this.opts.runId },
+      );
       if (!response.ok) return null;
       const receipt: unknown = await response.json();
       const key = receipt && typeof receipt === "object" && "lockfileKey" in receipt ? receipt.lockfileKey : undefined;
@@ -811,7 +914,7 @@ export class CloudflareSandboxExecutor implements Executor {
         claim.seed !== seed.checkoutBackupId)
     )
       throw new ExecInfraError("sandbox /seed: invalid preservation claim", "refused");
-    const r = await this.call(
+    const { data: r } = await this.call(
       "/seed",
       { seed, ...(claim ? { preservation: claim } : {}) },
       opts?.signal,
@@ -847,7 +950,7 @@ export class CloudflareSandboxExecutor implements Executor {
   }
 
   async readFile(path: string, opts?: ExecTraceOptions): Promise<string> {
-    const r = await this.call("/read", { path }, undefined, undefined, opts?.span);
+    const { data: r } = await this.call("/read", { path }, undefined, undefined, opts?.span);
     return truncate(String(r.content ?? ""));
   }
 
@@ -855,7 +958,7 @@ export class CloudflareSandboxExecutor implements Executor {
    *  the Worker refuses an over-cap file by name, and one that predates
    *  binary reads answers text, which `decodeBase64Read` names instead of decoding. */
   async readBytes(path: string, opts?: ExecTraceOptions): Promise<Uint8Array> {
-    const r = await this.call("/read", { path, encoding: "base64" }, undefined, undefined, opts?.span);
+    const { data: r } = await this.call("/read", { path, encoding: "base64" }, undefined, undefined, opts?.span);
     return decodeBase64Read(r, { where: "sandbox worker /read", path });
   }
 

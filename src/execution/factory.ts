@@ -5,6 +5,7 @@ import { BASH_TIMEOUT_MS, RUN_DEADLINE_RESERVE_MS, attachBoundWithinRun } from "
 import { oneLine } from "../core/redact.js";
 import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
+import { tracedFetch } from "../core/trace/tracedFetch.js";
 import type { ResidentLiveStateObserver } from "../core/runLiveState.js";
 import type { ResidentStep } from "./residentStepTrace.js";
 import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
@@ -964,7 +965,7 @@ async function selectExecutor(
     return {
       executor: await makePerThreadExecutor(
         opts,
-        { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) },
+        { threadKey: ctx.threadKey, runId: ctx.runId, resolveEnvs: async () => ({}) },
         sandboxKey,
       ),
       backend: perThreadBackend(opts),
@@ -1504,7 +1505,7 @@ async function reattachWorkspace(
     if (ctx.profile.machine === "blank") assertProfileIdentity(ctx.profile.identity, ctx.profile.machine);
     const input =
       ctx.profile.machine === "blank"
-        ? { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }
+        ? { threadKey: ctx.threadKey, runId: ctx.runId, resolveEnvs: async () => ({}) }
         : perThreadCheckout(opts, ctx);
     const executor = await makePerThreadExecutor(opts, input, sandboxKey);
     if (!recorded.seeded) {
@@ -1857,10 +1858,15 @@ export function residentSlugsLister(
     if (probeOutage && systemClock() < probeOutage.until) return undefined;
     let res: Response;
     try {
-      res = await fetch(`${cfg.baseUrl.replace(/\/$/, "")}/residents`, {
-        headers: { authorization: `Bearer ${token.reveal()}` },
-        signal: execDeadline(cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS),
-      });
+      res = await tracedFetch(
+        undefined,
+        `${cfg.baseUrl.replace(/\/$/, "")}/residents`,
+        {
+          headers: { authorization: `Bearer ${token.reveal()}` },
+          signal: execDeadline(cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS),
+        },
+        { route: "/residents" },
+      );
     } catch (err) {
       // A failed connect opens the window like the selection probe's would; a
       // deadline miss is the host answering slowly and arms nothing (item 25).
@@ -2032,6 +2038,7 @@ export function localWorkspaceDir(baseDir: string, threadKey: string): string {
  *  clones (absent = an empty workspace) and the env each command gets. */
 interface PerThreadInputs {
   threadKey: string;
+  runId?: string;
   /** the repository to clone and the ref to check out; absent = an empty workspace */
   repo?: string;
   ref?: string;
@@ -2052,6 +2059,7 @@ function perThreadCheckout(opts: ExecutorFactoryOptions, ctx: ExecutorContext): 
     const door = ctx.githubDoor;
     return {
       threadKey: ctx.threadKey,
+      runId: ctx.runId,
       repo: ctx.repo,
       ref: ctx.ref,
       ...(ctx.setupRemainingMs ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
@@ -2063,6 +2071,7 @@ function perThreadCheckout(opts: ExecutorFactoryOptions, ctx: ExecutorContext): 
   }
   return {
     threadKey: ctx.threadKey,
+    runId: ctx.runId,
     repo: ctx.repo,
     ref: ctx.ref,
     ...(ctx.setupRemainingMs ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
@@ -2169,6 +2178,7 @@ async function makePerThreadExecutor(
       url: opts.execution.url,
       token: token.reveal(),
       threadKey: sandboxKey ?? threadKey,
+      runId: input.runId,
       ...(input.setupRemainingMs ? { setupRemainingMs: input.setupRemainingMs } : {}),
       resolveEnvs: input.resolveEnvs,
       repo: input.repo,

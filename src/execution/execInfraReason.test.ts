@@ -69,8 +69,8 @@ function isReasonHelperCall(node: ts.Node | undefined): boolean {
 /** Whether the reason argument is a literal from the closed list, a call to one
  *  of the reason-of helpers, a `const` the enclosing block bound to such a call
  *  (the one decision reused for the tracker's kind), or a parameter of the
- *  enclosing function declared `ExecInfraReason` (the type carries it: the
- *  caller had to name one). */
+ *  enclosing function declared `ExecInfraReason` or a union of closed reason
+ *  literals (the type carries it: the caller had to name one). */
 function namesAReason(arg: ts.Expression | undefined): boolean {
   if (arg === undefined) return false;
   if (ts.isStringLiteral(arg)) return (EXEC_INFRA_REASONS as readonly string[]).includes(arg.text);
@@ -88,13 +88,23 @@ function namesAReason(arg: ts.Expression | undefined): boolean {
     }
     if (ts.isFunctionLike(scope)) {
       const param = scope.parameters.find((p) => ts.isIdentifier(p.name) && p.name.text === arg.text);
-      if (param !== undefined)
-        return (
-          param.type !== undefined &&
-          ts.isTypeReferenceNode(param.type) &&
-          ts.isIdentifier(param.type.typeName) &&
-          param.type.typeName.text === "ExecInfraReason"
+      if (param !== undefined) {
+        const type = param.type;
+        return !!(
+          (type &&
+            ts.isTypeReferenceNode(type) &&
+            ts.isIdentifier(type.typeName) &&
+            type.typeName.text === "ExecInfraReason") ||
+          (type &&
+            ts.isUnionTypeNode(type) &&
+            type.types.every(
+              (part) =>
+                ts.isLiteralTypeNode(part) &&
+                ts.isStringLiteral(part.literal) &&
+                (EXEC_INFRA_REASONS as readonly string[]).includes(part.literal.text),
+            ))
         );
+      }
     }
   }
   return false;
@@ -155,15 +165,19 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
       '  const loose = new ExecInfraError("c", unbound);\n' +
       "}\n" +
       'function m(reason: ExecInfraReason) { return new ExecInfraError("d", reason); }\n' +
-      'function n(reason: string) { return new ExecInfraError("e", reason); }\n';
+      'function n(reason: string) { return new ExecInfraError("e", reason); }\n' +
+      'function o(reason: "answered" | "worker-unavailable") { return new ExecInfraError("f", reason); }\n' +
+      'function p(reason: "answered" | "unknown") { return new ExecInfraError("g", reason); }\n';
     const calls = constructions("probe.ts", source);
-    expect(calls).toHaveLength(8);
+    expect(calls).toHaveLength(10);
     expect(calls.map((call) => namesAReason(call.arguments?.[1]))).toEqual([
       true,
       true,
       true,
       false,
       false,
+      false,
+      true,
       false,
       true,
       false,

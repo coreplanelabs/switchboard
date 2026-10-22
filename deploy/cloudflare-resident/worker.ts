@@ -1,4 +1,8 @@
-import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
+import {
+  observeWorkerCompletion,
+  observeWorkerRequest,
+  workerRequestId,
+} from "../../src/core/trace/workerCorrelation.js";
 import { installHttpTransport } from "../../src/core/trace/httpTransport.js";
 import { prepareStorageRequest } from "../../src/core/storeResponse.js";
 import { storageTransport } from "../../src/core/storageTransport.js";
@@ -1730,6 +1734,7 @@ class OpaqueNativeOutcomeUnconfirmedError extends Error {
 }
 
 type NativeRequestContext = {
+  requestId?: string;
   sourceId?: string;
   callId: string;
   actor: NativeOperationOrigin["actor"];
@@ -8893,6 +8898,9 @@ export class ResidentDO extends Sandbox<Env> {
           requestContext,
         ),
       );
+    } catch (error) {
+      emitStepRoot("resident.attach", t0, trace.steps(), traceparent, "error");
+      throw error;
     } finally {
       this.attachAdmissionsInFlight--;
     }
@@ -11264,36 +11272,42 @@ export class ResidentDO extends Sandbox<Env> {
       if ("error" in answer) refusal = answer;
       return answer;
     };
-    const context = checkOperation ? await this.checkOperationContext(threadKey, requestOwner) : undefined;
-    const saved =
-      checkOperation && context
-        ? await new RecordedCheckOperation(this.ctx.storage).execute(
-            context,
-            checkOperation,
-            { command, timeoutMs, env },
-            async (rows) =>
-              JSON.stringify(await this.checkOperationContext(threadKey, requestOwner, rows)) ===
-              JSON.stringify(context),
-            execute,
-          )
-        : undefined;
-    if (checkOperation && context && saved?.kind !== "completed" && !refusal)
-      reportCheckResultFailure(
-        saved?.kind === "not_started" ? "check_capacity" : "operation_result_unavailable",
-        context,
-        checkOperation,
-      );
-    const res = checkOperation
-      ? saved?.kind === "completed"
-        ? saved.result
-        : (refusal ??
-          ({
-            error: "check operation outcome unavailable",
-            status: 409,
-            reason: saved?.kind === "not_started" ? "check-capacity" : "busy",
-            cause: "system",
-          } satisfies ThreadErr))
-      : await execute();
+    let res: { stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr;
+    try {
+      const context = checkOperation ? await this.checkOperationContext(threadKey, requestOwner) : undefined;
+      const saved =
+        checkOperation && context
+          ? await new RecordedCheckOperation(this.ctx.storage).execute(
+              context,
+              checkOperation,
+              { command, timeoutMs, env },
+              async (rows) =>
+                JSON.stringify(await this.checkOperationContext(threadKey, requestOwner, rows)) ===
+                JSON.stringify(context),
+              execute,
+            )
+          : undefined;
+      if (checkOperation && context && saved?.kind !== "completed" && !refusal)
+        reportCheckResultFailure(
+          saved?.kind === "not_started" ? "check_capacity" : "operation_result_unavailable",
+          context,
+          checkOperation,
+        );
+      res = checkOperation
+        ? saved?.kind === "completed"
+          ? saved.result
+          : (refusal ??
+            ({
+              error: "check operation outcome unavailable",
+              status: 409,
+              reason: saved?.kind === "not_started" ? "check-capacity" : "busy",
+              cause: "system",
+            } satisfies ThreadErr))
+        : await execute();
+    } catch (error) {
+      emitStepRoot("resident.exec", startedAt, [], traceparent, "error", { waitedMs: startedAt - queuedAt });
+      throw error;
+    }
     // The command as the resident's own `resident.exec` root (docs/reference/specs/tracing.md
     // item 22): started when the command did, the wait for the thread's turn an attr.
     emitStepRoot("resident.exec", startedAt, [], traceparent, "error" in res ? refusalOutcome(res) : "ok", {
@@ -14669,35 +14683,40 @@ export class ResidentDO extends Sandbox<Env> {
     const t0 = systemClock();
     const trace = createStepTrace(t0);
     let res: OpRunOk | ThreadErr;
-    if (this.recreateAdmission.pending) {
-      res = this.recreateRefusal();
-    } else {
-      this.opAdmissionsInFlight++;
-      try {
-        const owner = `op:${crypto.randomUUID()}`;
-        const workload = await this.reserveWorkloadSlot(owner);
-        if (workload) res = workload;
-        else {
-          try {
-            res = await this.withDeployAdmission(
-              op === "test" ? "op-test" : "op-build",
-              requestContext,
-              () =>
-                this.withOpNativeOperation(
-                  owner,
-                  () => this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0)),
-                  op === "test" ? "op-test" : "op-build",
-                  requestContext,
-                ),
-              owner,
-            );
-          } finally {
-            this.workloadReservations.delete(owner);
+    try {
+      if (this.recreateAdmission.pending) {
+        res = this.recreateRefusal();
+      } else {
+        this.opAdmissionsInFlight++;
+        try {
+          const owner = `op:${crypto.randomUUID()}`;
+          const workload = await this.reserveWorkloadSlot(owner);
+          if (workload) res = workload;
+          else {
+            try {
+              res = await this.withDeployAdmission(
+                op === "test" ? "op-test" : "op-build",
+                requestContext,
+                () =>
+                  this.withOpNativeOperation(
+                    owner,
+                    () => this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0)),
+                    op === "test" ? "op-test" : "op-build",
+                    requestContext,
+                  ),
+                owner,
+              );
+            } finally {
+              this.workloadReservations.delete(owner);
+            }
           }
+        } finally {
+          this.opAdmissionsInFlight--;
         }
-      } finally {
-        this.opAdmissionsInFlight--;
       }
+    } catch (error) {
+      emitStepRoot("resident.op", t0, trace.steps(), traceparent, "error", { command: op });
+      throw error;
     }
     emitStepRoot("resident.op", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok", {
       command: op,
@@ -16453,6 +16472,7 @@ export default {
       ? undefined
       : startAdoptedRoot(tracer, "resident.fetch", { sinks: traceSinks, traceparent, attrs: { route: url.pathname } });
     const requestContext = (): NativeRequestContext => ({
+      requestId: workerRequestId(request.headers),
       callId: crypto.randomUUID(),
       actor: tokenScope(env, bearer) ?? "service",
       traceId: root?.traceId ?? parseTraceparent(traceparent)?.traceId ?? null,
@@ -16702,7 +16722,7 @@ export default {
           case "/op":
             return await handleOp(env, body, traceparent, requestContext());
           case "/await-restore":
-            return await handleAwaitRestore(env, body);
+            return await handleAwaitRestore(env, body, requestContext());
           default:
             return json({ error: "unknown route" }, 404);
         }
@@ -18444,6 +18464,7 @@ async function handleAttach(
       ...(levels ? { levels } : {}),
     }),
     (err) => catchAllErr(err),
+    { route: "/attach", requestId: requestContext?.requestId },
   );
 }
 
@@ -18476,7 +18497,11 @@ async function handleRunDeadline(env: Env, body: Record<string, unknown>): Promi
  *  ONE JSON document over HTTP 200) so a restore lasting minutes cannot lose
  *  the connection. A pre-route Worker answers 404 (unknown route), which the
  *  bot reads as "this Worker predates the route" and falls back cold. */
-async function handleAwaitRestore(env: Env, body: Record<string, unknown>): Promise<Response> {
+async function handleAwaitRestore(
+  env: Env,
+  body: Record<string, unknown>,
+  requestContext?: NativeRequestContext,
+): Promise<Response> {
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
   const record = await registryStub(env).getRecord(resource.resource);
@@ -18493,6 +18518,7 @@ async function handleAwaitRestore(env: Env, body: Record<string, unknown>): Prom
     residentStub(env, route?.residentId ?? resource.resource).awaitRestore(),
     (result) => result,
     (err) => catchAllErr(err),
+    { route: "/await-restore", requestId: requestContext?.requestId },
   );
 }
 
@@ -18578,6 +18604,7 @@ async function handleExec(
         requestContext,
       ),
     ),
+    requestContext?.requestId,
   );
 }
 
@@ -18651,6 +18678,7 @@ function streamHeartbeatJson<T>(
   pending: Promise<T>,
   toPayload: (result: T) => object,
   toErrorPayload: (err: unknown) => object,
+  correlation?: { route: string; requestId?: string },
 ): Response {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -18664,12 +18692,16 @@ function streamHeartbeatJson<T>(
       }, 15_000);
       const finish = (payload: object) => {
         clearInterval(beat);
+        let delivery: "sent" | "client-gone" = "sent";
         try {
           controller.enqueue(encoder.encode(JSON.stringify(payload)));
           controller.close();
         } catch {
           // stream already errored/cancelled — nothing left to deliver to
+          delivery = "client-gone";
         }
+        if (correlation)
+          observeWorkerCompletion("resident", correlation.route, correlation.requestId, payload, delivery);
       };
       // Item 62: the streamed document is the other exit; same sanitizer.
       pending
@@ -18691,6 +18723,7 @@ function streamHeartbeatJson<T>(
  *  deterministic answer over HTTP 200. */
 function streamThreadExec(
   pending: Promise<{ result: Awaited<ReturnType<ResidentDO["execThread"]>>; levels: ResidentLevelsDoc | null }>,
+  requestId?: string,
 ): Response {
   return streamHeartbeatJson(
     pending,
@@ -18702,6 +18735,7 @@ function streamThreadExec(
       ...(levels ? { levels } : {}),
     }),
     (err) => execFailureDocument(threadRejectionErr(err, "/exec")),
+    { route: "/exec", requestId },
   );
 }
 
@@ -18817,7 +18851,7 @@ async function handleOp(
       summary,
     });
   }
-  return streamOp(stub.runOp(op as "test" | "build", ref, traceparent, requestContext));
+  return streamOp(stub.runOp(op as "test" | "build", ref, traceparent, requestContext), requestContext?.requestId);
 }
 
 /** /op's payload mapping: results pass through; a failure streams as the typed
@@ -18827,11 +18861,12 @@ async function handleOp(
  *  stream theirs, so the client reads the status off the document by the one
  *  rule (`answeredStatus`) and judges `transient` by the one rule too
  *  (`isTransientRefusal`: a 5xx carrying it), never by the field on a 200. */
-function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>): Response {
+function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>, requestId?: string): Response {
   return streamHeartbeatJson(
     pending,
     (result) => result,
     (err) => catchAllErr(err, "op-failed"),
+    { route: "/op", requestId },
   );
 }
 

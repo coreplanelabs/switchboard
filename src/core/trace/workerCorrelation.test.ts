@@ -1,7 +1,69 @@
 import { describe, expect, it, vi } from "vitest";
-import { observeWorkerRequest } from "./workerCorrelation.js";
+import { observeWorkerCompletion, observeWorkerRequest } from "./workerCorrelation.js";
 
 describe("Worker invocation correlation", () => {
+  it("records the streamed failure class under the original request ID without private response bytes", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const requestId = "11111111-1111-4111-a111-111111111111";
+    try {
+      observeWorkerCompletion(
+        "resident",
+        "/exec",
+        requestId,
+        {
+          error: "PRIVATE_CONTAINER_ERROR",
+          status: 409,
+          cause: "system",
+          transient: false,
+          stdout: "PRIVATE_OUTPUT",
+        },
+        "sent",
+      );
+      observeWorkerCompletion("resident", "/exec", requestId, { stdout: "PRIVATE_OUTPUT", exitCode: 0 }, "sent");
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        {
+          event: "cloudflare.request.completed",
+          service: "resident",
+          route: "/exec",
+          requestId,
+          outcome: "failure",
+          delivery: "sent",
+          answerStatus: 409,
+          cause: "system",
+          transient: false,
+        },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("records a failed sandbox seed without its private detail", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const requestId = "11111111-1111-4111-a111-111111111111";
+    try {
+      observeWorkerCompletion(
+        "sandbox",
+        "/seed",
+        requestId,
+        { seeded: false, reason: "seed-failed", detail: "PRIVATE_RESTORE_DETAIL" },
+        "sent",
+      );
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        {
+          event: "cloudflare.request.completed",
+          service: "sandbox",
+          route: "/seed",
+          requestId,
+          outcome: "failure",
+          delivery: "sent",
+        },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("joins an authenticated request to its app trace before work starts without recording payloads", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const attributes: Record<string, string> = {};

@@ -1,6 +1,7 @@
 import { storageFailureDiagnosticOf } from "./storageFailureDiagnostic.js";
 import { isPublicationSettlement } from "./publicationSettlement.js";
 import { typedExecutionDiagnosticFrom } from "../execution/typedExecutionDiagnostic.js";
+import { execFailureDiagnosticFrom } from "../execution/execFailureDiagnostic.js";
 import { PROVIDER_FAILURE_CAUSES } from "./provider.js";
 import {
   RUN_NOTE_KINDS,
@@ -61,6 +62,12 @@ export function parseRunEventLines(text: string): { events: RunEvent[]; skipped:
           parsed.kind === "run_failed" ? typedExecutionDiagnosticFrom(parsed.executionDiagnostic) : undefined;
         if (diagnostic) parsed.executionDiagnostic = diagnostic;
         else delete parsed.executionDiagnostic;
+      }
+      if (parsed.type === "run_note" && Object.hasOwn(parsed, "execFailureDiagnostic")) {
+        const diagnostic =
+          parsed.kind === "run_failed" ? execFailureDiagnosticFrom(parsed.execFailureDiagnostic) : undefined;
+        if (diagnostic) parsed.execFailureDiagnostic = diagnostic;
+        else delete parsed.execFailureDiagnostic;
       }
       events.push(parsed);
     } else if (!isTransportFrame(parsed)) skipped++; // garbage, or an event-shaped payload this reader does not know

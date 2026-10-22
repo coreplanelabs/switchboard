@@ -72,6 +72,8 @@ import {
 } from "../publicationSettlement.js";
 import { createCheckExecution } from "../checkExecution.js";
 import { typedExecutionDiagnosticOf } from "../../execution/typedExecutionDiagnostic.js";
+import { execFailureDiagnosticOf } from "../../execution/execFailureDiagnostic.js";
+import { formatTraceparent } from "../trace/traceparent.js";
 import { executionContextOf, type Executor } from "../../execution/executor.js";
 import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
 import { MINUTE_MS, GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
@@ -3713,6 +3715,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         const judge = harnessOf(deps.harness);
         const operationScope = {
           runId: run.id,
+          traceparent: formatTraceparent(root.traceId, root.id),
           deadlineAt: ctx.admissionDeadlineAt,
           remainingMs: () => run.control.remainingMs(),
           signal: run.control.hardSignal,
@@ -3975,6 +3978,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }
         const operationScope = {
           runId: run.id,
+          traceparent: formatTraceparent(root.traceId, root.id),
           deadlineAt: ctx.admissionDeadlineAt,
           remainingMs: () => run.control.remainingMs(),
           signal: run.control.hardSignal,
@@ -5330,11 +5334,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ENDING_NOTE_MAX - (diagnosis ? diagnosis.length + 2 : 0) - operation.length,
       );
       const executionDiagnostic = typedExecutionDiagnosticOf(err);
+      const execFailureDiagnostic = execFailureDiagnosticOf(err);
       events.publish({
         type: "run_note",
         kind: "run_failed",
         summary: (diagnosis ? `${cause}; ${diagnosis}` : cause) + operation,
         ...(executionDiagnostic ? { executionDiagnostic } : {}),
+        ...(execFailureDiagnostic ? { execFailureDiagnostic } : {}),
       });
     }
     // pi first: it runs in the workspace released next; what the ending left
