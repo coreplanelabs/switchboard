@@ -3639,6 +3639,7 @@ describe("browser installation", () => {
     mode: "access" | "oauth" | "token" | "hex",
     provider?: Provider,
     configureCore?: (core: CoreDeps, github: InMemoryGithubApi) => void,
+    profileByEmail?: (email: string) => Promise<{ id: string; name?: string } | undefined>,
   ) {
     let clock = 1000,
       unavailable = false,
@@ -3696,7 +3697,7 @@ describe("browser installation", () => {
       ...currentNative,
       currentMcp: (...args: Parameters<typeof currentNative.currentMcp>) => currentNative.currentMcp(...args),
     };
-    const personByEmail = async () => ({ id: "slack:UALICE" });
+    const personByEmail = profileByEmail ?? (async () => ({ id: "slack:UALICE" }));
     const s = await fixture(
       false,
       false,
@@ -4851,6 +4852,17 @@ describe("browser installation", () => {
       expect(s.effects).toEqual(["access:alice"]);
     },
   );
+  it("records the verified Access email on an MCP run when no Slack profile matches", async () => {
+    const s = await ssoInstallation("access", undefined, undefined, async () => undefined);
+    const { wire } = await s.send({ text: "memory forget", idempotencyKey: "unmatched-profile" });
+    const id = wire.result.structuredContent.admission.runId;
+    await s.execute();
+    expect(await s.runStore.get(id)).toMatchObject({
+      userId: "access:alice",
+      userName: "alice@example.test",
+      authenticatedAs: "access:alice",
+    });
+  });
   describe("native admission recovery", () => {
     it.each([
       ["different-credential", "unavailable"],

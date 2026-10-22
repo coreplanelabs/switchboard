@@ -169,10 +169,12 @@ describe("current organization authentication", () => {
     const identity = { issuer: "installation:mcp", tenant: null, subject: "alice" };
     const access = { sub: "alice", email: "alice@example.test" };
     let lookupFails = false;
+    let lookupMisses = false;
     const resolver = createOrganizationAuthentication({
       ...s.options,
       personByEmail: async (email) => {
         if (lookupFails) throw new Error("PRIVATE-PROFILE-LOOKUP");
+        if (lookupMisses) return undefined;
         return email === access.email ? { id: requesterProfileId, name: "Alice" } : undefined;
       },
       currentMcp: async () => ({
@@ -249,7 +251,7 @@ describe("current organization authentication", () => {
       expect(degraded).toMatchObject({
         status: "resolved",
         actor: { id: "access:alice" },
-        msg: { userId: "access:alice", authenticatedAs: "access:alice" },
+        msg: { userId: "access:alice", userName: "alice@example.test", authenticatedAs: "access:alice" },
       });
       if (degraded.status !== "resolved") throw new Error("MCP restore did not resolve");
       expect(degraded.msg).not.toHaveProperty("requesterProfileId");
@@ -260,6 +262,16 @@ describe("current organization authentication", () => {
     } finally {
       warning.mockRestore();
     }
+    lookupFails = false;
+    lookupMisses = true;
+    const unmatched = await resolver.resolveEnvelope(saved.envelope);
+    expect(unmatched).toMatchObject({
+      status: "resolved",
+      actor: { id: "access:alice" },
+      msg: { userId: "access:alice", userName: "alice@example.test", authenticatedAs: "access:alice" },
+    });
+    if (unmatched.status !== "resolved") throw new Error("MCP restore did not resolve");
+    expect(unmatched.msg).not.toHaveProperty("requesterProfileId");
   });
   it("restores a personal MCP profile from its approved credential without storing it in the source", async () => {
     const s = setup();
