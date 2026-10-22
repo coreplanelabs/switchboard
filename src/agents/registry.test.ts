@@ -232,7 +232,7 @@ describe("the turn cap is a runaway guard derived from the wall clock (docs/refe
 });
 
 // Feature: docs/reference/specs/resident-repos.md — resident-path prompt variants:
-// the workspace is a ready worktree (no cloning, no installs, no repo
+// the workspace is a ready worktree (no cloning or repo
 // discovery, no gh CLI); selected by the dispatcher AFTER executor resolution,
 // never by mutating the shared AgentDef.
 
@@ -243,12 +243,11 @@ describe("resident prompt variants", () => {
     expect(AGENTS.general.residentSystem).toBeUndefined();
   });
 
-  it("variants describe a ready worktree and forbid setup work", () => {
+  it("variants describe a ready worktree and forbid another clone", () => {
     for (const sys of [AGENTS.coding.residentSystem!, AGENTS.review.residentSystem!]) {
       expect(sys).toMatch(/ready git worktree/i);
       expect(sys).toMatch(/do not clone/i);
-      expect(sys).toMatch(/do not install/i);
-      // no setup instructions: nothing telling the agent to clone or install
+      // The ready worktree needs no second clone.
       expect(sys).not.toMatch(/clone the (repo|relevant repository)/i);
       expect(sys).not.toMatch(/clone the repo into/i);
       // gh is not in the resident image — the variant must not lean on it
@@ -256,6 +255,8 @@ describe("resident prompt variants", () => {
       expect(sys).not.toContain("gh pr diff");
       expect(sys).toMatch(/`gh` CLI is NOT installed/i);
     }
+    expect(AGENTS.coding.residentSystem!).toMatch(/do not install/i);
+    expect(AGENTS.review.residentSystem!).toMatch(/frozen-lockfile install/i);
   });
 
   it("coding variant pushes the branch and submits the description; PR creation is not its job", () => {
@@ -413,8 +414,8 @@ describe("the workspace prompts name the image toolchain", () => {
 
 // Feature: docs/reference/specs/distilled-diffs.md. The resident prompts use the
 // digest two ways: coding lets it shape the submitted PR description; review
-// orients with it before reading. Review READS the code — it never runs the
-// project's tests or build (CI's verify gate does that, item 7).
+// orients with it before reading. Review runs checks when the target repo's
+// review procedure requires them (agent-review.md, repository procedure).
 describe("distilled-diffs prompt behavior (resident variants)", () => {
   it("coding resident: calls diff_digest to inform the submitted description", () => {
     const sys = AGENTS.coding.residentSystem!;
@@ -425,19 +426,27 @@ describe("distilled-diffs prompt behavior (resident variants)", () => {
     expect(sys).toMatch(/not the raw diff/i);
   });
 
-  it("review prompts read the code and never run the project's tests or build — CI does (item 7)", () => {
-    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
-      expect(sys).toMatch(/do not run the project's tests or build/i);
-      expect(sys).toMatch(/CI/);
-      // no instruction to run them, no ask to report pass/fail
-      expect(sys).not.toMatch(/RUN the project's tests/);
-      expect(sys).not.toMatch(/npm test/);
-      expect(sys).not.toMatch(/pass\/fail/i);
-      // "read and test" would still imply testing
-      expect(sys).not.toMatch(/read and test/);
-      // stays read-only: still no commits/pushes
-      expect(sys).toMatch(/read-only/i);
-      expect(sys).toMatch(/do not (modify|commit)/i);
+  it("review prompts follow required repository checks without granting a write or post", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!, REVIEW_SYSTEM_SEEDED]) {
+      expect(sys).toMatch(/read.*AGENTS\.md.*REVIEW\.md/i);
+      expect(sys).toMatch(/required.*tests.*lint.*typecheck.*build/i);
+      expect(sys).toMatch(/fresh local checks/);
+      expect(sys).toMatch(/required check needs dependencies.*frozen-lockfile install/i);
+      expect(sys).toMatch(/if a required check cannot run.*do not submit a verdict/i);
+      expect(sys).toMatch(/do not modify code, commit, or push/i);
+      expect(sys).toMatch(/do NOT post your review to GitHub yourself/i);
+      expect(sys).not.toMatch(/do not run the project's tests or build/i);
+      expect(sys).not.toMatch(/do not install anything/i);
+    }
+  });
+
+  it("review prompts require a native complete diff before a moved-head verdict", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!, REVIEW_SYSTEM_SEEDED]) {
+      expect(sys).toMatch(/head moves during this Review.*review_read.*new pinned head/i);
+      expect(sys).toMatch(/sourceHash.*eof/i);
+      expect(sys).toMatch(/saved.*diff.*initial or fixed-head review/i);
+      expect(sys).toMatch(/unavailable or incomplete.*no verdict for the new head/i);
+      expect(sys).toMatch(/later Review.*verified terminal state/i);
     }
   });
 
@@ -1638,7 +1647,7 @@ describe("every preset names fenced content as quoted data", () => {
 
 // Feature: docs/reference/specs/execution.md item 26 — the seeded-sandbox
 // variant: the repository is already cloned at the seeded checkout, so the
-// prompt forbids the clone and the install, names the checkout, and keeps
+// prompt forbids another clone, names the checkout, and keeps
 // `gh` (the sandbox image has it, the resident's does not).
 describe("seeded prompt variants", () => {
   it("coding and review carry a seeded variant; general does not", () => {
@@ -1647,17 +1656,18 @@ describe("seeded prompt variants", () => {
     expect(AGENTS.general.seededSystem).toBeUndefined();
   });
 
-  it("variants name the seeded checkout, forbid setup work, and do NOT say gh is missing", () => {
+  it("variants name the seeded checkout, forbid another clone, and do NOT say gh is missing", () => {
     for (const sys of [AGENTS.coding.seededSystem!, AGENTS.review.seededSystem!]) {
       expect(sys).toContain("/workspace/checkout");
       expect(sys).toMatch(/ALREADY CLONED/);
       expect(sys).toMatch(/do not clone it again/i);
-      expect(sys).toMatch(/do not install/i);
       expect(sys).not.toMatch(/clone the (repo|relevant repository)/i);
       expect(sys).not.toMatch(/`gh` CLI is NOT installed/i);
       expect(sys).not.toContain("gh pr create");
       expect(sys).not.toContain("gh pr checkout");
     }
+    expect(AGENTS.coding.seededSystem!).toMatch(/do not install/i);
+    expect(AGENTS.review.seededSystem!).toMatch(/frozen-lockfile install/i);
   });
 
   it("the coding variant pushes and submits the description; the review variant reads the diff from the checkout and keeps gh for the PR's metadata", () => {
