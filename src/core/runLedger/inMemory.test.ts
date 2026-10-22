@@ -39,6 +39,46 @@ const claimReq = (runId: string, threadKey: string, gen = "g1"): ClaimRequest =>
   tools: [{ name: "bash", description: "run", inputSchema: {} }],
 });
 
+describe("Review admission across channels", () => {
+  const head = "a".repeat(40);
+  const target = (runId: string, threadKey: string, reviewHead = head, pr = 42) => {
+    const request = claimReq(runId, threadKey);
+    request.meta = { ...request.meta, repo: "acme/api", pr, headSha: reviewHead };
+    return request;
+  };
+
+  it("returns the first run for the same PR and waits for its terminal settlement after a head move", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    expect(await ledger.claim(target("owner", "slack:C1:1"))).toMatchObject({ ok: true });
+    expect(await ledger.claim(target("same-thread", "slack:C1:1"))).toMatchObject({
+      ok: false,
+      reason: "thread-live",
+      live: { runId: "owner" },
+    });
+    expect(await ledger.claim(target("duplicate", "mcp:review:42"))).toEqual({
+      ok: false,
+      reason: "review-owned",
+      live: {
+        runId: "owner",
+        agent: "review",
+        startedAt: 1_000,
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        headSha: head,
+      },
+    });
+    expect(await ledger.claim(target("new-head", "slack:C2:2", "b".repeat(40)))).toMatchObject({
+      ok: false,
+      reason: "review-owned",
+      live: { runId: "owner", headSha: head },
+    });
+    expect(await ledger.claim(target("other-pr", "mcp:review:43", head, 43))).toMatchObject({ ok: true });
+    const otherRepo = target("other-repo", "mcp:other:42");
+    otherRepo.meta.repo = "acme/other";
+    expect(await ledger.claim(otherRepo)).toMatchObject({ ok: true });
+  });
+});
+
 describe("resident attachment claims", () => {
   it("accepts source metadata for the claimed unit lane and refuses another requester or session", async () => {
     const ledger = new InMemoryRunLedger(() => 0);

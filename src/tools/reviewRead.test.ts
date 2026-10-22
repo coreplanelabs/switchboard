@@ -11,7 +11,13 @@ import { LocalExecutor } from "../execution/executor.js";
 import { TOOLSETS } from "./toolsets.js";
 import type { ToolContext } from "./runnableTool.js";
 import { shapeToolSchemasForWire } from "../core/providerToolSchemas.js";
-import { advanceReviewRead, reviewReadProgressOf, reviewReadTool, type ReviewReadProgress } from "./reviewRead.js";
+import {
+  advanceReviewRead,
+  reviewReadProgressOf,
+  reviewReadTool,
+  type ReviewReadPageReceipt,
+  type ReviewReadProgress,
+} from "./reviewRead.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { produceReadingDiff } from "../core/readingDiff.js";
 
@@ -173,6 +179,11 @@ describe("review_read", () => {
 
   it("reconstructs a private full diff and oversized source line through bounded UTF8 byte pages", async () => {
     for (const input of [{ kind: "file", path: "catalog.txt" }, { kind: "diff" }]) {
+      const ctx = context();
+      const accepted: ReviewReadPageReceipt[] = [];
+      ctx.onReviewReadPage = (page) => {
+        accepted.push(page);
+      };
       const expected =
         input.kind === "file"
           ? source
@@ -184,7 +195,7 @@ describe("review_read", () => {
       let sourceHash: string | undefined;
       let actual = "";
       for (;;) {
-        const page = await read({ ...input, offset, ...(sourceHash ? { sourceHash } : {}) });
+        const page = await read({ ...input, offset, ...(sourceHash ? { sourceHash } : {}) }, ctx);
         expect(page.source).toMatchObject({ repo: "example/project", pr: 7, head, base, mergeBase: base });
         expect(page.offset).toBe(offset);
         expect(page.nextOffset).toBe(offset + Buffer.byteLength(page.text));
@@ -198,7 +209,13 @@ describe("review_read", () => {
       }
       expect(actual).toBe(expected);
       expect(offset).toBe(Buffer.byteLength(expected));
-      expect(await read({ ...input, offset, sourceHash })).toMatchObject({ text: "", eof: true, nextOffset: offset });
+      expect(accepted[0]).toMatchObject({ kind: input.kind, offset: 0, target: { head, base } });
+      expect(accepted.at(-1)).toMatchObject({ kind: input.kind, nextOffset: offset, size: offset, eof: true });
+      expect(await read({ ...input, offset, sourceHash }, ctx)).toMatchObject({
+        text: "",
+        eof: true,
+        nextOffset: offset,
+      });
     }
   }, 30_000);
 
@@ -215,16 +232,34 @@ describe("review_read", () => {
     expect(progress).toMatchObject({ head, nextOffset: first.nextOffset, eof: false });
     const second = await read({ kind: "diff", offset: first.nextOffset, sourceHash: first.sourceHash }, ctx);
     expect(progress).toMatchObject({ head, sourceHash: first.sourceHash, nextOffset: second.nextOffset, eof: false });
-    expect(advanceReviewRead(progress, { ...progress!, offset: second.nextOffset + 4 })).toBeUndefined();
+    expect(
+      advanceReviewRead(progress, {
+        target: context().reviewReadTarget!()!,
+        kind: "diff",
+        ...progress!,
+        offset: second.nextOffset + 4,
+      }),
+    ).toBeUndefined();
     expect(reviewReadProgressOf(progress)).toEqual(progress);
     expect(reviewReadProgressOf({ ...progress, nextOffset: progress!.size + 1 })).toBeUndefined();
   });
 
   it("keeps completed coverage when the same first page is read again", () => {
     const complete = { head: "a".repeat(40), sourceHash: "b".repeat(64), size: 100, nextOffset: 100, eof: true };
-    expect(advanceReviewRead(complete, { ...complete, offset: 0, nextOffset: 32, eof: false })).toEqual(complete);
+    const target = { repo: "example/project", pr: 7, head: complete.head, baseRef: "main", base: "c".repeat(40) };
     expect(
-      advanceReviewRead(complete, { ...complete, sourceHash: "c".repeat(64), offset: 0, nextOffset: 32, eof: false }),
+      advanceReviewRead(complete, { ...complete, target, kind: "diff", offset: 0, nextOffset: 32, eof: false }),
+    ).toEqual(complete);
+    expect(
+      advanceReviewRead(complete, {
+        ...complete,
+        target,
+        kind: "diff",
+        sourceHash: "c".repeat(64),
+        offset: 0,
+        nextOffset: 32,
+        eof: false,
+      }),
     ).toEqual({
       ...complete,
       sourceHash: "c".repeat(64),

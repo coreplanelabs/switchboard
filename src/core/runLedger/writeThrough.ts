@@ -97,9 +97,13 @@ import {
   type AppendableEvent,
   type CardHandle,
   type ClaimRequest,
+  type ClaimResult,
   type IntakeReceipt,
   type IntakeWriteResult,
   type LiveRunMeta,
+  type ReviewHeadAdvanceRequest,
+  type ReviewHeadAdvanceResult,
+  type ReviewSourceReceipt,
   type LiveRunRow,
   type LiveStateAssignRequest,
   type LiveStateAssignResult,
@@ -349,6 +353,13 @@ export class NativeClaimUnknownError extends Error {
   }
 }
 
+export class ReviewClaimOccupiedError extends Error {
+  constructor(readonly claim: Extract<ClaimResult, { ok: false; reason: "review-owned" | "review-conflict" }>) {
+    super("A Review already owns this pull request, or its active owner is ambiguous.");
+    this.name = "ReviewClaimOccupiedError";
+  }
+}
+
 /** Named typed boundary builder: the dispatcher preserves custody instead
  * of rendering this unknown operation as a settled refusal. */
 export function terminalCommitmentUnknown(
@@ -552,6 +563,7 @@ export interface LedgerWriteThrough {
   readonly gen: string;
   /** Current ledger owner receives a monotonic fence before resident attach. */
   claimResident(runId: string, threadKey: string): Promise<number | undefined>;
+  advanceReviewHead(request: Omit<ReviewHeadAdvanceRequest, "gen">): Promise<ReviewHeadAdvanceResult>;
   /** Reserve the thread at admission (item 42): an `attaching` row with the
    *  request and no prompt, its heartbeat running — or why not (`ReserveOutcome`).
    *  The run is not resumable until `open` promotes it; a reclaim of the row
@@ -684,6 +696,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   async claimResident(_runId: string, _threadKey: string): Promise<number | undefined> {
     return undefined;
+  }
+  async advanceReviewHead(_request: Omit<ReviewHeadAdvanceRequest, "gen">): Promise<ReviewHeadAdvanceResult> {
+    return { ok: false, reason: "source-unproved" };
   }
   async reserve(_req: ReserveRunRequest): Promise<ReserveOutcome> {
     return { kind: "off" };
@@ -1103,6 +1118,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const expected = structuredClone(request);
         originalClaim = expected;
         const result = await ledger.claim(request);
+        if (!result.ok && result.reason !== "thread-live") throw new ReviewClaimOccupiedError(result);
         if (result.ok) {
           claimAccepted = true;
           const allocationAck = allocationAckOf(result.allocationAck, expected);
@@ -1175,6 +1191,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         warn(`[ledger] ${req.threadKey} not tracked: ${why}`);
         return { outcome: "untracked", why, refused: "thread-live" };
       } catch (err) {
+        if (err instanceof ReviewClaimOccupiedError) throw err;
         if (
           (allocationBearing || req.meta.residentExecution === "native-v1") &&
           originalClaim !== undefined &&
@@ -1429,8 +1446,32 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                 statePatch: Object.fromEntries(Object.keys(expected.statePatch).map((key) => [key, state[key]])),
               };
             }
-            if (value === undefined || value === null || (await sourceHash(value)) !== pending.failure.expectedDigest)
-              return false;
+            if (value === undefined || value === null) return false;
+            const actualDigest = await sourceHash(value);
+            if (actualDigest !== pending.failure.expectedDigest) {
+              // A lost head-advance reply can commit one source receipt that
+              // the local state snapshot did not yet contain.
+              const source = this.uncertainReviewHeadSource;
+              const storedSource = state?.reviewClaimSource;
+              const confirmedNewSource = JSON.stringify(storedSource) === JSON.stringify(source);
+              if (
+                pending.failure.kind !== "state" ||
+                !source ||
+                !state ||
+                typeof state !== "object" ||
+                Array.isArray(state) ||
+                storedSource === undefined ||
+                (!confirmedNewSource &&
+                  JSON.stringify(storedSource) !== JSON.stringify(this.state.reviewClaimSource)) ||
+                (await sourceHash({ ...(pending.expected as RunState), reviewClaimSource: storedSource })) !==
+                  actualDigest
+              )
+                return false;
+              if (confirmedNewSource) {
+                this.state = { ...this.state, reviewClaimSource: structuredClone(source) };
+                this.uncertainReviewHeadSource = undefined;
+              }
+            }
             if (pending.failure.kind === "live-state") {
               const expected = pending.expected as {
                 liveState: RunLiveState;
@@ -1474,6 +1515,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private readonly hosted: boolean;
     private lastSeq: number;
     private state: RunState;
+    private uncertainReviewHeadSource?: ReviewSourceReceipt;
     private stateSending: Promise<void> = Promise.resolve();
     private sourceSending: Promise<boolean> = Promise.resolve(true);
     private boundarySending: Promise<void> = Promise.resolve();
@@ -1485,7 +1527,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
     private serializeState<T>(send: () => Promise<T>): Promise<T> {
       const sending = this.stateSending.then(send);
-      this.stateSending = sending.then(() => {});
+      this.stateSending = Promise.allSettled([sending]).then(() => {});
       return sending;
     }
     private stateDirty = false;
@@ -2606,6 +2648,45 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       return (await this.commitState(patch)) === "ok";
     }
 
+    private async observeUncertainReviewHeadSource(): Promise<void> {
+      const source = this.uncertainReviewHeadSource;
+      if (!source) return;
+      const [readback] = await Promise.allSettled([ledger.peekInbox(this.runId, gen, 0)]);
+      const observed = readback.status === "fulfilled" ? readback.value : undefined;
+      if (
+        observed?.ok &&
+        observed.runId === this.runId &&
+        observed.gen === gen &&
+        observed.boundary.state &&
+        typeof observed.boundary.state === "object" &&
+        !Array.isArray(observed.boundary.state) &&
+        JSON.stringify((observed.boundary.state as RunState).reviewClaimSource) === JSON.stringify(source)
+      ) {
+        this.state = { ...this.state, reviewClaimSource: structuredClone(source) };
+        this.uncertainReviewHeadSource = undefined;
+      }
+    }
+
+    async advanceReviewHead(request: Omit<ReviewHeadAdvanceRequest, "gen">): Promise<ReviewHeadAdvanceResult> {
+      return this.serializeState(async () => {
+        if (!this.tracked() || this.finished || this.handedOff || this.finishLanding)
+          return { ok: false, reason: "fenced" };
+        if (!(await this.reconcilePendingBoundary())) return { ok: false, reason: "source-unproved" };
+        try {
+          const result = await ledger.advanceReviewHead({ ...request, gen });
+          if (result.ok) {
+            this.state = { ...this.state, reviewClaimSource: structuredClone(request.source) };
+            this.uncertainReviewHeadSource = undefined;
+          }
+          return result;
+        } catch (error) {
+          this.uncertainReviewHeadSource = structuredClone(request.source);
+          await this.observeUncertainReviewHeadSource();
+          throw error;
+        }
+      });
+    }
+
     async commitState(patch: RunState): Promise<FinishingGate> {
       if (this.fencedOut || this.finished) return "fenced";
       if (this.detached || this.finishLanding) return "unavailable";
@@ -2624,8 +2705,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private async sendState(): Promise<void> {
       if (!this.stateDirty || this.detached || this.finished) return;
       if (!(await this.reconcilePendingBoundary())) return;
+      await this.observeUncertainReviewHeadSource();
       this.stateDirty = false;
       const snapshot = structuredClone(this.state);
+      // The store keeps whichever source receipt its unacknowledged head
+      // update committed; a stale local receipt must not replace it.
+      if (this.uncertainReviewHeadSource) delete snapshot.reviewClaimSource;
       const version = this.stateVersion;
       const expectedDigest = await sourceHash(snapshot);
       for (let attempt = 1; ; attempt++) {
@@ -3001,7 +3086,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
       reserved.assertOriginalPromotionActive();
       if (!result.ok) {
-        if (result.live.runId === req.runId) {
+        if (result.reason === "thread-live" && result.live.runId === req.runId) {
           reserved.detach("promotion refused (fenced)", true);
           unpromoted.delete(reserved.runId);
           return { kind: "fenced" };
@@ -3138,6 +3223,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   return {
     gen,
     sessionPersistence: true,
+    advanceReviewHead: (request) => {
+      const run = [...live].find((candidate) => candidate.runId === request.runId);
+      return run ? run.advanceReviewHead(request) : Promise.resolve({ ok: false, reason: "fenced" });
+    },
     async claimResident(runId, threadKey) {
       const result = await ledger.residentClaim(runId, gen, threadKey);
       if (!result.ok) throw new ResidentClaimRefusedError(result.reason);

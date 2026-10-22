@@ -256,6 +256,9 @@ export interface RunLedger {
    *  re-runs the owner write, so the caller's convention is: retry the whole
    *  `claim` on failure, never proceed past a claim that did not resolve `ok`. */
   claim(req: ClaimRequest, originalBodyJson?: string): Promise<ClaimResult>;
+  advanceReviewHead(
+    request: import("./types.js").ReviewHeadAdvanceRequest,
+  ): Promise<import("./types.js").ReviewHeadAdvanceResult>;
   /** Persist cumulative trusted source metadata under the exact session owner. */
   writeSessionSources(key: string, runId: string, gen: string, sources: SessionSources): Promise<FenceResult>;
   /** The seed prefix, written once at start (chunked by the implementation).

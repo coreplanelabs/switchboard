@@ -165,6 +165,10 @@ export const STORAGE_OPERATIONS = {
     (b) => nested(b.selector).gen,
   ),
   "/runs/claim": claim,
+  "/runs/review-head/advance": codec<{ request: Run } & Body>(
+    (b) => [nested(b.request).runId],
+    (b) => nested(b.request).gen,
+  ),
   "/runs/claim-observations/list": nonRun("store"),
   "/runs/claim-observations/record": observation,
   "/runs/context-checkpoint": runId,

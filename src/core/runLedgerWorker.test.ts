@@ -960,6 +960,40 @@ describe("WorkerRunLedger", () => {
     expect(busy.calls).toHaveLength(1);
   });
 
+  it("keeps the Review owner's run visibility facts in an occupied claim receipt", async () => {
+    const worker = stubWorker(() => ({
+      status: 409,
+      data: {
+        ok: false,
+        reason: "review-owned",
+        live: {
+          runId: "owner",
+          agent: "review",
+          startedAt: 5,
+          channelId: "mcp:private",
+          userId: "mcp:alice",
+          channelVisibility: "machine",
+          headSha: "a".repeat(40),
+          parentInstanceId: "ship-parent",
+        },
+      },
+    }));
+    expect(await worker.ledger.claim(claimReq)).toEqual({
+      ok: false,
+      reason: "review-owned",
+      live: {
+        runId: "owner",
+        agent: "review",
+        startedAt: 5,
+        channelId: "mcp:private",
+        userId: "mcp:alice",
+        channelVisibility: "machine",
+        headSha: "a".repeat(40),
+        parentInstanceId: "ship-parent",
+      },
+    });
+  });
+
   it.each([false, true])(
     "an acknowledged first ancillary marker prevents publishing a split-write acknowledgement (tool call: %s)",
     async (toolCall) => {
