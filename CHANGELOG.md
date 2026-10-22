@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.308.2](https://github.com/coreplanelabs/switchboard/compare/v1.308.1...v1.308.2) (2026-10-22)
+
+
+### Bug fixes
+
+* **core:** keep formal setting quotes tied to the request ([#3435](https://github.com/coreplanelabs/switchboard/issues/3435)) ([da870bb](https://github.com/coreplanelabs/switchboard/commit/da870bbb388b20074284bcf8f08e653b06527196))
+
 ## [1.308.1](https://github.com/coreplanelabs/switchboard/compare/v1.308.0...v1.308.1) (2026-10-22)
 
 
