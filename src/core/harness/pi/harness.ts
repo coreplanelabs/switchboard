@@ -35,6 +35,7 @@ import {
 } from "../../provider.js";
 import {
   HarnessContainerReplacedError,
+  FollowUpCompletionDeadlineError,
   HarnessGateBypassedError,
   HarnessMismatchError,
   isPiFacts,
@@ -2760,8 +2761,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       continuation = undefined;
       run.toolContext.recovery?.throwIfStopped();
       if (sessionEnded) throw new Error("the pi session has ended: no follow-up turn can run on it");
-      if (run.deadlineAt !== undefined && now() >= run.deadlineAt)
-        throw new Error("The admitted run deadline ended before the follow-up turn.");
+      const phaseDeadlineAt = Math.min(run.deadlineAt ?? Infinity, input.deadlineAt ?? Infinity);
+      if (now() >= phaseDeadlineAt) throw new FollowUpCompletionDeadlineError();
       const turnSpan = input.span?.start("run.agent");
       if (turnSpan) deps.bearers?.reparent(run.runId, turnSpan);
       bridge.under(turnSpan);
@@ -2775,10 +2776,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const turnStartedAt = now();
       const turnLease = loopClock(
         turnStartedAt,
-        Math.min(
-          turnLeaseMs(input.maxMinutes, deadline - turnStartedAt),
-          run.deadlineAt === undefined ? Infinity : Math.max(0, run.deadlineAt - turnStartedAt),
-        ),
+        Math.min(turnLeaseMs(input.maxMinutes, deadline - turnStartedAt), Math.max(0, phaseDeadlineAt - turnStartedAt)),
         run.agent.name,
         "turn",
       );
@@ -2786,7 +2784,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       /** The turn's end, its write-up included: the turn's loop ends at its
        *  deadline and the finale runs its allowance past it (`turnCheck`), so
        *  a wait under the turn gives up here, never at the deadline. */
-      const turnEnd = Math.min(turnDeadline + turnLease.finaleMs, run.deadlineAt ?? Infinity);
+      const turnEnd = Math.min(turnDeadline + turnLease.finaleMs, phaseDeadlineAt);
       input.toolContext.remainingMs = () => turnDeadline - now();
       // The turn's loop ends at its own deadline: a timeout is judged against that, not the run's loop end.
       live.rules = { ...rules, loopEndsIn: () => turnLease.loopEnd - now() };
@@ -2884,11 +2882,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         run.toolContext.recovery?.throwIfStopped();
         if (checkContinuation(turnEnd)) return;
         askOwedAbort();
+        if (input.deadlineAt !== undefined && now() >= phaseDeadlineAt) {
+          if (!finaleAborted) {
+            finaleAborted = true;
+            note("time_budget_exhausted", "follow-up completion deadline reached");
+            abortPi();
+          }
+          return;
+        }
         if (writeUp) {
-          if (
-            (writeUpAt !== undefined && now() - writeUpAt >= turnLease.finaleMs) ||
-            now() >= (run.deadlineAt ?? Infinity)
-          ) {
+          if ((writeUpAt !== undefined && now() - writeUpAt >= turnLease.finaleMs) || now() >= phaseDeadlineAt) {
             writeUpAt = undefined;
             finaleAborted = true;
             run.onProgress?.(finaleTimedOutNote("turn"));

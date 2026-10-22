@@ -11,7 +11,7 @@ import { LocalExecutor } from "../execution/executor.js";
 import { TOOLSETS } from "./toolsets.js";
 import type { ToolContext } from "./runnableTool.js";
 import { shapeToolSchemasForWire } from "../core/providerToolSchemas.js";
-import { reviewReadTool } from "./reviewRead.js";
+import { advanceReviewRead, reviewReadProgressOf, reviewReadTool, type ReviewReadProgress } from "./reviewRead.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { produceReadingDiff } from "../core/readingDiff.js";
 
@@ -201,6 +201,37 @@ describe("review_read", () => {
       expect(await read({ ...input, offset, sourceHash })).toMatchObject({ text: "", eof: true, nextOffset: offset });
     }
   }, 30_000);
+
+  it("records only contiguous exact-source diff pages and leaves a visible uncovered cursor", async () => {
+    const ctx = context();
+    let progress: ReviewReadProgress | undefined;
+    ctx.onReviewReadPage = (page) => {
+      const next = advanceReviewRead(progress, page);
+      if (!next) return false;
+      progress = next;
+      return true;
+    };
+    const first = await read({ kind: "diff" }, ctx);
+    expect(progress).toMatchObject({ head, nextOffset: first.nextOffset, eof: false });
+    const second = await read({ kind: "diff", offset: first.nextOffset, sourceHash: first.sourceHash }, ctx);
+    expect(progress).toMatchObject({ head, sourceHash: first.sourceHash, nextOffset: second.nextOffset, eof: false });
+    expect(advanceReviewRead(progress, { ...progress!, offset: second.nextOffset + 4 })).toBeUndefined();
+    expect(reviewReadProgressOf(progress)).toEqual(progress);
+    expect(reviewReadProgressOf({ ...progress, nextOffset: progress!.size + 1 })).toBeUndefined();
+  });
+
+  it("keeps completed coverage when the same first page is read again", () => {
+    const complete = { head: "a".repeat(40), sourceHash: "b".repeat(64), size: 100, nextOffset: 100, eof: true };
+    expect(advanceReviewRead(complete, { ...complete, offset: 0, nextOffset: 32, eof: false })).toEqual(complete);
+    expect(
+      advanceReviewRead(complete, { ...complete, sourceHash: "c".repeat(64), offset: 0, nextOffset: 32, eof: false }),
+    ).toEqual({
+      ...complete,
+      sourceHash: "c".repeat(64),
+      nextOffset: 32,
+      eof: false,
+    });
+  });
 
   it("refuses unpinned continuation, invalid offsets, and changed sources", async () => {
     const input = { kind: "file", path: "catalog.txt" };

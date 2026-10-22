@@ -106,6 +106,7 @@ import { contextRefusalsOf, isMainContextRefusalCode } from "../mainContextRefus
 import {
   HarnessContainerReplacedError,
   HarnessGateBypassedError,
+  FollowUpCompletionDeadlineError,
   HarnessInterruptedError,
   harnessFactsOf,
   openThroughSeam,
@@ -204,6 +205,7 @@ import {
 } from "../codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
 import { runVerdictTurn } from "../verdictTurn.js";
+import { advanceReviewRead, reviewReadProgressOf } from "../../tools/reviewRead.js";
 import { reviewPostOptedOut } from "../reviewPost.js";
 import { startReviewReadingDiff } from "../readingDiff.js";
 import { startReviewDescription } from "../reviewDescription.js";
@@ -1541,6 +1543,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ledgerRun?.setState({ verdict: v, reviewSubmission });
   };
   let digest = parseDigestReport(restored.digest);
+  let reviewReadProgress = reviewReadProgressOf(restored.reviewReadProgress);
+  let invalidReviewReadProgress = restored.reviewReadProgress !== undefined && reviewReadProgress === undefined;
+  let reviewCompletionFailure: string | undefined;
   const onDigest = (report: DigestReport) => {
     if (
       isPrReview &&
@@ -3135,6 +3140,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(reviewHistory ? { reviewHistory } : {}),
     ...(isPrReview
       ? {
+          onReviewReadPage: async (
+            page: import("../../tools/reviewRead.js").ReviewReadProgress & { offset: number },
+          ) => {
+            const next = advanceReviewRead(reviewReadProgress, page);
+            if (!next) return false;
+            if (ledgerRun?.tracked() && !(await ledgerRun.setStateAndFlush({ reviewReadProgress: next }))) return false;
+            reviewReadProgress = next;
+            invalidReviewReadProgress = false;
+            if (!ledgerRun?.tracked()) ledgerRun?.setState({ reviewReadProgress: next });
+            return true;
+          },
+        }
+      : {}),
+    ...(isPrReview
+      ? {
           reviewReadTarget: () => {
             const head = reviewHistory?.requiredHead ?? reviewHead ?? repoCtx.headSha;
             return !privateAudienceLatch.revoked &&
@@ -3913,8 +3933,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             })
           : undefined;
       let openingToolContext: ToolContext = toolContext;
-      const openRun = async () => {
+      const openRun = async (completionDeadlineAt?: number) => {
         ctx.assertAdmissionBudget();
+        const modelDeadlineAt = Math.min(ctx.admissionDeadlineAt ?? Infinity, completionDeadlineAt ?? Infinity);
+        if (clock() >= modelDeadlineAt) throw new FollowUpCompletionDeadlineError();
         if (agent.name === "review" && pinnedHead !== undefined) {
           const probe = await executor
             .execResult?.(`${gitInCheckout(currentCheckout)} rev-parse HEAD`, {
@@ -3984,7 +4006,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         const operationScope = {
           runId: run.id,
           traceparent: formatTraceparent(root.traceId, root.id),
-          deadlineAt: ctx.admissionDeadlineAt,
+          deadlineAt: Number.isFinite(modelDeadlineAt) ? modelDeadlineAt : undefined,
           remainingMs: () => run.control.remainingMs(),
           signal: run.control.hardSignal,
           clock,
@@ -4069,7 +4091,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   },
                 }),
             agent,
-            ...(ctx.admissionDeadlineAt !== undefined ? { deadlineAt: ctx.admissionDeadlineAt } : {}),
+            ...(Number.isFinite(modelDeadlineAt) ? { deadlineAt: modelDeadlineAt } : {}),
             ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
             model: { id: modelId, provider: providerName, providerType: providerCfg.type },
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
@@ -4212,6 +4234,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       };
       // Checkout replacement ends a confirmed producer, then continues its saved conversation.
       restartHarness = async (input) => {
+        if (input.deadlineAt !== undefined && clock() >= input.deadlineAt) throw new FollowUpCompletionDeadlineError();
         const record = endedRecord;
         if (!record || lastFacts?.ended !== true || !ledgerRun?.tracked())
           throw new Error("The original producer ending cannot qualify workspace continuation.");
@@ -4242,7 +4265,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         openingToolContext = input.toolContext;
         harnessEndState = "pending";
         harnessSession = undefined;
-        harnessSession = await openRun();
+        harnessSession = await openRun(input.deadlineAt);
         endedRecord = undefined;
         return harnessSession.answer;
       };
@@ -4480,6 +4503,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           toolContext,
           onEvent,
           control: run.control,
+          remainingMs: () => run.control.remainingMs(),
+          clock,
           ...(harnessSession
             ? {
                 followUp: async (input) => {
@@ -4517,6 +4542,29 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         };
       reviewHead = settled.reviewHead;
       observedHead = settled.observedHead;
+      reviewCompletionFailure = settled.incompleteReason;
+    }
+    if (isPrReview && !tailSkipped() && postedBefore === undefined) {
+      const progress = reviewReadProgress;
+      if (invalidReviewReadProgress || (progress && (progress.head !== reviewHead || !progress.eof))) {
+        const unvalidated = verdict?.findings?.map((finding) => finding.id).join(", ") || "none recorded";
+        const sourceFailure =
+          (invalidReviewReadProgress
+            ? "The saved diff cursor could not be verified."
+            : progress!.head === reviewHead
+              ? `Diff source ${progress!.sourceHash} remains unread from byte ${progress!.nextOffset} of ${progress!.size} at head ${progress!.head}.`
+              : `The diff read at head ${progress!.head} does not cover review head ${reviewHead ?? "unknown"}.`) +
+          ` Uncovered paths are unknown. Unvalidated findings: ${unvalidated}.`;
+        reviewCompletionFailure = [reviewCompletionFailure, sourceFailure].filter(Boolean).join(" ");
+        verdict = undefined;
+        reviewSubmission = { status: "rejected", reason: "The exact-head diff was not read to EOF." };
+        onEvent({
+          type: "run_note",
+          kind: "review_incomplete",
+          summary: `review incomplete: ${reviewCompletionFailure}`,
+          at: clock(),
+        });
+      }
     }
     if (agent.name === "review" && reviewSubmission !== undefined) await persistReviewSubmission(reviewSubmission);
     // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt
@@ -4537,6 +4585,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       !tailSkipped() &&
       postedBefore === undefined &&
       verdict === undefined &&
+      reviewCompletionFailure === undefined &&
       !(reviewSubmission?.status === "pending" && reviewSubmission.proposal !== undefined) &&
       // Head compatibility, not whether the model attempted submission, decides
       // if a verdict-only prompt can complete this review in the current checkout.
@@ -4549,7 +4598,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       !reviewPostOptedOut(ctx.requestText)
     ) {
       const reviewOf = { repo: repoCtx.repo, number: repoCtx.pr };
-      await root.span("run.verdict_turn", (span) =>
+      const turnResult = await root.span("run.verdict_turn", (span) =>
         runVerdictTurn({
           span,
           target: reviewOf,
@@ -4558,6 +4607,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             toolContext,
             onProgress,
             onEvent,
+            clock,
             ...(harnessSession
               ? {
                   followUp: (input) => harnessSession!.followUp({ ...input, publicationAnswer: answer }),
@@ -4568,6 +4618,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           logKey: msg.threadKey,
         }),
       );
+      reviewCompletionFailure = turnResult.incompleteReason ?? reviewCompletionFailure;
       verdict = reviewSubmission?.status === "accepted" ? reviewSubmission.verdict : undefined;
     }
     await checkRecovery();
@@ -5191,7 +5242,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           repoCtx,
           heads: { reviewHead, observedHead },
           verdict,
-          reviewIncomplete: reviewSubmissionFailure(reviewSubmission),
+          reviewIncomplete: reviewCompletionFailure ?? reviewSubmissionFailure(reviewSubmission),
           digest,
           answer,
           hardStopped: false,
@@ -5466,8 +5517,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                     answerOutcome,
                     ...(observedHead !== undefined ? { headSha: observedHead } : {}),
                     ...(verdict !== undefined ? { verdict } : {}),
-                    ...(reviewSubmissionFailure(reviewSubmission)
-                      ? { reviewIncomplete: reviewSubmissionFailure(reviewSubmission) }
+                    ...((reviewCompletionFailure ?? reviewSubmissionFailure(reviewSubmission))
+                      ? { reviewIncomplete: reviewCompletionFailure ?? reviewSubmissionFailure(reviewSubmission) }
                       : {}),
                     ...(reviewHead !== undefined ? { reviewHead } : {}),
                     ...(dispositions !== undefined ? { dispositions } : {}),
@@ -5582,8 +5633,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ...(handoff !== undefined ? { handoff } : {}),
         ...(researchBrief !== undefined ? { researchBrief } : {}),
         ...(verdict !== undefined ? { verdict } : {}),
-        ...(reviewSubmissionFailure(reviewSubmission)
-          ? { reviewIncomplete: reviewSubmissionFailure(reviewSubmission) }
+        ...((reviewCompletionFailure ?? reviewSubmissionFailure(reviewSubmission))
+          ? { reviewIncomplete: reviewCompletionFailure ?? reviewSubmissionFailure(reviewSubmission) }
           : {}),
         ...(reviewHead !== undefined ? { reviewHead } : {}),
         ...(dispositions !== undefined ? { dispositions } : {}),
@@ -5646,7 +5697,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     reviewHead,
     verdict,
     reviewPost,
-    reviewIncomplete: reviewSubmissionFailure(reviewSubmission),
+    reviewIncomplete: reviewCompletionFailure ?? reviewSubmissionFailure(reviewSubmission),
     reviewStoppedBeforeStart,
     prNote,
     toolCalls,

@@ -1275,7 +1275,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
             await recovery.record("one", "submit_verdict", {}, { text: "error: invalid finding" });
             await recovery.record("two", "submit_verdict", {}, { text: "error: invalid finding" });
           }
-          return sessionAnswering(
+          const session = sessionAnswering(
             "A partial review.",
             async () => {},
             async (input) => {
@@ -1287,6 +1287,8 @@ describe("runLoop — the model turn and everything that rides on it", () => {
               return "A new verdict";
             },
           );
+          session.remainingMs = () => 3 * 60_000;
+          return session;
         },
         {
           agent: "review",
@@ -4945,7 +4947,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
           for (let i = 0; i < 20; i++) run.onEvent?.({ type: "assistant", text: `Later narration ${i}` });
         return {
           answer,
-          remainingMs: () => 60000,
+          remainingMs: () => 3 * 60_000,
           followUp: async (turn) => {
             tails.push([...(turn.tools ?? [])]);
             turn.toolContext.onVerdict?.({ verdict: "approve", summary: "Checked", head, findings: [] });
@@ -14033,7 +14035,11 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     const feedback = vi.spyOn(s.deps.githubApi!, "getPullRequestFeedback");
     const resume = finishing("The review: one nit, F1.", {
       agent: "review",
-      state: { verdict: VERDICT, reviewHistory: { target: { repo: "o/r", number: 42 }, requiredHead: HEAD } },
+      state: {
+        verdict: VERDICT,
+        reviewHistory: { target: { repo: "o/r", number: 42 }, requiredHead: HEAD },
+        reviewReadProgress: { head: HEAD, sourceHash: "a".repeat(64), size: 64, nextOffset: 64, eof: true },
+      },
       repoCtx: prThread.repoCtx,
     });
     const out = answered(
@@ -14058,6 +14064,88 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       verdict: "approve",
     });
   });
+
+  it("a resumed partial diff read posts an explicit incomplete report without approval", async () => {
+    const posts: string[] = [];
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: {
+        exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : ""),
+        execResult: async () => ({ stdout: `${HEAD}\n`, stderr: "", exitCode: 0, truncated: false }),
+      },
+      review: {
+        head: HEAD,
+        post: async (_target, body) => {
+          posts.push(body);
+          return { state: "accepted" as const };
+        },
+      },
+    });
+    const resume = finishing("F1 needs validation.", {
+      agent: "review",
+      state: {
+        verdict: VERDICT,
+        reviewReadProgress: { head: HEAD, sourceHash: "a".repeat(64), size: 842280, nextOffset: 98304, eof: false },
+      },
+      repoCtx: prThread.repoCtx,
+    });
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
+    expect(out.verdict).toBeUndefined();
+    expect(out.reviewIncomplete).toContain("byte 98304 of 842280");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatch(/^Review incomplete/);
+    expect(posts[0]).toContain("Unvalidated findings: F1");
+    expect(posts[0]).not.toContain("LGTM:");
+  });
+
+  it.each(["post:off", "slack only"])(
+    "a %s review with a partial diff reports incomplete without posting",
+    async (optOut) => {
+      const posts: string[] = [];
+      const s = setup("", {
+        agent: "review",
+        provider: neverCalled(),
+        ...prThread,
+        executor: {
+          exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : ""),
+          execResult: async () => ({ stdout: `${HEAD}\n`, stderr: "", exitCode: 0, truncated: false }),
+        },
+        review: {
+          head: HEAD,
+          post: async (_target, body) => {
+            posts.push(body);
+            return { state: "accepted" as const };
+          },
+        },
+      });
+      const resume = finishing("I approve this change.", {
+        agent: "review",
+        state: {
+          verdict: VERDICT,
+          reviewReadProgress: { head: HEAD, sourceHash: "a".repeat(64), size: 842280, nextOffset: 98304, eof: false },
+        },
+        repoCtx: prThread.repoCtx,
+      });
+      const out = answered(
+        await runLoop(
+          s.deps,
+          await trackedCodingContext(s, {
+            ...s.ctx,
+            requestText: `agent:review https://github.com/o/r/pull/42 ${optOut}`,
+            resume,
+            messages: resume.plan.messages,
+          }),
+        ),
+      );
+      expect(out.verdict).toBeUndefined();
+      expect(out.reviewIncomplete).toContain("byte 98304 of 842280");
+      expect(posts).toEqual([]);
+    },
+  );
 
   it.each([
     ["general", false],
