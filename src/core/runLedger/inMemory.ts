@@ -5,6 +5,18 @@ import {
   sourceObligationContextReferences,
   sourceObligationHolder,
 } from "./sourceObligations.js";
+import {
+  inboxAcknowledgedRowsOf,
+  prepareInboxAcknowledgments,
+  inboxAcknowledgmentRowsUnchanged,
+} from "./inboxAcknowledgments.js";
+import {
+  prepareSourceInputCheckpoint,
+  protectSourceInputStep,
+  sourceInputCheckpointRequestOf,
+  type SourceInputCheckpointRequest,
+  type SourceInputCheckpointResult,
+} from "./sourceInputIntent.js";
 import { inspectOriginal, type OriginalCell } from "./originalEvidenceReader.js";
 import {
   ORIGINAL_CELL_BYTES,
@@ -88,6 +100,7 @@ import {
 } from "../budgets.js";
 import { planSourceJobClaim, planSourceJobRelease, planSourceRelevanceSave } from "./sourceEventJobs.js";
 import {
+  sourceSnapshot,
   sourceRelevanceRequestOf,
   type SourceRelevanceSaveResult,
   isSourceEventKey,
@@ -2129,6 +2142,10 @@ export class InMemoryRunLedger implements RunLedger {
     session?: string,
   ): Promise<FenceResult> {
     if (!Number.isSafeInteger(record.step) || record.step < 0) throw new Error("invalid public step key");
+    const normal =
+      record.inboxAcknowledgedRows === undefined ? undefined : inboxAcknowledgedRowsOf(record.inboxAcknowledgedRows);
+    if (record.inboxAcknowledgedRows !== undefined && !normal) return { ok: false, reason: "fenced" };
+    record = { ...record, ...(normal ? { inboxAcknowledgedRows: normal } : {}) };
     const owner = this.live.get(runId);
     if (owner && inboxSegmentFloor(this.steps.get(runId)?.inboxSegmentArchive, owner) === undefined)
       throw new Error("retained inbox segment boundary is unreadable");
@@ -2136,11 +2153,64 @@ export class InMemoryRunLedger implements RunLedger {
     if (!written.ok) return written;
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
+    const current = this.live.get(runId)!;
+    if (normal?.length && current.phase !== "live") return { ok: false, reason: "fenced" };
     const list = this.steps.get(runId) ?? [];
     const base = workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotionStepBase ?? 0;
     const index = base + record.step;
-    if (index < list.length) list[index] = record;
-    else list.push(record);
+    const existing = list[index];
+    if (existing?.inboxAcknowledgedRows?.length) {
+      return JSON.stringify(sourceSnapshot(existing)) === JSON.stringify(sourceSnapshot(record))
+        ? { ok: true }
+        : { ok: false, reason: "fenced" };
+    }
+    const prior = list.at(-1);
+    if (normal?.length && prior && record.step <= prior.step) return { ok: false, reason: "fenced" };
+    const floor = inboxSegmentFloor(list.inboxSegmentArchive, current);
+    if (floor === undefined) return { ok: false, reason: "fenced" };
+    const inbox = (this.inbox.get(runId) ?? []).filter((item) => item.seq > floor);
+    const before = JSON.stringify({
+      row: sourceInputWriteSnapshot(current),
+      prior,
+      archive: list.inboxSegmentArchive,
+      base,
+    });
+    const prepared = normal?.length
+      ? await prepareInboxAcknowledgments(runId, record, inbox)
+      : { witnesses: [], rows: [] };
+    if (!prepared) return { ok: false, reason: "fenced" };
+    if (
+      this.live.get(runId) !== current ||
+      before !==
+        JSON.stringify({
+          row: sourceInputWriteSnapshot(current),
+          prior: this.steps.get(runId)?.at(-1),
+          archive: this.steps.get(runId)?.inboxSegmentArchive,
+          base: workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotionStepBase ?? 0,
+        }) ||
+      !inboxAcknowledgmentRowsUnchanged(prepared.rows, (seq) =>
+        (this.inbox.get(runId) ?? []).find((item) => item.seq === seq),
+      )
+    )
+      return { ok: false, reason: "fenced" };
+    const protectedStep = protectSourceInputStep(
+      current.state,
+      record,
+      (this.inbox.get(runId) ?? []).filter((item) => item.seq > floor),
+      prior,
+      prepared.witnesses,
+    );
+    if (!protectedStep) {
+      console.warn("[runs/step] source input protection refused", {
+        runId,
+        ownerGen: gen,
+        step: record.step,
+        acknowledged: normal?.length ?? 0,
+      });
+      return { ok: false, reason: "fenced" };
+    }
+    if (index < list.length) list[index] = protectedStep;
+    else list.push(protectedStep);
     this.steps.set(runId, list);
     return { ok: true };
   }
@@ -2344,6 +2414,44 @@ export class InMemoryRunLedger implements RunLedger {
       ...(result.event ? { event: { ...result.event, seq: liveStateSeq } } : {}),
       liveStateSeq,
     };
+  }
+
+  async sourceInputCheckpoint(
+    runId: string,
+    gen: string,
+    request: SourceInputCheckpointRequest,
+  ): Promise<SourceInputCheckpointResult> {
+    const parsed = sourceInputCheckpointRequestOf(request);
+    if (!parsed) return { ok: false, reason: "fenced" };
+    const capture = () => ({
+      row: this.live.get(runId),
+      inbox: this.inbox.get(runId) ?? [],
+      step: this.steps.get(runId)?.at(-1),
+      archive: this.steps.get(runId)?.inboxSegmentArchive,
+    });
+    const initial = capture();
+    const fence = checkFence(initial.row, gen);
+    if (!fence.ok) return fence;
+    if (!initial.row) return { ok: false, reason: "unknown-run" };
+    if (parsed.operation !== "read" && this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
+    const floor = inboxSegmentFloor(initial.archive, initial.row);
+    if (floor === undefined) return { ok: false, reason: "fenced" };
+    const before = JSON.stringify(initial);
+    const prepared = await prepareSourceInputCheckpoint(
+      initial.row,
+      parsed,
+      initial.inbox.filter((item) => item.seq > floor),
+      initial.step,
+    );
+    if (!prepared || before !== JSON.stringify(capture())) return { ok: false, reason: "fenced" };
+    if (parsed.operation !== "read") {
+      initial.row.state = prepared.state;
+      if (prepared.step) {
+        const steps = this.steps.get(runId)!;
+        steps[steps.length - 1] = prepared.step;
+      }
+    }
+    return { ok: true, checkpoint: structuredClone(prepared.checkpoint) };
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {

@@ -1,7 +1,14 @@
 import { testSourceObligationJob } from "../../src/core/testing/sourceObligations.ts";
 import { sourceObligationHolder } from "../../src/core/runLedger/sourceObligations.ts";
 import type { SourceEventReceipt } from "../../src/core/runLedger/sourceEvents.ts";
-import { testSourceInput, testSourceInputIntent, seedSourceInputIntent } from "../../src/core/testing/sourceInputs.ts";
+import { unreadInbox } from "../../src/core/runLedger/decisions.ts";
+import type { StepRecord } from "../../src/core/runLedger/types.ts";
+import {
+  testSourceInput,
+  testSourceInputIntent,
+  seedSourceInputIntent,
+  seedSourceInputCheckpoints,
+} from "../../src/core/testing/sourceInputs.ts";
 import { captureSourceTaskSnapshot } from "../../src/core/references/sourceTaskSnapshot.ts";
 import { checkStateFixture } from "../../src/core/testing/checkState.ts";
 import { captureCheckArchive } from "../../src/core/checkInspection.ts";
@@ -22231,5 +22238,295 @@ describe("reader-first source obligation compatibility in SQLite", () => {
         reason: "revision-changed",
       });
     });
+  });
+});
+
+describe("canonical native input checkpoint in SQLite", () => {
+  async function fixture() {
+    const key = storeKey();
+    const options = {
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => fetchMemoryTest(String(input), init),
+    };
+    const ledger = new WorkerRunLedger(options),
+      store = new WorkerRunStore(options);
+    return { key, ledger, store, ...(await seedSourceInputCheckpoints(ledger)) };
+  }
+  async function unread(ledger: WorkerRunLedger, id: string, gen = "g1") {
+    const peek = await ledger.peekInbox(id, gen, 0);
+    if (!peek.ok) throw new Error("missing checkpoint fixture");
+    return peek.items.filter(unreadInbox(peek.boundary.lastStep as StepRecord | null)).map((item) => item.seq);
+  }
+  it("reports only safe checkpoint refusal fields and keeps successful requests silent", async () => {
+    const { key, ledger, id, gen, receipt } = await fixture();
+    const logs: unknown[][] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...fields) => logs.push(fields));
+    try {
+      expect(await ledger.sourceInputCheckpoint(id, gen, { operation: "read", inputId: receipt.inputId })).toEqual({
+        ok: true,
+        checkpoint: null,
+      });
+      expect(await ledger.sourceInputCheckpoint(id, gen, { operation: "commit", receipt })).toMatchObject({ ok: true });
+      const refusals = () => logs.filter((fields) => fields[0] === "[runs/source-input/checkpoint] refused");
+      expect(refusals()).toEqual([]);
+      for (const request of [
+        { operation: "read", inputId: receipt.inputId },
+        { operation: "commit", receipt },
+        { operation: "ack", inputId: receipt.inputId, receiptHash: "b".repeat(64) },
+      ])
+        expect(
+          await post("/runs/source-input/checkpoint", { storeKey: key, runId: id, gen: "stale", request }),
+        ).toEqual({ status: 409, data: { ok: false, reason: "fenced" } });
+      expect(
+        await post("/runs/source-input/checkpoint", {
+          storeKey: key,
+          runId: "missing-consumer",
+          gen,
+          request: { operation: "read", inputId: "PRIVATE_INPUT_IDENTIFIER" },
+        }),
+      ).toEqual({ status: 409, data: { ok: false, reason: "unknown-run" } });
+      expect(refusals()).toEqual([
+        ["[runs/source-input/checkpoint] refused", { runId: id, operation: "read", reason: "fenced" }],
+        ["[runs/source-input/checkpoint] refused", { runId: id, operation: "commit", reason: "fenced" }],
+        ["[runs/source-input/checkpoint] refused", { runId: id, operation: "ack", reason: "fenced" }],
+        [
+          "[runs/source-input/checkpoint] refused",
+          { runId: "missing-consumer", operation: "read", reason: "unknown-run" },
+        ],
+      ]);
+      expect(await unread(ledger, id)).toEqual([1, 2, 3, 4]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("reports source-protection step refusal once without native or input details", async () => {
+    const { key, ledger, id, gen, step } = await fixture();
+    const peek = await ledger.peekInbox(id, gen, 0);
+    if (!peek.ok) throw new Error("missing original inbox");
+    const witness = peek.items[0]!.witness;
+    const observed = await runInDurableObject(
+      env.RUNS.get(env.RUNS.idFromName(key)),
+      async (owner: RunHistoryDO, state) => {
+        const logs: unknown[][] = [];
+        const warn = console.warn;
+        console.warn = (...fields: unknown[]) => {
+          logs.push(fields);
+        };
+        try {
+          const success = await owner.recordStep(id, gen, { ...step, step: 1, inboxAcknowledgedRows: [witness] });
+          const quiet = logs.length;
+          const raw = state.storage.sql
+            .exec<{ state_json: string }>("SELECT state_json FROM live_runs WHERE run_id=?", id)
+            .toArray()[0]!;
+          const saved = JSON.parse(raw.state_json);
+          saved.sourceInputIntents = {
+            version: 999,
+            native: "PRIVATE_NATIVE_SESSION",
+            input: "PRIVATE_INPUT_IDENTIFIER",
+          };
+          state.storage.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", JSON.stringify(saved), id);
+          const refused = await owner.recordStep(id, gen, { ...step, step: 2, inboxAcknowledgedRows: [witness] });
+          return { success, quiet, refused, logs };
+        } finally {
+          console.warn = warn;
+        }
+      },
+    );
+    expect(observed).toEqual({
+      success: { ok: true },
+      quiet: 0,
+      refused: { ok: false, reason: "fenced" },
+      logs: [["[runs/step] source input protection refused", { runId: id, ownerGen: gen, step: 2, acknowledged: 1 }]],
+    });
+    const after = await ledger.peekInbox(id, gen, 0);
+    expect(after.ok && after.boundary.lastStep).toMatchObject({ step: 1, inboxConsumedSeq: 1 });
+    expect(await unread(ledger, id)).toEqual([2, 3, 4]);
+  });
+
+  it("commits the original before ACK and keeps exact proof private through terminal retention", async () => {
+    const { key, ledger, store, id, gen, receipt, step, thread, session } = await fixture();
+    const committed = await ledger.sourceInputCheckpoint(id, gen, { operation: "commit", receipt });
+    expect(committed).toEqual({
+      ok: true,
+      checkpoint: {
+        receipt,
+        receiptHash: await sourceHash(sourceSnapshot(receipt)),
+        taskHash: await sourceHash(null),
+        acknowledged: false,
+      },
+    });
+    expect(await unread(ledger, id)).toEqual([1, 2, 3, 4]);
+    const read = await ledger.sourceInputCheckpoint(id, gen, { operation: "read", inputId: receipt.inputId });
+    expect(read).toEqual(committed);
+    if (!read.ok || !read.checkpoint) throw new Error("missing native checkpoint");
+    const ack = { operation: "ack", inputId: receipt.inputId, receiptHash: read.checkpoint.receiptHash } as const;
+    expect(await ledger.sourceInputCheckpoint(id, gen, ack)).toMatchObject({
+      ok: true,
+      checkpoint: { acknowledged: true },
+    });
+    expect(await unread(ledger, id)).toEqual([1, 3, 4]);
+    expect(await ledger.step(id, gen, { ...step, step: 1 }, [], session)).toEqual({ ok: true });
+    expect(await unread(ledger, id)).toEqual([1, 3, 4]);
+    expect(await ledger.step(id, gen, { ...step, step: 2, inboxConsumedSeq: 4 }, [], session)).toEqual({ ok: true });
+    expect(await unread(ledger, id)).toEqual([1, 4]);
+    const live = (await ledger.listLive()).find((row) => row.runId === id)!;
+    const original = live.state.sourceInputIntents;
+    const terminal = {
+      ...record(id, thread),
+      agent: "orchestrator",
+      userId: "cli:alice",
+      channelId: "cli:main",
+      startedAt: live.startedAt,
+      finishedAt: live.startedAt + 1,
+      events: [],
+      eventCount: 0,
+      storedEventCount: 0,
+    };
+    expect(await ledger.finish(id, gen, terminal)).toMatchObject({ ok: true, stored: true });
+    expect((await store.get(id))?.sourceInputIntents).toEqual(original);
+    expect(await store.getSummary(id)).not.toHaveProperty("sourceInputIntents");
+    expect(await store.put({ ...terminal, label: "later presentation" })).toMatchObject({ stored: true });
+    expect((await store.get(id))?.sourceInputIntents).toEqual(original);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (owner: RunHistoryDO, state) => {
+      state.storage.sql.exec("UPDATE runs SET finished_at=1 WHERE run_id=?", id);
+      (owner as unknown as { trim(policy: Record<string, number>, now: number, fence: undefined): unknown }).trim(
+        { retentionDays: 1, maxRuns: 0, maxBytes: 0 },
+        Date.now(),
+        undefined,
+      );
+      expect(state.storage.sql.exec("SELECT run_id FROM runs WHERE run_id=?", id).toArray()).toEqual([{ run_id: id }]);
+    });
+    expect((await store.get(id))?.sourceInputIntents).toEqual(original);
+  });
+  it("rolls back both receipt ACK and cursor when the SQLite step write fails", async () => {
+    const { key, ledger, id, gen, receipt } = await fixture();
+    const committed = await ledger.sourceInputCheckpoint(id, gen, { operation: "commit", receipt });
+    if (!committed.ok || !committed.checkpoint) throw new Error("missing native checkpoint");
+    expect(await unread(ledger, id)).toEqual([1, 2, 3, 4]);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_owner, state) => {
+      state.storage.sql.exec(
+        "CREATE TRIGGER refuse_native_ack BEFORE UPDATE OF json ON run_steps BEGIN SELECT RAISE(ABORT, 'fixture checkpoint failure'); END",
+      );
+    });
+    await expect(
+      ledger.sourceInputCheckpoint(id, gen, {
+        operation: "ack",
+        inputId: receipt.inputId,
+        receiptHash: committed.checkpoint.receiptHash,
+      }),
+    ).rejects.toThrow();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_owner, state) => {
+      state.storage.sql.exec("DROP TRIGGER refuse_native_ack");
+    });
+    expect(await ledger.sourceInputCheckpoint(id, gen, { operation: "read", inputId: receipt.inputId })).toEqual(
+      committed,
+    );
+    expect(await unread(ledger, id)).toEqual([1, 2, 3, 4]);
+  });
+  it("settles the exact normal row through HTTP and never resurrects it after stale reports", async () => {
+    const { ledger, id, gen, receipt, step, session } = await fixture();
+    const observed = await ledger.peekInbox(id, gen, 0);
+    if (!observed.ok) throw new Error("missing original inbox");
+    const witness = observed.items[0]!.witness;
+    const committed = await ledger.sourceInputCheckpoint(id, gen, { operation: "commit", receipt });
+    if (!committed.ok || !committed.checkpoint) throw new Error("missing checkpoint");
+    expect(
+      await ledger.sourceInputCheckpoint(id, gen, {
+        operation: "ack",
+        inputId: receipt.inputId,
+        receiptHash: committed.checkpoint.receiptHash,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(await unread(ledger, id)).toEqual([1, 3, 4]);
+    const confirmed = {
+      ...step,
+      step: 1,
+      inboxConsumedSeq: 4,
+      inboxDeferredSeqs: [3, 4],
+      inboxAcknowledgedRows: [witness],
+    };
+    expect(await ledger.step(id, gen, confirmed, [], session)).toEqual({ ok: true });
+    expect(await ledger.step(id, gen, confirmed, [], session)).toEqual({ ok: true });
+    expect(await unread(ledger, id)).toEqual([3, 4]);
+    expect(await ledger.step(id, gen, { ...confirmed, inboxAcknowledgedRows: [] }, [], session)).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(
+      await ledger.step(id, gen, { ...step, step: 2, inboxConsumedSeq: 0, inboxDeferredSeqs: [1] }, [], session),
+    ).toEqual({ ok: true });
+    expect(await unread(ledger, id)).toEqual([3, 4]);
+    expect(
+      await ledger.step(
+        id,
+        gen,
+        { ...step, step: 3, inboxAcknowledgedRows: [observed.items[1]!.witness] },
+        [],
+        session,
+      ),
+    ).toEqual({ ok: false, reason: "fenced" });
+    expect(await unread(ledger, id)).toEqual([3, 4]);
+  });
+
+  it("keeps the normal row unread when its SQLite step insert fails", async () => {
+    const { key, ledger, id, gen, step, session } = await fixture();
+    const observed = await ledger.peekInbox(id, gen, 0);
+    if (!observed.ok) throw new Error("missing original inbox");
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_owner, state) => {
+      state.storage.sql.exec(
+        "CREATE TRIGGER refuse_normal_ack BEFORE INSERT ON run_steps BEGIN SELECT RAISE(ABORT, 'fixture normal confirmation failure'); END",
+      );
+    });
+    await expect(
+      ledger.step(id, gen, { ...step, step: 1, inboxAcknowledgedRows: [observed.items[0]!.witness] }, [], session),
+    ).rejects.toThrow();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_owner, state) => {
+      state.storage.sql.exec("DROP TRIGGER refuse_normal_ack");
+    });
+    expect(await unread(ledger, id)).toEqual([1, 2, 3, 4]);
+    const after = await ledger.peekInbox(id, gen, 0);
+    expect(after.ok && after.boundary.lastStep).toMatchObject({ step: 0, inboxConsumedSeq: 0 });
+    expect(after.ok && after.boundary.lastStep).not.toHaveProperty("inboxAcknowledgedRows");
+  });
+
+  it("refuses a changed normal row while retaining the original confirmation identity", async () => {
+    const { key, ledger, id, gen, step, session } = await fixture();
+    const observed = await ledger.peekInbox(id, gen, 0);
+    if (!observed.ok) throw new Error("missing original inbox");
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), (_owner, state) => {
+      state.storage.sql.exec(
+        "UPDATE run_inbox SET json=? WHERE run_id=? AND seq=1",
+        JSON.stringify({ text: "replacement normal row" }),
+        id,
+      );
+    });
+    expect(
+      await ledger.step(
+        id,
+        gen,
+        { ...step, step: 1, inboxAcknowledgedRows: [observed.items[0]!.witness] },
+        [],
+        session,
+      ),
+    ).toEqual({ ok: false, reason: "fenced" });
+    expect(await unread(ledger, id)).toEqual([1, 2, 3, 4]);
+  });
+  it("fences old owners and retains the original receipt and unread rows after reclaim", async () => {
+    const { ledger, id, gen, receipt } = await fixture();
+    const committed = await ledger.sourceInputCheckpoint(id, gen, { operation: "commit", receipt });
+    expect(committed).toMatchObject({ ok: true, checkpoint: { acknowledged: false } });
+    expect(await ledger.handoff(gen, [id])).toEqual({ marked: [id] });
+    expect((await ledger.reclaim("g2", Date.now() + 20000, 10000))[0]?.row.ownerGen).toBe("g2");
+    expect(await ledger.sourceInputCheckpoint(id, gen, { operation: "read", inputId: receipt.inputId })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await ledger.sourceInputCheckpoint(id, "g2", { operation: "read", inputId: receipt.inputId })).toEqual(
+      committed,
+    );
+    expect(await unread(ledger, id, "g2")).toEqual([1, 2, 3, 4]);
   });
 });
