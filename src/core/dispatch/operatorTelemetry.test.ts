@@ -26,6 +26,35 @@ describe("routing telemetry retention", () => {
     expect(step.responseStatus).toBeUndefined();
   });
 
+  it("records the first streamed content after headers and clears it on a later HTTP attempt", async () => {
+    let clock = 1_000;
+    const recorder = new RoutingRecorder(() => clock, clock, 61_000, new AbortController().signal);
+    await recorder.during("model", async (observe) => {
+      clock = 1_100;
+      observe({ transport: "request_send", transportId: "first" });
+      clock = 1_200;
+      observe({ transport: "response_headers", status: 503 });
+      clock = 1_300;
+      observe({ stream: "first_content" });
+      clock = 1_400;
+      observe({ transport: "request_send", transportId: "second" });
+      clock = 1_500;
+      observe({ transport: "response_headers", status: 200 });
+      clock = 1_700;
+      observe({ stream: "first_content" });
+      clock = 1_800;
+      observe({ stream: "first_content" });
+      return "done";
+    });
+    expect(recorder.snapshot().steps[0]).toMatchObject({
+      transportAttempts: 2,
+      requestSentAt: 1_400,
+      responseHeadersAt: 1_500,
+      firstContentAt: 1_700,
+      finishedAt: 1_800,
+    });
+  });
+
   it.each(["proposed", "selected", "rejected"] as const)(
     "redacts original strings on a %s scripted proposal",
     async (outcome) => {

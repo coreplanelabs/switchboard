@@ -4,6 +4,7 @@ import type { SpanEndEvent } from "./runEvents.js";
 export interface RoutingModelObservation {
   /** Transient provider transport events; the recorder stamps them with its clock. */
   transport?: "request_send" | "response_headers";
+  stream?: "first_content";
   status?: number;
   transportId?: string;
   provider?: string;
@@ -30,7 +31,7 @@ export interface RoutingToolCall {
   result?: string;
 }
 
-export interface RoutingStep extends Omit<RoutingModelObservation, "toolCalls" | "transport" | "status"> {
+export interface RoutingStep extends Omit<RoutingModelObservation, "toolCalls" | "transport" | "stream" | "status"> {
   index: number;
   phase: RoutingPhase;
   startedAt: number;
@@ -42,6 +43,7 @@ export interface RoutingStep extends Omit<RoutingModelObservation, "toolCalls" |
   transportAttempts?: number;
   requestSentAt?: number;
   responseHeadersAt?: number;
+  firstContentAt?: number;
   responseStatus?: number;
   tool?: string;
   question?: string;

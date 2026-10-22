@@ -66,7 +66,7 @@ export interface CompletionRequest {
    *  it to every breakpoint. Absent → the provider default (`5m`). */
   cacheTtl?: CacheTtl;
   /** Timing hooks for the call's span (docs/reference/specs/tracing.md): a streaming
-   *  provider reports the first token; the span layer stamps the time. A
+   *  provider reports the first content block; the span layer stamps the time. A
    *  provider that cannot observe its stream simply never calls them. */
   observer?: CompletionObserver;
 }
@@ -80,7 +80,7 @@ export interface CompletionObserver {
   onResponse?(requestId: string): void;
   /** One HTTP response, including failures and responses without a request ID. */
   onHttpResponse?(status: number, requestId?: string): void;
-  onFirstToken?(): void;
+  onFirstContent?(): void;
   /** A content block began / ended, by kind (`text`, `thinking`, `redacted_thinking`,
    *  `tool_use`, …) and stream index: the span layer sums a turn's thinking and
    *  writing time from these (docs/reference/specs/tracing.md; live-view item 15). */
