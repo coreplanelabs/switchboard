@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAppConfigText } from "../src/config.js";
@@ -7,6 +7,7 @@ import { hostAffectedProbe, loadProfileOnHost, readConfigForPush } from "../src/
 import { stagingProblems, waitForStagingMaintenanceRelease } from "../src/deploy/staging.js";
 import { systemClock } from "../src/core/trace/clock.js";
 import { workersFor } from "../src/deploy/plan.js";
+import { createStagingScratchDirectory } from "../src/deploy/stagingScratch.js";
 
 if (process.argv[2] === "--recover-resident") {
   process.argv.splice(2, 1);
@@ -92,7 +93,7 @@ if (!check && initialize) {
   const { initializeOnHost } = await import("./staging-initialize.js");
   await initializeOnHost(structuredClone(loaded.profile), Object.freeze({ ...config }), { receiptPath, resumeMemory });
 } else if (!check) {
-  const directory = mkdtempSync(join(tmpdir(), "switchboard-staging-"));
+  const directory = createStagingScratchDirectory(process.env.GITHUB_RUN_ID, loaded.profile, tmpdir());
   try {
     // Freeze both remote inputs outside the checkout; the deploy runner still checks its clean tree.
     const configPath = join(directory, "config.yaml");

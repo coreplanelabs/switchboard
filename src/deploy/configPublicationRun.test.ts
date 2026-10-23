@@ -652,6 +652,62 @@ describe("runDeployPlan config publication", () => {
     expect(h.store.slotState).toEqual({ version: 2, document: h.document });
   });
 
+  it("continues an unchanged deployment after one failed application read before Bot activation", async () => {
+    const h = installedRunner();
+    const readApp = h.deps.readAppState;
+    let failed = false;
+    h.deps.readAppState = async (...args) => {
+      if (!failed && processes.calls.includes("upload:memory")) {
+        failed = true;
+        return { error: "private fixture detail" };
+      }
+      return readApp(...args);
+    };
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({ kind: "ran", ok: true });
+    expect(processes.calls).toEqual(["upload:memory", "upload:bot"]);
+    expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+    expect(h.logs.filter((line) => line.includes("application read failed; retrying once"))).toEqual([
+      "[deploy:all] WARNING bot: application read failed; retrying once",
+    ]);
+    expect(h.logs.join("\n")).not.toContain("private fixture detail");
+  });
+
+  it("refuses a changed application target before Bot activation", async () => {
+    const h = installedRunner();
+    const readApp = h.deps.readAppState;
+    h.deps.readAppState = async (...args) =>
+      processes.calls.includes("upload:memory")
+        ? { value: { version: 16, image: "registry.example/bot:other" } }
+        : readApp(...args);
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({
+      kind: "ran",
+      ok: false,
+      results: [
+        expect.anything(),
+        { status: "FAILED: original config source application target changed before activation" },
+      ],
+    });
+    expect(processes.calls).toEqual(["upload:memory"]);
+    expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+  });
+
+  it("refuses an unreadable application target after one retry", async () => {
+    const h = installedRunner();
+    const readApp = h.deps.readAppState;
+    h.deps.readAppState = async (...args) =>
+      processes.calls.includes("upload:memory") ? { error: "application read failed" } : readApp(...args);
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({
+      kind: "ran",
+      ok: false,
+      results: [
+        expect.anything(),
+        { status: "FAILED: original config source application target unavailable before activation" },
+      ],
+    });
+    expect(processes.calls).toEqual(["upload:memory"]);
+    expect(h.store.slotState).toEqual({ version: 2, document: h.document });
+  });
+
   it("waits for the original singleton to finish starting before any config write or upload", async () => {
     const h = installedRunner();
     const ready = h.deps.readInstances;
