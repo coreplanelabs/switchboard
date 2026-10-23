@@ -69,6 +69,7 @@ const names = [
   "cancelRun",
   "cancelNativeRunScope",
   "nativeScopeTransport",
+  "nativeScopeRecoveryTransport",
   "detachThread",
   "killThreadUserProcesses",
   "observeRetiredThreadRuntime",

@@ -11078,6 +11078,25 @@ export class ResidentDO extends Sandbox<Env> {
     return new CloudflareNativeScopeTransport(this.ctx.container);
   }
 
+  /** Recovery validates its original record before comparing native boots. */
+  private nativeScopeRecoveryTransport(): NativeScopeTransport {
+    return {
+      request: async (value, timeout) => {
+        if (!this.ctx.container?.running) {
+          let refusal: string | undefined;
+          if (this.recreateAdmission.pending) refusal = "recreate-pending";
+          else if (this.destroying) refusal = "destroying";
+          else if (await this.recreateAdmission.blocked()) refusal = "recreate-held";
+          else if (await this.ctx.storage.get(CLEANUP_PENDING_KEY)) refusal = "cleanup-pending";
+          else if (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) refusal = "destroy-unconfirmed";
+          if (refusal) throw new Error(`native-scope runtime unavailable (${refusal})`);
+          await this.start();
+        }
+        return this.nativeScopeTransport().request(value, timeout);
+      },
+    };
+  }
+
   private async withOwnedNativeOperation<T>(
     threadKey: string,
     owner: WorkspaceOwner,
@@ -14301,23 +14320,7 @@ export class ResidentDO extends Sandbox<Env> {
         );
       };
       const journal = new NativeOperationJournal(this.ctx.storage);
-      const native = {
-        request: async (value: Record<string, unknown>, timeout: number) => {
-          // Recovery has already checked the exact record and original owner.
-          // Wake a sleeping container so the scope can compare its current boot
-          // with the original boot before closing; waking never replays work.
-          if (!this.ctx.container?.running) {
-            if (
-              this.destroying ||
-              (await this.ctx.storage.get(CLEANUP_PENDING_KEY)) ||
-              (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))
-            )
-              throw new Error("native-scope runtime unavailable");
-            await this.start();
-          }
-          return this.nativeScopeTransport().request(value, timeout);
-        },
-      };
+      const native = this.nativeScopeRecoveryTransport();
       const operator = await journal.recoverOperator(
         key,
         recordHash,
@@ -14575,7 +14578,7 @@ export class ResidentDO extends Sandbox<Env> {
       try {
         finalization = await journal.resumeProducerFinalization(
           origin,
-          native,
+          this.nativeScopeRecoveryTransport(),
           async (record) => "opOwner" in record && !this.activeOperatorRequests.has(record.opOwner),
         );
         for (const saved of await journal.producerAdmissions(origin, (previous) => previous !== owner)) {
