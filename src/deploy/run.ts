@@ -3464,17 +3464,28 @@ async function runSelectedDeployPlan(
       if ((step.name === "resident" || step.name === "bot") && (configPublication || installedConfig)) {
         // Check the original Bot source before either consumer. Real changes
         // publish once; installed bytes retain their exact durable revision.
-        const currentApp =
+        const readCurrentApp = () =>
           configConsumerStep?.liveGate?.kind === "bot"
-            ? await deps.readAppState(configConsumerStep.dir, configConsumerStep.liveGate.containerApp)
-            : { error: "bot application unavailable" };
+            ? deps.readAppState(configConsumerStep.dir, configConsumerStep.liveGate.containerApp)
+            : Promise.resolve({ error: "bot application unavailable" });
+        let currentApp = await readCurrentApp();
         if (cancelled()) break;
+        if ("error" in currentApp) {
+          io.warn(`[deploy:all] WARNING ${step.name}: application read failed; retrying once`);
+          await deps.sleep(plan.pollMs, deps.signal);
+          if (cancelled()) break;
+          currentApp = await readCurrentApp();
+          if (cancelled()) break;
+        }
         if (!configSource || !unchangedConfigSourceApplication(configSource, currentApp)) {
           results.push({
             name: step.name,
             script: step.script,
             live: "not deployed",
-            status: "FAILED: original config source application target changed before activation",
+            status:
+              "error" in currentApp
+                ? "FAILED: original config source application target unavailable before activation"
+                : "FAILED: original config source application target changed before activation",
           });
           break;
         }
