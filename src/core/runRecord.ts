@@ -823,7 +823,11 @@ function isRunPullRequestShape(v: unknown): v is RunPullRequest {
  *  (docs/reference/specs/agent-ship.md item 9, issue 1932).
  *  `model_stream_incomplete`: pi's answer stream ended incomplete after its
  *  local retry lease, with no provider-down evidence; Ship grants the same
- *  one re-run when nothing was pushed. `sandbox_fleet_busy`: a coordinator
+ *  one re-run when nothing was pushed.
+ *  `source_unavailable`: a temporary source read exhausted the run's local
+ *  retry window before any failed call reached the provider; it grants no
+ *  replay of an uncertain storage effect.
+ *  `sandbox_fleet_busy`: a coordinator
  *  child failed in setup before its model started after the executor spent
  *  the fleet wait; Ship may retry its review only at a freshly verified PR
  *  head within the original unit's lease. A failure without
@@ -835,6 +839,7 @@ export const RUN_FAILURE_KINDS = [
   "policy_refusal",
   "provider_transient",
   "model_stream_incomplete",
+  "source_unavailable",
   "sandbox_fleet_busy",
   // A `restarting` close whose claim deadline passed with no successor holding
   // the id: the store's sweep closes it as `interrupted` (record 0097).

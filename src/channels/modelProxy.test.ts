@@ -29,9 +29,11 @@ import {
   authenticateProxyProviderFailure,
   authenticateProxyUnknownTerminal,
   proxyProviderFailureIsAuthenticated,
+  proxySourceRetryIsAuthenticated,
   readProxyUnknownTerminal,
 } from "../core/modelProxy/providerFailureAuth.js";
 import { bearerHashOf, RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
+import { ToolRecovery } from "../core/harness/toolRecovery.js";
 import type { ModelCard } from "../core/modelCard.js";
 import { classifyProviderFailure, type ProviderConfig, type ToolDef } from "../core/provider.js";
 import { shapeToolSchemasForWire } from "../core/providerToolSchemas.js";
@@ -1923,6 +1925,92 @@ describe("the turn guard — a run that ended between the door and the turn", ()
 });
 
 describe("current model source guard", () => {
+  it("holds a temporary source read failure before forwarding a model call", async () => {
+    const h = harness();
+    const token = h.bearers.mint(h.grant("run-1"), { sourceGuardRequired: true });
+    const saved: unknown[] = [];
+    const recovery = new ToolRecovery(undefined, async (state) => {
+      saved.push(state);
+      return true;
+    });
+    await recovery.record("original-call", "bash", { command: "true" }, { text: "known failure" });
+    h.bearers.bindRecovery("run-1", recovery);
+    h.bearers.bindSourceGuard("run-1", async () => "retryable");
+
+    const response = await handleModelProxyRequest(
+      request({ headers: bearer(token), json: anthropicRequest({ stream: false }) }).req,
+      h.deps,
+    );
+
+    expect(h.fetchFake).not.toHaveBeenCalled();
+    expect([response.status, errorType(response)]).toEqual([403, "source_check_retryable"]);
+    expect(proxySourceRetryIsAuthenticated(response.body)).toBe(true);
+    expect(h.bearers.grantOf("run-1")?.turns).toBe(0);
+    expect(saved).toHaveLength(1);
+
+    h.bearers.bindSourceGuard("run-1", async () => true);
+    const recovered = await handleModelProxyRequest(
+      request({ headers: bearer(token), json: anthropicRequest({ stream: false }) }).req,
+      h.deps,
+    );
+    expect(recovered.status).toBe(200);
+    expect(h.fetchFake).toHaveBeenCalledTimes(1);
+    expect(h.bearers.grantOf("run-1")?.turns).toBe(1);
+    expect(saved).toHaveLength(1);
+  });
+
+  it("does not turn a revoked source guard into a signed retry or provider call", async () => {
+    const h = harness();
+    const token = h.bearers.mint(h.grant("run-1"), { sourceGuardRequired: true });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const checking = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    h.bearers.bindSourceGuard("run-1", async () => {
+      entered();
+      await held;
+      return "retryable";
+    });
+    const pending = handleModelProxyRequest(
+      request({ headers: bearer(token), json: anthropicRequest({ stream: false }) }).req,
+      h.deps,
+    );
+    await checking;
+    h.bearers.revoke("run-1");
+    release();
+
+    const response = await pending;
+    expect([response.status, errorType(response)]).toEqual([403, "revoked"]);
+    expect(proxySourceRetryIsAuthenticated(response.body)).toBe(false);
+    expect(h.fetchFake).not.toHaveBeenCalled();
+    expect(h.bearers.grantOf("run-1")?.turns).toBe(0);
+  });
+
+  it("keeps source access closed when it is revoked between retryable model requests", async () => {
+    const h = harness();
+    const token = h.bearers.mint(h.grant("run-1"), { sourceGuardRequired: true });
+    let source: boolean | "retryable" = "retryable";
+    h.bearers.bindSourceGuard("run-1", async () => source);
+    const ask = () =>
+      handleModelProxyRequest(
+        request({ headers: bearer(token), json: anthropicRequest({ stream: false }) }).req,
+        h.deps,
+      );
+
+    const first = await ask();
+    expect([first.status, errorType(first)]).toEqual([403, "source_check_retryable"]);
+    source = false;
+    const revoked = await ask();
+    expect([revoked.status, errorType(revoked)]).toEqual([403, "source_unavailable"]);
+    expect(proxySourceRetryIsAuthenticated(revoked.body)).toBe(false);
+    expect(h.fetchFake).not.toHaveBeenCalled();
+    expect(h.bearers.grantOf("run-1")?.turns).toBe(0);
+  });
+
   it.each(["anthropic-messages", "openai-chat", "openai-responses"] as const)(
     "%s refuses missing, changed and throwing private proof locally while public calls remain allowed",
     async (wire) => {
@@ -3207,6 +3295,33 @@ describe("Responses stream failure boundary", () => {
       }) as typeof fetch,
     }).result();
   };
+
+  it("carries a pre-provider source hold through the real pi Responses adapter", async () => {
+    const h = harness();
+    const token = h.bearers.mint(h.responsesGrant("run-1"), { sourceGuardRequired: true });
+    h.bearers.bindSourceGuard("run-1", async () => "retryable");
+    const message = await streamResponses(model, normalizeContext({ messages: [] }), {
+      apiKey: token,
+      maxRetries: 0,
+      fetch: (async (_url, init) => {
+        const response = await handleModelProxyRequest(
+          request({
+            path: OPENAI_RESPONSES_PATH,
+            headers: bearer(token),
+            json: JSON.parse(String(init?.body)),
+          }).req,
+          h.deps,
+        );
+        return new Response(response.body, { status: response.status, headers: response.headers });
+      }) as typeof fetch,
+    }).result();
+    const observed = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+
+    expect(observed.terminalFailure).toMatchObject({ kind: "local_source" });
+    expect(observed.providerFailure).toBeUndefined();
+    expect(h.calls).toHaveLength(0);
+    expect(h.bearers.grantOf("run-1")?.turns).toBe(0);
+  });
 
   it.each(["admission", "request_validation", "response_validation"] as const)(
     "distinguishes authenticated %s rejection across pi without granting retry",

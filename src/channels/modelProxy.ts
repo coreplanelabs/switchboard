@@ -21,8 +21,10 @@ import { MODEL_STREAM_HEARTBEAT_MS, RESPONSES_VALIDATION_LIMITS } from "../core/
 import { ToolRecoveryStoppedError } from "../core/harness/toolRecovery.js";
 import {
   authenticateProxyProviderFailure,
+  authenticateProxySourceRetry,
   authenticateProxyTurnBudgetExhausted,
   authenticateProxyUnknownTerminal,
+  PROXY_SOURCE_RETRY_MESSAGE,
 } from "../core/modelProxy/providerFailureAuth.js";
 import type { RunBearerGrant, RunBearerStore, RunMarks } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
@@ -1137,21 +1139,29 @@ async function handleAdmittedCall(
   };
   const { schemaShaped, payload, offered } = consumer ? await consumer.withParsing(async () => prepare()) : prepare();
   await deps.bearers.settleRecovery(grant.runId, false);
-  const sourceRefused = (code: "revoked" | "expired" | "source_unavailable") => {
-    if (code === "source_unavailable")
+  const sourceRefused = (code: "revoked" | "expired" | "source_unavailable" | "source_check_retryable") => {
+    if (code === "source_unavailable" || code === "source_check_retryable")
       grant.publish({
         type: "run_note",
         kind: "model_source_refused",
         summary:
-          "Switchboard could not verify access to this run's source. The model did not receive this request. Check source access before you retry.",
+          code === "source_check_retryable"
+            ? PROXY_SOURCE_RETRY_MESSAGE
+            : "Switchboard could not verify access to this run's source. The model did not receive this request. Check source access before you retry.",
         at: deps.clock(),
       });
     log(`[model-proxy] 403 ${code} run=${grant.runId}`);
+    if (code === "source_check_retryable") {
+      const error = authenticateProxySourceRetry();
+      const body = shape === "anthropic-messages" ? { type: "error", error } : { error };
+      return { status: 403, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+    }
     return refusalResponse(shape, 403, code, "The run's current model source could not be verified.");
   };
-  const sourceAllowed = await door.sourceGuard.check();
+  const sourceAllowed = await door.sourceGuard.checkForModel();
   const sourceRefusal = door.sourceGuard.current();
   if (sourceRefusal) return sourceRefused(sourceRefusal);
+  if (sourceAllowed === "retryable") return sourceRefused("source_check_retryable");
   if (!sourceAllowed) return sourceRefused("source_unavailable");
   const turn = deps.bearers.consumeTurn(grant.runId);
   if (!turn.ok && turn.reason === "tool_recovery") {

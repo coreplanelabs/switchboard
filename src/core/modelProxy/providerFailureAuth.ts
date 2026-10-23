@@ -147,6 +147,49 @@ export function proxyProviderFailureIsAuthenticated(value: unknown): boolean {
   return offered.length === expected.length && timingSafeEqual(offered, expected);
 }
 
+export const PROXY_SOURCE_RETRY_TYPE = "source_check_retryable";
+export const PROXY_SOURCE_RETRY_MESSAGE =
+  "The run's source check is temporarily unavailable; the model did not receive this request.";
+
+const sourceRetrySignature = (nonce: string): Buffer =>
+  createHmac("sha256", AUTH_KEY)
+    .update(JSON.stringify([AUTH_VERSION, nonce, PROXY_SOURCE_RETRY_TYPE, PROXY_SOURCE_RETRY_MESSAGE]))
+    .digest();
+
+/** The proxy signs a local refusal before it forwards this request to a provider. */
+export function authenticateProxySourceRetry(): {
+  type: typeof PROXY_SOURCE_RETRY_TYPE;
+  message: typeof PROXY_SOURCE_RETRY_MESSAGE;
+  [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: string;
+} {
+  const nonce = randomBytes(NONCE_BYTES).toString("base64url");
+  const mac = sourceRetrySignature(nonce).toString("base64url");
+  return {
+    type: PROXY_SOURCE_RETRY_TYPE,
+    message: PROXY_SOURCE_RETRY_MESSAGE,
+    [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: `${AUTH_VERSION}.${nonce}.${mac}`,
+  };
+}
+
+export function proxySourceRetryIsAuthenticated(value: unknown): boolean {
+  const found = candidates(parseBody(value), [], PROXY_SOURCE_RETRY_TYPE);
+  if (found.length !== 1) return false;
+  const row = found[0];
+  if (
+    row.message !== PROXY_SOURCE_RETRY_MESSAGE ||
+    Object.keys(row).length !== 3 ||
+    typeof row[PROXY_PROVIDER_FAILURE_AUTH_FIELD] !== "string"
+  )
+    return false;
+  const parts = (row[PROXY_PROVIDER_FAILURE_AUTH_FIELD] as string).split(".");
+  if (parts.length !== 3 || parts[0] !== AUTH_VERSION) return false;
+  const [, nonce, encodedMac] = parts;
+  if (!/^[A-Za-z0-9_-]{22}$/.test(nonce) || !/^[A-Za-z0-9_-]{43}$/.test(encodedMac)) return false;
+  const offered = Buffer.from(encodedMac, "base64url");
+  const expected = sourceRetrySignature(nonce);
+  return offered.length === expected.length && timingSafeEqual(offered, expected);
+}
+
 // An unknown terminal is not a ProviderFailure. Its separate signed type keeps
 // pi's abort race from turning missing recovery evidence into a local retry.
 const UNKNOWN_TERMINAL_TYPE = "model_terminal_unknown";

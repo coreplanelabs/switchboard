@@ -26,6 +26,8 @@ import {
 } from "../../runEvents.js";
 import {
   proxyProviderFailureIsAuthenticated,
+  proxySourceRetryIsAuthenticated,
+  PROXY_SOURCE_RETRY_MESSAGE,
   readProxyUnknownTerminal,
   readProxyTurnBudgetExhausted,
   proxyTurnBudgetExhaustedIsAuthenticated,
@@ -120,6 +122,7 @@ export type PiTerminalFailure =
   | { kind: "local_turn_budget"; detail: string; turns: number; maxTurns: number }
   | { kind: "local_abort"; detail: string }
   | { kind: "local_stream"; detail: string }
+  | { kind: "local_source"; detail: string }
   | { kind: "context_overflow"; detail: string; failure: ProviderFailure }
   | {
       kind: "unknown";
@@ -502,6 +505,11 @@ export class PiBridge {
       const unknown = readProxyUnknownTerminal(raw);
       if (unknown !== undefined) {
         out.terminalFailure = unknownTerminal(message, detail, unknown, this.deps.secretValues);
+        return;
+      }
+      if (raw !== undefined && proxySourceRetryIsAuthenticated(raw)) {
+        out.providerError = PROXY_SOURCE_RETRY_MESSAGE;
+        out.terminalFailure = { kind: "local_source", detail: PROXY_SOURCE_RETRY_MESSAGE };
         return;
       }
       if (raw !== undefined && proxyProviderFailureIsAuthenticated(raw)) {

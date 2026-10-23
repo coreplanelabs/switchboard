@@ -121,7 +121,13 @@ export interface PiHarnessFacts {
   relaunches: number;
   /** Reserved retry attempts and the original wait bound survive a restart.
    * Reserving before a prompt makes an uncertain send consume its attempt. */
-  retryRecovery?: { retries: number; until: number; notBefore: number };
+  retryRecovery?: {
+    retries: number;
+    until: number;
+    notBefore: number;
+    /** A source hold must not become a provider failure after re-attach. */
+    failureKind?: "local_source";
+  };
 }
 
 /** What a run's row will remember about its OpenCode server, the second
