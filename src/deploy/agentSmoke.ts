@@ -435,7 +435,7 @@ function scenarios(config: SmokeConfig): SmokeScenario[] {
       id: "workspace",
       agent: "explore",
       minutes: explore,
-      text: `agent:explore budget:${explore} Read ${config.workspace.path} in ${config.repo} using the workspace. Reply only with its contents. Do not change files.`,
+      text: `agent:explore budget:${explore} Read ${config.workspace.path} in ${config.repo} using the workspace. If no checkout is present, clone the bound repository with git clone "$GIT_DOOR_REMOTE". Reply only with its contents. Do not change files.`,
     },
     {
       id: "review",

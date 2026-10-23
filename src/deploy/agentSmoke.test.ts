@@ -898,7 +898,7 @@ describe("bounded agent smoke", () => {
       id: "workspace",
       agent: "explore",
       minutes: 15,
-      text: "agent:explore budget:15 Read SMOKE.md in acme/smoke using the workspace. Reply only with its contents. Do not change files.",
+      text: 'agent:explore budget:15 Read SMOKE.md in acme/smoke using the workspace. If no checkout is present, clone the bound repository with git clone "$GIT_DOOR_REMOTE". Reply only with its contents. Do not change files.',
     });
   });
 
@@ -1257,7 +1257,7 @@ describe("bounded agent smoke", () => {
     );
     expect((transport.request as ReturnType<typeof vi.fn>).mock.calls.map(([scenario]) => scenario.text)).toEqual([
       "agent:general What is 2 + 2? Answer only with the number. budget:4 model:openai/gpt-6.1-sol",
-      "agent:explore budget:15 Read SMOKE.md in acme/smoke using the workspace. Reply only with its contents. Do not change files. model:openai/gpt-6.1-sol",
+      'agent:explore budget:15 Read SMOKE.md in acme/smoke using the workspace. If no checkout is present, clone the bound repository with git clone "$GIT_DOOR_REMOTE". Reply only with its contents. Do not change files. model:openai/gpt-6.1-sol',
       `agent:review budget:15 Review https://github.com/acme/smoke/pull/7 at head ${head}. Publish the review; do not change files or merge. model:openai/gpt-6.1-sol`,
     ]);
   });
