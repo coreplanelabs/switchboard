@@ -32,6 +32,7 @@ import { DEFAULT_VERBOSITY, shows, type Verbosity } from "../core/verbosity.js";
 import { renderOffer } from "../core/confirmations.js";
 import { type SlackThreadMessage, stripAppFooter, stripBotNameAddress, threadTurns } from "./slack/threadTurns.js";
 import { createSlackNativeMedia } from "./slack/nativeMedia.js";
+import { describeSlackFailure } from "./slack/failure.js";
 import { nativeMediaDigest } from "../core/nativeMedia.js";
 import {
   createStatusBudget,
@@ -143,19 +144,6 @@ export function createStatusClient(token: Secret | undefined): SlackClient {
 function retryAfterSeconds(err: unknown): number | undefined {
   const e = err as { code?: string; retryAfter?: unknown } | undefined;
   return e?.code === webApi.ErrorCode.RateLimitedError && typeof e.retryAfter === "number" ? e.retryAfter : undefined;
-}
-
-/** An error's one-line name for a log: the message of an `Error`, the `code` of a
- *  Slack Web API rejection (a plain object, e.g. `slack_webapi_rate_limited_error`), else its JSON. */
-function describeError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  const code = (err as { code?: unknown } | undefined)?.code;
-  if (typeof code === "string") return code;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
 }
 
 const PLATFORM = "slack";
@@ -682,7 +670,7 @@ export async function actOnMissedMessage(
       try {
         row = await intake.deps.ledger?.readIntake(key);
       } catch (err) {
-        log(`[catch-up] ${key}: receipt read failed — ${describeError(err)}; deciding as if none`);
+        log(`[catch-up] ${key}: receipt read failed — ${describeSlackFailure(err)}; deciding as if none`);
       }
       if (row) {
         decided = true;
@@ -699,7 +687,8 @@ export async function actOnMissedMessage(
             thread: m.thread,
             botUserId: opts.botUserId,
             ...(opts.reply ? { reply: opts.reply } : {}),
-            failed: (err) => log(`[catch-up] ${key}: provider failure could not be rendered — ${describeError(err)}`),
+            failed: (err) =>
+              log(`[catch-up] ${key}: provider failure could not be rendered — ${describeSlackFailure(err)}`),
           });
         if (silent) log(`[catch-up] ${key}: silenced by its stored receipt (${row.source}): ${row.reason}`);
       } else {
@@ -738,7 +727,8 @@ export async function actOnMissedMessage(
             thread: m.thread,
             botUserId: opts.botUserId,
             ...(opts.reply ? { reply: opts.reply } : {}),
-            failed: (err) => log(`[catch-up] ${key}: provider failure could not be rendered — ${describeError(err)}`),
+            failed: (err) =>
+              log(`[catch-up] ${key}: provider failure could not be rendered — ${describeSlackFailure(err)}`),
           });
         decided = true;
         silent = decision.verdict !== "addressed";
@@ -1817,7 +1807,7 @@ export class SlackIO implements ChannelIO {
         const retryAfter = retryAfterSeconds(err);
         if (retryAfter === undefined || attempt >= TERMINAL_RESENDS) {
           console.warn(
-            `[slack] card ${card}: terminal frame not painted (${describeError(err)}) after ${attempt + 1} attempts`,
+            `[slack] card ${card}: terminal frame not painted (${describeSlackFailure(err)}) after ${attempt + 1} attempts`,
           );
           return false;
         }

@@ -30,7 +30,10 @@ describe("fetchImages (attachment ingestion within budgets)", () => {
     return fetchMock;
   }
 
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   it("downloads accepted images and returns base64 payloads", async () => {
     stubFetch();
@@ -75,15 +78,21 @@ describe("fetchImages (attachment ingestion within budgets)", () => {
   });
 
   it("survives a failed fetch and names the skipped file", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
-        throw new Error("network down");
+        throw new Error(
+          "GET https://files.slack.test/private/file?token=SECRET failed with ghp_123456789012345678901234567890",
+        );
       }),
     );
     const { images, skipped } = await fetchImages([png("a.png")], 10);
     expect(images).toEqual([]);
     expect(skipped).toEqual(["a.png (image/png)"]);
+    expect(log.mock.calls.map((c) => String(c[0]))).toEqual([
+      "[files] download failed for a.png (image/png): Error: GET «redacted-url» failed with «redacted-github-token»",
+    ]);
   });
 
   it("survives a thrown non-Error too", async () => {
