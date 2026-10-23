@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENTS } from "../agents/registry.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
+import { MINUTE_MS } from "./budgets.js";
 import { declaredProfile } from "../config/profile.js";
 import { resetResidentProbeCache } from "../execution/factory.js";
 import { TEST_GITHUB_CREDENTIALS } from "../execution/testing/githubCredentials.js";
 import type { Executor } from "../execution/executor.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
-import type { FollowUpTurnInput } from "./harness/contract.js";
+import { FollowUpCompletionDeadlineError, type FollowUpTurnInput } from "./harness/contract.js";
 import type { PrCommitList } from "./headMoved.js";
 import { submitVerdictTool } from "../tools/submit.js";
 import type { ReviewHistoryContext } from "./reviewHistory.js";
@@ -1328,6 +1329,46 @@ describe("settleReviewedHead — the head-move re-review", () => {
     return { input, executor, events, replies, labels, moves };
   }
 
+  it("a head move near the deadline records an incomplete review without moving the checkout or starting another model turn", async () => {
+    const followUp = vi.fn(async () => "unreachable");
+    const w = moved({ followUp, remainingMs: () => 2.5 * MINUTE_MS });
+    const out = await settleReviewedHead(w.input);
+    expect(out).toMatchObject({
+      reviewHead: HEAD,
+      observedHead: HEAD,
+      verdict: undefined,
+      incompleteReason: expect.stringContaining("no full re-review fits"),
+    });
+    expect(w.moves).toEqual([]);
+    expect(followUp).not.toHaveBeenCalled();
+    expect(w.events[0]).toMatchObject({ kind: "head_moved", summary: expect.stringContaining("review incomplete") });
+  });
+
+  it("skips a moved-head follow-up when base preparation uses its last model minute", async () => {
+    let remaining = 3.1 * MINUTE_MS;
+    const followUp = vi.fn(async () => "unreachable");
+    const w = moved({ followUp, remainingMs: () => remaining });
+    w.input.fetchPrBase = async () => {
+      remaining = 2.5 * MINUTE_MS;
+      return { baseRef: "main", baseSha: HEAD };
+    };
+    const out = await settleReviewedHead(w.input);
+    expect(followUp).not.toHaveBeenCalled();
+    expect(out.verdict).toBeUndefined();
+    expect(out.incompleteReason).toContain("no full re-review fits");
+  });
+
+  it("reports incomplete when a replacement session runs out of time before its model turn", async () => {
+    const followUp = vi.fn(async () => {
+      throw new FollowUpCompletionDeadlineError();
+    });
+    const w = moved({ followUp });
+    const out = await settleReviewedHead(w.input);
+    expect(followUp).toHaveBeenCalledTimes(1);
+    expect(out.verdict).toBeUndefined();
+    expect(out.incompleteReason).toContain("no full re-review fits");
+  });
+
   it.each([false, true])(
     "matching commit metadata cannot carry approval to another head (session %s)",
     async (session) => {
@@ -1413,7 +1454,7 @@ describe("settleReviewedHead — the head-move re-review", () => {
     expect(input.text).toContain("Switchboard has already moved your worktree to d75b5a5");
     expect(input.text).toContain("- 2222222 fix: review nits");
     expect(input.maxTurns).toBe(AGENTS.review.maxTurns);
-    expect(input.maxMinutes).toBe(AGENTS.review.maxMinutes);
+    expect(input.maxMinutes).toBe(1);
     expect(input.toolContext.executor).toBe(w.executor);
     // the round's transcript grew: the first review, then the follow-up
     expect(w.input.messages).toHaveLength(3);

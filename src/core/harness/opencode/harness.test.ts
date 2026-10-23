@@ -1502,6 +1502,25 @@ describe("the post-turn on the run's session — refused, answered by silence, o
 
   const postTurn = { text: "describe the change", maxTurns: 5, maxMinutes: 5, toolContext: { executor } };
 
+  it("starts no follow-up after its own completion deadline even when the run still has time", async () => {
+    let clock!: { now: number };
+    const o = openRun({}, oneTurn, undefined, NOW + 3 * MINUTE_MS, (_run, value) => {
+      clock = value;
+    });
+    const session = await o.opened;
+    clock.now = NOW + MINUTE_MS + 1;
+    const prompts = o.container.requests.filter(
+      (request) => request.method === "POST" && request.path.endsWith("/prompt"),
+    ).length;
+    await expect(session.followUp({ ...postTurn, maxMinutes: 1, deadlineAt: NOW + MINUTE_MS })).rejects.toThrow(
+      "deadline",
+    );
+    expect(
+      o.container.requests.filter((request) => request.method === "POST" && request.path.endsWith("/prompt")),
+    ).toHaveLength(prompts);
+    await session.end();
+  });
+
   it("refused: the turn throws OpenCodeRequestRefusedError naming the follow-up turn's prompt and the answer, the note is on the record, and the session still ends", async () => {
     const o = openRun({ promptPostFails: 2 });
     const session = await o.opened;

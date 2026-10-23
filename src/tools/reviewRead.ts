@@ -9,6 +9,47 @@ export interface ReviewReadTarget {
   base: string;
 }
 
+/** Controller receipt for contiguous bytes of one exact-head diff. */
+export interface ReviewReadProgress {
+  head: string;
+  sourceHash: string;
+  size: number;
+  nextOffset: number;
+  eof: boolean;
+}
+
+export function advanceReviewRead(
+  progress: ReviewReadProgress | undefined,
+  page: ReviewReadProgress & { offset: number },
+): ReviewReadProgress | undefined {
+  if (page.nextOffset < page.offset) return undefined;
+  const sameSource =
+    progress?.head === page.head && progress.sourceHash === page.sourceHash && progress.size === page.size;
+  if (page.offset !== 0 && !sameSource) return undefined;
+  if (sameSource && page.offset !== 0 && page.offset !== progress.nextOffset && page.nextOffset > progress.nextOffset)
+    return undefined;
+  if (sameSource && page.nextOffset <= progress.nextOffset) return progress;
+  return { head: page.head, sourceHash: page.sourceHash, size: page.size, nextOffset: page.nextOffset, eof: page.eof };
+}
+
+export function reviewReadProgressOf(value: unknown): ReviewReadProgress | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const v = value as Partial<ReviewReadProgress>;
+  return typeof v.head === "string" &&
+    /^[a-f0-9]{40}$/.test(v.head) &&
+    typeof v.sourceHash === "string" &&
+    /^[a-f0-9]{64}$/.test(v.sourceHash) &&
+    Number.isSafeInteger(v.size) &&
+    Number.isSafeInteger(v.nextOffset) &&
+    v.size! >= 0 &&
+    v.size! <= 10 * 1024 * 1024 &&
+    v.nextOffset! >= 0 &&
+    v.nextOffset! <= v.size! &&
+    v.eof === (v.nextOffset === v.size)
+    ? (v as ReviewReadProgress)
+    : undefined;
+}
+
 // Runs inside the executor, never on the bot host. Git reads immutable objects:
 // no checkout file, symlink, textconv, external diff, fetch or model shell runs.
 // Bound both the source and the returned page before crossing the output seam.
@@ -184,6 +225,17 @@ export const reviewReadTool: RunnableTool = {
         !ctx.github.canWrite(target.repo)
       )
         return fail("review source access changed during the read");
+      if (input.kind === "diff") {
+        const accepted = await ctx.onReviewReadPage?.({
+          head: target.head,
+          sourceHash: page.sourceHash!,
+          size: page.size!,
+          offset,
+          nextOffset: page.nextOffset!,
+          eof: page.eof!,
+        });
+        if (accepted === false) return fail("diff pages must be read in order from one unchanged source");
+      }
       return result.stdout;
     } catch {
       return fail("source read did not complete; no page was accepted");

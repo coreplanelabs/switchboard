@@ -281,7 +281,7 @@ export type RoundKind = "coding" | "review" | "findings" | "merge";
  *  falls under the floor is refused rather than dispatched: a two-minute
  *  review or findings round costs an attach and a model turn and finishes
  *  nothing. Review's observed 90th percentile is 5.1 minutes over 181 runs,
- *  but its three-minute write-up and three-minute post-step require at least
+ *  but its three-minute write-up and three-minute completion require at least
  *  seven minutes for a model turn; coding's is the least a findings round can run the repo's
  *  gate in — the gate alone takes seven to ten minutes on a resident, and a
  *  round that cannot run it finishes nothing its contract asks; the merge
@@ -390,8 +390,8 @@ export const ALLOWANCES = {
   bearerGrace: 1,
 } as const;
 
-/** The post-step turn a preset runs after its loop, in minutes: the coding
- *  run's description turn, the review's verdict turn, none for the rest. */
+/** The post-loop reserve, in minutes: coding's description turn and Review's
+ *  separate verdict and publication phases. */
 export const POST_STEP_MINUTES: Readonly<Record<Preset, number>> = {
   coding: 5,
   review: 3,
@@ -402,6 +402,18 @@ export const POST_STEP_MINUTES: Readonly<Record<Preset, number>> = {
   orchestrator: 0,
   ship: 0,
 };
+
+/** Review completion has separate leases within the existing post-step. */
+export const REVIEW_COMPLETION = { verdictMinutes: 1, publicationMinutes: 2 } as const;
+
+/** No model turn starts when it would consume the publication reserve. */
+export function reviewVerdictLease(remainingMs: number | undefined): number {
+  if (remainingMs === undefined) return REVIEW_COMPLETION.verdictMinutes;
+  return Math.min(
+    REVIEW_COMPLETION.verdictMinutes,
+    Math.max(0, remainingMs / MINUTE_MS - REVIEW_COMPLETION.publicationMinutes),
+  );
+}
 
 /** The post-step allowance of a preset named by its def's `name`: a name
  *  outside the table (a test's, a command run's) runs no post-step. */
