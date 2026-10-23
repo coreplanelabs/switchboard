@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
 import { hasUnexpectedOwnedThreadDir } from "./orphanThreadUsers.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
+import { residentGithubFailureFacts } from "./githubFailure.js";
 import ts from "typescript";
 import { runInNewContext } from "node:vm";
 
@@ -35,6 +36,61 @@ describe("resident model credential boundary", () => {
       "staging maintenance refuses token access outside the selected fixture",
     );
     expect(await mint({}, "acme/api")).toEqual({ token: "synthetic-fixture-token", expiresAtMs: 100_000_000 });
+  });
+
+  it("keeps safe GitHub mint facts and a no-response transport result without raw bytes", async () => {
+    const body = source.slice(
+      source.indexOf("export async function mintRepoScopedToken"),
+      source.indexOf("/** Short-lived RS256 JWT"),
+    );
+    const compiled = ts.transpileModule(body.replace("export async function", "async function"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json(
+          {
+            message:
+              "Resource not accessible by integration: https://private.example/repo?token=SECRET ghp_123456789012345678901234567890\nPRIVATE_SECOND_LINE",
+          },
+          { status: 403, headers: { "x-github-request-id": "A1:B2", "x-ratelimit-remaining": "0" } },
+        ),
+      )
+      .mockRejectedValueOnce(new Error("GET https://private.example/repo?token=SECRET failed"))
+      .mockResolvedValueOnce(
+        new Response("PRIVATE_BODY", {
+          status: 401,
+          headers: { "x-github-request-id": "PRIVATE/path", "x-ratelimit-remaining": "-1" },
+        }),
+      );
+    const mint = runInNewContext(compiled + "\nmintRepoScopedToken", {
+      registryStub: () => ({ getStagingMaintenance: async () => undefined }),
+      githubAppConfigured: () => true,
+      githubTokenCache: new Map(),
+      systemClock: () => 1_000,
+      CREDENTIAL_EXPIRY_MARGIN_MS: 60_000,
+      githubAppJwt: async () => "fixture-jwt",
+      RESIDENT_MIRROR_PERMISSIONS: {},
+      AbortSignal,
+      fetch: fetchMock,
+      errMsg: (error: Error) => error.message,
+      residentGithubFailureFacts,
+    }) as (env: Record<string, string>, slug: string) => Promise<unknown>;
+    const env = { GITHUB_APP_INSTALLATION_ID: "123" };
+
+    const http = await mint(env, "acme/api").catch((cause: unknown) => cause);
+    expect((http as Error).message).toBe(
+      "github-token-mint-failed: HTTP 403; request A1:B2; remaining 0; message Resource not accessible by integration: «redacted-url» «redacted-github-token»",
+    );
+    const transport = await mint(env, "acme/api").catch((cause: unknown) => cause);
+    expect((transport as Error).message).toBe("github-token-mint-failed: transport failure contacting api.github.com");
+    const malformed = await mint(env, "acme/api").catch((cause: unknown) => cause);
+    expect((malformed as Error).message).toBe("github-token-mint-failed: HTTP 401");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(`${String(http)} ${String(transport)} ${String(malformed)}`).not.toMatch(
+      /PRIVATE_SECOND_LINE|PRIVATE_BODY|private\.example|ghp_1234|SECRET/,
+    );
   });
 
   it("refuses an old thread directory owned by a candidate UID", () => {

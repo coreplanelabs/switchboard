@@ -8,6 +8,7 @@ import { prepareStorageRequest } from "../../src/core/storeResponse.js";
 import { storageTransport } from "../../src/core/storageTransport.js";
 import { assertRepositorySettingsWritable, resetRepositorySettings } from "../../src/execution/registrySettings.js";
 import { captureException } from "../../src/core/runStateWriteDiagnostic.js";
+import { residentGithubFailureFacts } from "./githubFailure.js";
 import {
   FENCE_ACQUISITION_PREFIX,
   fenceAcquisitionOf,
@@ -1238,13 +1239,12 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
     // fetch throw (network/DNS) lands here too. Both are command-level errors.
     const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
     throw new Error(
-      `github-token-mint-failed: ${aborted ? "timed out after 10s contacting api.github.com" : errMsg(err)}`,
+      `github-token-mint-failed: ${aborted ? "timed out after 10s contacting api.github.com" : "transport failure contacting api.github.com"}`,
       { cause: err },
     );
   }
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`github-token-mint-failed: HTTP ${res.status} ${body.slice(0, 300)}`);
+    throw new Error(`github-token-mint-failed: HTTP ${res.status}${await residentGithubFailureFacts(res)}`);
   }
   const data = (await res.json()) as { token: string; expires_at: string };
   verifyGithubMintScope(data, slug, RESIDENT_MIRROR_PERMISSIONS);
