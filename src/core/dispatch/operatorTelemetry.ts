@@ -107,6 +107,7 @@ export class RoutingRecorder {
         if (value.transportId) step.transportId = safe(value.transportId, 128);
         delete step.requestId;
         delete step.responseHeadersAt;
+        delete step.firstContentAt;
         delete step.responseStatus;
       } else if (
         value.transport === "response_headers" &&
@@ -117,6 +118,8 @@ export class RoutingRecorder {
       ) {
         step.responseHeadersAt = this.now();
         step.responseStatus = value.status;
+      } else if (value.stream === "first_content" && step.responseHeadersAt !== undefined) {
+        step.firstContentAt ??= this.now();
       }
       for (const key of ["provider", "model", "effort", "effortWord", "requestId", "stopReason"] as const) {
         if (value[key] !== undefined) step[key] = safe(value[key], 128);
