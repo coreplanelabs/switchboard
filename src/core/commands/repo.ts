@@ -763,7 +763,7 @@ export const repoRebuild = defineCommand({
       .string()
       .max(40000)
       .optional()
-      .describe("JSON array of two to 64 exact native keys and record hashes from one full-reset preview"),
+      .describe("JSON array of two to 64 exact native records; an unknown fetch also names its originBuild"),
   }),
   action: "repo:write",
   effect: "write",
@@ -843,7 +843,10 @@ export const repoRebuild = defineCommand({
   handler: async ({ args, options, deps, span }) => {
     const dryRun = options.dryRun ?? false;
     const full = options.full ?? false;
-    let discardUnknownNative: { key: string; recordHash: string } | { key: string; recordHash: string }[] | undefined =
+    let discardUnknownNative:
+      | { key: string; recordHash: string; unknownEffect?: { originBuild: string } }
+      | { key: string; recordHash: string; unknownEffect?: { originBuild: string } }[]
+      | undefined =
       options.discardNativeKey && options.discardNativeRecordHash
         ? { key: options.discardNativeKey, recordHash: options.discardNativeRecordHash }
         : undefined;
@@ -862,6 +865,10 @@ export const repoRebuild = defineCommand({
             .object({
               key: z.string().regex(/^native-operation:.{1,495}$/),
               recordHash: z.string().regex(/^[a-f0-9]{64}$/),
+              unknownEffect: z
+                .object({ originBuild: z.string().min(1).max(128) })
+                .strict()
+                .optional(),
             })
             .strict(),
         )

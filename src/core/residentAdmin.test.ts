@@ -133,7 +133,7 @@ describe("makeResidentAdminClient (real fetch client)", () => {
     ).toMatchObject({ status: 200, data: { discardedUnknownNative: { key: "native-operation:op:archive" } } });
     const targets = [
       { key: "native-operation:op:archive", recordHash: "a".repeat(64) },
-      { key: "native-operation:op:other", recordHash: "b".repeat(64) },
+      { key: "native-operation:op:other", recordHash: "b".repeat(64), unknownEffect: { originBuild: "build-1" } },
     ];
     expect(await client.rebuild("repo:acme/api", false, true, undefined, targets)).toMatchObject({
       status: 200,
