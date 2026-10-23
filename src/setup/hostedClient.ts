@@ -11,10 +11,58 @@ import {
   HOSTED_MCP_CONNECT_POLL_MS,
   HOSTED_MCP_PROBE_TIMEOUT_MS,
 } from "../core/budgets.js";
+import { oneLine, redactAndCap } from "../core/redact.js";
 
 export interface HostedProfile {
   url: string;
   bearer: string;
+}
+
+class HostedMcpFailure extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "HostedMcpFailure";
+  }
+}
+
+export function hostedRpcErrorDetails(error: unknown, bearer: string): string | undefined {
+  const row =
+    error && typeof error === "object" && !Array.isArray(error) ? (error as Record<string, unknown>) : undefined;
+  const code =
+    typeof row?.code === "number" && Number.isInteger(row.code) && row.code >= -32_768 && row.code <= 32_767
+      ? row.code
+      : undefined;
+  const message =
+    typeof row?.message === "string"
+      ? redactAndCap(
+          (bearer ? oneLine(row.message).replaceAll(bearer, "«redacted»") : oneLine(row.message))
+            .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "«redacted-url»")
+            .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "«redacted-email»"),
+          200,
+        )
+      : undefined;
+  const parts = [...(code !== undefined ? [`code ${code}`] : []), ...(message ? [`message ${message}`] : [])];
+  return parts.length ? parts.join("; ") : undefined;
+}
+
+async function hostedHttpFailure(response: Response, bearer: string): Promise<HostedMcpFailure> {
+  let remote: unknown;
+  try {
+    remote = await response.json();
+  } catch {
+    // An unparseable body has no safe JSON-RPC details; the HTTP status remains observed.
+  }
+  const error =
+    remote && typeof remote === "object" && !Array.isArray(remote) ? (remote as { error?: unknown }).error : undefined;
+  const details = hostedRpcErrorDetails(error, bearer);
+  return new HostedMcpFailure(`MCP HTTP ${response.status}${details ? `; ${details}` : ""}`);
+}
+
+function hostedTransportFailure(cause: unknown): HostedMcpFailure {
+  const timedOut = cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError");
+  return new HostedMcpFailure(timedOut ? "MCP timed out before a response" : "MCP transport failed before a response", {
+    cause,
+  });
 }
 export const hostedProfilePath = (): string =>
   process.env.SWITCHBOARD_CLIENT_CONFIG ?? join(homedir(), ".switchboard", "client.json");
@@ -166,14 +214,26 @@ export async function hostedMcpCall(
   params: Record<string, unknown> = {},
   timeoutMs = HOSTED_MCP_PROBE_TIMEOUT_MS,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch(`${profile.url}/mcp`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${profile.bearer}`, "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const result: unknown = await response.json();
-  if (!result || typeof result !== "object") throw new Error(`MCP returned HTTP ${response.status} without JSON`);
+  let response: Response;
+  try {
+    response = await fetch(`${profile.url}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${profile.bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (cause) {
+    throw hostedTransportFailure(cause);
+  }
+  if (!response.ok) throw await hostedHttpFailure(response, profile.bearer);
+  let result: unknown;
+  try {
+    result = await response.json();
+  } catch (cause) {
+    throw new HostedMcpFailure(`MCP HTTP ${response.status} response was invalid`, { cause });
+  }
+  if (!result || typeof result !== "object")
+    throw new HostedMcpFailure(`MCP returned HTTP ${response.status} without JSON`);
   return result as Record<string, unknown>;
 }
 
@@ -182,16 +242,31 @@ export async function proxyHostedMcp(profile: HostedProfile, line: string): Prom
   const message: unknown = JSON.parse(line);
   if (!message || typeof message !== "object" || Array.isArray(message)) throw new Error("invalid JSON-RPC request");
   const expectsReply = "id" in message;
-  const response = await fetch(`${profile.url}/mcp`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${profile.bearer}`, "content-type": "application/json" },
-    body: line,
-    signal: AbortSignal.timeout(HOSTED_MCP_CALL_TIMEOUT_MS),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${profile.url}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${profile.bearer}`, "content-type": "application/json" },
+      body: line,
+      signal: AbortSignal.timeout(HOSTED_MCP_CALL_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw hostedTransportFailure(cause);
+  }
+  if (!response.ok) throw await hostedHttpFailure(response, profile.bearer);
   if (!expectsReply) return undefined;
-  const body = await response.text();
-  if (!body) throw new Error(`MCP returned HTTP ${response.status} without a response`);
-  JSON.parse(body);
+  let body: string;
+  try {
+    body = await response.text();
+  } catch (cause) {
+    throw new HostedMcpFailure(`MCP HTTP ${response.status} response could not be read`, { cause });
+  }
+  if (!body) throw new HostedMcpFailure(`MCP returned HTTP ${response.status} without a response`);
+  try {
+    JSON.parse(body);
+  } catch (cause) {
+    throw new HostedMcpFailure(`MCP HTTP ${response.status} response was invalid`, { cause });
+  }
   return body;
 }
 
@@ -242,23 +317,31 @@ export async function connectHosted(
   output(`Confirm code ${challenge.slice(0, 8).toUpperCase()} in your browser.`);
   (opts.open ?? openBrowser)(link);
   const profile = { url, bearer };
+  let lastFailure: string | undefined;
   for (let attempt = 0; attempt < (opts.attempts ?? 120); attempt++) {
     try {
       const initialized = await hostedMcpCall(profile, "initialize", { protocolVersion: MCP_PROTOCOL_VERSION });
+      if (initialized.error)
+        lastFailure = `MCP initialize: ${hostedRpcErrorDetails(initialized.error, profile.bearer) ?? "refused"}`;
       if (!initialized.error && initialized.result) {
         const read = await hostedMcpCall(profile, "tools/call", { name: "runs_list", arguments: { limit: 1 } });
         if (read.error || !read.result)
-          throw new Error(`MCP access is missing runs:read: ${JSON.stringify(read.error ?? read)}`);
+          throw new Error(
+            `MCP access is missing runs:read: ${hostedRpcErrorDetails(read.error, profile.bearer) ?? "refused"}`,
+          );
         writeHostedProfile(profile, opts.profilePath);
         installCodexMcp(opts.codexPath);
         output("Connected. Restart Codex to load Switchboard MCP; use `switchboard ask` for the hosted CLI.");
         return;
-      }
+      } else if (!initialized.error) lastFailure = "MCP initialize returned no result";
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("MCP access is missing")) throw error;
+      if (error instanceof HostedMcpFailure) lastFailure = error.message;
       // The browser approval may still be pending; poll until the deadline.
     }
     await pause(opts.pollMs ?? HOSTED_MCP_CONNECT_POLL_MS);
   }
-  throw new Error("Connection timed out. Run connect again and approve the matching code in your browser.");
+  throw new Error(
+    `Connection timed out. Run connect again and approve the matching code in your browser.${lastFailure ? ` Last response: ${lastFailure}` : ""}`,
+  );
 }
