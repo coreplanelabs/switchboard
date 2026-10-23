@@ -167,6 +167,52 @@ describe("bounded agent smoke", () => {
     expect(transport.request).toHaveBeenCalledTimes(3);
   });
 
+  it("finishes the original Review run after one self-clearing read refusal", async () => {
+    const { transport } = fixture();
+    const request = transport.request;
+    transport.request = vi.fn(async (scenario, thread, onIntake) => {
+      const response = (await request(scenario, thread, onIntake)) as { run: { id: string }; build: unknown };
+      return {
+        ...response,
+        threadKey: `http:smoke:${thread}`,
+        run: { id: response.run.id, status: "started" },
+        admission: { status: "accepted", receiptId: `receipt-${scenario.id}`, runId: response.run.id },
+      };
+    });
+    const readRun = transport.readRun;
+    let refused = false;
+    transport.readRun = async (id, onRecord) => {
+      if (id === "run-review" && !refused) {
+        refused = true;
+        throw new SmokeReaderError({
+          code: "mcp_transient_refusal",
+          operation: "runs_get",
+          rpcCode: -32004,
+          http: { status: 200, authChallenge: false },
+        });
+      }
+      return readRun(id, onRecord);
+    };
+
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport,
+    });
+
+    expect(receipt.capabilityOutcome).toBe("passed");
+    expect(receipt.scenarios[2]).toMatchObject({
+      id: "review",
+      runId: "run-review",
+      outcome: "passed",
+      reason: "accepted",
+      readRetry: { code: "mcp_transient_refusal", operation: "runs_get", http: { status: 200, authChallenge: false } },
+      outputReadback: { kind: "native-persisted-run", runId: "run-review" },
+    });
+    expect(transport.request).toHaveBeenCalledTimes(3);
+  });
+
   it("keeps a denied run read incomplete without another request", async () => {
     const { transport } = fixture();
     const request = transport.request;
@@ -2783,6 +2829,33 @@ describe("native HTTP run readiness", () => {
     expect(JSON.stringify(receipt)).not.toContain("private remote");
     expect(JSON.stringify(receipt)).not.toContain("private-data");
   });
+  it("retries a self-clearing 503-class read refusal on the known original run", async () => {
+    const s = setup(() => ({ runs: [owner], readScope: scope }), -32004);
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "readiness",
+      transport: s.transport,
+    });
+    expect(receipt.scenarios[0]).toMatchObject({
+      runId: owner.id,
+      receiptId: "original-receipt",
+      admissionStatus: "accepted",
+      outcome: "incomplete",
+      reason: "run_record_unproven",
+      readRetry: { code: "mcp_transient_refusal", operation: "runs_get", http: { status: 200, authChallenge: false } },
+      observationError: {
+        code: "mcp_transient_refusal",
+        operation: "runs_get",
+        rpcCode: -32004,
+        http: { status: 200, authChallenge: false },
+      },
+    });
+    expect(s.operations).toEqual(["runs_list", "admit", "runs_list", "runs_get", "runs_get"]);
+    expect(JSON.stringify(receipt)).not.toContain("private remote");
+    expect(JSON.stringify(receipt)).not.toContain("private-data");
+  });
+
   it("keeps the original deadline when the owner never becomes visible", async () => {
     vi.useFakeTimers();
     try {
