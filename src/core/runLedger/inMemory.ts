@@ -36,6 +36,7 @@ import {
 } from "./sourceEvidence.js";
 import { RequiredTranscriptError } from "./transcript.js";
 import { TRANSCRIPT_PART_BYTES } from "./types.js";
+import { reviewSourceProvesHead } from "./reviewClaim.js";
 import { holdUnreadIngress } from "./unreadIngress.js";
 import {
   consumeIngress,
@@ -303,6 +304,8 @@ import type {
   AppendableEvent,
   ClaimRequest,
   ClaimResult,
+  ReviewHeadAdvanceRequest,
+  ReviewHeadAdvanceResult,
   FenceResult,
   InboxItem,
   IntakeQuery,
@@ -1695,6 +1698,37 @@ export class InMemoryRunLedger implements RunLedger {
       throw new Error("recorded check authorization is immutable");
     const existing = this.byThread(req.threadKey);
     if (
+      req.meta.agent === "review" &&
+      req.meta.repo &&
+      req.meta.pr !== undefined &&
+      (!existing || existing.runId === req.runId)
+    ) {
+      const owners = [...this.live.values()].filter(
+        (row) =>
+          row.runId !== req.runId &&
+          row.meta.agent === "review" &&
+          row.meta.repo?.toLowerCase() === req.meta.repo!.toLowerCase() &&
+          row.meta.pr === req.meta.pr,
+      );
+      if (owners.length > 1) return { ok: false, reason: "review-conflict" };
+      const owner = owners[0];
+      if (owner)
+        return {
+          ok: false,
+          reason: "review-owned",
+          live: {
+            runId: owner.runId,
+            agent: "review",
+            startedAt: owner.startedAt,
+            channelId: owner.meta.channelId,
+            userId: owner.meta.userId,
+            ...(owner.meta.channelVisibility ? { channelVisibility: owner.meta.channelVisibility } : {}),
+            ...(owner.meta.headSha ? { headSha: owner.meta.headSha } : {}),
+            ...(owner.meta.parentInstanceId ? { parentInstanceId: owner.meta.parentInstanceId } : {}),
+          },
+        };
+    }
+    if (
       existing?.runId === req.runId &&
       existing.ownerGen === req.gen &&
       req.phase === "attaching" &&
@@ -1823,6 +1857,31 @@ export class InMemoryRunLedger implements RunLedger {
     // models a row from before the log existed: it owns its own object.
     if (!req.meta.session) this.transcripts.set(req.runId, { ownerGen: req.gen, rows: [], attachments: [] });
     return acknowledged();
+  }
+
+  async advanceReviewHead(request: ReviewHeadAdvanceRequest): Promise<ReviewHeadAdvanceResult> {
+    const row = this.live.get(request.runId);
+    if (!row || row.ownerGen !== request.gen || row.phase !== "live") return { ok: false, reason: "fenced" };
+    if (!reviewSourceProvesHead(request, row.meta)) return { ok: false, reason: "source-unproved" };
+    if (row.meta.headSha === request.to)
+      return row.state.reviewClaimSource &&
+        JSON.stringify(row.state.reviewClaimSource) === JSON.stringify(request.source)
+        ? { ok: true }
+        : { ok: false, reason: "source-unproved" };
+    if (row.meta.headSha !== request.from) return { ok: false, reason: "fenced" };
+    if (
+      [...this.live.values()].some(
+        (owner) =>
+          owner.runId !== request.runId &&
+          owner.meta.agent === "review" &&
+          owner.meta.repo?.toLowerCase() === row.meta.repo?.toLowerCase() &&
+          owner.meta.pr === row.meta.pr,
+      )
+    )
+      return { ok: false, reason: "review-owned" };
+    row.meta.headSha = request.to;
+    row.state.reviewClaimSource = structuredClone(request.source);
+    return { ok: true };
   }
 
   /** The rows of `turns`, into `target` under the same `(idx, part)` upsert the objects apply. */

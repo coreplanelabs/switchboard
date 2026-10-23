@@ -316,7 +316,7 @@ describe("original allocation before first reservation", () => {
       expect(store.live.has(ctx.runId)).toBe(true);
     }
   });
-  it("keeps proven fenced and occupied-thread refusals distinct from accepted claims with unknown ACKs", async () => {
+  it("keeps proven fenced and same-thread occupied refusals distinct from accepted claims with unknown ACKs", async () => {
     for (const mode of ["fenced", "thread-live"] as const) {
       const d = deps(),
         store = new InMemoryRunLedger(() => NOW),

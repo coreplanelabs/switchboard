@@ -53,6 +53,7 @@ const CAUSE_OF = {
   pr_target_conflict: "request",
   repo_access: "policy",
   pr_head_unknown: "system",
+  review_occupied: "request",
   workspace_head_mismatch: "system",
   coordinator_thread_live: "system",
   child_reservation_failed: "system",

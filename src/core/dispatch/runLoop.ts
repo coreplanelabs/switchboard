@@ -188,6 +188,7 @@ import {
 import { normalizeHead } from "../reviewedHead.js";
 import { parseDigestReport, type DigestReport } from "../diffDigest.js";
 import { runReviewPostStep, settleReviewedHead, type ReviewPostOutcome, type RoundWorkspace } from "../reviewRound.js";
+import type { ReviewSourceReceipt } from "../runLedger/types.js";
 import { postReviewComment } from "../../execution/githubComments.js";
 import {
   observeCodingWorkspace,
@@ -682,6 +683,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // native result checkpoint in this harness; compacted history need not echo.
   const sourceResultCalls = new Set<string>();
   let reviewSubmission: ReviewSubmission | undefined;
+  let reviewClaimUnconfirmed = false;
   let recoveryCheckpointFailure: Record<string, unknown> | undefined;
   const recoveryError = (error: unknown) => ({
     kind:
@@ -3079,6 +3081,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     isPrReview && repoCtx.repo && repoCtx.pr !== undefined
       ? { target: { repo: repoCtx.repo, number: repoCtx.pr } }
       : undefined;
+  let reviewSourceProgress:
+    { headSha: string; baseSha: string; sourceHash: string; size: number; nextOffset: number } | undefined;
+  let completeReviewSource: ReviewSourceReceipt | undefined;
   const toolContext = {
     recovery,
     ...(command ? { command } : {}),
@@ -3130,6 +3135,41 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(reviewHistory ? { reviewHistory } : {}),
     ...(isPrReview
       ? {
+          onReviewReadPage: (page: import("../../tools/reviewRead.js").ReviewReadPageReceipt) => {
+            if (
+              page.kind !== "diff" ||
+              page.target.head !== (reviewHistory?.requiredHead ?? reviewHead ?? repoCtx.headSha)
+            )
+              return;
+            if (page.offset === 0)
+              reviewSourceProgress = {
+                headSha: page.target.head,
+                baseSha: page.target.base,
+                sourceHash: page.sourceHash,
+                size: page.size,
+                nextOffset: page.nextOffset,
+              };
+            else if (
+              reviewSourceProgress?.headSha === page.target.head &&
+              reviewSourceProgress.baseSha === page.target.base &&
+              reviewSourceProgress.sourceHash === page.sourceHash &&
+              reviewSourceProgress.size === page.size &&
+              reviewSourceProgress.nextOffset === page.offset
+            )
+              reviewSourceProgress.nextOffset = page.nextOffset;
+            else return;
+            if (page.eof && reviewSourceProgress?.nextOffset === page.size && repoCtx.repo && repoCtx.pr !== undefined)
+              completeReviewSource = {
+                kind: "diff",
+                repo: repoCtx.repo,
+                pr: repoCtx.pr,
+                headSha: page.target.head,
+                baseSha: page.target.base,
+                sourceHash: page.sourceHash,
+                size: page.size,
+                complete: true,
+              };
+          },
           reviewReadTarget: () => {
             const head = reviewHistory?.requiredHead ?? reviewHead ?? repoCtx.headSha;
             return !privateAudienceLatch.revoked &&
@@ -4512,6 +4552,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         };
       reviewHead = settled.reviewHead;
       observedHead = settled.observedHead;
+      if (deps.runLedger.sessionPersistence && repoCtx.headSha && reviewHead && reviewHead !== repoCtx.headSha) {
+        const source = completeReviewSource;
+        const currentHistory = toolContext.reviewHistory?.snapshot?.head === reviewHead;
+        const advanced =
+          source?.headSha === reviewHead && currentHistory && ledgerRun?.tracked()
+            ? await deps.runLedger
+                .advanceReviewHead({ runId: run.id, from: repoCtx.headSha, to: reviewHead, source })
+                .catch(() => ({ ok: false as const, reason: "source-unproved" as const }))
+            : { ok: false as const, reason: "source-unproved" as const };
+        if (!advanced.ok) {
+          reviewClaimUnconfirmed = true;
+          verdict = undefined;
+          reviewSubmission = {
+            status: "rejected",
+            reason: "The new head has no complete source read and acknowledged Review ownership.",
+          };
+          answer = `I could not confirm complete source coverage and durable Review ownership for ${repoCtx.repo}#${repoCtx.pr} at ${reviewHead}. This Review is incomplete. Request a new Review after this run ends.`;
+        }
+      }
     }
     if (agent.name === "review" && reviewSubmission !== undefined) await persistReviewSubmission(reviewSubmission);
     // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt
@@ -4530,6 +4589,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       repoCtx.repo &&
       repoCtx.pr !== undefined &&
       !tailSkipped() &&
+      !reviewClaimUnconfirmed &&
       postedBefore === undefined &&
       verdict === undefined &&
       !(reviewSubmission?.status === "pending" && reviewSubmission.proposal !== undefined) &&
@@ -5174,7 +5234,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // verdict a previous generation posted before the restart is the outcome
     // already (`postedBefore`): the record carries it, GitHub is not asked twice.
     if (postedBefore) reviewPost = postedBefore;
-    else if (agent.name === "review" && !tailSkipped())
+    else if (agent.name === "review" && !tailSkipped() && !reviewClaimUnconfirmed)
       reviewPost = await root.span("run.review_post_step", () =>
         runReviewPostStep({
           remainingMs: () =>

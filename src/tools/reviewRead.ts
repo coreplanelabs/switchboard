@@ -9,6 +9,16 @@ export interface ReviewReadTarget {
   base: string;
 }
 
+export interface ReviewReadPageReceipt {
+  target: ReviewReadTarget;
+  kind: "diff" | "file";
+  sourceHash: string;
+  size: number;
+  offset: number;
+  nextOffset: number;
+  eof: boolean;
+}
+
 // Runs inside the executor, never on the bot host. Git reads immutable objects:
 // no checkout file, symlink, textconv, external diff, fetch or model shell runs.
 // Bound both the source and the returned page before crossing the output seam.
@@ -184,6 +194,15 @@ export const reviewReadTool: RunnableTool = {
         !ctx.github.canWrite(target.repo)
       )
         return fail("review source access changed during the read");
+      ctx.onReviewReadPage?.({
+        target,
+        kind: input.kind,
+        sourceHash: page.sourceHash!,
+        size: page.size!,
+        offset,
+        nextOffset: page.nextOffset!,
+        eof: page.eof!,
+      });
       return result.stdout;
     } catch {
       return fail("source read did not complete; no page was accepted");

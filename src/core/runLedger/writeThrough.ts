@@ -97,9 +97,12 @@ import {
   type AppendableEvent,
   type CardHandle,
   type ClaimRequest,
+  type ClaimResult,
   type IntakeReceipt,
   type IntakeWriteResult,
   type LiveRunMeta,
+  type ReviewHeadAdvanceRequest,
+  type ReviewHeadAdvanceResult,
   type LiveRunRow,
   type LiveStateAssignRequest,
   type LiveStateAssignResult,
@@ -349,6 +352,13 @@ export class NativeClaimUnknownError extends Error {
   }
 }
 
+export class ReviewClaimOccupiedError extends Error {
+  constructor(readonly claim: Extract<ClaimResult, { ok: false; reason: "review-owned" | "review-conflict" }>) {
+    super("A Review already owns this pull request, or its active owner is ambiguous.");
+    this.name = "ReviewClaimOccupiedError";
+  }
+}
+
 /** Named typed boundary builder: the dispatcher preserves custody instead
  * of rendering this unknown operation as a settled refusal. */
 export function terminalCommitmentUnknown(
@@ -552,6 +562,7 @@ export interface LedgerWriteThrough {
   readonly gen: string;
   /** Current ledger owner receives a monotonic fence before resident attach. */
   claimResident(runId: string, threadKey: string): Promise<number | undefined>;
+  advanceReviewHead(request: Omit<ReviewHeadAdvanceRequest, "gen">): Promise<ReviewHeadAdvanceResult>;
   /** Reserve the thread at admission (item 42): an `attaching` row with the
    *  request and no prompt, its heartbeat running — or why not (`ReserveOutcome`).
    *  The run is not resumable until `open` promotes it; a reclaim of the row
@@ -684,6 +695,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   async claimResident(_runId: string, _threadKey: string): Promise<number | undefined> {
     return undefined;
+  }
+  async advanceReviewHead(_request: Omit<ReviewHeadAdvanceRequest, "gen">): Promise<ReviewHeadAdvanceResult> {
+    return { ok: false, reason: "source-unproved" };
   }
   async reserve(_req: ReserveRunRequest): Promise<ReserveOutcome> {
     return { kind: "off" };
@@ -1103,6 +1117,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const expected = structuredClone(request);
         originalClaim = expected;
         const result = await ledger.claim(request);
+        if (!result.ok && result.reason !== "thread-live") throw new ReviewClaimOccupiedError(result);
         if (result.ok) {
           claimAccepted = true;
           const allocationAck = allocationAckOf(result.allocationAck, expected);
@@ -1175,6 +1190,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         warn(`[ledger] ${req.threadKey} not tracked: ${why}`);
         return { outcome: "untracked", why, refused: "thread-live" };
       } catch (err) {
+        if (err instanceof ReviewClaimOccupiedError) throw err;
         if (
           (allocationBearing || req.meta.residentExecution === "native-v1") &&
           originalClaim !== undefined &&
@@ -3001,7 +3017,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
       reserved.assertOriginalPromotionActive();
       if (!result.ok) {
-        if (result.live.runId === req.runId) {
+        if (result.reason === "thread-live" && result.live.runId === req.runId) {
           reserved.detach("promotion refused (fenced)", true);
           unpromoted.delete(reserved.runId);
           return { kind: "fenced" };
@@ -3138,6 +3154,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   return {
     gen,
     sessionPersistence: true,
+    advanceReviewHead: (request) => ledger.advanceReviewHead({ ...request, gen }),
     async claimResident(runId, threadKey) {
       const result = await ledger.residentClaim(runId, gen, threadKey);
       if (!result.ok) throw new ResidentClaimRefusedError(result.reason);

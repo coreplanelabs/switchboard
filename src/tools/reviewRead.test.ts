@@ -11,7 +11,7 @@ import { LocalExecutor } from "../execution/executor.js";
 import { TOOLSETS } from "./toolsets.js";
 import type { ToolContext } from "./runnableTool.js";
 import { shapeToolSchemasForWire } from "../core/providerToolSchemas.js";
-import { reviewReadTool } from "./reviewRead.js";
+import { reviewReadTool, type ReviewReadPageReceipt } from "./reviewRead.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { produceReadingDiff } from "../core/readingDiff.js";
 
@@ -173,6 +173,9 @@ describe("review_read", () => {
 
   it("reconstructs a private full diff and oversized source line through bounded UTF8 byte pages", async () => {
     for (const input of [{ kind: "file", path: "catalog.txt" }, { kind: "diff" }]) {
+      const ctx = context();
+      const accepted: ReviewReadPageReceipt[] = [];
+      ctx.onReviewReadPage = (page) => accepted.push(page);
       const expected =
         input.kind === "file"
           ? source
@@ -184,7 +187,7 @@ describe("review_read", () => {
       let sourceHash: string | undefined;
       let actual = "";
       for (;;) {
-        const page = await read({ ...input, offset, ...(sourceHash ? { sourceHash } : {}) });
+        const page = await read({ ...input, offset, ...(sourceHash ? { sourceHash } : {}) }, ctx);
         expect(page.source).toMatchObject({ repo: "example/project", pr: 7, head, base, mergeBase: base });
         expect(page.offset).toBe(offset);
         expect(page.nextOffset).toBe(offset + Buffer.byteLength(page.text));
@@ -198,7 +201,13 @@ describe("review_read", () => {
       }
       expect(actual).toBe(expected);
       expect(offset).toBe(Buffer.byteLength(expected));
-      expect(await read({ ...input, offset, sourceHash })).toMatchObject({ text: "", eof: true, nextOffset: offset });
+      expect(accepted[0]).toMatchObject({ kind: input.kind, offset: 0, target: { head, base } });
+      expect(accepted.at(-1)).toMatchObject({ kind: input.kind, nextOffset: offset, size: offset, eof: true });
+      expect(await read({ ...input, offset, sourceHash }, ctx)).toMatchObject({
+        text: "",
+        eof: true,
+        nextOffset: offset,
+      });
     }
   }, 30_000);
 
