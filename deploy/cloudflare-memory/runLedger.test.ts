@@ -16687,7 +16687,11 @@ describe("state-write holds across Durable Object RPC", () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ ok: true });
       expect((await stub.listLive())[0].state).toEqual(state);
-      expect(warnings.map((line) => JSON.parse(line))).toContainEqual(
+      expect(
+        warnings
+          .filter((line) => line.startsWith('{"event":"storage.request.failure_telemetry_failed"'))
+          .map((line) => JSON.parse(line)),
+      ).toContainEqual(
         expect.objectContaining({
           event: "storage.request.failure_telemetry_failed",
           operation: "/runs/state",

@@ -645,9 +645,13 @@ export const COMMAND_FIXTURES: Readonly<
     hints: {
       discardNativeKey: "native-operation:op:archive",
       discardNativeRecordHash: "a".repeat(64),
+      discardNativeRecordsJson: JSON.stringify([
+        { key: "native-operation:op:archive", recordHash: "a".repeat(64) },
+        { key: "native-operation:op:other", recordHash: "b".repeat(64) },
+      ]),
     },
-    variants: { "all-options-set": { omit: ["resident"] } },
-    why: "an exact native discard needs both selectors with full reset and cannot select a pool replica",
+    variants: { "all-options-set": { omit: ["resident", "discardNativeKey", "discardNativeRecordHash"] } },
+    why: "exact native discard forms are exclusive and require a full reset without a pool replica",
   },
   "memory.forget": {
     hints: { id: FIXTURE.ownMemoryRecord },
