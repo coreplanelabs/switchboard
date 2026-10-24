@@ -199,6 +199,8 @@ export interface RefreshFailure {
   busy: boolean;
   /** A prior owned background operation is not evidence that the VM is broken. */
   operationHeld?: boolean;
+  /** A failed stamp read does not prove that the snapshot or VM is broken. */
+  verificationUnknown?: boolean;
 }
 
 /** Root argv that kills every process the build user still owns and waits
