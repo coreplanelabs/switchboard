@@ -666,7 +666,14 @@ export async function runAgentSmoke(input: {
         originalRecord = await input.transport.readRun(response.run.id, retainRun);
       } catch (error) {
         const observation = error instanceof SmokeReaderError ? error.observation : null;
+        // The read surface refuses -32004 while a dependency is momentarily
+        // busy or unavailable; that clears on its own (503 class), so retry the
+        // same original run's read before giving up on the deployment.
+        const transientRefusal =
+          observation?.code === "mcp_transient_refusal" &&
+          ["runs_list", "runs_get"].includes(observation.operation ?? "");
         const retryableRead =
+          transientRefusal ||
           (source === "http" &&
             observation &&
             ["runs_list", "runs_get"].includes(observation.operation ?? "") &&
@@ -1021,13 +1028,15 @@ export function agentSmokeTransport(input: {
               ? "mcp_http_failed"
               : error instanceof McpError && error.code === -32001
                 ? "mcp_read_unauthorized"
-                : error instanceof McpError && typeof error.code === "number"
-                  ? "mcp_rpc_failed"
-                  : error instanceof McpError && error.code === "timeout"
-                    ? "mcp_timeout"
-                    : error instanceof McpError && error.code === "protocol"
-                      ? "mcp_protocol_mismatch"
-                      : "mcp_transport_failed";
+                : error instanceof McpError && error.code === -32004
+                  ? "mcp_transient_refusal"
+                  : error instanceof McpError && typeof error.code === "number"
+                    ? "mcp_rpc_failed"
+                    : error instanceof McpError && error.code === "timeout"
+                      ? "mcp_timeout"
+                      : error instanceof McpError && error.code === "protocol"
+                        ? "mcp_protocol_mismatch"
+                        : "mcp_transport_failed";
       throw new SmokeReaderError({
         code,
         operation: name,
