@@ -52,6 +52,27 @@ afterEach(() => {
 });
 
 describe("resolveRepoContext: read-scoped PR lookup", () => {
+  it("keeps a safe HTTP failure on an explicit PR target", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    stubFetch({ status: 403, body: { message: "private response text" } });
+    expect(
+      await resolveRepoContext(
+        msg("review https://github.com/acme/api/pull/7"),
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      ),
+    ).toEqual({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+      prHeadFailure: { code: "http_failed", httpStatus: 403 },
+    });
+  });
+
   it("keeps native source identity for explicit, accepted and inherited PR targets", async () => {
     const source = { host: "github.com" as const, appId: 1, installationId: 2 };
     vi.spyOn(githubApp, "resolveGithubCredential").mockResolvedValue({ token: "read", expiresAtMs: null, source });
