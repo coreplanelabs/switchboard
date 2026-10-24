@@ -1,3 +1,9 @@
+import {
+  SOURCE_OBLIGATION_HOLDER_PREFIX,
+  sourceEventStorageCharge,
+  sourceObligationJobOf,
+  retainSourceObligationRangeHolders,
+} from "../../src/core/runLedger/sourceObligations.js";
 import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import { bindingFetch, installHttpTransport } from "../../src/core/trace/httpTransport.js";
 import { WriteReceipts } from "./writeReceipts.js";
@@ -7752,7 +7758,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.sql
       .exec<{ holder_run_id: string; source_run_id: string; session_key: string }>(
         `SELECT holder_run_id, source_run_id, session_key FROM context_refs
-       WHERE (retention_pin = 1 OR ordinary_pin = 1) AND holder_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units)`,
+       WHERE (retention_pin = 1 OR ordinary_pin = 1) AND (holder_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units) OR holder_run_id LIKE '@source-obligation:%')`,
       )
       .toArray()
       .map((r) => ({
@@ -7826,7 +7832,8 @@ export class RunHistoryDO extends DurableObject<Env> {
               .filter(({ key }) => this.sessionContextRootIsRetained(key, policy, now))
               .map(({ key }) => `@session:${key}`),
           )
-          .concat(this.unitContextRoots()),
+          .concat(this.unitContextRoots())
+          .concat(this.sourceObligationHolders()),
       },
     );
     return new Set(kept.map((r) => r.id));
@@ -10588,6 +10595,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!prepared) return { kind: "refused", reason: "invalid-event" };
     if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid source reception time");
     let refusalContext: Record<string, string | number> = {};
+    const unreadableJobs = new Set<string>();
     const result = await this.ctx.storage.transaction<SourceEventReceiveResult>(async () => {
       const prior = this.sourceEventRow(prepared.key);
       if (prior) {
@@ -10606,9 +10614,34 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       const total = this.sql
         .exec<{ count: number; bytes: number }>(
-          `SELECT COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS bytes FROM source_events`,
+          "SELECT COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS bytes FROM source_events",
         )
         .toArray()[0]!;
+      // Ordinary reception keeps its aggregate quota read. Only future or
+      // unreadable job frames need reservation reconciliation.
+      for (const row of this.sql.exec<{ key: string; event_json: string; job_json: string; bytes: number }>(
+        `SELECT key, event_json, job_json, bytes FROM source_events
+         WHERE CASE WHEN json_valid(job_json) THEN json_extract(job_json, '$.version') >= 4 ELSE 1 END`,
+      )) {
+        let job: unknown;
+        try {
+          job = parseStoredJson(row.job_json);
+        } catch {
+          unreadableJobs.add(row.key);
+          total.bytes += SOURCE_EVENT_STORE_MAX_BYTES;
+          continue;
+        }
+        if (
+          job !== null &&
+          typeof job === "object" &&
+          "version" in job &&
+          typeof job.version === "number" &&
+          (job.version === 4 || (job.version > 4 && "obligations" in job)) &&
+          !sourceObligationJobOf(job)
+        )
+          unreadableJobs.add(row.key);
+        total.bytes += sourceEventStorageCharge(row.event_json, job, row.bytes) - row.bytes;
+      }
       if (total.count >= SOURCE_EVENT_STORE_MAX_COUNT || total.bytes + prepared.bytes > SOURCE_EVENT_STORE_MAX_BYTES) {
         refusalContext = {
           retainedCount: total.count,
@@ -10646,6 +10679,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         },
       };
     });
+    for (const eventKey of unreadableJobs)
+      console.warn("[source-events/receive] retained unreadable job", { eventKey, reason: "unreadable-job" });
     if (result.kind === "refused")
       console.warn("[source-events/receive] refused", {
         eventKey: prepared.key,
@@ -10722,7 +10757,13 @@ export class RunHistoryDO extends DurableObject<Env> {
           receivedAt: row.received_at,
           bodyHash: row.body_hash,
         });
-        if (!job || !receipt || job.eventKey !== row.key || (job.version === 3 && request.readerVersion < 3)) {
+        if (
+          !job ||
+          !receipt ||
+          job.eventKey !== row.key ||
+          (job.version === 3 && request.readerVersion < 3) ||
+          job.version === 4
+        ) {
           held++;
           heldJobs.push({
             eventKey: row.key,
@@ -10963,7 +11004,20 @@ export class RunHistoryDO extends DurableObject<Env> {
     return holders.some(({ holder_run_id }) => this.contextHolderIsLiveOrKept(holder_run_id, policy, now));
   }
 
+  private sourceObligationHolders(): string[] {
+    return this.sql
+      .exec<{ holder_run_id: string }>(
+        "SELECT DISTINCT holder_run_id FROM context_refs WHERE holder_run_id LIKE '@source-obligation:%' AND (retention_pin = 1 OR ordinary_pin = 1)",
+      )
+      .toArray()
+      .map((row) => row.holder_run_id)
+      .filter((holder) => holder.startsWith(SOURCE_OBLIGATION_HOLDER_PREFIX));
+  }
+
   private contextHolderIsLiveOrKept(runId: string, policy: RetentionPolicy, now: number): boolean {
+    // Missing canonical completion is not permission to orphan a pending pin.
+    // The holder is retention data only; ordinary access checks still apply.
+    if (runId.startsWith(SOURCE_OBLIGATION_HOLDER_PREFIX)) return true;
     if (runId.startsWith("@session:"))
       return this.sessionContextRootIsRetained(runId.slice("@session:".length), policy, now);
     if (runId.startsWith("@unit:")) return this.unitContextRootIsRetained(runId);
@@ -11881,7 +11935,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.run_id = run_events.run_id)
             AND NOT EXISTS (SELECT 1 FROM live_runs WHERE live_runs.run_id = run_events.run_id)`);
           this.sql.exec(
-            `DELETE FROM context_refs WHERE holder_run_id NOT IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units)`,
+            `DELETE FROM context_refs WHERE holder_run_id NOT IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units) AND holder_run_id NOT LIKE '@source-obligation:%'`,
           );
           // Intake receipts past their bound (item 59): each row carries its own
           // `prune_after`, stamped at the insert from the writer's window.
@@ -13980,7 +14034,7 @@ export class SessionLogDO extends DurableObject<Env> {
       if (proposed.revision !== current.revision || proposed.guarded !== current.guarded)
         return { ok: false as const, reason: "revision-changed" as const, ...current };
       const pins = this.rangePins(),
-        allowed = new Set(holders);
+        allowed = new Set(retainSourceObligationRangeHolders(pins, holders));
       for (const holder of Object.keys(pins)) if (!allowed.has(holder)) delete pins[holder];
       const revision = this.writeRangePins(pins);
       return revision === undefined
@@ -14010,7 +14064,7 @@ export class SessionLogDO extends DurableObject<Env> {
       if (this.sourceMeta("custody_pin_guard") !== undefined)
         return { ok: false as const, reason: "custody-protected" as const };
       const pins = this.rangePins();
-      const allowed = new Set(holders);
+      const allowed = new Set(retainSourceObligationRangeHolders(pins, holders));
       for (const holder of Object.keys(pins)) if (!allowed.has(holder)) delete pins[holder];
       return { ok: this.writeRangePins(pins) !== undefined };
     });

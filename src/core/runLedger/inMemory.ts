@@ -1,3 +1,10 @@
+import {
+  sourceEventStorageCharge,
+  retainSourceObligationRangeHolders,
+  sourceObligationJobOf,
+  sourceObligationContextReferences,
+  sourceObligationHolder,
+} from "./sourceObligations.js";
 import { inspectOriginal, type OriginalCell } from "./originalEvidenceReader.js";
 import {
   ORIGINAL_CELL_BYTES,
@@ -1456,6 +1463,17 @@ export class InMemoryRunLedger implements RunLedger {
     string,
     { json: string; receipt: SourceEventReceipt; job: unknown; bytes: number; dueAt: number; closedAt?: number }
   >();
+  /** Retention roots for the paired reference store; no obligation writer. */
+  sourceObligationRetention() {
+    const jobs = [...this.sourceEvents.values()].flatMap((row) => {
+      const job = sourceObligationJobOf(row.job);
+      return job ? [job] : [];
+    });
+    return {
+      references: jobs.flatMap(sourceObligationContextReferences),
+      liveHolderIds: jobs.flatMap((job) => job.obligations.map((o) => sourceObligationHolder(o.reference))),
+    };
+  }
   sourceEventWakeAt: number | undefined;
   private sourceEventSequence = 0;
   private sourceJobCursor = 0;
@@ -1537,7 +1555,7 @@ export class InMemoryRunLedger implements RunLedger {
     if (proposed.revision !== actual.revision || proposed.guarded !== actual.guarded)
       return { ok: false as const, reason: "revision-changed" as const, ...actual };
     const pins = structuredClone(log.rangePins ?? {}),
-      allowed = new Set(holders);
+      allowed = new Set(retainSourceObligationRangeHolders(pins, holders));
     for (const { receipt: pending } of this.sourceSeedRecords(key)) {
       allowed.add(pending.runId);
       const held = pins[pending.runId] ?? [];
@@ -3255,7 +3273,10 @@ export class InMemoryRunLedger implements RunLedger {
         ? { kind: "duplicate", receipt: structuredClone(receipt) }
         : { kind: "refused", reason: "delivery-conflict" };
     }
-    const bytes = [...this.sourceEvents.values()].reduce((sum, row) => sum + row.bytes, 0);
+    const bytes = [...this.sourceEvents.values()].reduce(
+      (sum, row) => sum + sourceEventStorageCharge(row.json, row.job, row.bytes),
+      0,
+    );
     if (this.sourceEvents.size >= SOURCE_EVENT_STORE_MAX_COUNT || bytes + prepared.bytes > SOURCE_EVENT_STORE_MAX_BYTES)
       return { kind: "refused", reason: "capacity" };
     const now = this.now();
@@ -3322,7 +3343,13 @@ export class InMemoryRunLedger implements RunLedger {
       this.sourceJobCursor = row.receipt.sequence;
       const job = sourceEventJobOf(row.job),
         receipt = sourceEventReceiptOf(row.receipt);
-      if (!job || !receipt || job.eventKey !== receipt.key || (job.version === 3 && request.readerVersion < 3)) {
+      if (
+        !job ||
+        !receipt ||
+        job.eventKey !== receipt.key ||
+        (job.version === 3 && request.readerVersion < 3) ||
+        job.version === 4
+      ) {
         held++;
         continue;
       }

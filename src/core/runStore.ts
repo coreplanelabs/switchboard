@@ -1,3 +1,4 @@
+import { contextReferencesOf, type ContextReference } from "./runLedger/contextRetention.js";
 import type { StorageFailureNotice } from "./storageFailureDiagnostic.js";
 import { terminalPublicationRetentionRequired } from "./branchPublication.js";
 import {
@@ -286,6 +287,8 @@ export function toListItem(record: RunRecord, bytes: number): RunListItem {
 }
 
 export interface LocalStoreOptions {
+  /** Canonical pending-holder index supplied by the paired ledger reader. */
+  contextRetention?: () => { references: readonly ContextReference[]; liveHolderIds: readonly string[] };
   policy?: Partial<RetentionPolicy>;
   /** Injectable clock (epoch ms). */
   now?: () => number;
@@ -306,10 +309,12 @@ export class InMemoryRunStore implements RunStore {
   private readonly records = new Map<string, { record: RunRecord; bytes: number }>();
   private readonly policy: RetentionPolicy;
   private readonly now: () => number;
+  private readonly contextRetention: LocalStoreOptions["contextRetention"];
 
   constructor(opts: LocalStoreOptions = {}) {
     this.policy = clampRetentionPolicy(opts.policy ?? {});
     this.now = opts.now ?? Date.now;
+    this.contextRetention = opts.contextRetention;
   }
 
   private items(): RunListItem[] {
@@ -317,7 +322,18 @@ export class InMemoryRunStore implements RunStore {
   }
 
   private retained(): RunListItem[] {
-    return applyRetention(this.items(), this.policy, this.now(), {
+    const items = this.items(),
+      extra = this.contextRetention?.();
+    return applyRetention(items, this.policy, this.now(), {
+      ...extra,
+      ...(extra
+        ? {
+            references: [
+              ...items.flatMap((item) => contextReferencesOf(item.id, item.childHandoff, item.contextDependencies)),
+              ...extra.references,
+            ],
+          }
+        : {}),
       protectedIds: [...this.records.values()]
         .filter(
           ({ record }) => terminalPublicationRetentionRequired(record) || pendingSourceInputRetentionRequired(record),
@@ -453,11 +469,13 @@ export class FileRunStore implements RunStore {
   private readonly dir: string;
   private readonly policy: RetentionPolicy;
   private readonly now: () => number;
+  private readonly contextRetention: LocalStoreOptions["contextRetention"];
 
   constructor(dir: string, opts: LocalStoreOptions = {}) {
     this.dir = resolve(dir);
     this.policy = clampRetentionPolicy(opts.policy ?? {});
     this.now = opts.now ?? Date.now;
+    this.contextRetention = opts.contextRetention;
   }
 
   private recordPath(id: string): string {
@@ -531,7 +549,19 @@ export class FileRunStore implements RunStore {
         }
       })
       .map((item) => item.id);
-    return applyRetention(index, this.policy, this.now(), { protectedIds });
+    const extra = this.contextRetention?.();
+    return applyRetention(index, this.policy, this.now(), {
+      ...extra,
+      protectedIds,
+      ...(extra
+        ? {
+            references: [
+              ...index.flatMap((item) => contextReferencesOf(item.id, item.childHandoff, item.contextDependencies)),
+              ...extra.references,
+            ],
+          }
+        : {}),
+    });
   }
 
   /** The retained index rows, newest first, only those whose file is intact. */
