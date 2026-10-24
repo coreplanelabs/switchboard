@@ -4,6 +4,7 @@ import { utf8ByteLength } from "../../runRecord.js";
 import { historyContextBytes } from "../../runLedger/transcript.js";
 import { beginHarnessLaunch, sessionPolicyFor, confirmSessionFacts } from "../contract.js";
 import { harnessLaunchIntentOf } from "../sessionPolicy.js";
+import { ModelSourceUnavailableError } from "../modelSource.js";
 import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
 import { HarnessEndingUnconfirmedError } from "../container.js";
 import { RefusalError, refusalOf } from "../../refusal.js";
@@ -448,12 +449,7 @@ export class ModelStreamIncompleteError extends Error {
 
 /** A source read stayed unavailable through the run's local retry window.
  * The proxy did not forward any of the failed calls to the provider. */
-export class ModelSourceUnavailableError extends Error {
-  constructor() {
-    super("Switchboard could not verify this run's source before its retry window ended.");
-    this.name = "ModelSourceUnavailableError";
-  }
-}
+export { ModelSourceUnavailableError } from "../modelSource.js";
 
 /** The original proxy cap refused another call; no provider was contacted. */
 export class ModelTurnBudgetExhaustedError extends RefusalError {
