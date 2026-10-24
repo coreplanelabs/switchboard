@@ -1,3 +1,11 @@
+import { inboxAcknowledgedRowsOf } from "./runLedger/inboxAcknowledgments.js";
+import {
+  sourceInputCheckpointRequestOf,
+  sourceInputCheckpointOf,
+  type SourceInputCheckpointRequest,
+  type SourceInputCheckpointResult,
+} from "./runLedger/sourceInputIntent.js";
+import { sourceSnapshot } from "./runLedger/sourceEvents.js";
 import { noteStoreReadFailure } from "./storeFailure.js";
 import {
   writeReceiptReadOf,
@@ -1119,9 +1127,26 @@ export class WorkerRunLedger implements RunLedger {
     session?: string,
   ): Promise<FenceResult> {
     this.checkIds(runId, gen);
+    const normal =
+      record.inboxAcknowledgedRows === undefined ? undefined : inboxAcknowledgedRowsOf(record.inboxAcknowledgedRows);
+    if (record.inboxAcknowledgedRows !== undefined && !normal)
+      throw new PermanentStoreError("run ledger: invalid inbox acknowledgments");
+    record = { ...record, ...(normal ? { inboxAcknowledgedRows: normal } : {}) };
     const written = await this.writeTurns(runId, gen, turns, session);
     if (!written.ok) return written;
-    return this.fenceResult(await this.post("/runs/step", { storeKey: this.opts.storeKey, runId, gen, record }));
+    const result = await this.post("/runs/step", { storeKey: this.opts.storeKey, runId, gen, record });
+    if (
+      normal?.length &&
+      result.status === 200 &&
+      result.data.ok === true &&
+      JSON.stringify(inboxAcknowledgedRowsOf(result.data.inboxAcknowledgedRows)) !== JSON.stringify(normal)
+    )
+      throw this.unknownAcknowledgement(
+        "run ledger: exact inbox acknowledgment missing",
+        result.request,
+        result.status,
+      );
+    return this.fenceResult(result);
   }
 
   private checkSessionKey(key: string): void {
@@ -1603,6 +1628,47 @@ export class WorkerRunLedger implements RunLedger {
     )
       throw this.invalidResult(new PermanentStoreError("run ledger /runs/inbox/read: invalid observational inbox"), r);
     return r.data.items as InboxItem[];
+  }
+
+  async sourceInputCheckpoint(
+    runId: string,
+    gen: string,
+    request: SourceInputCheckpointRequest,
+  ): Promise<SourceInputCheckpointResult> {
+    this.checkIds(runId, gen);
+    const parsed = sourceInputCheckpointRequestOf(request);
+    if (!parsed) throw new PermanentStoreError("run ledger: invalid source input checkpoint request");
+    const result = await this.post(
+      "/runs/source-input/checkpoint",
+      { storeKey: this.opts.storeKey, runId, gen, request: parsed },
+      false,
+      parsed.operation === "read" ? "read" : "write",
+    );
+    if (result.status !== 200 || result.data.ok !== true) {
+      const fence = this.fenceResult(result);
+      if (!fence.ok) return fence;
+    }
+    const checkpoint = sourceInputCheckpointOf(result.data.checkpoint);
+    const id = parsed.operation === "commit" ? parsed.receipt.inputId : parsed.inputId;
+    if (parsed.operation === "read" && result.data.checkpoint === null) {
+      this.fenceResult(result);
+      return { ok: true, checkpoint: null };
+    }
+    if (
+      !checkpoint ||
+      checkpoint.receipt.inputId !== id ||
+      checkpoint.receiptHash !== (await sourceHash(sourceSnapshot(checkpoint.receipt))) ||
+      (parsed.operation === "commit" &&
+        JSON.stringify(sourceSnapshot(parsed.receipt)) !== JSON.stringify(sourceSnapshot(checkpoint.receipt))) ||
+      (parsed.operation === "ack" && (parsed.receiptHash !== checkpoint.receiptHash || !checkpoint.acknowledged))
+    )
+      throw this.unknownAcknowledgement(
+        "run ledger: invalid source input checkpoint acknowledgement",
+        result.request,
+        result.status,
+      );
+    this.fenceResult(result);
+    return { ok: true, checkpoint };
   }
 
   async peekInbox(runId: string, gen: string, afterSeq: number): Promise<import("./runLedger/types.js").InboxPeek> {

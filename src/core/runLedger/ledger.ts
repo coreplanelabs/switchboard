@@ -1,3 +1,4 @@
+import type { SourceInputCheckpointRequest, SourceInputCheckpointResult } from "./sourceInputIntent.js";
 import type { InboxDeliveryResult } from "./inboxDelivery.js";
 import type {
   CanonicalCheckpointSource,
@@ -321,6 +322,12 @@ export interface RunLedger {
   append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult>;
   /** Commit a state boundary and row projection atomically; ended also fences execution replay. */
   assignLiveState(runId: string, gen: string, assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult>;
+  /** Commit native evidence, read its canonical checkpoint, then acknowledge only its exact witness. */
+  sourceInputCheckpoint(
+    runId: string,
+    gen: string,
+    request: SourceInputCheckpointRequest,
+  ): Promise<SourceInputCheckpointResult>;
   setState(runId: string, gen: string, state: RunState): Promise<FenceResult>;
   /** Any generation: a steer arrives on whichever container is up. */
   pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult>;

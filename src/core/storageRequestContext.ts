@@ -265,6 +265,7 @@ export const STORAGE_OPERATIONS = {
   "/runs/source-events/release": nonRun("source-event"),
   "/runs/source-events/relevance": relevance,
   "/runs/state": runId,
+  "/runs/source-input/checkpoint": runId,
   "/runs/step": runId,
   "/runs/stop": runId,
   "/runs/summary": id,
