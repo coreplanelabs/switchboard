@@ -24,6 +24,7 @@ export default defineConfig({
       "containerStartContract.test.ts",
       "coordinator.test.ts",
       "modelProxyForwarding.test.ts",
+      "hardRestart.test.ts",
       "githubDoorForwarding.test.ts",
       "dashboardFallback.test.ts",
     ],

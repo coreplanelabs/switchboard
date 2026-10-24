@@ -15,7 +15,9 @@ describe("the shim forwards the model proxy's paths to the container blind", () 
   const source = read("worker.ts");
 
   it("answers three paths itself — the restart, the coordinator's instance create and its status — and hands every other path to the container, so /v1/messages, /v1/chat/completions and /v1/responses reach the bot unread", () => {
-    expect(source).toMatch(/pathname === "\/admin\/restart"\s*\?\s*await handleAdminRestart\(/);
+    expect(source).toMatch(
+      /pathname === "\/admin\/restart" \|\| pathname === "\/admin\/restart\/hard"\s*\?\s*await handleAdminRestart\(/,
+    );
     expect(source).toMatch(/pathname === COORDINATOR_INSTANCES_PATH\s*\?\s*await handleCoordinatorInstances\(/);
     expect(source).toMatch(/statusId !== undefined\s*\?\s*await handleCoordinatorInstanceStatus\(/);
     // The container's answer passes through with its length declared (knownLength.ts) — nothing else touches it.

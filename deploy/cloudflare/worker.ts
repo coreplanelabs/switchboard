@@ -40,6 +40,7 @@ import {
   authenticateRestart,
   authorizeRestartDeployer,
   decideRestart,
+  parseHardRestartRequest,
   parseRestartRequest,
   restartResponse,
   type RestartOutcome,
@@ -264,6 +265,31 @@ export class SwitchboardServer extends Container<Env> {
     return this.restartRunning(opts);
   }
 
+  /** Destroy one identified refusal-only process after a graceful stop failed.
+   * This may discard its local disk, so refuse any process that reports work. */
+  async hardRestart(expectedStartedAt: string): Promise<RestartOutcome> {
+    // DO requests can interleave while awaiting network I/O. Keep the health
+    // identity check and destroy in one exclusive event to protect a new process.
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (!this.ctx.container?.running) return { kind: "not-running" };
+      const health = await this.containerFetch(new Request(`${INTERNAL}/healthz`), this.defaultPort);
+      const body = parseHealthz(await health.text().catch(() => ""));
+      if (
+        health.status !== 503 ||
+        body?.startedAt !== expectedStartedAt ||
+        body?.ok !== false ||
+        typeof body.config !== "string" ||
+        body.inFlight !== 0 ||
+        body.draining !== false ||
+        (body.held !== undefined && (!Array.isArray(body.held) || body.held.length > 0))
+      )
+        return { kind: "refused", problems: ["hard restart requires the same idle refusal-only process"] };
+      console.warn(`[restart] SIGKILL → refusal-only container (started ${expectedStartedAt}, 0 in flight)`);
+      await this.destroy();
+      return { kind: "stopping", forced: true, hard: true, inFlight: 0, previousStartedAt: expectedStartedAt };
+    });
+  }
+
   /** The stop itself, for a running container: the preflight's refusal rules over `/healthz`, then SIGTERM. */
   private async restartRunning(opts: { force: boolean }): Promise<RestartOutcome> {
     const health = await this.containerFetch(new Request(`${INTERNAL}/healthz`), this.defaultPort);
@@ -295,7 +321,7 @@ export class SwitchboardServer extends Container<Env> {
  *  the restart is repairing.
  *  Body `{ "force": true }` bypasses the fail-closed refusals (no JSON body,
  *  impossible `inFlight`); runs in flight or a drain warn and never refuse. */
-async function handleAdminRestart(request: Request, env: Env): Promise<Response> {
+async function handleAdminRestart(request: Request, env: Env, hard = false): Promise<Response> {
   const json = (status: number, body: Record<string, unknown>) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   if (request.method !== "POST") return json(405, { ok: false, error: "method not allowed: POST /admin/restart" });
@@ -310,18 +336,26 @@ async function handleAdminRestart(request: Request, env: Env): Promise<Response>
     console.warn(`[restart] ${auth.status} — ${auth.reason}`);
     return json(auth.status, { ok: false, error: auth.reason });
   }
-  const parsed = parseRestartRequest(await request.text().catch(() => ""));
+  const rawBody = await request.text().catch(() => "");
+  const parsed = hard ? parseHardRestartRequest(rawBody) : parseRestartRequest(rawBody);
   if (!parsed.ok) return json(400, { ok: false, error: parsed.reason });
   let outcome: RestartOutcome;
   try {
-    outcome = await getContainer(env.SWITCHBOARD, INSTANCE).restart({ force: parsed.force });
+    outcome =
+      "expectedStartedAt" in parsed
+        ? await getContainer(env.SWITCHBOARD, INSTANCE).hardRestart(parsed.expectedStartedAt)
+        : await getContainer(env.SWITCHBOARD, INSTANCE).restart({ force: parsed.force });
   } catch (err) {
-    // The container's /healthz probe or the DO call threw (container mid-transition,
-    // port not answering): fail closed in the route's own JSON shape so the CLI reads
-    // a reason instead of the platform's HTML 500. Nothing was stopped.
+    // A hard destroy may have taken effect before an error reached the Worker.
+    // Report that uncertainty so an operator cannot treat a retry as safe.
     const reason = err instanceof Error ? err.message : String(err);
-    console.error(`[restart] ${authn.identity.subject} → error before stop: ${reason}`);
-    return json(500, { ok: false, error: `restart failed before stopping anything: ${reason}` });
+    console.error(
+      `[restart] ${authn.identity.subject} → ${hard ? "hard outcome unknown" : "error before stop"}: ${reason}`,
+    );
+    return json(500, {
+      ok: false,
+      error: `${hard ? "hard restart outcome unknown" : "restart failed before stopping anything"}: ${reason}`,
+    });
   }
   console.log(
     `[restart] ${auth.subject} → ${outcome.kind}${outcome.kind === "refused" ? `: ${outcome.problems.join("; ")}` : ""}`,
@@ -576,8 +610,8 @@ export default {
                 status: 401,
                 headers: { "content-type": "application/json" },
               })
-          : pathname === "/admin/restart"
-            ? await handleAdminRestart(forwarded, env)
+          : pathname === "/admin/restart" || pathname === "/admin/restart/hard"
+            ? await handleAdminRestart(forwarded, env, pathname === "/admin/restart/hard")
             : pathname === COORDINATOR_INSTANCES_PATH
               ? await handleCoordinatorInstances(forwarded, env)
               : eventsId !== undefined
