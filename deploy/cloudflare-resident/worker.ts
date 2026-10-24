@@ -872,7 +872,8 @@ const INFRA_STREAK_KEY = "resident:infraStreak";
  *  re-enters the step. A control port that did not answer
  *  (`runtime-unreachable: …`, item 64) is the third: no command ran, the
  *  ladder over its own persisted count owns the recovery. */
-const NON_EVIDENCE_REASON = /^(?:stale-mid-flight|restore-interrupted|runtime-unreachable|infra-streak|refresh-held):/;
+const NON_EVIDENCE_REASON =
+  /^(?:stale-mid-flight|restore-interrupted|runtime-unreachable|infra-streak|refresh-held|snapshot-stamp-unreadable):/;
 /** When the disk-full recovery last stopped the container (docs/reference/specs/resident-repos.md item 54):
  *  feeds `planDiskFullRecovery`'s cooldown so a working set that refills the
  *  disk is named, not recycled in a loop. */
@@ -1160,11 +1161,6 @@ function isRuntimeBusy(err: unknown): boolean {
   for (const link of selfAndCauses(err)) if (isRuntimeBusySignal(link)) return true;
   return false;
 }
-/** Trailing slice of one string for an error reason. Command RESULTS are not
- *  described here — `describeStepFailure` owns that, because choosing between
- *  the two streams is what lost a diagnosis (residentStepReport.ts). */
-const tail = (s: string, n: number): string => s.trim().slice(-n);
-
 // ---------------------------------------------------------------------------
 // GitHub App auth (docs/decisions/0009-residents-second-credential-domain.md)
 // — Worker/DO scope only; the private key never
@@ -3684,6 +3680,12 @@ class StepError extends Error {
   }
 }
 
+class SnapshotStampUnreadableError extends StepError {
+  constructor(message: string, cause?: unknown) {
+    super("restore", message, cause);
+  }
+}
+
 /** A preserved workspace refused a worktree step's replacement: the
  *  refusal's setup word rides the step error, so the attach's answer keeps
  *  `settlement_pending` apart from `workspace_preserved` (record 0097). */
@@ -5131,12 +5133,21 @@ export class ResidentDO extends Sandbox<Env> {
     // derive from the restored MIRROR (the source of truth the checkout was
     // built from); the checkout's presence was proven by restoreBackup + the
     // chown below failing loudly if it is missing.
-    const shaRes = await this.run(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${snap.ref}`]);
-    const diskSha = shaRes.exitCode === 0 ? shaRes.stdout.trim() : `unreadable(${tail(shaRes.stderr, 120)})`;
-    const diskLock = await this.lockfileKey(snap.sha).catch((err) => {
+    const shaRes = await this.run(["git", "-C", MIRROR_DIR, "rev-parse", "--verify", `refs/heads/${snap.ref}`]).catch(
+      async (err) => {
+        if (isBackgroundOperationHeld(err)) throw err;
+        throw await this.unreadableSnapshotStamp("sha", err);
+      },
+    );
+    if (shaRes.exitCode !== 0 || shaRes.timedOut || !/^[0-9a-f]{40,64}$/.test(shaRes.stdout.trim()))
+      throw await this.unreadableSnapshotStamp("sha", describeStepFailure(shaRes));
+    const diskSha = shaRes.stdout.trim();
+    const diskLock = await this.lockfileKey(snap.sha).catch(async (err) => {
       if (isBackgroundOperationHeld(err)) throw err;
-      return `unreadable(${errMsg(err)})`;
+      throw await this.unreadableSnapshotStamp("lockfileHash", err);
     });
+    if (!/^[0-9a-f]{64}$/.test(diskLock))
+      throw await this.unreadableSnapshotStamp("lockfileHash", "hash read returned no valid digest");
     if (diskSha !== snap.sha || diskLock !== snap.lockfileHash) {
       throw await this.goDown(
         `snapshot-stamp-mismatch: restored disk {sha:${diskSha}, lockfileHash:${diskLock}} != stamp {sha:${snap.sha}, lockfileHash:${snap.lockfileHash}}`,
@@ -5145,6 +5156,16 @@ export class ResidentDO extends Sandbox<Env> {
 
     await this.runOk(["chown", "-R", `${BUILD_USER}:${BUILD_USER}`, CHECKOUT_DIR], "chown");
     return { done: false };
+  }
+
+  private async unreadableSnapshotStamp(
+    field: "sha" | "lockfileHash",
+    cause: unknown,
+  ): Promise<SnapshotStampUnreadableError> {
+    const reason = `snapshot-stamp-unreadable: restored disk ${field} could not be verified (${errMsg(cause)})`;
+    await this.recordRefreshError(reason);
+    await this.setResidentState("degraded", reason);
+    return new SnapshotStampUnreadableError(reason, cause);
   }
 
   /** Delete the R2 objects behind SDK backup handles (backups/<id>/ lives
@@ -6057,6 +6078,16 @@ export class ResidentDO extends Sandbox<Env> {
    *  not accept the connect (`runtime-busy`, item 68) is a fourth: `busy`,
    *  and the cycle yields to the run that holds it. */
   private async classifyCycleError(err: unknown): Promise<RefreshFailure> {
+    if (err instanceof SnapshotStampUnreadableError)
+      return {
+        step: err.step,
+        reason: err.message,
+        interrupted: false,
+        diskFull: false,
+        runtimeUnreachable: false,
+        busy: false,
+        verificationUnknown: true,
+      };
     if (isBackgroundOperationHeld(err))
       return classifyRefreshFailure({
         step: err instanceof StepError ? err.step : "refresh",
@@ -6087,11 +6118,13 @@ export class ResidentDO extends Sandbox<Env> {
    *  clears it, same as a mint error), then `degraded` with the last snapshot
    *  still serving, and the disk-full recovery when that is the cause. */
   private async refreshFailed(failure: RefreshFailure, selfInFlight: number): Promise<void> {
-    console.log(`refresh: cycle ${failure.operationHeld ? "held" : "failed"} — ${failure.reason.slice(0, 400)}`);
+    console.log(
+      `refresh: cycle ${failure.operationHeld || failure.verificationUnknown ? "held" : "failed"} — ${failure.reason.slice(0, 400)}`,
+    );
     await this.recordRefreshError(failure.reason);
-    if (failure.operationHeld) {
-      // The original effect may still be running. Replacing its VM cannot
-      // establish the outcome, and this hold breaks any earlier infra streak.
+    if (failure.operationHeld || failure.verificationUnknown) {
+      // An unresolved effect or stamp read is not evidence that the VM is
+      // broken. A replacement cannot establish the missing fact.
       await this.ctx.storage.delete(INFRA_STREAK_KEY);
       await this.setResidentState("degraded", failure.reason);
       return;

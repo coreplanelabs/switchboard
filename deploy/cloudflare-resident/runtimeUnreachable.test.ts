@@ -41,7 +41,7 @@ function functionOf(name: string): string {
 
 /** A top-level `const NAME = /…/;` regex literal of the entry, as a RegExp. */
 function regexConst(name: string): RegExp {
-  const m = new RegExp(`^const ${name} = /(.*)/([a-z]*);$`, "m").exec(source);
+  const m = new RegExp(`^const ${name} =\\s*/(.*)/([a-z]*);$`, "m").exec(source);
   expect(m, `worker.ts declares the regex ${name}`).not.toBeNull();
   return new RegExp(m![1], m![2]);
 }
