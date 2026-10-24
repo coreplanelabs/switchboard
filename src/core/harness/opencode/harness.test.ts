@@ -398,6 +398,43 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
     facts,
   });
 
+  it("holds a source-guarded bot-loss session before a new continue input or bearer adoption", async () => {
+    const clock = () => 1_700_000_000_000;
+    const bearers = new RunBearerStore({ clock });
+    bearers.mint(
+      {
+        runId: "run-c",
+        modelRef: "anthropic/claude-fable-5",
+        providerName: "anthropic",
+        providerWire: "anthropic-messages",
+        model: "claude-fable-5",
+        maxTokens: 4096,
+        maxTurns: 50,
+        expiresAt: clock() + 60 * 60_000,
+        span: createTracer({ clock }).start("request", { sinks: [] }),
+        publish: () => {},
+      },
+      { sourceGuardRequired: true },
+    );
+    bearers.bindSourceGuard("run-c", async () => true);
+    const driver = openCodeDriver({ bearers });
+    const result = await driver.run({
+      turns: [{ content: [{ type: "text", text: "must not run" }], stopReason: "end_turn" }],
+      processAliveOnResume: true,
+      resume: resume(rowFor(driver), [request], []),
+    });
+    expect(result.outcome).toMatchObject({
+      kind: "failed",
+      error: { name: "HarnessEndingUnconfirmedError", message: "The original producer ending is unconfirmed." },
+    });
+    expect(result.requests.filter((entry) => entry.method === "POST" && entry.path.endsWith("/prompt"))).toEqual([]);
+    expect(result.modelCalls).toEqual([]);
+    expect(result.starts).toEqual([]);
+    expect(result.killed).toEqual([]);
+    expect(result.removed).toEqual([]);
+    expect(bearers.verify(driver.bearer)).toMatchObject({ ok: false, reason: "unknown_bearer" });
+  });
+
   it("retains the actual launch temporary-directory capability through saved facts and reattachment", async () => {
     const driver = openCodeDriver();
     const turns: RunScript["turns"] = [

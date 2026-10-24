@@ -225,6 +225,16 @@ interface RealRunOptions {
   effort?: NonNullable<HarnessRun["effort"]>;
   grant?: Partial<RunBearerGrant>;
   proxy?: { providers: Record<string, ProviderConfig>; env: Record<string, string> };
+  sourceGuard?: () => Promise<boolean | "retryable">;
+  upstreamProbe?: Array<Record<string, unknown>>;
+  nativeProbe?: { facts?: HarnessFacts[]; container?: BotHostHarnessContainer; bearers?: RunBearerStore };
+  control?: RunControl;
+  deadlineAt?: number;
+  clock?: () => number;
+  continuationPost?: "landed-response-lost" | "not-landed-response-lost";
+  continuationAttempts?: { count: number };
+  sourceHoldAck?: boolean | "throw";
+  inbox?: FollowUpInbox;
   /** A bot roll: this generation's bot is fresh (new stores, new handlers) but
    *  listens on the DEAD generation's port, in the same container and home —
    *  the live OpenCode server's relay and model URLs keep resolving. The caller
@@ -242,10 +252,12 @@ async function driveRealRun(
   resume?: HarnessResume,
   opts?: RealRunOptions,
 ): Promise<RealRun> {
-  const clock = () => Date.now();
+  const clock = opts?.clock ?? (() => Date.now());
   const bearers = new RunBearerStore({ clock });
+  if (opts?.nativeProbe) opts.nativeProbe.bearers = bearers;
   const spans: SpanRecord[] = [];
   const bearer = bearers.mint(grantFor(runId, clock, spans, opts?.grant));
+  if (opts?.sourceGuard) bearers.bindSourceGuard(runId, opts.sourceGuard);
   const harnesses = new HarnessRegistry();
   const takeover = new LedgerTakeover();
   takeover.settle();
@@ -259,6 +271,7 @@ async function driveRealRun(
   const upstreamFetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const parsed = JSON.parse(String(init?.body)) as { model?: string; messages?: Array<{ role: string }> };
     upstreamBodies.push(parsed as Record<string, unknown>);
+    opts?.upstreamProbe?.push(parsed as Record<string, unknown>);
     const results = (parsed.messages ?? []).filter((m) => m.role === "tool").length;
     const chunks = scriptedChunks(parsed, script).map((c) => {
       const usage = (c as { usage?: Record<string, unknown> }).usage;
@@ -305,10 +318,28 @@ async function driveRealRun(
     new BotHostHarnessContainer({
       env: { PATH: `${resolve(BIN, "..")}:${process.env.PATH ?? ""}`, HOME: homeDir },
     });
+  if (opts?.continuationPost) {
+    const originalRequest = container.request.bind(container);
+    container.request = async (paths, request) => {
+      if (request.method === "POST" && request.path.endsWith("/prompt")) {
+        const payload = JSON.parse(request.body ?? "{}") as { metadata?: { originalInputId?: string } };
+        if (payload.metadata?.originalInputId) {
+          if (opts.continuationAttempts) opts.continuationAttempts.count++;
+          if (opts.continuationPost === "landed-response-lost") await originalRequest(paths, request);
+          throw new Error("the continuation response was lost after admission was uncertain");
+        }
+      }
+      return originalRequest(paths, request);
+    };
+  }
 
   const events: RunEvent[] = [];
   const steps: StepReport[] = [];
   const facts: HarnessFacts[] = [];
+  if (opts?.nativeProbe) {
+    opts.nativeProbe.facts = facts;
+    opts.nativeProbe.container = container;
+  }
   const statusReports: string[] = [];
   const run: HarnessRun = {
     runId,
@@ -328,12 +359,22 @@ async function driveRealRun(
     tools: [updateStatusTool],
     toolContext: { executor, reportProgress: (list) => void statusReports.push(list) },
     rules: { checkout: homeDir, protectedBranches: ["main"] },
-    control: new RunControl(),
-    inbox: new FollowUpInbox(),
+    control: opts?.control ?? new RunControl(),
+    ...(opts?.deadlineAt !== undefined ? { deadlineAt: opts.deadlineAt } : {}),
+    inbox: opts?.inbox ?? new FollowUpInbox(),
     onEvent: (e) => void events.push(e),
     onProgress: () => {},
     onStep: async (r) => void steps.push(r),
-    saveFacts: (f) => void facts.push(f),
+    saveFacts: (f, control) => {
+      facts.push(f);
+      if (control?.requireAcknowledgement) {
+        if (f.harness === "opencode" && f.sourceHold) {
+          if (opts?.sourceHoldAck === "throw") throw new Error("Memory source-hold acknowledgment lost");
+          return opts?.sourceHoldAck ?? true;
+        }
+        return true;
+      }
+    },
     ...(resume ? { resume } : {}),
   };
   const deps: HarnessDeps = {
@@ -1017,4 +1058,347 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode speaks the aggregator's ow
     }
     await session.end();
   }, 120_000);
+});
+
+describe.skipIf(!openCodeBinaryAvailable())("OpenCode signed source refusal probe", () => {
+  const sourceOptions: Pick<RealRunOptions, "model" | "grant" | "proxy"> = {
+    model: { id: "real-model", provider: "anthropic", providerType: "openai-compatible" },
+    grant: {
+      modelRef: "anthropic/real-model",
+      providerName: "anthropic",
+      providerWire: "openai-chat",
+      model: "real-model",
+    },
+    proxy: {
+      providers: {
+        anthropic: {
+          type: "openai-compatible",
+          wire: "openai-chat",
+          vendor: "model",
+          catalog: "anthropic",
+          baseUrl: "http://upstream.test/v1",
+          apiKeyEnv: "FAKE_MODEL_KEY",
+        },
+      },
+      env: { FAKE_MODEL_KEY: "test-only-key" },
+    },
+  };
+  it("holds a signed source failure and continues once in the original live session", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    const inbox = new FollowUpInbox();
+    let sourceChecks = 0;
+    const run = await driveRealRun(
+      "run-source-held",
+      (_results, chunks) => chunks.text("finished after source recovery"),
+      undefined,
+      {
+        ...sourceOptions,
+        inbox,
+        sourceGuard: async () => {
+          sourceChecks++;
+          if (sourceChecks === 2)
+            inbox.push({ text: "also inspect the follow-up", userId: "user:test", at: Date.now() });
+          return sourceChecks === 1 ? "retryable" : true;
+        },
+        upstreamProbe: upstream,
+      },
+    );
+    try {
+      expect(run.session.answer).toBe("finished after source recovery");
+      expect(upstream).toHaveLength(1);
+      expect(sourceChecks).toBe(4);
+      expect(run.statusReports).toEqual([]);
+      expect(run.events.filter((event) => event.type === "run_note" && event.kind === "harness_error")).toEqual([]);
+      expect(inbox.drain().map((input) => input.text)).toEqual(["also inspect the follow-up"]);
+      const held = run.facts.at(-1);
+      if (held?.harness !== "opencode" || !held.sourceHold) throw new Error("The source hold facts were not saved");
+      const records = (await readFeed(run)).split("\n").flatMap((line) => {
+        if (!line) return [];
+        const parsed = parseFeedRecord(line);
+        return parsed?.feed === "event" ? [parsed.event] : [];
+      });
+      expect(records.filter((event) => event.type === "session.execution.failed")).toHaveLength(1);
+      expect(records.filter((event) => event.type === "session.execution.succeeded")).toHaveLength(1);
+      expect(records.filter((event) => event.type === "session.tool.called")).toEqual([]);
+      const messages = await run.container.request(openCodeRunPathsAt(held.root), {
+        method: "GET",
+        path: `/api/session/${held.sessionID}/message?order=asc&limit=200`,
+        port: held.port,
+        secretHeaders: { Authorization: openCodeAuthHeader(held.bearerHash!) },
+      });
+      expect(messages.status).toBe(200);
+      const rows = (JSON.parse(messages.body) as { data: Array<{ id: string; type: string }> }).data;
+      expect(rows.filter((row) => row.id === held.sourceHold!.originalInputId)).toHaveLength(1);
+      expect(rows.filter((row) => row.id === held.sourceHold!.continuationId)).toHaveLength(1);
+      expect(JSON.stringify(upstream[0])).toContain("Continue the preceding request");
+    } finally {
+      await run.session.end();
+    }
+  }, 120_000);
+
+  it("the recovered continuation completes one relayed tool effect and one answer", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    let checks = 0;
+    const run = await driveRealRun(
+      "run-source-tool-once",
+      (results, chunks) =>
+        results === 0
+          ? chunks.toolCall("call_source_status", "update_status", { checklist: "○ source recovered" })
+          : chunks.text("completed after one status update"),
+      undefined,
+      {
+        ...sourceOptions,
+        upstreamProbe: upstream,
+        sourceGuard: async () => (++checks === 1 ? "retryable" : true),
+      },
+    );
+    try {
+      expect(run.session.answer).toBe("completed after one status update");
+      expect(run.statusReports).toEqual(["○ source recovered"]);
+      expect(upstream).toHaveLength(2);
+      const calls = run.events.filter((event) => event.type === "tool_call");
+      expect(calls).toMatchObject([{ callId: "call_source_status", tool: "update_status" }]);
+    } finally {
+      await run.session.end();
+    }
+  }, 120_000);
+
+  it("a source failure after a completed tool resumes without repeating that effect", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    let checks = 0;
+    const run = await driveRealRun(
+      "run-source-after-tool",
+      (results, chunks) =>
+        results === 0
+          ? chunks.toolCall("call_prior_status", "update_status", { checklist: "○ already done" })
+          : chunks.text("completed after the held read"),
+      undefined,
+      {
+        ...sourceOptions,
+        upstreamProbe: upstream,
+        sourceGuard: async () => (++checks === 2 ? "retryable" : true),
+      },
+    );
+    try {
+      expect(run.session.answer).toBe("completed after the held read");
+      expect(run.statusReports).toEqual(["○ already done"]);
+      expect(upstream).toHaveLength(2);
+      expect(run.events.filter((event) => event.type === "tool_call")).toMatchObject([
+        { callId: "call_prior_status", tool: "update_status" },
+      ]);
+    } finally {
+      await run.session.end();
+    }
+  }, 120_000);
+
+  it("source revocation during the hold sends no continuation or provider request", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    const native: NonNullable<RealRunOptions["nativeProbe"]> = {};
+    let checks = 0;
+    await expect(
+      driveRealRun("run-source-revoked", (_results, chunks) => chunks.text("must not run"), undefined, {
+        ...sourceOptions,
+        nativeProbe: native,
+        upstreamProbe: upstream,
+        sourceGuard: async () => {
+          checks++;
+          if (checks === 2) native.bearers?.revoke("run-source-revoked");
+          return checks === 1 ? "retryable" : true;
+        },
+      }),
+    ).rejects.toMatchObject({ name: "ModelSourceUnavailableError" });
+    expect(upstream).toEqual([]);
+    expect(native.facts?.some((entry) => entry.harness === "opencode" && entry.sourceHold !== undefined)).toBe(false);
+  }, 120_000);
+
+  it("the original admitted deadline ends the source hold before another input", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    let now = Date.now();
+    const deadlineAt = now + 5 * 60_000;
+    let checks = 0;
+    await expect(
+      driveRealRun("run-source-deadline", (_results, chunks) => chunks.text("must not run"), undefined, {
+        ...sourceOptions,
+        clock: () => now,
+        deadlineAt,
+        upstreamProbe: upstream,
+        sourceGuard: async () => {
+          if (++checks === 2) now = deadlineAt;
+          return "retryable";
+        },
+      }),
+    ).rejects.toMatchObject({ name: "ModelSourceUnavailableError" });
+    expect(upstream).toEqual([]);
+  }, 120_000);
+
+  it("a hard cancellation during the source hold ends without a continuation", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    const control = new RunControl();
+    let checks = 0;
+    const run = await driveRealRun(
+      "run-source-cancelled",
+      (_results, chunks) => chunks.text("must not run"),
+      undefined,
+      {
+        ...sourceOptions,
+        control,
+        upstreamProbe: upstream,
+        sourceGuard: async () => {
+          checks++;
+          if (checks === 1) setTimeout(() => control.requestStop("hard"), 500);
+          return checks === 1 ? "retryable" : true;
+        },
+      },
+    );
+    try {
+      expect(run.session.answer).toBe("⏹ Stopped by user.");
+      expect(upstream).toEqual([]);
+      expect(checks).toBe(1);
+      expect(run.statusReports).toEqual([]);
+    } finally {
+      await run.session.end();
+    }
+  }, 120_000);
+
+  it("a lost continuation response resolves from its exact native input ID without another POST", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    const attempts = { count: 0 };
+    let checks = 0;
+    const run = await driveRealRun(
+      "run-source-ack-lost",
+      (_results, chunks) => chunks.text("continued once"),
+      undefined,
+      {
+        ...sourceOptions,
+        continuationPost: "landed-response-lost",
+        continuationAttempts: attempts,
+        upstreamProbe: upstream,
+        sourceGuard: async () => (++checks === 1 ? "retryable" : true),
+      },
+    );
+    try {
+      expect(run.session.answer).toBe("continued once");
+      expect(upstream).toHaveLength(1);
+      expect(attempts.count).toBe(1);
+      const held = run.facts.at(-1);
+      expect(held).toMatchObject({ harness: "opencode", sourceHold: { originalInputId: expect.any(String) } });
+    } finally {
+      await run.session.end();
+    }
+  }, 120_000);
+
+  it("a continuation absent after a lost response retains the original native process", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    const attempts = { count: 0 };
+    const native: NonNullable<RealRunOptions["nativeProbe"]> = {};
+    let checks = 0;
+    try {
+      await expect(
+        driveRealRun("run-source-write-unknown", (_results, chunks) => chunks.text("must not run"), undefined, {
+          ...sourceOptions,
+          continuationPost: "not-landed-response-lost",
+          continuationAttempts: attempts,
+          nativeProbe: native,
+          upstreamProbe: upstream,
+          sourceGuard: async () => (++checks === 1 ? "retryable" : true),
+        }),
+      ).rejects.toMatchObject({ name: "HarnessEndingUnconfirmedError" });
+      expect(upstream).toEqual([]);
+      expect(attempts.count).toBe(1);
+      const held = native.facts?.at(-1);
+      if (held?.harness !== "opencode" || !native.container) throw new Error("The original native facts are missing");
+      expect(await native.container.alive(held.pid)).toBe(true);
+      expect(held.sourceHold?.continuationId).toMatch(/^msg_[a-f0-9]{64}$/);
+    } finally {
+      const held = native.facts?.at(-1);
+      if (held?.harness === "opencode" && native.container) {
+        await native.container.kill(held.pid);
+        if (held.tailerPid !== undefined) await native.container.kill(held.tailerPid);
+        await native.container.remove(openCodeRunPathsAt(held.root));
+      }
+    }
+  }, 120_000);
+
+  it("a caught optional-turn source hold refuses later prompts and destructive ending", async () => {
+    const upstream: Array<Record<string, unknown>> = [];
+    const attempts = { count: 0 };
+    const native: NonNullable<RealRunOptions["nativeProbe"]> = {};
+    let checks = 0;
+    const run = await driveRealRun(
+      "run-source-optional-unknown",
+      (_results, chunks) => chunks.text("initial answer"),
+      undefined,
+      {
+        ...sourceOptions,
+        continuationPost: "not-landed-response-lost",
+        continuationAttempts: attempts,
+        nativeProbe: native,
+        upstreamProbe: upstream,
+        sourceGuard: async () => (++checks === 2 ? "retryable" : true),
+      },
+    );
+    try {
+      expect(run.session.answer).toBe("initial answer");
+      expect(upstream).toHaveLength(1);
+      const verdictTurn = {
+        text: "give the Review verdict",
+        maxTurns: 3,
+        maxMinutes: 3,
+        tools: [],
+        toolContext: { executor },
+      };
+      await expect(run.session.followUp(verdictTurn)).rejects.toMatchObject({ name: "HarnessEndingUnconfirmedError" });
+      expect(attempts.count).toBe(1);
+      expect(upstream).toHaveLength(1);
+      const held = native.facts?.at(-1);
+      if (held?.harness !== "opencode" || !native.container) throw new Error("The original native facts are missing");
+      expect(held.sourceHold?.continuationId).toMatch(/^msg_[a-f0-9]{64}$/);
+      expect(await native.container.alive(held.pid)).toBe(true);
+      await expect(run.session.followUp(verdictTurn)).rejects.toMatchObject({ name: "HarnessEndingUnconfirmedError" });
+      expect(attempts.count).toBe(1);
+      await expect(run.session.end()).rejects.toMatchObject({ name: "HarnessEndingUnconfirmedError" });
+      expect(await native.container.alive(held.pid)).toBe(true);
+      expect(existsSync(held.root)).toBe(true);
+    } finally {
+      const held = native.facts?.at(-1);
+      if (held?.harness === "opencode" && native.container) {
+        await native.container.kill(held.pid);
+        if (held.tailerPid !== undefined) await native.container.kill(held.tailerPid);
+        await native.container.remove(openCodeRunPathsAt(held.root));
+      }
+    }
+  }, 120_000);
+
+  it.each([false, "throw"] as const)(
+    "an unacknowledged source hold (%s) retains the original process and sends no continuation",
+    async (ack) => {
+      const upstream: Array<Record<string, unknown>> = [];
+      const native: NonNullable<RealRunOptions["nativeProbe"]> = {};
+      let checks = 0;
+      try {
+        await expect(
+          driveRealRun("run-source-ack-missing", (_results, chunks) => chunks.text("must not run"), undefined, {
+            ...sourceOptions,
+            sourceHoldAck: ack,
+            nativeProbe: native,
+            upstreamProbe: upstream,
+            sourceGuard: async () => (++checks === 1 ? "retryable" : true),
+          }),
+        ).rejects.toMatchObject({ name: "HarnessEndingUnconfirmedError" });
+        expect(upstream).toEqual([]);
+        const held = native.facts?.at(-1);
+        if (held?.harness !== "opencode" || !native.container) throw new Error("The original native facts are missing");
+        expect(await native.container.alive(held.pid)).toBe(true);
+        expect(held.sourceHold?.originalInputId).toMatch(/^msg_/);
+      } finally {
+        const held = native.facts?.at(-1);
+        if (held?.harness === "opencode" && native.container) {
+          await native.container.kill(held.pid);
+          if (held.tailerPid !== undefined) await native.container.kill(held.tailerPid);
+          await native.container.remove(openCodeRunPathsAt(held.root));
+        }
+      }
+    },
+    120_000,
+  );
 });

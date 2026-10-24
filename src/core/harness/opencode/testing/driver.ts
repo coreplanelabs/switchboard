@@ -1,4 +1,5 @@
 import { ExecInfraError } from "../../../../execution/executor.js";
+import { authenticateProxySourceRetry } from "../../../modelProxy/providerFailureAuth.js";
 // OpenCode's driver for the conformance table (docs/reference/specs/harness.md
 // item 11): a run driven through the REAL `OpenCodeHarness` object — its full
 // `open` (the launch through the seam, the seed imported as an authored
@@ -284,6 +285,8 @@ export interface FakeServeOptions {
    *  hands the refusal on — a live execution's end, not a late tail's; the next
    *  play continues at the turn after it. */
   budgetRefusalAtModelCall?: number;
+  /** The signed proxy source refusal on one model call, with no provider or turn effect. */
+  sourceRefusalAtModelCall?: number;
   /** A steer on the idle session starts a new execution at once, as the pinned
    *  binary does (measured: a steer arriving after the end starts an execution,
    *  its row in the store before the answer); off, the fake's default, the
@@ -610,6 +613,8 @@ class ScriptedServe {
   private readonly promptPostFails: number | undefined;
   private readonly promptPostThrows: number | undefined;
   private readonly budgetRefusalAtModelCall: number | undefined;
+  private readonly sourceRefusalAtModelCall: number | undefined;
+  private sourceRefused = false;
   private readonly steerOnIdleStartsExecution: boolean;
   private readonly silentAfterPrompt: number | undefined;
   private readonly interruptSettlesLate: "interrupted" | "failed" | "budget" | undefined;
@@ -749,6 +754,7 @@ class ScriptedServe {
     this.promptPostFails = options.promptPostFails;
     this.promptPostThrows = options.promptPostThrows;
     this.budgetRefusalAtModelCall = options.budgetRefusalAtModelCall;
+    this.sourceRefusalAtModelCall = options.sourceRefusalAtModelCall;
     this.steerOnIdleStartsExecution = options.steerOnIdleStartsExecution === true;
     this.silentAfterPrompt = options.silentAfterPrompt;
     // A hung tool's interrupt owes the interrupted execution's tail at the next
@@ -1134,6 +1140,7 @@ class ScriptedServe {
       if (this.permissionListResets) throw controlReset("request");
       return j(200, { data: [...this.pendingAsks.values(), ...this.liveAsks.values()] });
     }
+    if (req.method === "GET" && req.path === `/api/session/${this.sessionID}/inbox`) return j(200, { data: [] });
     if (req.method === "GET" && req.path === "/api/config") {
       // The document the launch actually wrote, so readiness holds the run's own config.
       const written = this.container.files.get(this.configPath());
@@ -1636,14 +1643,20 @@ class ScriptedServe {
    *  the provider's words, then the two refills its terminal transition causes
    *  — the pending asks (none), then the store with the idle marker the failure
    *  left, the tailer's order — and NO `session.idle`. */
-  private failExecution(type: string, message: string, status?: number): void {
+  private failExecution(type: string, message: string, status?: number, responseBody?: string): void {
     this.emitEvent("session.execution.failed", {
       sessionID: this.sessionID,
-      error: { type, message, ...(status !== undefined ? { status } : {}) },
+      error: {
+        type,
+        message,
+        ...(status !== undefined ? { status } : {}),
+        ...(responseBody ? { response: { body: responseBody } } : {}),
+      },
     });
     this.store.push({ id: `msg_idle_${this.ordinal++}`, type: "idle", outcome: "failed", time: { created: NOW } });
-    this.emitPermissions([]);
-    this.emitMessages();
+    const reason = responseBody === undefined ? "session.step.ended" : "session.execution.failed";
+    this.emitPermissions([], reason);
+    this.emitMessages(reason);
   }
 
   private waitReply(requestID: string): Promise<Decision> {
@@ -1759,6 +1772,13 @@ class ScriptedServe {
       return;
     }
     for (let t = from; t < this.script.turns.length && !this.interrupted; t++) {
+      if (!this.sourceRefused && this.sourceRefusalAtModelCall === t + 1) {
+        this.sourceRefused = true;
+        this.resumeTurn = t;
+        const signed = authenticateProxySourceRetry();
+        this.failExecution("provider.auth", signed.message, 403, JSON.stringify({ error: signed }));
+        return;
+      }
       // A hard stop before this model call (`hardStopBeforeModelCall`): request
       // it, then wait for the loop to see it and interrupt the session (the
       // interrupt route sets `interrupted`) before this turn plays — so the run
