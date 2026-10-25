@@ -491,6 +491,7 @@ export type ReadyEnvironmentReason =
   | "dependencies_stale"
   | "binding_mismatch"
   | "seed_failed"
+  | "seed_outcome_unknown"
   | "tool_missing"
   | "test_command_invalid"
   | "check_failed";
@@ -1452,8 +1453,10 @@ async function seedSandbox(
     });
     if (decision.action === "refuse")
       throw readyFailure(
-        "dependencies_invalid",
-        "Repair the original workspace's dependency view before retrying this task.",
+        answer.reason === "seed-uncertain" ? "seed_outcome_unknown" : "dependencies_invalid",
+        answer.reason === "seed-uncertain"
+          ? "Inspect the saved workspace and its original process before retrying this task."
+          : "Repair the original workspace's dependency view before retrying this task.",
       );
     if (decision.action === "cold") return { why: oneLine(decision.why) };
     if (ctx.readyEnvironment !== undefined && !decision.seed.depsBackupId)
