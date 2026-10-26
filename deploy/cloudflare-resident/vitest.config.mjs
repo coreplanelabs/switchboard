@@ -79,6 +79,7 @@ export default defineConfig({
       "autoRebuild.test.ts",
       "awaitRestore.test.ts",
       "infraStreak.test.ts",
+      "snapshotStampRead.test.ts",
       "staleTip.test.ts",
       "execReplacedWord.test.ts",
       "opExecTimeout.test.ts",

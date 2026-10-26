@@ -512,9 +512,10 @@ describe("the fetch step names GitHub only for GitHub's failures", () => {
 
 describe("the reasons are read as the resident's, never the repo's", () => {
   it("`infra-streak:` is a non-evidence reason (the gate always runs the next cycle) and the gate parks only what parksOnRepeat allows", () => {
-    const m = /^const NON_EVIDENCE_REASON = \/(.*)\/;$/m.exec(source);
+    const m = /^const NON_EVIDENCE_REASON =\s*\/(.*)\/;$/m.exec(source);
     expect(m).not.toBeNull();
     expect(new RegExp(m![1]).test("infra-streak: 3 consecutive cycles failed …")).toBe(true);
+    expect(new RegExp(m![1]).test("snapshot-stamp-unreadable: lockfileHash could not be verified")).toBe(true);
     expect(source).toMatch(
       /entry\.state === "degraded" && !isNonEvidenceReason\(entry\.reason\) && parksOnRepeat\(entry\.reason\)/,
     );
