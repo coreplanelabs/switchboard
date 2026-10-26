@@ -1587,6 +1587,18 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
         throw historyFailure("history_context_unavailable", "The saved history source could not be verified.");
       if (pointer?.savedNativeMediaSource && (!isContextDependencies(context) || !context.nativeMediaSources?.length))
         throw historyFailure("history_context_unavailable", "The saved history source could not be verified.");
+      // A Review that failed before its agent started can leave a system reply
+      // in the thread. It has no model answer to carry into the next Review.
+      if (
+        role === "assistant" &&
+        context === undefined &&
+        stored?.agent === "review" &&
+        stored.status === "failed" &&
+        stored.session === undefined &&
+        stored.events?.some((event) => event.type === "refusal" && event.code === "setup_failed") &&
+        !stored.events?.some((event) => event.type === "answer")
+      )
+        return null;
       if (role === "assistant") {
         const producer = live?.meta ?? stored;
         if (!producer || !isContextDependencies(context) || context.status !== "known")
