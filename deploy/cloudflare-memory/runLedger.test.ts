@@ -1814,6 +1814,7 @@ describe("original ingress SQLite owner", () => {
       request: { text: "Original request", authenticatedAs: "access:alice" },
       contentExpiresAt: Date.now() + 90_000,
       originExpiresAt: Date.now() + 365_000,
+      receiptId: "organization:original:1",
       origin: {
         version: 1 as const,
         organization: "org:test",
@@ -1851,6 +1852,22 @@ describe("original ingress SQLite owner", () => {
     if (first.status !== "claimed") throw new Error("not claimed");
     expect(await client().consumeIngress(request)).toEqual({ status: "duplicate", record: first.record });
     expect(await client().consumeIngress({ ...request, threadKey: "http:other" })).toEqual({ status: "conflict" });
+    const launch = {
+      effectKey: request.effectKey,
+      digest: request.digest,
+      runId: first.record.runId,
+      receiptId: request.receiptId,
+      producerGeneration: "bot-generation-1",
+      launchId: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+    };
+    expect(await client().launchIngress(launch)).toMatchObject({
+      status: "record",
+      record: { launch: { producerGeneration: "bot-generation-1", launchId: launch.launchId } },
+    });
+    expect(await client().launchIngress(launch)).toMatchObject({ status: "record" });
+    expect(await client().launchIngress({ ...launch, producerGeneration: "bot-generation-2" })).toEqual({
+      status: "fenced",
+    });
     expect(
       await client().finishIngress({
         effectKey: request.effectKey,
@@ -1870,6 +1887,8 @@ describe("original ingress SQLite owner", () => {
         handlerOutcome: "uncertain",
         ownerStage: "schedule",
         failure: { stage: "schedule", kind: "transport" },
+        producerGeneration: launch.producerGeneration,
+        launchId: launch.launchId,
       }),
     ).toMatchObject({ status: "record", record: { status: "uncertain", runId: first.record.runId } });
     expect(await client().readIngress(request.effectKey)).toMatchObject({
@@ -1894,6 +1913,7 @@ describe("original ingress SQLite owner", () => {
         handlerOutcome: "uncertain",
         ownerStage: "schedule",
         failure: { stage: "schedule", kind: "transport" },
+        launch: { producerGeneration: "bot-generation-1", launchId: launch.launchId },
       },
     });
     await runInDurableObject(stub, async (_instance, state) => {

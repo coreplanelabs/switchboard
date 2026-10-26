@@ -34,6 +34,7 @@ describe("RunRoutePage (the /runs/:id dispatch)", () => {
           receiptId: "organization:acme:7",
           ownerStatus,
           createdAt: 1_700_000_000_000,
+          producer: { status: "unknown" },
           ...(ownerStatus === "uncertain"
             ? { ownerStage: "schedule" as const, failure: { stage: "schedule" as const, kind: "transport" as const } }
             : {}),

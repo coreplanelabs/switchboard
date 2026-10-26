@@ -53,6 +53,81 @@ const origin = {
   },
 };
 describe("original ingress owner", () => {
+  it("binds one launch receipt to the original source and producer generation", async () => {
+    const ledger = new InMemoryRunLedger(() => 1);
+    const owned = await ledger.consumeIngress({
+      ...request,
+      origin,
+      originExpiresAt: 365,
+      receiptId: "organization:org:test:7",
+    });
+    if (owned.status !== "claimed") throw new Error("original owner not claimed");
+    const launch = {
+      effectKey: request.effectKey,
+      digest: request.digest,
+      runId: owned.record.runId,
+      receiptId: "organization:org:test:7",
+      producerGeneration: "bot-generation-1",
+      launchId: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+    };
+    expect(await ledger.launchIngress(launch)).toMatchObject({
+      status: "record",
+      record: { launch: { producerGeneration: "bot-generation-1", launchId: launch.launchId, launchedAt: 1 } },
+    });
+    expect(await ledger.launchIngress(launch)).toMatchObject({
+      status: "record",
+      record: { launch: { launchId: launch.launchId } },
+    });
+    expect(await ledger.launchIngress({ ...launch, producerGeneration: "bot-generation-2" })).toEqual({
+      status: "fenced",
+    });
+    expect(await ledger.launchIngress({ ...launch, digest: "b".repeat(64) })).toEqual({ status: "fenced" });
+    expect(await ledger.launchIngress({ ...launch, receiptId: "organization:org:test:8" })).toEqual({
+      status: "fenced",
+    });
+    expect(await ledger.launchIngress({ ...launch, runId: crypto.randomUUID() })).toEqual({ status: "fenced" });
+    expect(
+      await ledger.finishIngress({
+        effectKey: launch.effectKey,
+        digest: launch.digest,
+        runId: launch.runId,
+        status: "completed",
+        outcome: "completed",
+      }),
+    ).toEqual({ status: "fenced" });
+    expect(
+      await ledger.finishIngress({
+        effectKey: launch.effectKey,
+        digest: launch.digest,
+        runId: launch.runId,
+        status: "completed",
+        outcome: "completed",
+        handlerOutcome: "completed",
+        producerGeneration: "bot-generation-2",
+        launchId: launch.launchId,
+      }),
+    ).toEqual({ status: "fenced" });
+    expect(
+      await ledger.finishIngress({
+        effectKey: launch.effectKey,
+        digest: launch.digest,
+        runId: launch.runId,
+        status: "completed",
+        outcome: "completed",
+        handlerOutcome: "completed",
+        producerGeneration: launch.producerGeneration,
+        launchId: launch.launchId,
+      }),
+    ).toMatchObject({
+      status: "record",
+      record: { terminal: { producerGeneration: "bot-generation-1", launchId: launch.launchId, outcome: "completed" } },
+    });
+    expect(await ledger.readIngressByRun(owned.record.runId)).toMatchObject({
+      status: "record",
+      record: { launch: { producerGeneration: "bot-generation-1", launchId: launch.launchId } },
+    });
+    expect(await ledger.launchIngress({ ...launch, effectKey: "missing" })).toEqual({ status: "not_found" });
+  });
   it("retains a closed dispatch outcome and failure stage beside the original receipt", async () => {
     const ledger = new InMemoryRunLedger(() => 1);
     const owned = await ledger.consumeIngress({ ...request, origin, receiptId: "organization:org:test:7" });

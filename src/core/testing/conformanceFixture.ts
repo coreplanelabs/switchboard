@@ -637,6 +637,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
               receiptId: "organization:acme:7",
               ownerStatus: "dispatching" as const,
               createdAt: NOW,
+              producer: { status: "unknown" as const },
             },
           } as const)
         : { kind: "not_found" as const },

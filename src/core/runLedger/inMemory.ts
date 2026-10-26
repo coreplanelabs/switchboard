@@ -53,10 +53,12 @@ import {
   claimUnreadIngress,
   type UnreadIngressProof,
   finishIngress,
+  launchIngress,
   retainedIngress,
   type IngressRecord,
   type IngressRequest,
   type IngressSettlement,
+  type IngressLaunch,
   type IngressResult,
 } from "./ingress.js";
 import {
@@ -728,6 +730,11 @@ export class InMemoryRunLedger implements RunLedger {
   }
   async finishIngress(request: IngressSettlement): Promise<IngressResult> {
     const result = finishIngress(this.ingress.get(request.effectKey) ?? null, request, this.now());
+    if (result.status === "record") this.ingress.set(request.effectKey, structuredClone(result.record));
+    return result;
+  }
+  async launchIngress(request: IngressLaunch): Promise<IngressResult> {
+    const result = launchIngress(this.ingress.get(request.effectKey) ?? null, request, this.now());
     if (result.status === "record") this.ingress.set(request.effectKey, structuredClone(result.record));
     return result;
   }

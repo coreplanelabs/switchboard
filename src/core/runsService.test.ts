@@ -4881,9 +4881,32 @@ describe("RunsService — original organization admission", () => {
         receiptId: "organization:acme:7",
         ownerStatus: "dispatching",
         createdAt: NOW,
+        producer: { status: "unknown" },
       },
     });
     expect(JSON.stringify(await svc.getAdmission(id))).not.toContain("private review request");
+    const launchId = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    expect(
+      await ledger.launchIngress({
+        effectKey: request.effectKey,
+        digest,
+        runId: id,
+        receiptId: request.receiptId,
+        producerGeneration: "bot-generation-1",
+        launchId,
+      }),
+    ).toMatchObject({ status: "record", record: { launch: { launchId } } });
+    expect(await svc.getAdmission(id)).toMatchObject({
+      kind: "known",
+      value: {
+        producer: {
+          status: "launched",
+          generation: "bot-generation-1",
+          launchReceipt: launchId,
+          launchedAt: NOW,
+        },
+      },
+    });
     await ledger.finishIngress({
       effectKey: request.effectKey,
       digest,
@@ -4893,6 +4916,8 @@ describe("RunsService — original organization admission", () => {
       handlerOutcome: "uncertain",
       ownerStage: "schedule",
       failure: { stage: "schedule", kind: "transport" },
+      producerGeneration: "bot-generation-1",
+      launchId,
     });
     expect(await svc.getAdmission(id)).toMatchObject({
       kind: "known",
@@ -4902,6 +4927,29 @@ describe("RunsService — original organization admission", () => {
         handlerOutcome: "uncertain",
         ownerStage: "schedule",
         failure: { stage: "schedule", kind: "transport" },
+        producer: { status: "launched", generation: "bot-generation-1", launchReceipt: launchId },
+      },
+    });
+    await ledger.finishIngress({
+      effectKey: request.effectKey,
+      digest,
+      runId: id,
+      status: "completed",
+      outcome: "Original owner completed.",
+      handlerOutcome: "completed",
+      producerGeneration: "bot-generation-1",
+      launchId,
+    });
+    expect(await svc.getAdmission(id)).toMatchObject({
+      kind: "known",
+      value: {
+        producer: {
+          status: "terminal",
+          generation: "bot-generation-1",
+          launchReceipt: launchId,
+          outcome: "completed",
+          terminalAt: NOW,
+        },
       },
     });
     expect(await svc.getAdmission("f3e13f45-5801-49f5-a024-01db96685eca")).toEqual({ kind: "not_found" });

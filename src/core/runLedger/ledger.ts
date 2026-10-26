@@ -182,6 +182,7 @@ export interface RunLedger {
   pendingUnreadIngress(organization: string, limit: number): Promise<import("./ingress.js").IngressResult>;
   /** Original ingress ownership, before routing or any command effect. */
   consumeIngress(request: import("./ingress.js").IngressRequest): Promise<import("./ingress.js").IngressResult>;
+  launchIngress(request: import("./ingress.js").IngressLaunch): Promise<import("./ingress.js").IngressResult>;
   readIngress(effectKey: string): Promise<import("./ingress.js").IngressResult>;
   readIngressByRun(runId: string): Promise<import("./ingress.js").IngressResult>;
   pendingIngressRefusals(organization: string, limit: number): Promise<import("./ingress.js").IngressResult>;

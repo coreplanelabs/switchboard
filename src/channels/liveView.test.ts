@@ -2569,6 +2569,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
             receiptId: "organization:acme:7",
             ownerStatus: "dispatching",
             createdAt: NOW,
+            producer: { status: "unknown" },
           },
         };
       });

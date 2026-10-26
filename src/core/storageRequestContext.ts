@@ -211,6 +211,7 @@ export const STORAGE_OPERATIONS = {
   "/runs/ingress/by-run": runId,
   "/runs/ingress/clear": nonRun("ingress"),
   "/runs/ingress/consume": nonRun("ingress"),
+  "/runs/ingress/launch": nonRun("ingress"),
   "/runs/ingress/finish": requestRun,
   "/runs/ingress/read": nonRun("ingress"),
   "/runs/ingress/refusal-ack": requestRun,

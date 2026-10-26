@@ -196,7 +196,13 @@ import type {
   PlaneReclaimWord,
 } from "./plane/decide.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./runLedger/ledger.js";
-import type { UnreadIngressProof, IngressRequest, IngressSettlement, IngressResult } from "./runLedger/ingress.js";
+import type {
+  UnreadIngressProof,
+  IngressRequest,
+  IngressSettlement,
+  IngressLaunch,
+  IngressResult,
+} from "./runLedger/ingress.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
 import {
   isSessionCheckpoint,
@@ -1369,6 +1375,10 @@ export class WorkerRunLedger implements RunLedger {
   }
   async consumeIngress(request: IngressRequest): Promise<IngressResult> {
     const result = await this.post("/runs/ingress/consume", { storeKey: this.opts.storeKey, request });
+    return result.data as unknown as IngressResult;
+  }
+  async launchIngress(request: IngressLaunch): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/launch", { storeKey: this.opts.storeKey, request });
     return result.data as unknown as IngressResult;
   }
   async readIngress(effectKey: string): Promise<IngressResult> {

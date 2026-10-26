@@ -468,6 +468,7 @@ export const ORGANIZATION_OWNER_STAGES = [
   "authorization",
   "execution-fence",
   "source-snapshot",
+  "launch",
   "request",
   "sink",
   "execute",

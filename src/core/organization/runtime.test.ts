@@ -113,6 +113,38 @@ function setup(authorize = async () => true, clock = () => 1) {
 }
 describe("organization runtime", () => {
   describe("owner failure diagnostics", () => {
+    it("reports a failed launch write when readback has no launch receipt", async () => {
+      const s = setup();
+      const reports: OrganizationOwnerFailure[] = [];
+      const runtime = createOrganizationRuntime({
+        ...s,
+        reportOwnerFailure: (failure) => {
+          reports.push(failure);
+        },
+      });
+      const admitted = await s.send("launch-write-failed");
+      if (admitted.status !== "receipt" || !admitted.receipt.effectKey) throw new Error("not admitted");
+      s.ledger.launchIngress = async () => {
+        throw classifyError(new Error("private launch detail"), { kind: "transport" });
+      };
+      await runtime.reconcile("org:test");
+      await s.tasks.shift()!();
+      const original = await s.ledger.readIngress(admitted.receipt.effectKey);
+      if (original.status !== "record") throw new Error("original owner missing");
+      expect(reports).toEqual([
+        {
+          runId: original.record.runId,
+          receiptId: admitted.receipt.id,
+          requestDigest: admitted.receipt.digest,
+          branch: "dispatch",
+          failure: { stage: "launch", kind: "transport" },
+        },
+      ]);
+      expect(JSON.stringify(reports)).not.toContain("private launch detail");
+      expect(original.record).toMatchObject({ status: "uncertain", ownerStage: "launch" });
+      expect(original.record).not.toHaveProperty("launch");
+      expect(s.effects).toEqual([]);
+    });
     it("keeps safe failure output readable through the authorized trace reader before an agent run exists", async () => {
       const s = setup();
       const log = createSpanLog();
@@ -1008,6 +1040,7 @@ describe("organization runtime", () => {
         pendingUnreadIngress: s.ledger.pendingUnreadIngress.bind(s.ledger),
         claimUnreadIngress: s.ledger.claimUnreadIngress.bind(s.ledger),
         consumeIngress: s.ledger.consumeIngress.bind(s.ledger),
+        launchIngress: s.ledger.launchIngress.bind(s.ledger),
         readIngress: s.ledger.readIngress.bind(s.ledger),
         finishIngress: s.ledger.finishIngress.bind(s.ledger),
         pendingIngressRefusals: s.ledger.pendingIngressRefusals.bind(s.ledger),
@@ -1163,6 +1196,124 @@ describe("organization runtime", () => {
       },
     });
     expect(s.effects).toEqual([]);
+  });
+  it("records the original producer before dispatch after a lost launch acknowledgement", async () => {
+    const s = setup();
+    const reports: OrganizationOwnerFailure[] = [];
+    const runtime = createOrganizationRuntime({
+      ...s,
+      reportOwnerFailure: (failure) => {
+        reports.push(failure);
+      },
+    });
+    const admitted = await s.send("lost-launch-ack");
+    if (admitted.status !== "receipt" || !admitted.receipt.effectKey) throw new Error("not admitted");
+    const launch = s.ledger.launchIngress.bind(s.ledger);
+    s.ledger.launchIngress = async (request) => {
+      await launch(request);
+      throw new Error("ack lost");
+    };
+    await runtime.reconcile("org:test");
+    expect(s.effects).toEqual([]);
+    await s.tasks.shift()!();
+    expect(reports).toMatchObject([{ failure: { stage: "launch", kind: "other" } }]);
+    expect(s.effects).toHaveLength(1);
+    expect(await s.ledger.readIngress(admitted.receipt.effectKey)).toMatchObject({
+      status: "record",
+      record: {
+        status: "completed",
+        launch: { producerGeneration: "process" },
+        terminal: { producerGeneration: "process", outcome: "completed" },
+      },
+    });
+    await createOrganizationRuntime({ ...s, owner: "replacement" }).reconcile("org:test");
+    expect(s.effects).toHaveLength(1);
+    expect(s.tasks).toEqual([]);
+  });
+  it("does not execute when a lost launch acknowledgement cannot be read back", async () => {
+    const s = setup();
+    const admitted = await s.send("unreadable-launch-ack");
+    if (admitted.status !== "receipt" || !admitted.receipt.effectKey) throw new Error("not admitted");
+    const launch = s.ledger.launchIngress.bind(s.ledger);
+    const read = s.ledger.readIngress.bind(s.ledger);
+    s.ledger.launchIngress = async (request) => {
+      await launch(request);
+      throw new Error("ack lost");
+    };
+    let reads = 0;
+    s.ledger.readIngress = async (effectKey) => {
+      if (++reads > 1) throw new Error("read unavailable");
+      return read(effectKey);
+    };
+    await s.runtime.reconcile("org:test");
+    await expect(s.tasks.shift()!()).rejects.toThrow("Original ingress settlement was not recorded.");
+    expect(s.effects).toEqual([]);
+    expect(await read(admitted.receipt.effectKey)).toMatchObject({
+      status: "record",
+      record: { status: "dispatching", launch: { producerGeneration: "process" } },
+    });
+  });
+  it("holds a delayed producer through reclaim and never starts a second effect", async () => {
+    const s = setup();
+    const admitted = await s.send("delayed-producer");
+    if (admitted.status !== "receipt" || !admitted.receipt.effectKey) throw new Error("not admitted");
+    await s.runtime.reconcile("org:test");
+    const before = await s.ledger.readIngress(admitted.receipt.effectKey);
+    expect(before).toMatchObject({ status: "record", record: { status: "dispatching" } });
+    if (before.status !== "record") throw new Error("original owner missing");
+    expect(before.record).not.toHaveProperty("launch");
+    await createOrganizationRuntime({ ...s, owner: "replacement" }).reconcile("org:test");
+    expect(s.tasks).toHaveLength(1);
+    await s.tasks.shift()!();
+    expect(s.effects).toHaveLength(1);
+    expect(await s.ledger.readIngress(admitted.receipt.effectKey)).toMatchObject({
+      status: "record",
+      record: { launch: { producerGeneration: "process" }, terminal: { outcome: "completed" } },
+    });
+  });
+  it("keeps missing launch proof uncertain without dispatching", async () => {
+    const s = setup();
+    const admitted = await s.send("missing-launch-row");
+    if (admitted.status !== "receipt" || !admitted.receipt.effectKey) throw new Error("not admitted");
+    s.ledger.launchIngress = async () => ({ status: "not_found" });
+    await s.runtime.reconcile("org:test");
+    await s.tasks.shift()!();
+    expect(s.effects).toEqual([]);
+    const held = await s.ledger.readIngress(admitted.receipt.effectKey);
+    expect(held).toMatchObject({ status: "record", record: { status: "uncertain" } });
+    if (held.status !== "record") throw new Error("original owner missing");
+    expect(held.record).not.toHaveProperty("launch");
+    expect(held.record).not.toHaveProperty("terminal");
+  });
+  it("does not repeat model, workspace or GitHub publication after an uncertain original Review", async () => {
+    const s = setup();
+    const effects = { model: 0, workspace: 0, githubReview: 0 };
+    const original = createOrganizationRuntime({
+      ...s,
+      dispatchOwned: async () => {
+        effects.model++;
+        effects.workspace++;
+        effects.githubReview++;
+        return { status: "uncertain", reason: "The original publication acknowledgement is missing." };
+      },
+    });
+    const admitted = await s.send("review-with-existing-github-publication");
+    if (admitted.status !== "receipt" || !admitted.receipt.effectKey) throw new Error("not admitted");
+    await original.reconcile("org:test");
+    await s.tasks.shift()!();
+    expect(effects).toEqual({ model: 1, workspace: 1, githubReview: 1 });
+    expect(await s.ledger.readIngress(admitted.receipt.effectKey)).toMatchObject({
+      status: "record",
+      record: { status: "uncertain", launch: { producerGeneration: "process" } },
+    });
+    expect(await s.send("review-with-existing-github-publication")).toMatchObject({
+      status: "receipt",
+      duplicate: true,
+      receipt: { status: "accepted" },
+    });
+    await createOrganizationRuntime({ ...s, owner: "replacement" }).reconcile("org:test");
+    expect(s.tasks).toEqual([]);
+    expect(effects).toEqual({ model: 1, workspace: 1, githubReview: 1 });
   });
   it("passes saved confirmation ids to the original consumer without making them message text", async () => {
     const s = setup();

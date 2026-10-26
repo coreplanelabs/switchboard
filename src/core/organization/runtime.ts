@@ -42,6 +42,7 @@ export interface OrganizationRuntimeOptions {
     | "pendingUnreadIngress"
     | "claimUnreadIngress"
     | "consumeIngress"
+    | "launchIngress"
     | "readIngress"
     | "finishIngress"
     | "clearIngressContent"
@@ -164,6 +165,12 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
       runId: original.record.runId,
       status: "completed",
       outcome: evidence.outcome ?? "Original run completed.",
+      ...(original.record.launch
+        ? {
+            producerGeneration: original.record.launch.producerGeneration,
+            launchId: original.record.launch.launchId,
+          }
+        : {}),
     });
   };
   const clearOwners = async (organization: string, sourceMessage?: SourceDeletionAddress): Promise<boolean> => {
@@ -387,6 +394,9 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
             status: outcome.status === "uncertain" ? "uncertain" : "completed",
             outcome: outcome.reason ?? outcome.status,
             ...(outcome.status === "refused" ? { refusalPending: true } : {}),
+            ...(original.launch
+              ? { producerGeneration: original.launch.producerGeneration, launchId: original.launch.launchId }
+              : {}),
           });
           if (outcome.status === "refused") await repairRefusals(organization);
           invalidate(organization);
@@ -490,6 +500,8 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
         continue;
       }
       const runId = owner.record.runId;
+      const launchId = crypto.randomUUID();
+      let confirmedLaunch = false;
       const finish = async (
         outcome: OrganizationOwnerOutcome,
         ownerStage?: OrganizationOwnerStage,
@@ -505,8 +517,10 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
           ...(ownerStage ? { ownerStage } : {}),
           ...(failure ? { failure } : {}),
           ...(outcome.status === "refused" ? { refusalPending: true } : {}),
+          ...(confirmedLaunch ? { producerGeneration: options.owner, launchId } : {}),
         });
-        if (finished.status === "record" && outcome.status === "refused") await repairRefusals(organization);
+        if (finished.status !== "record") throw new Error("Original ingress settlement was not recorded.");
+        if (outcome.status === "refused") await repairRefusals(organization);
         invalidate(organization);
       };
       const branch = envelope.continuation ? "confirm" : envelope.target ? "answer" : "dispatch";
@@ -584,6 +598,34 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
               await settleOwner({ status: "refused", reason: "The original source snapshot is unavailable." });
               return;
             }
+            stage = "launch";
+            const launch = {
+              effectKey: receipt.effectKey!,
+              digest: envelope.digest,
+              runId,
+              receiptId: receipt.id,
+              producerGeneration: options.owner,
+              launchId,
+            };
+            let launched: IngressResult;
+            try {
+              launched = await options.ledger.launchIngress(launch);
+            } catch (error) {
+              report(ownerFailureAt("launch", error));
+              launched = await options.ledger.readIngress(receipt.effectKey!);
+            }
+            if (
+              launched.status !== "record" ||
+              launched.record.runId !== runId ||
+              launched.record.digest !== envelope.digest ||
+              launched.record.receiptId !== receipt.id ||
+              launched.record.launch?.producerGeneration !== options.owner ||
+              launched.record.launch.launchId !== launchId
+            ) {
+              await settleOwner({ status: "uncertain", reason: "The original launch could not be confirmed." });
+              return;
+            }
+            confirmedLaunch = true;
             stage = "request";
             const request = {
               envelope: snapshotEnvelope(envelope, accepted.receipt),
