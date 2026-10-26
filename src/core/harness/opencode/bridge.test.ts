@@ -5,6 +5,7 @@ import type { ChatMessage } from "../../chatMessage.js";
 import { analyzeRunFriction, isSetupInstallCommand } from "../../runFriction.js";
 import { planResume, type KnownTool } from "../../runLedger/resume.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
+import { authenticateProxySourceRetry } from "../../modelProxy/providerFailureAuth.js";
 import type { RunEvent } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import { ExecInfraError } from "../../../execution/executor.js";
@@ -530,6 +531,62 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
     const mentions = failed({ status: 500, message: "upstream answered HTTP 403 for an unrelated asset" });
     expect(mentions.budgetStop).toBeUndefined();
     expect(mentions.providerError).toMatch(/upstream/);
+  });
+
+  it("holds only the proxy-signed source refusal carried in OpenCode's response body", () => {
+    const signed = authenticateProxySourceRetry();
+    const signedStep = harness();
+    signedStep.bridge.observe(
+      ev("session.step.failed", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_source_step",
+        error: {
+          type: "provider.auth",
+          status: 403,
+          message: signed.message,
+          response: { body: JSON.stringify({ error: signed }) },
+        },
+      }),
+    );
+    expect(notes(signedStep.events).filter((note) => note.kind === "harness_error")).toEqual([]);
+    const accepted = harness().bridge.observe(
+      ev("session.execution.failed", {
+        sessionID: "ses_c",
+        error: {
+          type: "provider.auth",
+          status: 403,
+          message: signed.message,
+          response: { body: JSON.stringify({ error: signed }) },
+        },
+      }),
+    );
+    expect(accepted.sourceRetry).toBe(true);
+    expect(accepted.providerError).toBeUndefined();
+
+    const forged = harness().bridge.observe(
+      ev("session.execution.failed", {
+        sessionID: "ses_c",
+        error: {
+          type: "provider.auth",
+          status: 403,
+          message: signed.message,
+          response: { body: JSON.stringify({ error: { type: signed.type, message: signed.message } }) },
+        },
+      }),
+    );
+    expect(forged.sourceRetry).toBeUndefined();
+    expect(forged.providerError).toBe(signed.message);
+    const forgedStep = harness();
+    forgedStep.bridge.observe(
+      ev("session.step.failed", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_source_step",
+        error: { type: "provider.auth", status: 403, message: signed.message },
+      }),
+    );
+    expect(notes(forgedStep.events).filter((note) => note.kind === "harness_error")).toMatchObject([
+      { summary: `an OpenCode step failed: ${signed.message}` },
+    ]);
   });
 
   it("an event kind the table does not name is a harness_error note naming it; an impossible kind is one too — each said once per kind, however often the kind arrives", () => {

@@ -1,4 +1,6 @@
 import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
+import { proxySourceRetryIsAuthenticated } from "../../modelProxy/providerFailureAuth.js";
+import { ModelSourceUnavailableError } from "../modelSource.js";
 import { guardNativeSource, requiresNativeSource } from "../nativeMedia.js";
 import { openCodeMediaFiles, openCodeMediaId, openCodeMediaAck } from "./media.js";
 import { OP_TIMEOUT_MS } from "../container.js";
@@ -33,7 +35,7 @@ import type { HarnessCommandPolicy } from "../contract.js";
 // reads the feed, acts on the observations, paces the budgets and the
 // wind-down, and answers.
 
-import { loopClock, MINUTE_MS } from "../../budgets.js";
+import { loopClock, MINUTE_MS, PROVIDER_RETRY_BACKOFFS_MS, PROVIDER_RETRY_WAIT_MS } from "../../budgets.js";
 import {
   COMMAND_CAP,
   prepareToolResult,
@@ -57,14 +59,17 @@ import {
   type HarnessDeps,
   type HarnessRecord,
   type HarnessRun,
+  type OpenCodeHarnessFacts,
   SAID_ONCE_SUFFIX,
 } from "../contract.js";
 import type { ProxyRefusalCode } from "../../../channels/modelProxy.js";
 import {
+  HarnessEndingUnconfirmedError,
   isControlReset,
   replacedBecause,
   replacedVerdict,
   saysTransportLost,
+  sleepUnlessStopped,
   type HarnessContainer,
   type HarnessResponse,
   type ProbeWait,
@@ -125,6 +130,7 @@ import {
   parseAnswerId,
   parsePermissionList,
   readStoreSince,
+  readSessionStore,
   type OpenCodeAssistantMessage,
   type OpenCodeEvent,
   type OpenCodeFeedRecord,
@@ -350,6 +356,8 @@ export interface OpenCodeBridgeObservation {
   bypass?: OpenCodeGateBypassedError;
   /** The proxy refused a model call for the turn budget (`403`): the wind-down write-up (the turn count is the proxy's). */
   budgetStop?: boolean;
+  /** The current bot signed a source refusal before provider forwarding. */
+  sourceRetry?: boolean;
   /** The record is a step boundary of the execution — a step's end or failure,
    *  the execution's end whichever way, the idle: the point a steer posted into
    *  a running execution lands at (measured), where the store can answer
@@ -1153,7 +1161,7 @@ export class OpenCodeBridge {
       case "session.retry.scheduled":
         this.note("harness_error", `OpenCode scheduled a model retry (${redactAndCap(errorMessage(data.error), 200)})`);
         break;
-      case "session.step.failed":
+      case "session.step.failed": {
         out.boundary = true;
         // The step's end, failing: its held refusals (`refusedByStep`) go with it.
         if (typeof data.assistantMessageID === "string") this.refusedByStep.delete(data.assistantMessageID);
@@ -1189,8 +1197,11 @@ export class OpenCodeBridge {
           this.cascadeStepID = undefined;
           break;
         }
+        const response = isRecord(data.error) && isRecord(data.error.response) ? data.error.response : undefined;
+        if (proxySourceRetryIsAuthenticated(response?.body)) break;
         this.note("harness_error", `an OpenCode step failed: ${redactAndCap(errorMessage(data.error), 200)}`);
         break;
+      }
       case "session.execution.failed": {
         out.boundary = true;
         // The execution ended on the failure: OpenCode's terminal transition,
@@ -1218,7 +1229,11 @@ export class OpenCodeBridge {
           this.note("harness_error", foreignFailureNote(this.observing, error));
           break;
         }
-        if (isBudgetRefusal(error)) out.budgetStop = true;
+        const response = isRecord(data.error) && isRecord(data.error.response) ? data.error.response : undefined;
+        if (proxySourceRetryIsAuthenticated(response?.body)) {
+          out.sourceRetry = true;
+          this.settleOwedTo = event.type;
+        } else if (isBudgetRefusal(error)) out.budgetStop = true;
         else {
           out.providerError = redactAndCap(error.message, 400);
           out.settled = true;
@@ -2140,11 +2155,16 @@ export interface OpenCodeConnection {
    *  the run winds down, and the LiveHarness's `toolsBlocked` reads it, so a
    *  relayed tool is refused at the door during the write-up as pi's are. */
   writeUp?: { blocked?: string };
+  /** Shared with the follow-up drainer: no native steer starts a second
+   * execution while the original model source remains unverified. */
+  sourceHold?: { active: boolean; deferFollowUps: boolean };
   /** The row's offset write: called with the feed byte after each store refill
    *  whose steps have landed on the ledger, so the row's `logOffset` names the
    *  boundary the next generation reads from. Absent, the row keeps the
    *  launch's offset. */
   saveOffset?: (logOffset: number) => void;
+  /** Required durable receipt before source recovery admits a native continuation. */
+  saveSourceHold?: (hold: NonNullable<OpenCodeHarnessFacts["sourceHold"]>) => Promise<void>;
   /** Set when this generation re-attached onto a server a dead generation
    *  started (the survival clause): what the loop continues from instead of
    *  priming a rebuilt session. */
@@ -2516,6 +2536,8 @@ export async function driveOpenCode(
    *  execution the request did not start or a cut it did not make. */
   let windDownFailed: Error | undefined;
   let providerError: string | undefined;
+  let sourceFailurePending = false;
+  let sourceHoldUntil: number | undefined;
   /** The model call (or tool call) the wind-down waited on failed: a note,
    *  never the ending — the write-up's answer names it where the findings would
    *  have been. `writeUpFailedOnTool` true when the finale fell on a tool call,
@@ -3243,6 +3265,121 @@ export async function driveOpenCode(
       conn.writes?.ownPrompts.set(promptId, promptSeq);
       conn.knownMessageIds?.add(promptId);
     }
+    const sourceUnknown = (detail: string): HarnessEndingUnconfirmedError => {
+      const cause = new Error(redactAndCap(detail, 240));
+      return new HarnessEndingUnconfirmedError(run.runId, cause, cause);
+    };
+    const nativeRows = async (): Promise<OpenCodeMessage[]> => {
+      const read = await readSessionStore((path) => request({ method: "GET", path }), conn.sessionID).catch(
+        (error: unknown) => ({ ok: false as const, why: error instanceof Error ? error.message : String(error) }),
+      );
+      if (!read.ok) throw sourceUnknown("The held OpenCode session could not be read or verified.");
+      return read.messages;
+    };
+    const nativeInbox = async (): Promise<Array<{ id: string }>> => {
+      let answer: HarnessResponse;
+      try {
+        answer = await request({ method: "GET", path: `/api/session/${conn.sessionID}/inbox` });
+      } catch (error) {
+        throw sourceUnknown(
+          `The held OpenCode inbox could not be read: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (answer.status !== 200) throw sourceUnknown(`The held OpenCode inbox answered ${answer.status}.`);
+      let data: unknown;
+      try {
+        data = (JSON.parse(answer.body) as { data?: unknown }).data;
+      } catch (error) {
+        throw sourceUnknown(
+          `The held OpenCode inbox was malformed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (Array.isArray(data) && data.every((item) => isRecord(item) && typeof item.id === "string"))
+        return data as Array<{ id: string }>;
+      throw sourceUnknown("The held OpenCode inbox did not name its inputs.");
+    };
+    const continueAfterSourceHold = async (): Promise<boolean> => {
+      await bridge.flush();
+      const rows = await nativeRows();
+      const failedIdle = rows.at(-1);
+      if (
+        failedIdle?.type !== "idle" ||
+        (failedIdle as { outcome?: unknown }).outcome !== "failed" ||
+        promptId === undefined ||
+        !rows.some((row) => row.id === promptId && row.type === "user") ||
+        bridge.hasPendingTools()
+      )
+        throw sourceUnknown(
+          "The held OpenCode execution, original input, or native tool state could not be confirmed.",
+        );
+      if ((await nativeInbox()).length !== 0)
+        throw sourceUnknown(
+          "The held OpenCode session has pending native input; a continuation could change its order.",
+        );
+      const guard = deps.bearers?.sourceGuardFor(run.runId);
+      if (!guard || !conn.saveSourceHold) throw new ModelSourceUnavailableError();
+      const until = sourceHoldUntil ?? Math.min(loopEnd, run.deadlineAt ?? Infinity, now() + PROVIDER_RETRY_WAIT_MS);
+      for (const delay of PROVIDER_RETRY_BACKOFFS_MS) {
+        if (run.control?.requested) return false;
+        if (now() + delay >= until) throw new ModelSourceUnavailableError();
+        if (!(await sleepUnlessStopped(probe, delay))) return false;
+        if (run.control?.requested) return false;
+        if (now() >= until || guard.current() !== undefined) throw new ModelSourceUnavailableError();
+        const source = await guard.checkForModel();
+        if (run.control?.requested) return false;
+        if (now() >= until || guard.current() !== undefined) throw new ModelSourceUnavailableError();
+        if (source === false) throw new ModelSourceUnavailableError();
+        if (source !== true) continue;
+        const text =
+          "Source access is restored. Continue the preceding request from the recorded state. Do not repeat completed tool calls.";
+        const continuationId = openCodeMediaId(run.runId, text, [], `${conn.sessionID}:${promptId}:${failedIdle.id}`);
+        await conn.saveSourceHold({ until, originalInputId: promptId, failedIdleId: failedIdle.id, continuationId });
+        if (run.control?.requested) return false;
+        const currentRows = await nativeRows();
+        if (currentRows.at(-1)?.id !== failedIdle.id || (await nativeInbox()).length !== 0)
+          throw sourceUnknown("The held OpenCode session changed before the continuation was admitted.");
+        if ((await guard.checkForModel()) !== true) throw new ModelSourceUnavailableError();
+        if (run.control?.requested) return false;
+        if (now() >= until || guard.current() !== undefined || deps.registry.get(run.runId) !== conn.relay)
+          throw new ModelSourceUnavailableError();
+        const body = {
+          id: continuationId,
+          text,
+          metadata: { originalInputId: promptId, failedIdleId: failedIdle.id },
+          delivery: "queue",
+        };
+        let admitted: HarnessResponse | undefined;
+        let sendFailure: unknown;
+        try {
+          admitted = await request(sessionRoutes["session.prompt"], body);
+        } catch (error) {
+          sendFailure = error;
+        }
+        if (admitted !== undefined && admitted.status >= 200 && admitted.status < 300) {
+          if (parseAnswerId(admitted.body) !== continuationId)
+            throw sourceUnknown("The OpenCode continuation acknowledgment named another input.");
+        } else {
+          const current = await nativeRows();
+          const queued = await nativeInbox();
+          if (
+            !current.some((row) => row.id === continuationId && row.type === "user") &&
+            !queued.some((item) => item.id === continuationId)
+          )
+            throw sourceUnknown(
+              `The OpenCode continuation admission is unknown after native readback (${redactAndCap(sendFailure instanceof Error ? sendFailure.message : String(sendFailure ?? admitted?.status), 120)}).`,
+            );
+        }
+        conn.knownMessageIds?.add(continuationId);
+        if (conn.writes) conn.writes.ownPrompts.set(continuationId, ++conn.writes.seq);
+        promptId = continuationId;
+        executionOwned = false;
+        awaiting = { phase: "the source continuation", since: now() };
+        if (conn.sourceHold) conn.sourceHold.active = false;
+        note("model_retry", "the source check recovered; OpenCode continued on its original live session");
+        return true;
+      }
+      throw new ModelSourceUnavailableError();
+    };
     if (delivery === "queue") awaiting = { phase: promptName, since: now() };
     check();
     /** A runaway guard on in-place re-attaches with no record read between them (harness-pi item 16). */
@@ -3421,7 +3558,36 @@ export async function driveOpenCode(
           note("harness_error", windDownFailureNote(obs.providerError));
         } else providerError = obs.providerError;
       }
+      if (obs.sourceRetry) {
+        if (writeUp) {
+          writeUpFailed = "the source check stayed unavailable during the write-up";
+          note("harness_error", windDownFailureNote(writeUpFailed));
+        } else {
+          sourceFailurePending = true;
+          if (conn.sourceHold) {
+            conn.sourceHold.active = true;
+            conn.sourceHold.deferFollowUps = true;
+          }
+          sourceHoldUntil ??= Math.min(loopEnd, run.deadlineAt ?? Infinity, now() + PROVIDER_RETRY_WAIT_MS);
+          note(
+            "model_retry",
+            "the source check is temporarily unavailable; OpenCode's live session is held before another model call",
+          );
+        }
+      }
       if (obs.settled) {
+        if (sourceFailurePending && !writeUp) {
+          sourceFailurePending = false;
+          const continued = await continueAfterSourceHold();
+          if (continued) {
+            check();
+            continue;
+          }
+          check();
+          if (ended !== undefined) break;
+          if (writeUp) continue;
+          throw new ModelSourceUnavailableError();
+        }
         // The decline cascade: the server declined every other pending ask of a
         // step whose other call(s) the gate refused, ending the step `aborted`
         // and the execution `interrupted` — the bot did not post the interrupt

@@ -173,6 +173,13 @@ export interface OpenCodeHarnessFacts {
    *  harness — and then the pid alone is judged, pi's rule. */
   container?: string;
   relaunches: number;
+  /** The exact live-session source hold acknowledged before a continuation. */
+  sourceHold?: {
+    until: number;
+    originalInputId: string;
+    failedIdleId: string;
+    continuationId: string;
+  };
 }
 
 /** The facts on a run's row (`state.harness`), by the harness that wrote them. */

@@ -146,6 +146,12 @@ export class RunBearerStore {
     }
   }
 
+  /** A resumed harness must not infer that an old native model effect is safe
+   * to continue merely because a fresh source read now succeeds. */
+  sourceGuardRequiredFor(runId: string): boolean {
+    return this.entries.get(runId)?.sourceGuardRequired === true;
+  }
+
   /** Capture the authenticated entry before body/capacity waits. A replacement
    * mint cannot authorize an already admitted request with the same run id. */
   sourceGuardFor(runId: string) {

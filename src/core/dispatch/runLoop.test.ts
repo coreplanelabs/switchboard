@@ -9929,6 +9929,66 @@ describe("the OpenCode harness — the container replaced under a living bot, re
     `${YAML}harness:\n  coding: opencode\nworkspaceDir: ${mkdtempSync(join(tmpdir(), "swb-relaunch-oc-"))}\n`;
   const REPLACED = "vm-new";
 
+  it("a signed OpenCode source hold reaches one continuation and one tool effect through runLoop", async () => {
+    const registry = new HarnessRegistry();
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    const container = new FakeHarnessContainer();
+    const serve = scriptOpenCodeServe(container, {
+      registry,
+      bearers,
+      options: { sourceRefusalAtModelCall: 1 },
+      script: {
+        turns: [
+          {
+            content: [
+              {
+                type: "tool_use",
+                id: "call_source_status",
+                name: "update_status",
+                input: { checklist: "○ recovered" },
+              },
+            ],
+          },
+          { content: [{ type: "text", text: "source recovered and work completed" }] },
+        ],
+      },
+    });
+    const s = setup("", {
+      agent: "coding",
+      yaml: yamlOnOpenCode(),
+      harness: harnessOver(registry, () => container),
+    });
+    s.deps.runBearers = bearers;
+    const bearer = mintFor(bearers, s);
+    const { ledgerRun, states, record: recorded } = recordingLedgerRun();
+    ledgerRun.tracked = () => true;
+    ledgerRun.setStateAndFlush = async (patch) => {
+      states.push(patch as Record<string, unknown>);
+      return true;
+    };
+    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun, bearer }));
+    expect(out.answer).toBe("source recovered and work completed");
+    expect(serve.modelCalls).toHaveLength(2);
+    expect(bearers.grantOf("run-l")?.turns).toBe(2);
+    expect(
+      serve.modelCalls[0]!.messages.filter((message) => message.role === "user")
+        .flatMap((message) => message.content)
+        .filter((part) => part.type === "text" && part.text.includes("Continue the preceding request")),
+    ).toHaveLength(1);
+    expect(harnessStates(states).some((facts) => facts.sourceHold !== undefined)).toBe(true);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = recorded();
+    expect(record.status).toBe("completed");
+    expect(record.events.filter((event) => event.type === "run_note" && event.kind === "model_retry")).toHaveLength(2);
+    expect(record.events.filter((event) => event.type === "tool_call")).toMatchObject([
+      { callId: "call_source_status", tool: "update_status" },
+    ]);
+    expect(record.events.filter((event) => event.type === "tool_result")).toMatchObject([
+      { callId: "call_source_status", ok: true },
+    ]);
+  }, 120_000);
+
   it("a living bot, the typed error from the feed read: OpenCode is relaunched in the replacement container from the record — nothing killed or removed for the old server, the workspace re-attached, the bearer rotated with its turns preserved and the row's hash the new secret's, one resumed note, relaunches = 1 — and the run completes with the model continuing from the imported record", async () => {
     const registry = new HarnessRegistry();
     const bearers = new RunBearerStore({ clock: () => NOW });

@@ -261,6 +261,7 @@ export async function openOpenCodeRun(
   // no new work starts while the run writes its final answer. The bridge sets
   // this holder; the LiveHarness reads it.
   const writeUp: { blocked?: string } = {};
+  const sourceHold = { active: false, deferFollowUps: false };
   const live: LiveHarness = {
     runId: run.runId,
     tools: run.tools,
@@ -271,7 +272,7 @@ export async function openOpenCodeRun(
     emit,
     toolSpan: () => undefined,
     gateSaw: () => {},
-    toolsBlocked: () => writeUp.blocked,
+    toolsBlocked: () => writeUp.blocked ?? (sourceHold.active ? "the run's model source is unavailable" : undefined),
     callSeen: async () => {},
     callEnded: async () => {},
   };
@@ -336,11 +337,13 @@ export async function openOpenCodeRun(
   // prompt of its own that landed from what was there before (the control
   // reset's resolution, `OpenCodeConnection.knownMessageIds`).
   const known = new Set<string>();
+  let unconfirmedPostTurn: HarnessEndingUnconfirmedError | undefined;
   // The import's rows among them: an imported row newest is an idle session (the
   // import writes no idle marker; measured, a steer there landed at once).
   const imported = new Set<string>();
   const end = async (): Promise<void> => {
     forget();
+    if (unconfirmedPostTurn) throw unconfirmedPostTurn;
     if (replaced || server === undefined) return;
     await deps.container.kill(server.pid);
     await deps.container.kill(server.tailerPid);
@@ -563,10 +566,29 @@ export async function openOpenCodeRun(
       tailerPid: server.tailerPid,
       ...(here !== undefined ? { containerWord: here } : {}),
       writeUp,
+      sourceHold,
       // The row's offset follows the ledger: the feed byte after each refill
       // whose steps landed, so the next generation reads on from there.
       saveOffset: (logOffset) => {
         if (facts !== undefined && logOffset > facts.logOffset) saveFacts({ ...facts, logOffset });
+      },
+      saveSourceHold: async (sourceHold) => {
+        if (facts === undefined) {
+          const cause = new Error("The OpenCode source hold has no producer facts.");
+          throw new HarnessEndingUnconfirmedError(run.runId, cause, cause);
+        }
+        facts = { ...facts, sourceHold };
+        let saved: Awaited<ReturnType<NonNullable<HarnessRun["saveFacts"]>>>;
+        try {
+          saved = await run.saveFacts?.(facts, { requireAcknowledgement: true });
+        } catch (error) {
+          const cause = error instanceof Error ? error : new Error(String(error));
+          throw new HarnessEndingUnconfirmedError(run.runId, cause, cause);
+        }
+        if (saved !== true) {
+          const cause = new Error("The OpenCode source hold was not acknowledged; no continuation was sent.");
+          throw new HarnessEndingUnconfirmedError(run.runId, cause, cause);
+        }
       },
       ...(server.reattach ? { reattach: server.reattach } : {}),
     };
@@ -604,6 +626,7 @@ export async function openOpenCodeRun(
     } finally {
       draining = false;
       drained = await drainer;
+      sourceHold.deferFollowUps = false;
     }
     if (drained instanceof OpenCodeWriteUnresolvedError && !hardStopped) throw drained;
 
@@ -612,6 +635,7 @@ export async function openOpenCodeRun(
       record: () => record(),
       ...(ending ? { ending } : {}),
       followUp: async (input) => {
+        if (unconfirmedPostTurn) throw unconfirmedPostTurn;
         run.toolContext.recovery?.throwIfStopped();
         const phaseDeadlineAt = Math.min(run.deadlineAt ?? Infinity, input.deadlineAt ?? Infinity);
         if (deps.clock() >= phaseDeadlineAt) throw new FollowUpCompletionDeadlineError();
@@ -670,7 +694,15 @@ export async function openOpenCodeRun(
             },
             { ...conn, feedOffset: turnEnd, saveOffset: undefined, reattach: undefined, knownMessageIds: known },
             "turn",
-          );
+          ).catch((err: unknown) => {
+            // Optional post-turn callers can catch this error. The returned
+            // session still owns the unconfirmed native effect and must not end.
+            if (err instanceof HarnessEndingUnconfirmedError && err.runId === run.runId) {
+              unconfirmedPostTurn = err;
+              sourceHold.active = true;
+            }
+            throw err;
+          });
           for (const id of turn.storeIds) known.add(id);
           record = () => {
             const later = turn.record();
@@ -700,6 +732,10 @@ export async function openOpenCodeRun(
     // in the container that answers now, so `end` probes, ends and removes
     // nothing there — the loop relaunches from the record the verdict carries.
     if (err instanceof HarnessContainerReplacedError) replaced = true;
+    if (err instanceof HarnessEndingUnconfirmedError && err.runId === run.runId) {
+      forget();
+      throw err;
+    }
     if (openingCustodyUnknown) {
       forget();
       // Keep a same-run custody error's original opening cause visible to
@@ -792,6 +828,10 @@ async function reattachOpenCode(
   const read = await readSessionStore(get, facts.sessionID);
   if (!read.ok) return refuse(read.why);
   const store = read.messages;
+  if (deps.bearers?.sourceGuardRequiredFor(deps.runId))
+    return refuse(
+      "the source-guarded native execution crossed a bot restart without a verified cross-generation model-effect receipt; the session is retained without a continue input",
+    );
   const pending = await get(routes["session.permission.list"].path);
   if (pending.status < 200 || pending.status >= 300)
     return refuse(`the server refused the session's pending asks (${pending.status})`);
@@ -885,6 +925,10 @@ function drainFollowUps(
     const senderOf = (input: FollowUpInput): string =>
       input.from !== undefined ? `run:${input.from.runId}` : `user:${input.userId}`;
     while (running()) {
+      if (conn.sourceHold?.deferFollowUps) {
+        await deps.sleep(deps.pollMs ?? deps.tickMs ?? OP_TIMEOUT_MS);
+        continue;
+      }
       const inputs = run.inbox?.drain() ?? [];
       for (const input of inputs) {
         // Once a person's follow-up is held for the fresh turn, that person's
@@ -942,6 +986,10 @@ function drainFollowUps(
         if (!running() || deps.clock() >= (run.deadlineAt ?? Infinity)) {
           run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input))]);
           return;
+        }
+        if (conn.sourceHold?.deferFollowUps) {
+          run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input))]);
+          break;
         }
         const prompt = nativeFollowUpText([input], followUpPrompt([input]));
         const text = stagedLine ? `${prompt}\n\n${stagedLine}` : prompt;
