@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.309.0](https://github.com/coreplanelabs/switchboard/compare/v1.308.2...v1.309.0) (2026-10-24)
+
+
+### Features
+
+* **core:** retain pending inputs after a run ends ([#3390](https://github.com/coreplanelabs/switchboard/issues/3390)) ([1f84d14](https://github.com/coreplanelabs/switchboard/commit/1f84d14bc0ba19d120f6efd209a22a5bad005452))
+* **core:** verify saved source input in Pi sessions ([#3461](https://github.com/coreplanelabs/switchboard/issues/3461)) ([4e11c36](https://github.com/coreplanelabs/switchboard/commit/4e11c362ac1a1496a87268adbe6b7a0553516b0c))
+* **runs:** show request status before a run exists ([#3422](https://github.com/coreplanelabs/switchboard/issues/3422)) ([833cc2a](https://github.com/coreplanelabs/switchboard/commit/833cc2a28b57700a5b46dc06189c68c75f437a9b))
+
+
+### Bug fixes
+
+* **core:** hold reclaimed browser runs until source verifies ([#3459](https://github.com/coreplanelabs/switchboard/issues/3459)) ([e4f9d26](https://github.com/coreplanelabs/switchboard/commit/e4f9d26dbbd5089e0ab9ed98f74744db6b7941be))
+* **core:** retain GitHub source failure facts ([#3425](https://github.com/coreplanelabs/switchboard/issues/3425)) ([f3d528d](https://github.com/coreplanelabs/switchboard/commit/f3d528d898b28af3c2339c381b02ad0127052608))
+* **core:** stop routing after a source check times out ([#3465](https://github.com/coreplanelabs/switchboard/issues/3465)) ([f43c57e](https://github.com/coreplanelabs/switchboard/commit/f43c57e54a46c9bf22b7841f6d2211b45d6e65e5))
+* **core:** trace remote execution failures across workers ([#3427](https://github.com/coreplanelabs/switchboard/issues/3427)) ([450f1a9](https://github.com/coreplanelabs/switchboard/commit/450f1a9ffda9b615eab5624cf576a16563a79771))
+* **deploy:** diagnose and retry staging MCP read failures ([#3445](https://github.com/coreplanelabs/switchboard/issues/3445)) ([32f23b6](https://github.com/coreplanelabs/switchboard/commit/32f23b65c5c18ad05beb9e56ba1196b4908a0898))
+* **deploy:** recover a stuck Bot container safely ([#3439](https://github.com/coreplanelabs/switchboard/issues/3439)) ([89f784b](https://github.com/coreplanelabs/switchboard/commit/89f784bdb01080be0cb67663b55db5ea976814b4))
+* **deploy:** refuse a Bot image from another commit ([#3446](https://github.com/coreplanelabs/switchboard/issues/3446)) ([df16509](https://github.com/coreplanelabs/switchboard/commit/df16509bf035a4beed2f41c02314707ca146c3ec))
+* **deploy:** retain reset journal failure evidence ([#3433](https://github.com/coreplanelabs/switchboard/issues/3433)) ([9fb695c](https://github.com/coreplanelabs/switchboard/commit/9fb695c042142756977bf4d0f321a97aa19beaeb))
+* **deploy:** reuse staging config source on retries ([#3477](https://github.com/coreplanelabs/switchboard/issues/3477)) ([e7fbd62](https://github.com/coreplanelabs/switchboard/commit/e7fbd624911b5479f0b4c9fac433d5979cfc1974))
+* **deploy:** skip the staging acceptance verdict on a cancelled run ([#3442](https://github.com/coreplanelabs/switchboard/issues/3442)) ([5fa6371](https://github.com/coreplanelabs/switchboard/commit/5fa6371d9a053c3dc7be7e02c554e5e76a7b8da2))
+* **deploy:** use bound Git remote in workspace smoke ([#3478](https://github.com/coreplanelabs/switchboard/issues/3478)) ([65bfd69](https://github.com/coreplanelabs/switchboard/commit/65bfd69e11de5521cda16b3b107f67172d24b467))
+* **deps:** use patched runtime and development dependencies ([#3452](https://github.com/coreplanelabs/switchboard/issues/3452)) ([9d67264](https://github.com/coreplanelabs/switchboard/commit/9d672642421a1c78fcd7a71e4a289f50dc579164))
+* **harness:** recover Resident log reads after connection loss ([#3447](https://github.com/coreplanelabs/switchboard/issues/3447)) ([72df449](https://github.com/coreplanelabs/switchboard/commit/72df44955770490ae48cab6d6064dc8820b4f352))
+* **runs:** show verified MCP requester email ([#3443](https://github.com/coreplanelabs/switchboard/issues/3443)) ([4de7e4f](https://github.com/coreplanelabs/switchboard/commit/4de7e4f6cc5eeb3b4f69445881371c6593e75c74))
+
 ## [1.308.2](https://github.com/coreplanelabs/switchboard/compare/v1.308.1...v1.308.2) (2026-10-22)
 
 
