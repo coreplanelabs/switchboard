@@ -1,0 +1,233 @@
+name: production capability smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: Release tag whose checked source runs the smoke (for example v1.2.3)
+        type: string
+        required: true
+      expected-build:
+        description: Exact deployed commit; must match the release tag, deployment run, and live Workers
+        type: string
+        required: true
+      deployment-run-id:
+        description: Successful production deploy run for this exact build
+        type: string
+        required: true
+      fixture-head:
+        description: Exact head of the verified disposable Review PR
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: depot-ubuntu-24.04-4
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    environment: production
+    timeout-minutes: 45
+    env:
+      CI: "1"
+      SEGMENT_DOWNLOAD_TIMEOUT_MINS: "1"
+      EXPECTED_BUILD: ${{ inputs.expected-build }}
+      RELEASE_TAG: ${{ inputs.release-tag }}
+      DEPLOYMENT_RUN_ID: ${{ inputs.deployment-run-id }}
+      FIXTURE_HEAD: ${{ inputs.fixture-head }}
+      SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_DEPLOY_PROFILE }}
+      SMOKE_INGRESS_TOKEN: ${{ secrets.SMOKE_INGRESS_TOKEN }}
+      SMOKE_INGRESS_ORIGIN: ${{ vars.SMOKE_INGRESS_ORIGIN }}
+      SMOKE_INGRESS_CONFIG: ${{ vars.SMOKE_INGRESS_CONFIG }}
+      SMOKE_ACCESS_CLIENT_ID: ${{ secrets.SMOKE_ACCESS_CLIENT_ID }}
+      SMOKE_ACCESS_CLIENT_SECRET: ${{ secrets.SMOKE_ACCESS_CLIENT_SECRET }}
+      SMOKE_REQUIRE_SLACK_CONNECTION: ${{ vars.SMOKE_REQUIRE_SLACK_CONNECTION }}
+      SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
+      RESIDENT_READ_TOKEN: ${{ secrets.RESIDENT_READ_TOKEN }}
+    steps:
+      - name: fence one attempt and the deployed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' '{"version":1,"scope":"deployment-capability-smoke","capabilityOutcome":"incomplete","reason":"preflight_unproven"}' > "$RUNNER_TEMP/smoke-receipt.json"
+          if [[ "$GITHUB_REF" != refs/heads/main || "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo "::error::Smoke requires one first attempt from main."
+            exit 1
+          fi
+          if ! [[ "$EXPECTED_BUILD" =~ ^[0-9a-f]{40}$ && "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ &&
+                  "$DEPLOYMENT_RUN_ID" =~ ^[0-9]+$ && "$FIXTURE_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Exact build, release tag, deployment run, and fixture head are required."
+            exit 1
+          fi
+          current_main=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [[ "$current_main" != "$GITHUB_SHA" ]]; then
+            echo "::error::Main moved after this verifier run was dispatched."
+            exit 1
+          fi
+          gh run view "$DEPLOYMENT_RUN_ID" --repo "$GITHUB_REPOSITORY" --json workflowName,headSha,conclusion,event,jobs > "$RUNNER_TEMP/deployment-run.json"
+          if ! jq -e --arg build "$EXPECTED_BUILD" '
+            .workflowName == "deploy-production" and .headSha == $build and
+            .conclusion == "success" and .event == "workflow_dispatch" and
+            any(.jobs[];
+              .conclusion == "success" and
+              any(.steps[]; .name == "deploy" and .conclusion == "success") and
+              any(.steps[]; .name == "what is live" and .conclusion == "success"))
+          ' "$RUNNER_TEMP/deployment-run.json" > /dev/null; then
+            echo "::error::The exact production deployment and readiness receipt is unproved."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.expected-build }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: verify trusted release source
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$EXPECTED_BUILD" ||
+                "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" != "$EXPECTED_BUILD" ]]; then
+            echo "::error::The checked source or release tag differs from the deployed build."
+            exit 1
+          fi
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: verify dedicated smoke configuration
+        env:
+          CONFIG_REPO_NAME: ${{ vars.CONFIG_REPO_NAME }}
+          HAS_APP_CREDENTIALS: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID != '' }}
+          HAS_CLOUDFLARE_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN != '' || secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SWITCHBOARD_DEPLOY_PROFILE" || -z "$SMOKE_INGRESS_TOKEN" ||
+                -z "$SMOKE_INGRESS_ORIGIN" || -z "$SMOKE_INGRESS_CONFIG" ||
+                -z "$SANDBOX_TOKEN" || -z "$RESIDENT_READ_TOKEN" ||
+                "$HAS_CLOUDFLARE_TOKEN" != true ]]; then
+            echo "::error::Production profile, dedicated smoke scope, Sandbox/Resident reads, or Cloudflare observation token is missing."
+            exit 1
+          fi
+          if ! jq -e --arg repo "$GITHUB_REPOSITORY_OWNER/switchboard-release-smoke" --arg head "$FIXTURE_HEAD" '
+            .disposable == true and .channel == "release-smoke" and .subject == "release-smoke" and
+            .repo == $repo and .workspace.path == "SMOKE.txt" and
+            .review.number == 1 and .review.head == $head
+          ' <<< "$SMOKE_INGRESS_CONFIG" > /dev/null; then
+            echo "::error::The configured smoke target differs from the verified disposable fixture."
+            exit 1
+          fi
+          if [[ -n "$SMOKE_ACCESS_CLIENT_ID" && -z "$SMOKE_ACCESS_CLIENT_SECRET" ||
+                -z "$SMOKE_ACCESS_CLIENT_ID" && -n "$SMOKE_ACCESS_CLIENT_SECRET" ]]; then
+            echo "::error::The Access Service Auth pair is incomplete."
+            exit 1
+          fi
+          if [[ -n "$CONFIG_REPO_NAME" && "$HAS_APP_CREDENTIALS" != true ]]; then
+            echo "::error::The configuration repository needs its read-only App."
+            exit 1
+          fi
+      - name: mint the configuration read token
+        id: infra-token
+        if: vars.CONFIG_REPO_NAME != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}
+          owner: ${{ vars.CONFIG_REPO_OWNER }}
+          repositories: ${{ vars.CONFIG_REPO_NAME }}
+          permission-contents: read
+      - name: render profile-bound Worker configs
+        env:
+          CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
+        run: npm run deploy:gen
+      - name: read the fleet plan
+        env:
+          CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          WRANGLER_SEND_METRICS: "false"
+        run: npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/smoke-fleet.json"
+      - name: verify all live Workers and the smoke reader
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/smoke-fleet.json"
+          if ! jq -e '(.steps | map(.name) | sort) == ["bot","memory","resident","sandbox"]' "$plan" > /dev/null; then
+            echo "::error::The plan does not name the four production Workers exactly once."
+            exit 1
+          fi
+          while IFS= read -r step; do
+            name=$(jq -r '.name' <<< "$step")
+            url=$(jq -r '.healthUrl // .wakeUrl // .liveGate.healthUrl // empty' <<< "$step")
+            bearer=$(jq -r '.liveGate.bearerEnv // empty' <<< "$step")
+            if [[ -z "$url" ]]; then echo "::error::$name has no health URL."; exit 1; fi
+            auth=(-A switchboard-session)
+            if [[ -n "$bearer" ]]; then
+              if [[ "$bearer" != SANDBOX_TOKEN ]]; then echo "::error::Unexpected health bearer."; exit 1; fi
+              auth+=(-H "authorization: Bearer $SANDBOX_TOKEN")
+            fi
+            if ! curl --fail-with-body -sS --max-time 20 "${auth[@]}" "$url" > "$RUNNER_TEMP/health-$name.json"; then
+              echo "::error::$name health is unreadable."
+              exit 1
+            fi
+            if ! jq -e --arg build "$EXPECTED_BUILD" '.ok == true and .build.commit == $build' "$RUNNER_TEMP/health-$name.json" > /dev/null; then
+              echo "::error::$name does not serve the expected build."
+              exit 1
+            fi
+            if [[ "$name" == bot ]] && ! jq -e '.draining == false' "$RUNNER_TEMP/health-bot.json" > /dev/null; then
+              echo "::error::The Bot is draining."
+              exit 1
+            fi
+          done < <(jq -c '.steps[]' "$plan")
+          resident_url=$(jq -er '.steps[] | select(.name == "resident") | (.drain.url // .setEnv.RESIDENT_BASE_URL // empty)' "$plan")
+          if ! curl --fail-with-body -sS -A switchboard-session --max-time 20 -H "authorization: Bearer $RESIDENT_READ_TOKEN" "${resident_url%/}/residents" > "$RUNNER_TEMP/residents.json"; then
+            echo "::error::The Resident registry is unreadable."
+            exit 1
+          fi
+          if ! jq -e '
+            if type != "object" or (.residents | type) != "array" then false else
+              .residents as $rows |
+              [$rows[] | if type != "object" then null elif has("residentId") then .residentId else .resource end] as $ids |
+              .draining == null and .count > 0 and .count == ($rows | length) and
+              ((has("pendingReplicas") | not) or .pendingReplicas == 0) and
+              all($rows[]; (.resource | type == "string" and length > 0) and
+                .live.imageReport == "current" and .live.error == null) and
+              all($ids[]; type == "string" and length > 0) and
+              ($ids | length) == ($ids | unique | length)
+            end
+          ' "$RUNNER_TEMP/residents.json" > /dev/null; then
+            echo "::error::The Resident registry is draining or has an unready image."
+            exit 1
+          fi
+          npm run --silent smoke:ingress -- "$plan" "$RUNNER_TEMP/smoke-receipt.json" --check --check-reader
+      - name: one production capability smoke
+        id: smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SMOKE_EXPECTED_COMMIT: ${{ inputs.expected-build }}
+          SMOKE_INGRESS_THREAD: smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          set -euo pipefail
+          current_main=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [[ "$current_main" != "$GITHUB_SHA" || "$GITHUB_RUN_ATTEMPT" != 1 ]]; then
+            echo "::error::The verifier main moved or this is a repeated attempt. No smoke admitted."
+            exit 1
+          fi
+          npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json"
+          jq -e '.scope == "deployment-capability-smoke" and .capabilityOutcome == "passed" and
+            (.scenarios | length == 3) and all(.scenarios[]; .outcome == "passed")' "$RUNNER_TEMP/smoke-receipt.json" > /dev/null
+      - name: smoke acceptance artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smoke-only-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-receipt.json
+          retention-days: 7
+          if-no-files-found: error
