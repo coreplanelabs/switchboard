@@ -183,7 +183,7 @@ describe("global deploy admission evidence", () => {
         "\n" +
         routeDeclaration.getText(ast) +
         `\nconst Worker = { ${fetchMethod.getText(ast)} };` +
-        `\nclass Registry extends DurableObject { ${methods} } class Resident { ${["withDeployAdmission", "withOpNativeOperation", "operationOrigin", "withSharedNativeOperation"].map((name) => methodOf(source.slice(source.indexOf("export class ResidentDO")), name)).join("\n")} }`,
+        `\nclass Registry extends DurableObject { ${methods} } class Resident { ${["withDeployAdmission", "withOpNativeOperation", "nativeScopeRecoveryTransport", "operationOrigin", "withSharedNativeOperation"].map((name) => methodOf(source.slice(source.indexOf("export class ResidentDO")), name)).join("\n")} }`,
       {
         compilerOptions: { target: ts.ScriptTarget.ES2022 },
       },
