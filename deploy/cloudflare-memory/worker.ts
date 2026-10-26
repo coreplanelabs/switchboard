@@ -129,13 +129,16 @@ import {
   unreadIngressProofSchema,
   type UnreadIngressProof,
   finishIngress,
+  launchIngress,
   retainedIngress,
   ingressRequestSchema,
   ingressRecordSchema,
   ingressSettlementSchema,
+  ingressLaunchSchema,
   type IngressRecord,
   type IngressRequest,
   type IngressSettlement,
+  type IngressLaunch,
   type IngressResult,
 } from "../../src/core/runLedger/ingress.ts";
 import {
@@ -4093,6 +4096,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   async ingress(
     command:
       | { action: "consume"; request: IngressRequest }
+      | { action: "launch"; request: IngressLaunch }
       | { action: "read"; effectKey: string }
       | { action: "clear"; effectKey: string; protection?: IngressClearProtection }
       | { action: "finish"; request: IngressSettlement }
@@ -4136,11 +4140,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       const result: IngressResult =
         command.action === "consume"
           ? consumeIngress(prior, command.request, now)
-          : command.action === "finish"
-            ? finishIngress(prior, command.request, now)
-            : prior
-              ? { status: "record", record: retainedIngress(prior, now) }
-              : { status: "not_found" };
+          : command.action === "launch"
+            ? launchIngress(prior, command.request, now)
+            : command.action === "finish"
+              ? finishIngress(prior, command.request, now)
+              : prior
+                ? { status: "record", record: retainedIngress(prior, now) }
+                : { status: "not_found" };
       if (command.action === "clear" && result.status === "record") result.record.request = null;
       if (command.action === "ack" && result.status === "record") {
         if (result.record.digest !== command.request.digest || result.record.runId !== command.request.runId)
@@ -14900,6 +14906,7 @@ const LEDGER_ROUTES = new Set<string>([
   "/runs/ingress/unread-hold",
   "/runs/ingress/unread-claim",
   "/runs/ingress/consume",
+  "/runs/ingress/launch",
   "/runs/ingress/read",
   "/runs/ingress/clear",
   "/runs/ingress/by-run",
@@ -15837,6 +15844,11 @@ async function handleLedger(
     const request = ingressRequestSchema.safeParse(b.request);
     if (!request.success) return json({ status: "invalid" }, 400);
     return json(await stub.ingress({ action: "consume", request: request.data }, now));
+  }
+  if (pathname === "/runs/ingress/launch") {
+    const request = ingressLaunchSchema.safeParse(b.request);
+    if (!request.success) return json({ status: "invalid" }, 400);
+    return json(await stub.ingress({ action: "launch", request: request.data }, now));
   }
   if (pathname === "/runs/ingress/by-run") {
     const runId = parseRunId(b.runId);

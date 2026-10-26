@@ -210,6 +210,7 @@ describe("runs admission status", () => {
         handlerOutcome: "uncertain",
         ownerStage: "schedule",
         failure: { stage: "schedule", kind: "transport" },
+        producer: { status: "unknown" },
       },
     });
     const deps: RunsCommandDeps = { runs: async () => runs };
@@ -222,6 +223,7 @@ describe("runs admission status", () => {
       handlerOutcome: "uncertain",
       ownerStage: "schedule",
       failure: { stage: "schedule", kind: "transport" },
+      producer: { status: "unknown" },
     });
     expect(await registry.invoke("runs.request", { args: [id] }, unpinned, deps)).toMatchObject({
       ok: false,

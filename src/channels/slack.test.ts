@@ -243,6 +243,7 @@ describe("Slack source deletion", () => {
         ...ledger,
         readIngress: ledger.readIngress.bind(ledger),
         consumeIngress: ledger.consumeIngress.bind(ledger),
+        launchIngress: ledger.launchIngress.bind(ledger),
         finishIngress: ledger.finishIngress.bind(ledger),
         pendingUnreadIngress: ledger.pendingUnreadIngress.bind(ledger),
         claimUnreadIngress: ledger.claimUnreadIngress.bind(ledger),

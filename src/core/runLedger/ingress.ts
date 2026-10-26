@@ -62,9 +62,37 @@ export const ingressRecordSchema = ingressRequestSchema
     failure: organizationOwnerFailureFactSchema.optional(),
     refusalPending: z.boolean().optional(),
     unread: unreadIngressSchema.optional(),
+    launch: z
+      .object({
+        producerGeneration: name,
+        launchId: z.string().uuid(),
+        launchedAt: instant,
+      })
+      .strict()
+      .optional(),
+    terminal: z
+      .object({
+        producerGeneration: name,
+        launchId: z.string().uuid(),
+        outcome: z.enum(["completed", "refused"]),
+        recordedAt: instant,
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type IngressRecord = z.infer<typeof ingressRecordSchema>;
+export const ingressLaunchSchema = z
+  .object({
+    effectKey: name,
+    digest: z.string().regex(/^[0-9a-f]{64}$/),
+    runId: name,
+    receiptId: name,
+    producerGeneration: name,
+    launchId: z.string().uuid(),
+  })
+  .strict();
+export type IngressLaunch = z.infer<typeof ingressLaunchSchema>;
 /** Trusted owner/config metadata on the existing erasure operation. */
 export const ingressClearProtectionSchema = z
   .object({ expiresAt: instant.optional(), receiptTtlMs: instant.positive() })
@@ -114,6 +142,8 @@ export const ingressSettlementSchema = z
     ownerStage: z.enum(ORGANIZATION_OWNER_STAGES).optional(),
     failure: organizationOwnerFailureFactSchema.optional(),
     refusalPending: z.boolean().optional(),
+    producerGeneration: name.optional(),
+    launchId: z.string().uuid().optional(),
   })
   .strict();
 export type IngressSettlement = z.infer<typeof ingressSettlementSchema>;
@@ -152,6 +182,39 @@ export function retainedIngress(record: IngressRecord, now: number): IngressReco
     request: record.contentExpiresAt <= now ? null : structuredClone(record.request),
   };
 }
+export function launchIngress(prior: IngressRecord | null, input: IngressLaunch, now: number): IngressResult {
+  const parsed = ingressLaunchSchema.safeParse(input);
+  if (!parsed.success) return { status: "invalid" };
+  if (!prior) return { status: "not_found" };
+  if (
+    prior.effectKey !== input.effectKey ||
+    prior.digest !== input.digest ||
+    prior.runId !== input.runId ||
+    prior.receiptId !== input.receiptId ||
+    prior.origin?.digest !== input.digest ||
+    prior.origin.sourceReference?.userId !== prior.requester ||
+    prior.origin.sourceReference.threadKey !== prior.threadKey
+  )
+    return { status: "fenced" };
+  if (prior.launch)
+    return prior.launch.producerGeneration === input.producerGeneration && prior.launch.launchId === input.launchId
+      ? { status: "record", record: retainedIngress(prior, now) }
+      : { status: "fenced" };
+  if (
+    prior.status !== "dispatching" ||
+    !prior.request ||
+    prior.contentExpiresAt <= now ||
+    (prior.originExpiresAt !== undefined && prior.originExpiresAt <= now)
+  )
+    return { status: "fenced" };
+  return {
+    status: "record",
+    record: ingressRecordSchema.parse({
+      ...retainedIngress(prior, now),
+      launch: { producerGeneration: input.producerGeneration, launchId: input.launchId, launchedAt: now },
+    }),
+  };
+}
 export function finishIngress(prior: IngressRecord | null, input: IngressSettlement, now: number): IngressResult {
   const parsed = ingressSettlementSchema.safeParse(input);
   if (!parsed.success) return { status: "invalid" };
@@ -159,13 +222,37 @@ export function finishIngress(prior: IngressRecord | null, input: IngressSettlem
   if (outcome.length > 2048) return { status: "invalid" };
   if (!prior) return { status: "not_found" };
   if (input.digest !== prior.digest || input.runId !== prior.runId) return { status: "fenced" };
+  if ((input.producerGeneration === undefined) !== (input.launchId === undefined)) return { status: "invalid" };
+  if (
+    (prior.launch !== undefined || input.launchId !== undefined) &&
+    (prior.launch?.launchId !== input.launchId || prior.launch?.producerGeneration !== input.producerGeneration)
+  )
+    return { status: "fenced" };
   if (
     !["completed", "uncertain"].includes(input.status) ||
     typeof input.outcome !== "string" ||
     input.outcome.length > 2048
   )
     return { status: "invalid" };
-  if (prior.status === "completed") return { status: "record", record: retainedIngress(prior, now) };
+  const terminal =
+    input.launchId !== undefined &&
+    input.status === "completed" &&
+    (input.handlerOutcome === "completed" || input.handlerOutcome === "refused")
+      ? {
+          producerGeneration: input.producerGeneration!,
+          launchId: input.launchId,
+          outcome: input.handlerOutcome,
+          recordedAt: now,
+        }
+      : undefined;
+  if (prior.status === "completed")
+    return {
+      status: "record",
+      record:
+        terminal && !prior.terminal
+          ? ingressRecordSchema.parse({ ...retainedIngress(prior, now), terminal })
+          : retainedIngress(prior, now),
+    };
   return {
     status: "record",
     record: ingressRecordSchema.parse({
@@ -177,6 +264,7 @@ export function finishIngress(prior: IngressRecord | null, input: IngressSettlem
       ...(input.ownerStage ? { ownerStage: input.ownerStage } : {}),
       ...(input.failure ? { failure: input.failure } : {}),
       ...(input.refusalPending ? { refusalPending: true } : {}),
+      ...(terminal && !prior.terminal ? { terminal } : {}),
     }),
   };
 }

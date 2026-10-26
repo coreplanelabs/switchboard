@@ -397,6 +397,17 @@ export interface AdmissionView {
   handlerOutcome?: IngressRecord["handlerOutcome"];
   ownerStage?: IngressRecord["ownerStage"];
   failure?: IngressRecord["failure"];
+  producer:
+    | { status: "unknown" }
+    | { status: "launched"; generation: string; launchReceipt: string; launchedAt: number }
+    | {
+        status: "terminal";
+        generation: string;
+        launchReceipt: string;
+        launchedAt: number;
+        outcome: "completed" | "refused";
+        terminalAt: number;
+      };
 }
 export type AdmissionRead =
   | { kind: "known"; value: AdmissionView; resource: Extract<Resource, { type: "run" }> }
@@ -1469,6 +1480,24 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             ...(record.handlerOutcome !== undefined ? { handlerOutcome: record.handlerOutcome } : {}),
             ...(record.ownerStage !== undefined ? { ownerStage: record.ownerStage } : {}),
             ...(record.failure !== undefined ? { failure: record.failure } : {}),
+            producer: record.launch
+              ? record.terminal?.launchId === record.launch.launchId &&
+                record.terminal.producerGeneration === record.launch.producerGeneration
+                ? {
+                    status: "terminal",
+                    generation: record.launch.producerGeneration,
+                    launchReceipt: record.launch.launchId,
+                    launchedAt: record.launch.launchedAt,
+                    outcome: record.terminal.outcome,
+                    terminalAt: record.terminal.recordedAt,
+                  }
+                : {
+                    status: "launched",
+                    generation: record.launch.producerGeneration,
+                    launchReceipt: record.launch.launchId,
+                    launchedAt: record.launch.launchedAt,
+                  }
+              : { status: "unknown" },
           },
         };
       } catch (error) {
