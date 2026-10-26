@@ -35,7 +35,7 @@ import type { Span } from "../core/trace/types.js";
 import type { ResidentLiveStateObserver } from "./runLiveState.js";
 import { ResidentRegistrationMismatchError, type ResidentBinding } from "../execution/resident.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
-import type { FollowUpTurn } from "./harness/contract.js";
+import { FollowUpCompletionDeadlineError, type FollowUpTurn } from "./harness/contract.js";
 import {
   classifyHeadMove,
   headMovedNote,
@@ -57,7 +57,7 @@ import { systemClock } from "./trace/clock.js";
 import type { PullRequestFacts } from "../execution/githubPulls.js";
 import type { GithubReviewWriteResult } from "../execution/githubComments.js";
 import { sourceHash } from "./references/receipts.js";
-import { minutesToMs, postStepMinutes } from "./budgets.js";
+import { minutesToMs, REVIEW_COMPLETION, reviewVerdictLease } from "./budgets.js";
 import {
   acceptedReviewPublication,
   awaitReviewPublication,
@@ -581,6 +581,9 @@ export interface ReviewTurnSpec {
   toolContext: ToolContext;
   onEvent: (event: RunEvent) => void;
   control: RunControl;
+  /** Remaining time in the original review lease. */
+  remainingMs?: () => number | undefined;
+  clock?: () => number;
   /** One more turn on the run's own pi session (harness-pi item 14). Absent —
    *  a `finish` plan, whose session ended with the previous generation — a
    *  substantive move is not re-reviewed: the verdict stands for the head it
@@ -594,6 +597,7 @@ export interface SettledReviewHead {
   verdict: ReviewVerdict | undefined;
   reviewHead: string | undefined;
   observedHead: string | undefined;
+  incompleteReason?: string;
 }
 
 /** Check the workspace before release. A different PR head needs a fresh
@@ -665,6 +669,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   // under `run.settle_reviewed_head` (docs/reference/specs/tracing.md item 17).
   const trace = span ? { span } : undefined;
   const stopped = () => input.preReviewStopped() || turn.control.hardSignal.aborted;
+  const rereviewMinutes = () => reviewVerdictLease(turn.remainingMs?.());
   const checkout = () => {
     if (!input.checkout) return undefined;
     const path = input.checkout();
@@ -704,7 +709,14 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   let verdict = input.verdict;
   let reviewHead = input.reviewHead;
   let observedHead = await probeHead();
-  const outcome = (): SettledReviewHead => ({ answer, verdict, reviewHead, observedHead });
+  let incompleteReason: string | undefined;
+  const outcome = (): SettledReviewHead => ({
+    answer,
+    verdict,
+    reviewHead,
+    observedHead,
+    ...(incompleteReason ? { incompleteReason } : {}),
+  });
   if (stopped()) return outcome();
   if (input.publication || input.pinnedHead !== undefined) {
     const bound = input.publication;
@@ -725,6 +737,37 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   const where = `${pr.repo}#${pr.number}`;
   const currentHead = async () => normalizeHead(await input.fetchPrHead(pr).catch(() => undefined));
   const expected = normalizeHead(reviewHead);
+  const incompleteTimeReason = (current: string, availableMinutes: number) =>
+    `Head moved from ${expected ?? "unknown"} to ${current}; no full re-review fits before publication. Only ${Math.max(0, availableMinutes).toFixed(2)} of ${REVIEW_COMPLETION.verdictMinutes.toFixed(2)} minutes remain for re-review.`;
+  const completionTurn = (current: string) => {
+    const maxMinutes = rereviewMinutes();
+    if (maxMinutes < REVIEW_COMPLETION.verdictMinutes) {
+      incompleteReason = incompleteTimeReason(current, maxMinutes);
+      turn.onEvent({
+        type: "run_note",
+        kind: "head_moved",
+        summary: `review incomplete: ${incompleteReason}`,
+        at: systemClock(),
+      });
+      return undefined;
+    }
+    return { maxMinutes, deadlineAt: (turn.clock ?? systemClock)() + minutesToMs(maxMinutes) };
+  };
+  const followUpWithinCompletion = async (current: string, input: Parameters<NonNullable<typeof turn.followUp>>[0]) => {
+    try {
+      return await turn.followUp!(input);
+    } catch (error) {
+      if (!(error instanceof FollowUpCompletionDeadlineError)) throw error;
+      incompleteReason = incompleteTimeReason(current, 0);
+      turn.onEvent({
+        type: "run_note",
+        kind: "head_moved",
+        summary: `review incomplete: ${incompleteReason}`,
+        at: systemClock(),
+      });
+      return undefined;
+    }
+  };
   const reviewed = normalizeHead(observedHead) ?? normalizeHead(verdict?.head);
   if (expected && reviewed) {
     const current = await currentHead();
@@ -751,10 +794,17 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
           delete history.snapshot;
           delete history.progress;
         }
-        const summary = `workspace adopted ${current.slice(0, 7)} after ${expected.slice(0, 7)} — ${turn.followUp ? "re-reviewing the current head" : "no session to re-review; not approving"}`;
+        const canRereview = turn.followUp !== undefined && rereviewMinutes() >= REVIEW_COMPLETION.verdictMinutes;
+        if (!canRereview)
+          incompleteReason = turn.followUp
+            ? incompleteTimeReason(current, rereviewMinutes())
+            : `Head moved from ${expected} to ${current}; no live session can re-review this head.`;
+        const summary = `workspace adopted ${current.slice(0, 7)} after ${expected.slice(0, 7)} — ${canRereview ? "re-reviewing the current head" : "review incomplete: no full re-review fits before publication"}`;
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
-        if (turn.followUp) {
+        if (canRereview && turn.followUp) {
           await prepareBase(current);
+          const completion = completionTurn(current);
+          if (!completion) return outcome();
           const text = [
             `The workspace for ${where} now observes ${current}, superseding ${expected}. The earlier verdict is void: workspace recovery alone does not prove the new head was reviewed.`,
             `Re-review at ${current}: confirm with git rev-parse HEAD, read the current diff and its affected callers, and re-check the prior findings and every invariant case. Read complete review history again through github_pull_get with includeReviewHistory: true.`,
@@ -763,14 +813,16 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
           input.notify.headMoved(`head moved → ${current.slice(0, 7)}`);
           await input.notify.reply(`🔀 ${where}: ${summary}.`).catch(() => {});
           if (input.preReviewStopped()) return outcome();
+          const ready = completionTurn(current);
+          if (!ready) return outcome();
           input.messages.push(
             { role: "assistant", content: [{ type: "text", text: answer }] },
             { role: "user", content: [{ type: "text", text }] },
           );
-          answer = await turn.followUp({
+          const completed = await followUpWithinCompletion(current, {
             text,
             maxTurns: turn.agent.maxTurns,
-            maxMinutes: turn.agent.maxMinutes,
+            ...ready,
             toolContext: {
               ...turn.toolContext,
               onVerdict: (v) => {
@@ -779,6 +831,8 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
             },
             ...(span ? { span } : {}),
           });
+          if (completed === undefined) return outcome();
+          answer = completed;
           if (input.preReviewStopped()) return outcome();
           if (!turn.control.hardSignal.aborted) observedHead = await probeHead();
         }
@@ -798,6 +852,11 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         // the head it read, said on the record, and the post gate pins it there.
         const summary = `head moved ${expected.slice(0, 7)} → ${current.slice(0, 7)} — not re-reviewed: the loop answered before a restart and its session is gone; the verdict stands for ${expected.slice(0, 7)}`;
         console.log(`[review] ${logKey} ${summary} (${where})`);
+        turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
+      } else if (classified && followUp && move && rereviewMinutes() < REVIEW_COMPLETION.verdictMinutes) {
+        verdict = undefined;
+        incompleteReason = incompleteTimeReason(current, rereviewMinutes());
+        const summary = `review incomplete: head moved ${expected.slice(0, 7)} → ${current.slice(0, 7)} with too little time for a full re-review and publication`;
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
       } else if (classified && followUp && move) {
         // Mutate the shared history context before any re-review work: the
@@ -849,6 +908,8 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         observedHead = confirmed;
         verdict = undefined; // the earlier verdict is void; the re-review must submit its own
         reviewHead = current;
+        const completion = completionTurn(current);
+        if (!completion) return outcome();
         const followUpText = rereviewFollowUp({
           where,
           reviewed: expected,
@@ -870,13 +931,15 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         // One more turn on the run's own pi session. The follow-up alone
         // carries the new head: pi reads its system prompt once, at load, so
         // the REVIEW TARGET block stays the session's (harness-pi item 14).
-        answer = await followUp({
+        const completed = await followUpWithinCompletion(current, {
           text: followUpText,
           maxTurns: turn.agent.maxTurns,
-          maxMinutes: turn.agent.maxMinutes,
+          ...completion,
           toolContext,
           ...(span ? { span } : {}),
         });
+        if (completed === undefined) return outcome();
+        answer = completed;
         if (stopped()) return outcome();
         // Re-read, not narrowed: the stop may have been requested during the turn.
         if (!turn.control.hardSignal.aborted) observedHead = await probeHead();
@@ -934,7 +997,7 @@ export type ReviewPostOutcome = ReviewPost;
  */
 export async function runReviewPostStep(input: Parameters<typeof reviewPostStep>[0]): Promise<ReviewPostOutcome> {
   const controller = new AbortController();
-  const allowance = minutesToMs(postStepMinutes("review"));
+  const allowance = minutesToMs(REVIEW_COMPLETION.publicationMinutes);
   const remaining = input.remainingMs?.();
   const waitMs = remaining === undefined ? allowance : Math.max(0, Math.min(allowance, remaining));
   const deadlineAt = systemClock() + waitMs;

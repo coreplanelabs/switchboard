@@ -1,4 +1,9 @@
-import { beginHarnessLaunch, sessionPolicyFor, confirmSessionFacts } from "../contract.js";
+import {
+  beginHarnessLaunch,
+  sessionPolicyFor,
+  confirmSessionFacts,
+  FollowUpCompletionDeadlineError,
+} from "../contract.js";
 import { harnessLaunchIntentOf } from "../sessionPolicy.js";
 import { HarnessEndingUnconfirmedError } from "../container.js";
 // The OpenCode harness (docs/reference/specs/harness.md item 7): OpenCode as the
@@ -608,8 +613,8 @@ export async function openOpenCodeRun(
       ...(ending ? { ending } : {}),
       followUp: async (input) => {
         run.toolContext.recovery?.throwIfStopped();
-        if (run.deadlineAt !== undefined && deps.clock() >= run.deadlineAt)
-          throw new Error("The admitted run deadline ended before the follow-up turn.");
+        const phaseDeadlineAt = Math.min(run.deadlineAt ?? Infinity, input.deadlineAt ?? Infinity);
+        if (deps.clock() >= phaseDeadlineAt) throw new FollowUpCompletionDeadlineError();
         // One more turn on the same session (the post-turns: the coding
         // description, the review's verdict), driven through the same loop over
         // a connection that reads only what the turn appends. The relayed
@@ -622,7 +627,8 @@ export async function openOpenCodeRun(
         live.toolContext = input.toolContext;
         // The turn's lease is carved from the run's: the lesser of its ask and
         // what the lease still holds, never under a minute (decision 0046).
-        const turnMinutes = turnLeaseMs(input.maxMinutes, remainingMs()) / MINUTE_MS;
+        const turnMinutes =
+          Math.min(turnLeaseMs(input.maxMinutes, remainingMs()), phaseDeadlineAt - deps.clock()) / MINUTE_MS;
         // The turn's tools, marked for the proxy for the turn's duration (model-proxy item 6).
         deps.bearers?.markTurn(run.runId, input.tools);
         try {
@@ -642,6 +648,7 @@ export async function openOpenCodeRun(
             deps,
             {
               ...run,
+              ...(Number.isFinite(phaseDeadlineAt) ? { deadlineAt: phaseDeadlineAt } : {}),
               messages: [request],
               agent: { ...run.agent, maxTurns: input.maxTurns, maxMinutes: turnMinutes },
               toolContext: live.toolContext,

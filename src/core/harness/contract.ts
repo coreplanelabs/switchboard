@@ -350,6 +350,8 @@ export interface FollowUpTurnInput {
   maxTurns: number;
   /** The turn's ask, in minutes; the harness carves the lesser of it and the lease's remainder. */
   maxMinutes: number;
+  /** Optional hard end for the whole turn, including wind-down and restart. */
+  deadlineAt?: number;
   /** The tools this turn may call (model-proxy item 6): the harness marks
    *  them on the run's bearer entry for the turn's duration and the proxy
    *  trims each request's tool list to them, the choice left to the model.
@@ -359,6 +361,13 @@ export interface FollowUpTurnInput {
   span?: Span;
 }
 export type FollowUpTurn = (input: FollowUpTurnInput) => Promise<string>;
+
+export class FollowUpCompletionDeadlineError extends Error {
+  constructor() {
+    super("The review completion deadline ended before the model turn started.");
+    this.name = "FollowUpCompletionDeadlineError";
+  }
+}
 
 /** A run whose loop has ended and whose process still lives, idle on its
  *  session: the loop's answer, one more turn on that session, and the end of

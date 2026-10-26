@@ -1744,9 +1744,28 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     await session.end();
   });
 
+  it("starts no follow-up after its own completion deadline even when the run still has time", async () => {
+    const w = world({ agent: { name: "review", maxMinutes: 10 } });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "done"));
+    const session = await w.open();
+    w.clock.now = NOW + MINUTE_MS + 1;
+    const prompts = w.container.commands().filter((command) => command.type === "prompt").length;
+    await expect(
+      session.followUp({
+        text: "submit verdict",
+        maxTurns: 4,
+        maxMinutes: 1,
+        deadlineAt: NOW + MINUTE_MS,
+        toolContext: { executor },
+      }),
+    ).rejects.toThrow("deadline");
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(prompts);
+    await session.end();
+  });
+
   it("an absolute deadline ends a hung post-loop turn without admitting a finale prompt", async () => {
     const w = world({ agent: { name: "general", maxMinutes: 20 } });
-    Object.assign(w.run, { deadlineAt: NOW + 90_000 });
+    Object.assign(w.run, { deadlineAt: NOW + 5 * MINUTE_MS });
     scriptedPi(w.container, (n, c) => {
       if (n === 0) finalTurn(c, "done");
       else w.clock.now = NOW + 90_001;
@@ -1754,7 +1773,13 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const session = await w.open();
     const commandsBefore = w.container.commands().length;
     w.clock.now = NOW + 60_000;
-    await session.followUp({ text: "write the verdict", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    await session.followUp({
+      text: "write the verdict",
+      maxTurns: 4,
+      maxMinutes: 5,
+      deadlineAt: NOW + 90_000,
+      toolContext: { executor },
+    });
     expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(2);
     expect(
       w.container

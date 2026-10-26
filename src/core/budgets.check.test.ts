@@ -28,6 +28,7 @@ import {
   postStepLease,
   postStepMinutes,
   PRESET_FLOORS,
+  REVIEW_COMPLETION,
   provisionalBearerExpiresAt,
   reserveMinutes,
   SHIP_WAIT,
@@ -314,6 +315,13 @@ describe("the derivations the registry reads from the module", () => {
 
 describe("the loop's clocks — the loop ends inside the lease, so the write-up and the post-step fit", () => {
   const T0 = 1_700_000_000_000;
+  it("a 25-minute Review has 19 loop minutes, three write-up minutes, and a one-plus-two-minute completion reserve", () => {
+    const c = loopClock(T0, 25 * MINUTE_MS, "review");
+    expect(c.loopEnd).toBe(T0 + 19 * MINUTE_MS);
+    expect(c.deadline).toBe(T0 + 25 * MINUTE_MS);
+    expect(REVIEW_COMPLETION.verdictMinutes + REVIEW_COMPLETION.publicationMinutes).toBe(3);
+    expect(c.finaleMs).toBe(3 * MINUTE_MS);
+  });
   it("a coding lease of 90 minutes ends its loop at 82: the write-up's 3 and the post-step's 5 are held back; the warning lands 3 minutes before the loop's end; the write-up is bounded by its allowance", () => {
     const c = loopClock(T0, 90 * MINUTE_MS, "coding");
     expect(c).toEqual({
