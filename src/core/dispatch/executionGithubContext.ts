@@ -10,6 +10,7 @@ import {
   githubResponseFailureOf,
 } from "../../execution/githubApi.js";
 import { classificationOf } from "../trace/classify.js";
+import type { Span } from "../trace/types.js";
 import {
   GITHUB_ACCESS_OPERATIONS,
   GITHUB_ACCESS_ROUTES,
@@ -99,13 +100,15 @@ export async function currentGithubReadCapability(
   github: GithubCapability,
   agentName: string,
   readResults?: Map<string, Promise<unknown>>,
+  sourceSpan?: Span,
 ): Promise<{ ok: true } | { ok: false; githubAccess: GithubAccessDiagnostic }> {
-  const first = await currentGithubReadCapabilityOnce(receipt, input, github, agentName, readResults);
+  const scopedGithub = sourceSpan && github.api.withSpan ? { ...github, api: github.api.withSpan(sourceSpan) } : github;
+  const first = await currentGithubReadCapabilityOnce(receipt, input, scopedGithub, agentName, readResults);
   // A read can time out after GitHub accepts it. Recheck from the catalogue
   // with fresh reads once; the second answer alone may grant current access.
   if (first.ok || !["timeout", "transport"].includes(first.githubAccess.reason)) return first;
   readResults?.clear();
-  return currentGithubReadCapabilityOnce(receipt, input, github, agentName, readResults);
+  return currentGithubReadCapabilityOnce(receipt, input, scopedGithub, agentName, readResults);
 }
 
 async function currentGithubReadCapabilityOnce(

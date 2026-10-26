@@ -437,7 +437,7 @@ export interface RunLoopContext {
   channelVisibility: ChannelVisibility;
   slackContext?: SlackContextBinding;
   privateAudienceLatch?: PrivateAudienceLatch;
-  admittedContextCheck?: () => Promise<import("../audienceDecision.js").AudienceCheck>;
+  admittedContextCheck?: (sourceSpan?: Span) => Promise<import("../audienceDecision.js").AudienceCheck>;
   admitSourceContext?: (context: ContextDependencies) => Promise<boolean>;
   validateExecutionContext?: (context: ContextDependencies) => Promise<import("../audienceDecision.js").AudienceCheck>;
   currentNativeMediaContext?: () => ContextDependencies | undefined;
@@ -2589,7 +2589,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           if (
             !accessAllowed(
               await retryTransientSourceCheck(
-                () => closedStage(span, "run.source_check.context", check),
+                () => closedStage(span, "run.source_check.context", (sourceSpan) => check(sourceSpan)),
                 () => registry.isActive(run.id, run.control) && !privateAudienceLatch.revoked,
               ),
             )
@@ -5090,7 +5090,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           const result = privateRun
             ? await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)
             : ctx.admittedContextCheck
-              ? await ctx.admittedContextCheck()
+              ? await ctx.admittedContextCheck(span)
               : { ok: true as const };
           span.setAttrs(audienceCheckAttrs(result));
           return result;

@@ -62,6 +62,7 @@ import { isChildHandoff, type HandoffSource } from "./handoff.js";
 import type { HandoffAccess, HandoffAccessFactory } from "./handoffRuntime.js";
 import { threadAssetsOf, type ThreadAsset } from "./threadAssets.js";
 import { systemClock } from "../trace/clock.js";
+import type { Span } from "../trace/types.js";
 
 type StoredContextRun = RunRecord | LiveRunRow;
 export type ContextAccessDeps = Pick<
@@ -88,7 +89,8 @@ const denied = (check?: ContextRefusalCheck): Extract<AudienceCheck, { ok: false
  * also contain omitted legacy rows or live-only results that cannot be reused. */
 export async function revalidateAdmittedContext(
   current: () => ContextDependencies,
-  validate: (snapshot: ContextDependencies) => Promise<AudienceCheck>,
+  validate: (snapshot: ContextDependencies, sourceSpan?: Span) => Promise<AudienceCheck>,
+  sourceSpan?: Span,
 ): Promise<AudienceCheck> {
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -96,7 +98,7 @@ export async function revalidateAdmittedContext(
       if (!isContextDependencies(snapshot)) return denied("context_invalid");
       if (snapshot.status !== "known") return denied("context_unknown");
       const revision = JSON.stringify(snapshot);
-      const checked = await validate(snapshot);
+      const checked = await validate(snapshot, sourceSpan);
       if (!checked.ok) return checked;
       if (JSON.stringify(current()) === revision) return checked;
     }
@@ -110,7 +112,7 @@ const factsOf = (row: StoredContextRun) => ("meta" in row ? { ...row.meta, id: r
 /** One current reader over the existing run, session and adapter seams.
  * Canonical dependencies describe what to check; none of their bytes grant access. */
 export interface MessageContextAccess {
-  validateDependencies(context: ContextDependencies): Promise<AudienceCheck>;
+  validateDependencies(context: ContextDependencies, sourceSpan?: Span): Promise<AudienceCheck>;
   normalizeDependencies(
     contexts: readonly ContextDependencies[],
     candidates: readonly ContextDependencies[],
@@ -402,7 +404,7 @@ function buildContextAccess(
       repo: ref.repo,
     }).allow;
   };
-  const validate = async (dependencies: ContextDependencies): Promise<AudienceCheck> => {
+  const validate = async (dependencies: ContextDependencies, sourceSpan?: Span): Promise<AudienceCheck> => {
     if (!isContextDependencies(dependencies)) return denied("context_invalid");
     if (dependencies.status !== "known") return denied("context_unknown");
     if (dependencies.sourceInputs?.length && !deps.revalidateSourceInput) return denied("source_input_access_unproved");
@@ -510,6 +512,7 @@ function buildContextAccess(
             githubCapabilityFor(deps, actor()),
             source.agent,
             readResults,
+            sourceSpan,
           );
           if (!access.ok) return { ...denied("execution_github_access_unproved"), githubAccess: access.githubAccess };
           if ((await deps.runLedger.readLiveRuns()).some((row) => row.runId === ref.runId))
@@ -560,6 +563,7 @@ function buildContextAccess(
               github,
               current.meta.agent!,
               readResults,
+              sourceSpan,
             );
             if (!access.ok) return { ...denied("execution_github_access_unproved"), githubAccess: access.githubAccess };
           }
