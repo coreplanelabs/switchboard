@@ -164,7 +164,10 @@ export function closeInboxSegment(
     },
     lastStep: lastStep === null ? null : structuredClone(lastStep),
     highWater,
-    undelivered: row.phase === "attaching" && lastStep === null,
+    undelivered:
+      lastStep === null &&
+      (row.phase === "attaching" ||
+        (row.phase === "finishing" && row.liveState?.state === "ended" && row.state.setupInboxUnconsumed === true)),
   };
   return {
     version: 1,

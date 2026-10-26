@@ -62,6 +62,8 @@ import {
 } from "../reviewVerdict.js";
 import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
+import { assignRunLiveState } from "../runLiveState.js";
+import { causeOfClose } from "../plane/decide.js";
 import { activityOfEvents } from "../runRegistry/activity.js";
 import type { RunSnapshot, RunSummary, SealResult } from "../runRegistry/projections.js";
 import type { RunHistoryWriter } from "../runHistoryWriter.js";
@@ -841,7 +843,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
 
 /** A run that never reached its model loop still owns its advertised identity.
  *  A tracked reservation finishes atomically; the store writes an untracked run. */
-export function finishSetupRun(
+export async function finishSetupRun(
   deps: RecordDeps,
   ctx: Omit<TombstoneContext, "run" | "resume"> & {
     audience?: AudienceTrace;
@@ -856,16 +858,72 @@ export function finishSetupRun(
     /** The setup result the attach reached: a selection's, or a lost word for a run that got no workspace. */
     setup?: RunSetup;
   },
-): void {
+): Promise<{ ok: true } | { ok: false; reason: string }> {
   const { registry, runId, finishedAt, refusal, status, ending } = ctx;
   const reason = refusal.text;
-  registry.publish(runId, {
+  const events = registry.eventLane(runId);
+  events.publish({
     type: "refusal",
     code: refusal.code,
     cause: refusal.cause,
     text: redactAndCap(reason.trim() ? reason : "The run ended before its model started.", 600),
     at: finishedAt,
   });
+  let terminal: { ok: true } | { ok: false; reason: string } = { ok: false, reason: "missing-run" };
+  try {
+    await events.write(async () => {
+      const summary = registry.getById(runId);
+      if (!summary) return;
+      if (!summary.liveState) {
+        terminal = { ok: false, reason: "initial-state-unconfirmed" };
+        return;
+      }
+      if (summary.liveState.state === "ended") {
+        terminal = { ok: true };
+        return;
+      }
+      const eventSeq = summary.eventCount + 1;
+      const assignment = {
+        expectedSeq: summary.liveStateSeq ?? 0,
+        eventSeq,
+        at: finishedAt,
+        state: "ended" as const,
+        cause: causeOfClose(status),
+        statePatch: {
+          finalStatus: status,
+          // The terminal write changes the row phase before its unread inbox closes.
+          setupInboxUnconsumed: true,
+          ...(ctx.failure !== undefined ? { failure: ctx.failure } : {}),
+        },
+      };
+      if (ctx.ledgerRun?.tracked()) {
+        const committed = await ctx.ledgerRun.assignLiveState(assignment);
+        if (!committed.ok) {
+          terminal = { ok: false, reason: committed.reason };
+          return;
+        }
+        terminal = registry.commitLiveState(runId, committed)
+          ? { ok: true }
+          : { ok: false, reason: "projection-rejection" };
+        return;
+      }
+      const local = assignRunLiveState(summary.liveState, summary.liveStateSeq ?? 0, assignment);
+      if (!local.ok || !local.event) {
+        terminal = { ok: false, reason: local.ok ? "missing-terminal-event" : local.reason };
+        return;
+      }
+      terminal = registry.commitLiveState(runId, {
+        ...local,
+        event: { ...local.event, seq: eventSeq },
+        liveStateSeq: eventSeq,
+      })
+        ? { ok: true }
+        : { ok: false, reason: "projection-rejection" };
+    });
+  } catch {
+    return { ok: false, reason: "unavailable" };
+  }
+  if (!terminal.ok) return terminal;
   registry.finish(runId, status);
   ending.finished(runId);
   const snap = registry.snapshotById(runId);
@@ -910,6 +968,7 @@ export function finishSetupRun(
         ctx.ledgerRun,
       ),
   });
+  return { ok: true };
 }
 
 /** What `registerFinishRecord` reads off the dispatch. */

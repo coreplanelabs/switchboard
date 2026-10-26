@@ -3394,7 +3394,7 @@ async function verifiedSetupAttachRefusal(
   if (
     !run.finished ||
     run.status !== "failed" ||
-    !["preparing", "admitted", "waiting_deploy"].includes(run.liveState?.state ?? "") ||
+    !["preparing", "admitted", "waiting_deploy", "ended"].includes(run.liveState?.state ?? "") ||
     run.usage?.turns !== 0 ||
     run.usage.byModel === undefined ||
     Object.keys(run.usage.byModel).length !== 0 ||
@@ -3440,13 +3440,37 @@ async function verifiedSetupAttachRefusal(
       (event) => event.type === "span_end" && event.name === "dispatch.workspace.attach" && event.status === "error",
     ) ?? -1;
   const refusalIndex = events?.findIndex((event) => event.type === "refusal" && event.code === "setup_failed") ?? -1;
+  const endedIndex = events?.findIndex((event) => event.type === "run_state" && event.state === "ended") ?? -1;
+  const ended = endedIndex >= 0 ? events?.[endedIndex] : undefined;
+  const hasEnded = run.liveState?.state === "ended" || child?.liveState?.state === "ended" || endedIndex >= 0;
+  const terminalBoundary =
+    !hasEnded ||
+    (run.liveState?.state === "ended" &&
+      child?.liveState?.state === "ended" &&
+      endedIndex === refusalIndex + 1 &&
+      ended?.type === "run_state" &&
+      ended.cause === "failed" &&
+      ended.at === run.finishedAt &&
+      ended.since === run.finishedAt &&
+      child.finishedAt === run.finishedAt &&
+      run.liveState.since === ended.since &&
+      child.liveState.since === ended.since &&
+      ended.bound === undefined &&
+      events?.filter((event) => event.type === "run_state" && event.state === "ended").length === 1);
+  const setupState = hasEnded
+    ? events
+        ?.slice(0, endedIndex)
+        .filter((event) => event.type === "run_state")
+        .at(-1)?.state
+    : run.liveState?.state;
+  const matchesSetupState = (state: "admitted" | "preparing" | "waiting_deploy") =>
+    setupState === state && (hasEnded ? terminalBoundary : child?.liveState?.state === state);
   const attachStart = events?.[attachStartIndex];
   const attachEnd = events?.[attachEndIndex];
   const drainStart = events?.[drainStartIndex];
   const drainEnd = events?.[drainEndIndex];
   const drainWaitSetupRefusal =
-    run.liveState?.state === "waiting_deploy" &&
-    child?.liveState?.state === "waiting_deploy" &&
+    matchesSetupState("waiting_deploy") &&
     preparingIndex < 0 &&
     attachStartIndex >= 0 &&
     attachStartIndex < waitingDeployIndex &&
@@ -3460,7 +3484,7 @@ async function verifiedSetupAttachRefusal(
     drainStart?.type === "span_start" &&
     drainEnd?.type === "span_end" &&
     drainStart.spanId === drainEnd.spanId &&
-    events?.slice(waitingDeployIndex + 1).every((event) => event.type !== "run_state") === true &&
+    events?.slice(waitingDeployIndex + 1).every((event) => event.type !== "run_state" || event === ended) === true &&
     events?.[refusalIndex]?.type === "refusal" &&
     events[refusalIndex].cause === "system";
   const admittedIndex = events?.findIndex((event) => event.type === "run_state" && event.state === "admitted") ?? -1;
@@ -3482,7 +3506,7 @@ async function verifiedSetupAttachRefusal(
         (memoryEndIndex === admittedIndex + 1 && attachStartIndex === admittedIndex + 2)) &&
       attachEndIndex === admittedIndex + 3
     : attachStartIndex === admittedIndex + 1 && attachEndIndex === admittedIndex + 2;
-  const cleanup = events?.slice(refusalIndex + 1) ?? [];
+  const cleanup = events?.slice(refusalIndex + (hasEnded ? 2 : 1)) ?? [];
   const cleanupPair = (offset: number, name: string) => {
     const opened = cleanup[offset];
     const closed = cleanup[offset + 1];
@@ -3517,12 +3541,11 @@ async function verifiedSetupAttachRefusal(
       return opened >= 0 && opened < cleanupBoundary;
     });
   const admittedAttachRefusal =
-    run.liveState?.state === "admitted" &&
-    child?.liveState?.state === "admitted" &&
+    matchesSetupState("admitted") &&
     preparingIndex < 0 &&
     waitingDeployIndex < 0 &&
     admittedIndex >= 0 &&
-    events?.filter((event) => event.type === "run_state").length === 1 &&
+    events?.filter((event) => event.type === "run_state").length === (hasEnded ? 2 : 1) &&
     adjacentAttachSetup &&
     refusalIndex === attachEndIndex + 1 &&
     attachStart?.type === "span_start" &&
@@ -3555,8 +3578,7 @@ async function verifiedSetupAttachRefusal(
       );
     });
   const preparingAttachRefusal =
-    run.liveState?.state === "preparing" &&
-    child?.liveState?.state === "preparing" &&
+    matchesSetupState("preparing") &&
     preparingIndex >= 0 &&
     attachStartIndex > preparingIndex &&
     attachEndIndex > attachStartIndex &&
@@ -3643,6 +3665,7 @@ async function verifiedSetupAttachRefusal(
       ? waitingDeployIndex
       : preparingIndex;
   if (
+    !terminalBoundary ||
     !permittedCleanup ||
     !validInputMetadata ||
     !completeSetupSpans ||
@@ -3692,7 +3715,8 @@ async function verifiedSetupAttachRefusal(
           (event.type === "context" && typeof event.text === "string" && index < setupBoundaryIndex) ||
           (event.type === "refusal" && event.code === "setup_failed") ||
           (event.type === "run_state" &&
-            ["admitted", "waiting_deploy", "waiting_repository", "falling_back", "preparing"].includes(event.state)) ||
+            (["admitted", "waiting_deploy", "waiting_repository", "falling_back", "preparing"].includes(event.state) ||
+              (hasEnded && index === endedIndex))) ||
           ((event.type === "span_start" || event.type === "span_end") &&
             (event.name === "request" ||
               event.name === "slack.receive" ||
