@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ALLOWANCES, bearerExpiresAt, loopClock, MINUTE_MS, PROVIDER_RETRY_BACKOFFS_MS } from "../../budgets.js";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
@@ -712,6 +712,12 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
           userName: restored.msg.userName,
           msg: restored.msg,
           ledgerSeq: row.seq,
+          ledgerWitness: {
+            version: 1 as const,
+            runId: "run-7",
+            seq: row.seq,
+            digest: createHash("sha256").update(JSON.stringify(row.message)).digest("hex"),
+          },
         },
       };
     };
@@ -2526,6 +2532,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
     const ledgerRun = opened.run;
     w.run.onStep = ledgerRun.step.bind(ledgerRun);
+    const confirmedControls: number[] = [];
+    w.run.confirmedFollowUps = (inputs) => {
+      confirmedControls.push(...inputs.filter((input) => input.userId === "plane").map((input) => input.ledgerSeq!));
+      ledgerRun.confirmInboxInputs(inputs);
+    };
     const firstUp = await providerUp(),
       inFlightUp = await providerUp();
     const up = firstUp.input,
@@ -2585,6 +2596,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     w.inbox.push({ ...up, ledgerSeq: firstUpSeq });
     await expect(turn).resolves.toBe("follow-up recovered");
 
+    expect([...new Set(confirmedControls)].sort((a, b) => a - b)).toEqual([1, 2]);
     const [reclaimed] = await reclaimWithLease();
     // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
     expect(await ledger.readInbox("run-7", 0)).toEqual([firstUp.row, inFlightUp.row]);
@@ -2636,6 +2648,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
       const ledgerRun = opened.run;
       w.run.onStep = ledgerRun.step.bind(ledgerRun);
+      const confirmedControls: number[] = [];
+      w.run.confirmedFollowUps = (inputs) => {
+        confirmedControls.push(...inputs.filter((input) => input.userId === "plane").map((input) => input.ledgerSeq!));
+        ledgerRun.confirmInboxInputs(inputs);
+      };
       const ordinary = { text: "also bump the changelog", userId: "slack:UALICE", at: NOW };
       const ordinaryRow = await externalRow(ordinary),
         controlRow = await providerUp();
@@ -2706,6 +2723,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
 
       // The bot process dies here; reclaim must use the durable cursor, not the
       // in-process relaunch record, and offer only the ordinary deferred row.
+      expect([...new Set(confirmedControls)].sort((a, b) => a - b)).toEqual([2]);
       const [reclaimed] = await reclaimWithLease();
       expect(planResume({ transcript: completed, lastStep: reclaimed!.lastStep!, tools: [] })).toMatchObject({
         kind: "finish",
@@ -2861,6 +2879,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
     w.run.onStep = opened.run.step.bind(opened.run);
+    const confirmedControls: number[] = [];
+    w.run.confirmedFollowUps = (inputs) => {
+      confirmedControls.push(...inputs.filter((input) => input.userId === "plane").map((input) => input.ledgerSeq!));
+      opened.run.confirmInboxInputs(inputs);
+    };
     const controlRow = await providerUp(),
       up = controlRow.input,
       upSeq = controlRow.row.seq;
@@ -2906,6 +2929,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
 
     await expect(w.start()).resolves.toBe("recovered on the local retry");
 
+    expect([...new Set(confirmedControls)].sort((a, b) => a - b)).toEqual([1]);
     const [reclaimed] = await reclaimWithLease();
     // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
     expect(await ledger.readInbox("run-7", 0)).toEqual([controlRow.row]);
@@ -2941,6 +2965,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
     w.run.onStep = opened.run.step.bind(opened.run);
+    const confirmedControls: number[] = [];
+    w.run.confirmedFollowUps = (inputs) => {
+      confirmedControls.push(...inputs.filter((input) => input.userId === "plane").map((input) => input.ledgerSeq!));
+      opened.run.confirmInboxInputs(inputs);
+    };
     const firstUp = await providerUp(),
       inFlightUp = await providerUp();
     const up = firstUp.input,
@@ -2994,6 +3023,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     w.inbox.push({ ...up, ledgerSeq: firstUpSeq });
     await expect(done).resolves.toBe("recovered on the plane reissue");
 
+    expect([...new Set(confirmedControls)].sort((a, b) => a - b)).toEqual([1, 2]);
     const [reclaimed] = await reclaimWithLease();
     // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
     expect(await ledger.readInbox("run-7", 0)).toEqual([firstUp.row, inFlightUp.row]);

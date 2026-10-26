@@ -100,7 +100,7 @@ export async function seedSourceInputIntent(
 
 /** Isolated native checkpoint fixture. These synthetic native IDs prove the
  * store boundary only; they do not claim acceptance by a running harness. */
-export async function seedSourceInputCheckpoints(ledger: RunLedger) {
+export async function seedSourceInputCheckpoints(ledger: RunLedger, renderedHash?: string) {
   const id = "source-consumer",
     gen = "g1",
     thread = "cli:thread";
@@ -142,10 +142,13 @@ export async function seedSourceInputCheckpoints(ledger: RunLedger) {
   };
   requireOk(await ledger.step(id, gen, step, [], session));
   requireOk(await ledger.pushInbox(id, { text: "Unrelated first row" }));
-  const first = await seedSourceInputIntent(ledger, testSourceInputIntent());
+  const original = testSourceInputIntent();
+  if (renderedHash !== undefined) original.entries[0]!.renderedHash = renderedHash;
+  const first = await seedSourceInputIntent(ledger, original);
   requireOk(await ledger.pushInbox(id, { text: "Unrelated third row" }));
   const second = testSourceInputIntent();
   second.entries[0]!.id = "source-input-two";
+  if (renderedHash !== undefined) second.entries[0]!.renderedHash = renderedHash;
   const another = await seedSourceInputIntent(ledger, second);
   const intents: SourceInputIntents = { version: 1, entries: [...first.entries, ...another.entries] };
   requireOk(await ledger.setState(id, gen, { sourceInputIntents: intents }));
