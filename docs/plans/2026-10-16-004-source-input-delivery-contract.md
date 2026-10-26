@@ -145,3 +145,18 @@ The next behavior change updates the affected rows in [run history](../reference
 | Disposable end-to-end source delivery with measured limits and original custody | `[gap]` Release owner qualification after integrated source and current-head review |
 
 Each gap belongs to the original shared intake work. Component storage tests and merged converters do not close these integration gates.
+
+
+## Reader-first deployment and rollback floor
+
+Deploy support for obligation readers before any obligation writer. The first source change adds only a closed version 4 waiting-job frame, exact source-obligation holder decoding, retained-holder lookup and pruning support in the history and session-log objects, and reservation accounting. Production has no API or caller that creates this frame. Tests seed representative future metadata. This is local compatibility proof only.
+
+A waiting frame retains each original source-input reference, checked context, protection evidence, automatic deadline and charged reservation. Pending, uncertain and expired obligations retain their holders. A deadline does not acknowledge input or release a pin. Old job claimants hold version 4 frames without spending an operational retry. The reader cannot select a destination or grant source access. A remote pin census must keep an obligation holder even when its canonical completion is missing.
+
+Before the second source change may create obligations, the delivery owner must record the exact merged reader commit, release, deployment and fleet capability receipts for every history writer/pruner and session-log reader/pruner that can touch these records. Qualify the deployed readers with retained metadata, quota and prune checks in staging. The supported rollback floor after the first obligation write is that qualified reader-support release. Rolling back to an arbitrary older binary is unsupported because it can ignore the holder and reservation or remove its pins. No SQL trigger makes such a rollback safe. An uncertain fleet or deployment receipt keeps the writer disabled.
+
+The later writer must charge the complete bounded obligation metadata, local index and remote protection records, plus its maximum settlement or refusal receipt. It must persist that reservation in the existing source-event byte charge as well as the frame, in the same transaction. Readers reconcile the higher of the stored charge and the retained frame charge; unreadable declared obligation metadata holds new reception at capacity. Uncertain reservations remain charged. The workload and operator response still need measurement before activation.
+
+The second change must also prove atomic preparation and local pins, acknowledged remote protection, deadline coverage through the existing alarm, waiting without operational retry exhaustion, and transfer to committed consumer checkpoint pins before release. This reader change supplies no preparation, transfer, release, delivery, migration acceptance or native ACK API. Source producers and delivery callers remain disabled. The seven-day window and 16 folds per root remain proposed, unmeasured limits; decoder bounds are not a workload or admission-capacity receipt.
+
+The reservation charge must remain in `source_events.bytes` through later schema versions. A reader holds an unknown job and retains that stored charge. A declared obligation frame that it cannot decode consumes the full safety bound. An unrelated future job format does not consume the whole store merely because its version is newer. The quota diagnostic names the retained event key and `unreadable-job`; it excludes source content.

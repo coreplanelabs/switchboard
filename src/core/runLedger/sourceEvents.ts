@@ -1,3 +1,4 @@
+import { sourceObligationJobOf, type SourceObligationJob } from "./sourceObligations.js";
 import { sourceHash } from "../references/receipts.js";
 import {
   SOURCE_EVENT_MAX_BYTES,
@@ -110,7 +111,7 @@ export type ClaimedSourceEventJob = SourceJobStateBase &
         failure: { reason: SourceJobHoldReason | "attempts-exhausted"; at: number };
       }
   );
-export type SourceEventJob = ReceivedSourceEventJob | ClaimedSourceEventJob;
+export type SourceEventJob = ReceivedSourceEventJob | ClaimedSourceEventJob | SourceObligationJob;
 export interface SourceJobClaimRequest {
   owner: string;
   readerVersion: 2 | 3;
@@ -390,6 +391,7 @@ export function sourceJobReleaseReceiptOf(v: unknown): SourceJobReleaseReceipt |
   return;
 }
 export function sourceEventJobOf(v: unknown): SourceEventJob | undefined {
+  if (object(v) && v.version === 4) return sourceObligationJobOf(v);
   if (!object(v) || !isSourceEventKey(v.eventKey) || v.stage !== "received" || !time(v.attempts)) return;
   if (
     v.version === 1 &&
@@ -510,6 +512,8 @@ export async function sourceEventRecordOf(value: unknown): Promise<SourceEventRe
     prepared.bodyHash !== receipt.bodyHash ||
     !job ||
     job.eventKey !== receipt.key ||
+    (job.version === 4 &&
+      job.obligations.some((o) => JSON.stringify(o.reference.receipt) !== JSON.stringify(receipt))) ||
     job.stage !== "received"
   )
     return;
