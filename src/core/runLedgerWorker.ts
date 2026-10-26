@@ -1024,11 +1024,45 @@ export class WorkerRunLedger implements RunLedger {
       if (!fence.ok) return fence;
       if (readiness.data.transcriptCodec !== 1) throw new RequiredTranscriptError("Memory codec unavailable");
     }
-    const send = async (batch: TranscriptRow[], blobs: TranscriptAttachment[]) => {
+    const send = async (batch: TranscriptRow[], blobs: TranscriptAttachment[]): Promise<FenceResult> => {
       const payload = { ...sendingBody, rows: batch, attachments: blobs };
       if (new TextEncoder().encode(JSON.stringify(payload)).byteLength > TRANSCRIPT_REQUEST_BYTES)
         throw new RequiredTranscriptError("write exceeds existing request budget");
-      const result = await this.post(path, payload);
+      let result: Awaited<ReturnType<typeof this.post>>;
+      try {
+        result = await this.post(path, payload);
+      } catch (err) {
+        // A lost reply can follow a committed batch. Read that exact request;
+        // no missing or partial proof permits sending the rows again.
+        if (
+          path !== "/runs/session/write" ||
+          !(err instanceof UncertainStoreError) ||
+          err.request.operation !== path ||
+          !err.request.requestId
+        )
+          throw err;
+        let proof: WriteReceiptRead;
+        try {
+          proof = await this.readWriteReceipt({
+            runId,
+            gen,
+            operation: path,
+            requestId: err.request.requestId,
+            digest: err.request.digest,
+          });
+        } catch {
+          throw err;
+        }
+        if (
+          proof.kind !== "source" ||
+          proof.receipt.state !== "recorded" ||
+          proof.receipt.record.result.ok !== true ||
+          proof.receipt.record.components.rowsWritten !== batch.length ||
+          proof.receipt.record.components.attachmentsWritten !== blobs.length
+        )
+          throw err;
+        return { ok: true };
+      }
       if (internal && result.data.ok === true && result.data.transcriptCodec !== 1)
         throw this.invalidResult(
           new UncertainStoreError("run ledger: transcript codec acknowledgement missing", result.request),

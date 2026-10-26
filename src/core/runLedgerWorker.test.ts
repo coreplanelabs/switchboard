@@ -298,6 +298,109 @@ describe("original write receipt client", () => {
   });
 });
 
+describe("a session step after a lost write reply", () => {
+  const runId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const gen = "g1";
+  const key = "slack:C1:1.0:review";
+  const record: StepRecord = {
+    step: 1,
+    seq: 1,
+    turnIndex: 1,
+    inFlight: [],
+    inboxConsumedSeq: 0,
+    remainingMs: 60_000,
+    turn: 1,
+    iteration: 0,
+  };
+  it.each(["recorded", "missing", "partial", "refused", "unavailable", "changed", "read-error"] as const)(
+    "uses only exact %s receipt evidence before the step, without resending session rows",
+    async (proof) => {
+      const paths: string[] = [];
+      let sent: { requestId: string; digest: string } | undefined;
+      const ledger = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "fixture-token",
+        storeKey: "runs:default",
+        fetch: async (input, init) => {
+          const path = new URL(String(input)).pathname;
+          const payload = String(init?.body);
+          const body = JSON.parse(payload) as Record<string, unknown>;
+          paths.push(path);
+          if (path === "/runs/session/write") {
+            const requestId = new Headers(init?.headers).get("x-switchboard-storage-request-id");
+            if (!requestId) throw new Error("The original request ID is missing");
+            sent = { requestId, digest: (await storeRequestWitness(path, payload, body, requestId)).digest };
+            throw new TypeError("The committed write reply was lost");
+          }
+          if (path === "/runs/write-receipt") {
+            const selector = body.selector as Record<string, unknown>;
+            expect(selector).toEqual({ runId, gen, operation: "/runs/session/write", ...sent });
+            if (proof === "read-error") throw new TypeError("The receipt read failed");
+            if (proof === "unavailable") return Response.json({ kind: "unavailable" });
+            return Response.json({
+              kind: "source",
+              resource: {
+                type: "run",
+                id: runId,
+                userId: "access:alice",
+                channelId: "mcp:fixture",
+                channelVisibility: "machine",
+              },
+              threadKey: "mcp:fixture:receipt",
+              receipt:
+                proof === "missing"
+                  ? { state: "unknown", reason: "missing" }
+                  : {
+                      state: "recorded",
+                      record: {
+                        ...selector,
+                        ...(proof === "changed" ? { digest: "c".repeat(64) } : {}),
+                        version: 1,
+                        effectDigest: "b".repeat(64),
+                        result: proof === "refused" ? { ok: false, reason: "fenced" } : { ok: true, bytes: 100 },
+                        components: {
+                          stateWritten: false,
+                          eventsWritten: 0,
+                          contextPinningApplied: false,
+                          rowsWritten: proof === "partial" ? 0 : 1,
+                          attachmentsWritten: 0,
+                          sourcesWritten: false,
+                          sourceOwnerWritten: false,
+                          sourceTainted: false,
+                          bytePolicyApplied: true,
+                        },
+                      },
+                    },
+            });
+          }
+          if (path === "/runs/step") return Response.json({ ok: true });
+          throw new Error(`Unexpected route: ${path}`);
+        },
+      });
+      const write = ledger.step(
+        runId,
+        gen,
+        record,
+        [{ idx: 0, message: { role: "assistant", content: [{ type: "text", text: "answer" }] } }],
+        key,
+      );
+      if (proof === "recorded") expect(await write).toEqual({ ok: true });
+      else await expect(write).rejects.toMatchObject({ name: "UncertainStoreError" });
+      if (proof === "read-error") {
+        expect(paths[0]).toBe("/runs/session/write");
+        expect(paths.filter((path) => path === "/runs/session/write")).toHaveLength(1);
+        expect(paths).toContain("/runs/write-receipt");
+        expect(paths).not.toContain("/runs/step");
+      } else
+        expect(paths).toEqual(
+          proof === "recorded"
+            ? ["/runs/session/write", "/runs/write-receipt", "/runs/step"]
+            : ["/runs/session/write", "/runs/write-receipt"],
+        );
+    },
+  );
+});
+
 describe("bounded original evidence client", () => {
   const id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   const reply = () => ({
