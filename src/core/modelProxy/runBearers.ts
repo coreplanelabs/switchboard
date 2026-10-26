@@ -97,7 +97,7 @@ export type RunBearerFacts = Omit<RunBearerGrant, "span" | "publish"> & {
 interface Entry {
   recovery?: ToolRecovery;
   sourceGuardRequired: boolean;
-  sourceGuard?: () => Promise<boolean>;
+  sourceGuard?: () => Promise<boolean | "retryable">;
   grant: RunBearerGrant;
   /** The SHA-256 of every secret that buys this run's calls: the provision's
    *  mint, an operator's `issue`, and a previous generation's bearer a pi
@@ -136,8 +136,9 @@ export class RunBearerStore {
   }
 
   /** Trusted source proof stays on the entry across adopt, issue and rotation.
-   * A run requiring source proof must bind it before any model call. */
-  bindSourceGuard(runId: string, guard: () => Promise<boolean>): void {
+   * Only a typed transient observational read may return `retryable`;
+   * a run requiring source proof must bind it before any model call. */
+  bindSourceGuard(runId: string, guard: () => Promise<boolean | "retryable">): void {
     const entry = this.entries.get(runId);
     if (entry && !entry.revoked) {
       entry.sourceGuardRequired = true;
@@ -154,17 +155,20 @@ export class RunBearerStore {
       if (this.opts.clock() >= entry.grant.expiresAt) return "expired";
       return undefined;
     };
+    const checkForModel = async (): Promise<boolean | "retryable"> => {
+      if (current() || !entry) return false;
+      if (!entry.sourceGuardRequired) return true;
+      try {
+        const result = await entry.sourceGuard?.();
+        return current() === undefined ? (result ?? false) : false;
+      } catch {
+        return false;
+      }
+    };
     return {
       current,
-      check: async (): Promise<boolean> => {
-        if (current() || !entry) return false;
-        if (!entry.sourceGuardRequired) return true;
-        try {
-          return !!entry.sourceGuard && (await entry.sourceGuard()) && current() === undefined;
-        } catch {
-          return false;
-        }
-      },
+      checkForModel,
+      check: async (): Promise<boolean> => (await checkForModel()) === true,
     };
   }
 

@@ -29,6 +29,7 @@ import type { ChatMessage } from "../../chatMessage.js";
 import { classifyProviderFailure, providerFailureParks, type ProviderFailureCause } from "../../provider.js";
 import {
   authenticateProxyProviderFailure,
+  authenticateProxySourceRetry,
   authenticateProxyUnknownTerminal,
   authenticateProxyTurnBudgetExhausted,
 } from "../../modelProxy/providerFailureAuth.js";
@@ -110,6 +111,7 @@ import {
   compactionSteer,
   LOCAL_MODEL_ABORT_MESSAGE,
   ModelPolicyRefusedError,
+  ModelSourceUnavailableError,
   ModelStreamIncompleteError,
   ModelTransientFailureError,
   PiContainerReplacedError,
@@ -3179,6 +3181,165 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(prompts[1].id).not.toBe(prompts[0].id);
   });
 
+  it("rechecks the same model turn after two temporary source failures near the retry window", async () => {
+    const clock = { now: NOW };
+    const slept: number[] = [];
+    const w = world({
+      clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        if (ms >= PROVIDER_RETRY_BACKOFFS_MS[0]) clock.now += ms;
+      },
+    });
+    scriptedPi(w.container, (n, c) => {
+      if (n >= 2) return finalTurn(c, "source recovered");
+      clock.now += 20_000;
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: `403 ${JSON.stringify({ type: "error", error: authenticateProxySourceRetry() })}`,
+          },
+        },
+        { type: "agent_settled" },
+      );
+    });
+
+    await expect(w.start()).resolves.toBe("source recovered");
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(3);
+    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
+    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[1]);
+    expect(clock.now - NOW).toBe(60_000);
+    expect(w.facts).toContainEqual(
+      expect.objectContaining({ retryRecovery: expect.objectContaining({ failureKind: "local_source" }) }),
+    );
+    expect(w.notes.join("\n")).toContain("source check is temporarily unavailable");
+    expect(w.notes.join("\n")).not.toContain("model provider did not complete");
+  });
+
+  it("ends by source failure when the local retry window expires without a provider answer", async () => {
+    const clock = { now: NOW };
+    const w = world({
+      clock,
+      sleep: async (ms) => {
+        if (ms >= PROVIDER_RETRY_BACKOFFS_MS[0]) clock.now += ms;
+      },
+    });
+    scriptedPi(w.container, (_n, c) => {
+      clock.now += 20_000;
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: `403 ${JSON.stringify({ type: "error", error: authenticateProxySourceRetry() })}`,
+          },
+        },
+        { type: "agent_settled" },
+      );
+    });
+
+    await expect(w.start()).rejects.toBeInstanceOf(ModelSourceUnavailableError);
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(3);
+    expect(w.notes.join("\n")).not.toContain("model provider did not complete");
+  });
+
+  it("a hard stop during a held source recheck ends the run without another model prompt", async () => {
+    const w = world({
+      sleep: async (ms) => {
+        if (ms >= PROVIDER_RETRY_BACKOFFS_MS[0]) w.control.requestStop("hard");
+      },
+    });
+    scriptedPi(w.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: `403 ${JSON.stringify({ type: "error", error: authenticateProxySourceRetry() })}`,
+          },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+
+    await expect(w.start()).resolves.toBe(HARD_STOP_MESSAGE);
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+    expect(w.events).toContainEqual(expect.objectContaining({ type: "run_note", kind: "stopped", mode: "hard" }));
+  });
+
+  it("does not reissue a held source turn after its original run lease expires", async () => {
+    const clock = { now: NOW };
+    const w = world({
+      clock,
+      sleep: async (ms) => {
+        if (ms >= PROVIDER_RETRY_BACKOFFS_MS[0]) clock.now += 2 * 60 * MINUTE_MS;
+      },
+    });
+    scriptedPi(w.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: `403 ${JSON.stringify({ type: "error", error: authenticateProxySourceRetry() })}`,
+          },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+
+    await expect(w.start()).rejects.toBeInstanceOf(ModelSourceUnavailableError);
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+  });
+
+  it("rechecks a follow-up turn after a temporary source failure on the same session", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) return finalTurn(c, "first answer");
+      if (n === 1) {
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: `403 ${JSON.stringify({ type: "error", error: authenticateProxySourceRetry() })}`,
+            },
+          },
+          { type: "agent_settled" },
+        );
+        return;
+      }
+      finalTurn(c, "follow-up source recovered");
+    });
+
+    const session = await w.open();
+    try {
+      await expect(
+        session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+      ).resolves.toBe("follow-up source recovered");
+      expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(3);
+      expect(w.facts).toContainEqual(
+        expect.objectContaining({ retryRecovery: expect.objectContaining({ failureKind: "local_source" }) }),
+      );
+      expect(w.notes.join("\n")).toContain("follow-up source check is temporarily unavailable");
+      expect(w.notes.join("\n")).not.toContain("model provider did not complete");
+    } finally {
+      await session.end();
+    }
+  });
+
   it("an OpenAI stream ending without finish_reason is retried and the child survives", async () => {
     const slept: number[] = [];
     const w = world({ sleep: async (ms) => void slept.push(ms) });
@@ -4250,6 +4411,84 @@ describe("runPiHarness — after a bot restart", () => {
       "the model provider did not complete the call before the run's retry budget ended",
     );
     expect(w.facts[0]?.retryRecovery).toEqual({ retries: 2, until: NOW + 60000, notBefore: NOW });
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(0);
+  });
+
+  it("a resumed source hold at its saved retry limit fails as source_unavailable before another prompt", async () => {
+    const w = world();
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      retryRecovery: { retries: 2, until: NOW + 60000, notBefore: NOW, failureKind: "local_source" },
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "unexpected continuation"));
+    await expect(w.start()).rejects.toBeInstanceOf(ModelSourceUnavailableError);
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(0);
+  });
+
+  it("a resumed source hold keeps its cause when the saved deadline passes during acknowledgement", async () => {
+    const clock = { now: NOW + 59000 };
+    const w = world({ clock, providerPark: true });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      retryRecovery: { retries: 1, until: NOW + 60000, notBefore: NOW, failureKind: "local_source" },
+    });
+    const save = w.run.saveFacts!;
+    w.run.saveFacts = (facts, control) => {
+      const saved = save(facts, control);
+      if (control?.requireAcknowledgement && isPiFacts(facts) && facts.retryRecovery) clock.now += 2000;
+      return saved;
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "unexpected late continuation"));
+    await expect(w.start()).rejects.toBeInstanceOf(ModelSourceUnavailableError);
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(0);
+  });
+
+  it("a resumed source hold keeps its cause when the saved wait crosses its deadline", async () => {
+    const clock = { now: NOW + 59000 };
+    const w = world({ clock, sleep: async () => void (clock.now += 2000) });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      retryRecovery: { retries: 1, until: NOW + 60000, notBefore: NOW + 59500, failureKind: "local_source" },
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "unexpected late continuation"));
+    await expect(w.start()).rejects.toBeInstanceOf(ModelSourceUnavailableError);
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(0);
+  });
+
+  it("a queued source retry refuses a model prompt when the saved deadline passes behind control writes", async () => {
+    const clock = { now: NOW + 59000 };
+    const w = world({ clock, providerPark: true });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      retryRecovery: { retries: 1, until: NOW + 60000, notBefore: NOW, failureKind: "local_source" },
+    });
+    const write = w.container.writeLine.bind(w.container);
+    w.container.writeLine = async (paths, line) => {
+      if (JSON.parse(line).type === "get_state") {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        clock.now += 2000;
+      }
+      await write(paths, line);
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "unexpected late continuation"));
+    await expect(w.start()).rejects.toBeInstanceOf(ModelSourceUnavailableError);
+    expect(clock.now).toBe(NOW + 61000);
     expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(0);
   });
 

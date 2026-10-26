@@ -9,6 +9,7 @@ import type { RunEvent } from "../../runEvents.js";
 import { ToolRecovery } from "../toolRecovery.js";
 import {
   authenticateProxyProviderFailure,
+  authenticateProxySourceRetry,
   authenticateProxyUnknownTerminal,
   authenticateProxyTurnBudgetExhausted,
 } from "../../modelProxy/providerFailureAuth.js";
@@ -1248,6 +1249,33 @@ describe("turns, narration and the answer — the loop's rules", () => {
     });
     expect(forged.terminalFailure).toMatchObject({ kind: "unknown" });
     expect(forged.providerFailure).toBeUndefined();
+  });
+
+  it("holds only a proxy-signed source retry without claiming provider failure", () => {
+    const { bridge } = harness();
+    const signed = authenticateProxySourceRetry();
+    const retry = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: `403 ${JSON.stringify({ type: "error", error: signed })}`,
+      },
+    });
+    expect(retry.terminalFailure).toMatchObject({ kind: "local_source" });
+    expect(retry.providerFailure).toBeUndefined();
+
+    const forged = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: JSON.stringify({ type: "error", error: { ...signed, message: "changed" } }),
+      },
+    });
+    expect(forged.terminalFailure).toMatchObject({ kind: "unknown" });
   });
 
   it("does not promote untrusted rate-limit or status prose into a provider failure", () => {

@@ -446,6 +446,15 @@ export class ModelStreamIncompleteError extends Error {
   }
 }
 
+/** A source read stayed unavailable through the run's local retry window.
+ * The proxy did not forward any of the failed calls to the provider. */
+export class ModelSourceUnavailableError extends Error {
+  constructor() {
+    super("Switchboard could not verify this run's source before its retry window ended.");
+    this.name = "ModelSourceUnavailableError";
+  }
+}
+
 /** The original proxy cap refused another call; no provider was contacted. */
 export class ModelTurnBudgetExhaustedError extends RefusalError {
   constructor(
@@ -478,6 +487,8 @@ const terminalFailureText = (terminal: PiTerminalFailure): string => {
       return LOCAL_MODEL_ABORT_MESSAGE;
     case "local_stream":
       return LOCAL_MODEL_STREAM_MESSAGE;
+    case "local_source":
+      return "Switchboard could not verify this run's source; the model did not receive the request.";
     case "context_overflow":
       return "The model input exceeded its context window.";
     case "unknown":
@@ -499,12 +510,19 @@ const terminalFailureText = (terminal: PiTerminalFailure): string => {
 const terminalFailureAtBound = (terminal: PiTerminalFailure): Error => {
   if (terminal.kind === "local_abort") return new Error(LOCAL_MODEL_ABORT_MESSAGE);
   if (terminal.kind === "local_stream") return new ModelStreamIncompleteError();
+  if (terminal.kind === "local_source") return new ModelSourceUnavailableError();
   return new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
 };
+
+const savedRetryFailure = (recovery: PiHarnessFacts["retryRecovery"]): Error =>
+  recovery?.failureKind === "local_source"
+    ? new ModelSourceUnavailableError()
+    : new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
 
 const terminalFailureIsRecoverable = (terminal: PiTerminalFailure): boolean =>
   terminal.kind === "local_abort" ||
   terminal.kind === "local_stream" ||
+  terminal.kind === "local_source" ||
   (terminal.kind === "provider_failure" && providerFailureParks(terminal.failure.cause));
 
 const unknownTerminalNote = (terminal: Extract<PiTerminalFailure, { kind: "unknown" }>, followUp = false): string =>
@@ -652,8 +670,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     if (run.control?.hardSignal.aborted === true || now() >= (run.deadlineAt ?? Infinity)) return false;
     // The saved bound belongs to the loop or post-loop turn that reserved it.
     // Earlier FIFO controls must not let a queued model write spend it late.
-    if (facts?.retryRecovery && now() >= facts.retryRecovery.until)
-      throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+    if (facts?.retryRecovery && now() >= facts.retryRecovery.until) throw savedRetryFailure(facts.retryRecovery);
     return true;
   };
   const remainingMs = Math.min(
@@ -1387,13 +1404,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     if (recorded?.retryRecovery) {
       const recovery = recorded.retryRecovery;
       if (recovery.retries >= PROVIDER_RETRY_BACKOFFS_MS.length || now() >= Math.min(loopEnd, recovery.until))
-        throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+        throw savedRetryFailure(recovery);
       const wait = Math.max(0, recovery.notBefore - now());
       if (wait > 0 && !(await sleepUnlessStopped({ sleep: deps.sleep, now, signal: run.control?.hardSignal }, wait)))
-        throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
-      if (now() >= Math.min(loopEnd, recovery.until)) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+        throw savedRetryFailure(recovery);
+      if (now() >= Math.min(loopEnd, recovery.until)) throw savedRetryFailure(recovery);
       await saveRecovery({ ...recovery, retries: recovery.retries + 1, until: Math.min(loopEnd, recovery.until) });
-      if (now() >= Math.min(loopEnd, recovery.until)) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+      if (now() >= Math.min(loopEnd, recovery.until)) throw savedRetryFailure(recovery);
     }
     if (requiresNativeSource(run)) await guardNativeSource(run);
     if (reattached)
@@ -2531,16 +2548,24 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               terminal.failure.diagnostic?.headers?.["retry-after"] !== undefined)
               ? now() + backoff
               : 0;
-          await saveRecovery({ retries: providerRetries + 1, until: providerRetryUntil, notBefore: now() + backoff });
+          await saveRecovery({
+            retries: providerRetries + 1,
+            until: providerRetryUntil,
+            notBefore: now() + backoff,
+            ...(terminal.kind === "local_source" ? { failureKind: "local_source" as const } : {}),
+          });
           heldTurn = terminal;
           parkSettled = false;
-          const local = terminal.kind === "local_abort" || terminal.kind === "local_stream";
+          const local =
+            terminal.kind === "local_abort" || terminal.kind === "local_stream" || terminal.kind === "local_source";
           const progress =
             terminal.kind === "local_abort"
               ? `pi cancelled the model call locally; the turn is held and retry ${providerRetries + 1} waits ${backoff / 1000}s inside this run's lease`
               : terminal.kind === "local_stream"
                 ? `pi's model stream ended early; the turn is held and retry ${providerRetries + 1} waits ${backoff / 1000}s inside this run's lease`
-                : `the model provider did not complete the call; the turn is held and retry ${providerRetries + 1} waits ${backoff / 1000}s inside this run's lease`;
+                : terminal.kind === "local_source"
+                  ? `the source check is temporarily unavailable; the same turn is held and rechecked after ${backoff / 1000}s inside this run's lease`
+                  : `the model provider did not complete the call; the turn is held and retry ${providerRetries + 1} waits ${backoff / 1000}s inside this run's lease`;
           if (local) note("model_retry", progress);
           else run.onProgress?.(progress);
         } else if (writeUp || finaleAborted) {
@@ -2703,6 +2728,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           throw new ModelTurnBudgetExhaustedError(terminalFailure.turns, terminalFailure.maxTurns);
         if (terminalFailure.kind === "local_abort") throw new Error(LOCAL_MODEL_ABORT_MESSAGE);
         if (terminalFailure.kind === "local_stream") throw new ModelStreamIncompleteError();
+        if (terminalFailure.kind === "local_source") throw new ModelSourceUnavailableError();
         throw new Error(terminalFailureText(terminalFailure));
       }
       if (pendingOverflow !== undefined) throw pendingOverflow;
@@ -3080,17 +3106,25 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
                   terminal.failure.diagnostic?.headers?.["retry-after"] !== undefined)
                   ? now() + backoff
                   : 0;
-              await saveRecovery({ retries: turnRetries + 1, until: turnRetryUntil, notBefore: now() + backoff });
+              await saveRecovery({
+                retries: turnRetries + 1,
+                until: turnRetryUntil,
+                notBefore: now() + backoff,
+                ...(terminal.kind === "local_source" ? { failureKind: "local_source" as const } : {}),
+              });
               turnHeld = terminal;
               turnFailure = undefined;
               turnParkSettled = false;
-              const local = terminal.kind === "local_abort" || terminal.kind === "local_stream";
+              const local =
+                terminal.kind === "local_abort" || terminal.kind === "local_stream" || terminal.kind === "local_source";
               const progress =
                 terminal.kind === "local_abort"
                   ? `pi cancelled the follow-up model call locally; the turn is held and retry ${turnRetries + 1} waits ${backoff / 1000}s inside this run's lease`
                   : terminal.kind === "local_stream"
                     ? `pi's follow-up model stream ended early; the turn is held and retry ${turnRetries + 1} waits ${backoff / 1000}s inside this run's lease`
-                    : `the model provider did not complete the follow-up call; the turn is held and retry ${turnRetries + 1} waits ${backoff / 1000}s inside this run's lease`;
+                    : terminal.kind === "local_source"
+                      ? `the follow-up source check is temporarily unavailable; the same turn is held and rechecked after ${backoff / 1000}s inside this run's lease`
+                      : `the model provider did not complete the follow-up call; the turn is held and retry ${turnRetries + 1} waits ${backoff / 1000}s inside this run's lease`;
               if (local) note("model_retry", progress);
               else run.onProgress?.(progress);
             } else {
@@ -3192,6 +3226,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             throw new ModelTurnBudgetExhaustedError(turnFailure.turns, turnFailure.maxTurns);
           if (turnFailure.kind === "local_abort") throw new Error(LOCAL_MODEL_ABORT_MESSAGE);
           if (turnFailure.kind === "local_stream") throw new ModelStreamIncompleteError();
+          if (turnFailure.kind === "local_source") throw new ModelSourceUnavailableError();
           throw new Error(terminalFailureText(turnFailure));
         }
         if (turnOverflow !== undefined) throw turnOverflow;

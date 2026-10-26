@@ -134,6 +134,7 @@ import { branchIdentityCaptureBlocked } from "../branchIdentityHistory.js";
 import { HarnessContainerError, HarnessEndingUnconfirmedError, isContainerGone } from "../harness/container.js";
 import {
   ModelPolicyRefusedError,
+  ModelSourceUnavailableError,
   ModelStreamIncompleteError,
   ModelTransientFailureError,
 } from "../harness/pi/harness.js";
@@ -2604,7 +2605,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           span.fail(error);
           refused(`${stage}_exception`);
           span.end("error");
-          return false;
+          return error.cause instanceof TransientStoreError &&
+            registry.isActive(run.id, run.control) &&
+            !privateAudienceLatch.revoked
+            ? "retryable"
+            : false;
         }
       }),
     );
@@ -5315,6 +5320,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       }
       if (err instanceof ModelPolicyRefusedError) failure = { kind: "policy_refusal" };
       else if (err instanceof ToolRecoveryStoppedError) failure = { kind: "tool_recovery_exhausted" };
+      else if (err instanceof ModelSourceUnavailableError) failure = { kind: "source_unavailable" };
       else if (err instanceof ModelTransientFailureError) failure = { kind: "provider_transient" };
       else if (err instanceof ModelStreamIncompleteError) failure = { kind: "model_stream_incomplete" };
       // The record must say why a failed run failed even when the reply is
