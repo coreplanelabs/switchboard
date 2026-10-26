@@ -1,4 +1,5 @@
 import { NativeOperationJournal, nativeOperationRecordSchema, validNativeOperationKey } from "./nativeOperation.js";
+import { nativeOperatorScopeClosing, nativeOperatorScopeKey } from "./nativeScope.js";
 import { selectedResidentMember } from "../../src/execution/residentMembers";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
@@ -400,7 +401,7 @@ describe("archive teardown exclusion", () => {
     },
   );
 
-  it("discards one exact unknown restore only after confirmed runtime destruction", async () => {
+  it("discards exact unknown restore and refresh fetch records only after confirmed runtime destruction", async () => {
     const ref = {
       version: 1,
       kind: "operation",
@@ -468,6 +469,8 @@ describe("archive teardown exclusion", () => {
       NativeOperationJournal,
       NATIVE_OPERATION_PREFIX: "native-operation:",
       nativeOperationRecordSchema,
+      nativeOperatorScopeClosing,
+      nativeOperatorScopeKey,
       CLEANUP_PENDING_KEY: "cleanup",
       RESOURCE_KEY: "resource",
       NATIVE_EMERGENCY_DISCARD_PREFIX: "native-emergency-discard:",
@@ -507,11 +510,11 @@ describe("archive teardown exclusion", () => {
     resident.swapIncarnation = () => {};
 
     await expect(resident.teardown({ key, recordHash: "0".repeat(64) })).rejects.toThrow(
-      "exact closed native restore changed or another hold remains (holds=1, eligible=true, hashMatch=false)",
+      "exact closed native operation changed or another hold remains (holds=1, eligible=true, hashMatch=false)",
     );
     rows.set("native-operation:op:other", structuredClone(rows.get(key)));
     await expect(resident.teardown({ key, recordHash })).rejects.toThrow(
-      "exact closed native restore changed or another hold remains (holds=2, eligible=true, hashMatch=true)",
+      "exact closed native operation changed or another hold remains (holds=2, eligible=true, hashMatch=true)",
     );
     rows.delete("native-operation:op:other");
     const ineligible = structuredClone(rows.get(key)) as { native: { closed: boolean } };
@@ -519,7 +522,7 @@ describe("archive teardown exclusion", () => {
     rows.set(key, ineligible);
     const ineligibleHash = (await new NativeOperationJournal(storage).list()).operations[0]!.recordHash;
     await expect(resident.teardown({ key, recordHash: ineligibleHash })).rejects.toThrow(
-      "exact closed native restore changed or another hold remains (holds=1, eligible=false, hashMatch=true)",
+      "exact closed native operation changed or another hold remains (holds=1, eligible=false, hashMatch=true)",
     );
     rows.set(key, structuredClone(initialRows.get(key)));
     expect(effects).toEqual([]);
@@ -642,6 +645,131 @@ describe("archive teardown exclusion", () => {
     expect(rows.has(key)).toBe(true);
     expect(rows.has(otherKey)).toBe(true);
     expect(effects).toEqual(["destroy"]);
+
+    // A refresh fetch can retain an opaque native effect beside an opaque
+    // archive restore. The full reset must name both original records.
+    rows.clear();
+    for (const [name, value] of initialRows) rows.set(name, value);
+    const fetchKey = "native-operation:op:fetch";
+    const fetchScope = {
+      version: 1,
+      kind: "operation",
+      id: "77777777-7777-4777-8777-777777777777",
+      boot: ref.boot,
+      owner: { opOwner: "op:fetch" },
+    };
+    rows.set(fetchKey, {
+      opOwner: "op:fetch",
+      origin: {
+        producer: "refresh-step",
+        resource,
+        callId: "66666666-6666-4666-8666-666666666666",
+        sourceId: "fetch",
+        actor: "system",
+        traceId: null,
+        parentSourceId: "refresh_test_1",
+        build: "test-build",
+        workerVersion: null,
+        startedAt: 0,
+      },
+      native: {
+        version: 1,
+        closed: true,
+        scope: fetchScope,
+        pending: { "88888888-8888-4888-8888-888888888888": { kind: "opaque" } },
+      },
+    });
+    rows.set(nativeOperatorScopeKey({ opOwner: "op:fetch" }), {
+      kind: "operation",
+      id: fetchScope.id,
+      owner: fetchScope.owner,
+      boot: fetchScope.boot,
+      closing: true,
+      closed: false,
+      bootstrap: "ready",
+    });
+    const fetchHash = (await new NativeOperationJournal(storage).list()).operations.find(
+      (row) => row.key === fetchKey,
+    )!.recordHash;
+    const mixedTargets = [
+      { key, recordHash },
+      { key: fetchKey, recordHash: fetchHash, unknownEffect: { originBuild: "test-build" } },
+    ];
+    effects.length = 0;
+    lateRecordWrite = false;
+    await expect(
+      resident.teardown([mixedTargets[0], { ...mixedTargets[1], recordHash: "0".repeat(64) }]),
+    ).rejects.toThrow("resident-cleanup-refused");
+    expect(effects).toEqual([]);
+    await expect(
+      resident.teardown([
+        { key, recordHash },
+        { key: fetchKey, recordHash: fetchHash },
+      ]),
+    ).rejects.toThrow("eligible=false, hashMatch=true");
+    await expect(
+      resident.teardown([mixedTargets[0], { ...mixedTargets[1], unknownEffect: { originBuild: "other-build" } }]),
+    ).rejects.toThrow("eligible=false, hashMatch=true");
+    expect(effects).toEqual([]);
+    const scopeKey = nativeOperatorScopeKey({ opOwner: "op:fetch" });
+    const originalScope = rows.get(scopeKey) as Record<string, unknown>;
+    rows.set(scopeKey, { ...originalScope, id: "99999999-9999-4999-8999-999999999999" });
+    await expect(resident.teardown(mixedTargets)).rejects.toThrow("eligible=false, hashMatch=true");
+    expect(effects).toEqual([]);
+    rows.set(scopeKey, originalScope);
+    rows.delete(key);
+    await expect(resident.teardown(mixedTargets[1])).rejects.toThrow("eligible=false, hashMatch=true");
+    expect(effects).toEqual([]);
+    rows.set(key, initialRows.get(key));
+    const fetchRecord = rows.get(fetchKey);
+    const unrelated = structuredClone(fetchRecord) as { origin: { sourceId: string } };
+    unrelated.origin.sourceId = "snapshot";
+    rows.set(fetchKey, unrelated);
+    const unrelatedHash = (await new NativeOperationJournal(storage).list()).operations.find(
+      (row) => row.key === fetchKey,
+    )!.recordHash;
+    await expect(
+      resident.teardown([
+        mixedTargets[0],
+        { key: fetchKey, recordHash: unrelatedHash, unknownEffect: { originBuild: "test-build" } },
+      ]),
+    ).rejects.toThrow("eligible=false, hashMatch=true");
+    expect(effects).toEqual([]);
+    rows.set(fetchKey, fetchRecord);
+    const mixedInitialRows = new Map(rows);
+    destroyFails = true;
+    await expect(resident.teardown(mixedTargets)).rejects.toThrow("runtime destruction unconfirmed");
+    expect([...rows.values()]).toContainEqual(
+      expect.objectContaining({
+        key: fetchKey,
+        unknownEffect: { originBuild: "test-build" },
+        originalOperationOutcome: "unknown",
+        state: "prepared",
+      }),
+    );
+    rows.clear();
+    for (const [name, value] of mixedInitialRows) rows.set(name, value);
+    destroyFails = false;
+    effects.length = 0;
+    expect(await resident.teardown(mixedTargets)).toMatchObject({
+      containerStopped: true,
+      storageCleared: true,
+      discardedUnknownNatives: mixedTargets,
+      errors: [],
+    });
+    expect(effects).toEqual(["destroy"]);
+    for (const target of mixedTargets) {
+      expect(rows.has(target.key)).toBe(false);
+      expect([...rows.values()]).toContainEqual(
+        expect.objectContaining({
+          key: target.key,
+          recordHash: target.recordHash,
+          ...(target.unknownEffect ? { unknownEffect: target.unknownEffect } : {}),
+          originalOperationOutcome: "unknown",
+          state: "runtime-destroyed",
+        }),
+      );
+    }
   });
 });
 
@@ -1007,13 +1135,20 @@ describe("full resident reset", () => {
     expect(await invalid.json()).toEqual({ error: "one exact native key and record hash are required" });
     const targets = [
       { key: "native-operation:op:archive", recordHash: "a".repeat(64) },
-      { key: "native-operation:op:other", recordHash: "b".repeat(64) },
+      { key: "native-operation:op:other", recordHash: "b".repeat(64), unknownEffect: { originBuild: "build-1" } },
     ];
     const duplicate = await endpoint({}, { resource, discardUnknownNative: [targets[0], targets[0]] });
     expect(duplicate.status).toBe(400);
     expect(await duplicate.json()).toEqual({
       error: "two to 64 distinct exact native keys and record hashes are required",
     });
+    const missingBuild = await endpoint(
+      {},
+      { resource, discardUnknownNative: [targets[0], { ...targets[1], unknownEffect: {} }] },
+    );
+    expect(missingBuild.status).toBe(400);
+    const singleUnknown = await endpoint({}, { resource, discardUnknownNative: targets[1] });
+    expect(singleUnknown.status).toBe(400);
     const selectedPlan = await endpoint({}, { resource, dryRun: true, discardUnknownNative: targets });
     expect(selectedPlan.status).toBe(200);
     expect(await selectedPlan.json()).toMatchObject({ dryRun: true, originalOperationOutcome: "unknown" });

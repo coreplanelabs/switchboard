@@ -961,10 +961,10 @@ describe("repo offboard / rebuild (--dry-run)", () => {
 });
 
 describe("repo rebuild --full", () => {
-  it("sends a complete exact native restore set from the public command", async () => {
+  it("sends a complete exact native set with an explicit unknown effect from the public command", async () => {
     const targets = [
       { key: "native-operation:op:first", recordHash: "a".repeat(64) },
-      { key: "native-operation:op:second", recordHash: "b".repeat(64) },
+      { key: "native-operation:op:second", recordHash: "b".repeat(64), unknownEffect: { originBuild: "build-1" } },
     ];
     const client = mockClient({ rebuild: ok({ wouldRemove: {}, reprovision: { defaultRef: "main" } }) });
     const commands = bind({ admin: client });
@@ -990,6 +990,18 @@ describe("repo rebuild --full", () => {
       admin,
     );
     expect(duplicate).toMatchObject({ ok: false, error: "invalid_input" });
+    const missingBuild = await commands.invoke(
+      "repo.rebuild",
+      {
+        args: ["acme/api"],
+        options: {
+          full: true,
+          discardNativeRecordsJson: JSON.stringify([targets[0], { ...targets[1], unknownEffect: {} }]),
+        },
+      },
+      admin,
+    );
+    expect(missingBuild).toMatchObject({ ok: false, error: "invalid_input" });
     expect(client.rebuild).toHaveBeenCalledTimes(1);
   });
 

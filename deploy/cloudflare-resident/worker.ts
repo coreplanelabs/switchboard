@@ -38,6 +38,8 @@ import {
   NativeRunScopes,
   CloudflareNativeScopeTransport,
   type NativeScopeTransport,
+  nativeOperatorScopeClosing,
+  nativeOperatorScopeKey,
   nativeScopeRetirementKey,
   NATIVE_SCOPE_CONTROL_MS,
   type NativeScopeRef,
@@ -3595,7 +3597,7 @@ const DESTROY_UNCONFIRMED_KEY = "resident:destroyUnconfirmed";
 const CLEANUP_PENDING_KEY = "resident:cleanupPending";
 /** Retain the exact unknown-effect record after an explicitly selected full reset. */
 const NATIVE_EMERGENCY_DISCARD_PREFIX = "native-emergency-discard:";
-type NativeDiscardTarget = { key: string; recordHash: string };
+type NativeDiscardTarget = { key: string; recordHash: string; unknownEffect?: { originBuild: string } };
 type NativeDiscardSelection = NativeDiscardTarget | NativeDiscardTarget[];
 const RECREATE_ADMISSION_KEY = "resident:recreateAdmission";
 /** The row under RUNTIME_UNREACHABLE_KEY: the count and both instants, so the
@@ -15945,6 +15947,7 @@ export class ResidentDO extends Sandbox<Env> {
           resource: string;
           key: string;
           recordHash: string;
+          unknownEffect?: { originBuild: string };
           original: unknown;
           originalOperationOutcome: string;
           state: string;
@@ -15955,17 +15958,45 @@ export class ResidentDO extends Sandbox<Env> {
       targets.length > 0 && unresolved.size === 0 && audits.every(({ old }) => old?.state === "runtime-destroyed");
     if (targets.length) {
       const hashes = await journal.fingerprints(NATIVE_OPERATION_PREFIX);
-      const eligible = targets.every((target) => {
-        const parsed = nativeOperationRecordSchema.safeParse(unresolved.get(target.key));
-        return (
-          parsed.success &&
-          "opOwner" in parsed.data &&
-          parsed.data.native.closed === true &&
-          !!parsed.data.native.scope &&
-          Object.values(parsed.data.native.pending).some((attempt) => attempt.restore) &&
-          !Object.values(parsed.data.native.pending).some((attempt) => !attempt.restore)
-        );
-      });
+      const eligible = (
+        await Promise.all(
+          targets.map(async (target) => {
+            const parsed = nativeOperationRecordSchema.safeParse(unresolved.get(target.key));
+            if (!parsed.success || !("opOwner" in parsed.data)) return false;
+            const record = parsed.data;
+            const pending = Object.values(record.native.pending);
+            // The journal cannot name the opaque effect. The operator must select
+            // its original build explicitly and keep its result unknown.
+            const unknownFetch =
+              targets.length >= 2 &&
+              !!target.unknownEffect &&
+              target.unknownEffect.originBuild === record.origin?.build &&
+              target.key === `native-operation:${record.opOwner}` &&
+              !!record.native.scope &&
+              nativeOperatorScopeClosing(
+                await this.ctx.storage.get(nativeOperatorScopeKey({ opOwner: record.opOwner })),
+                { opOwner: record.opOwner },
+                record.native.scope,
+              ) &&
+              record.origin?.producer === "refresh-step" &&
+              record.origin.resource === resource &&
+              record.origin.sourceId === "fetch" &&
+              record.origin.actor === "system" &&
+              pending.length === 1 &&
+              pending[0].kind === "opaque" &&
+              !pending[0].process &&
+              !pending[0].restore;
+            return (
+              record.native.closed === true &&
+              !!record.native.scope &&
+              (unknownFetch ||
+                (!target.unknownEffect &&
+                  pending.some((attempt) => attempt.restore) &&
+                  !pending.some((attempt) => !attempt.restore)))
+            );
+          }),
+        )
+      ).every(Boolean);
       const hashMatch = targets.every((target) => hashes[target.key] === target.recordHash);
       if (
         !resumeWithoutRecord &&
@@ -15976,7 +16007,7 @@ export class ResidentDO extends Sandbox<Env> {
           !hashMatch)
       )
         throw new Error(
-          `resident-cleanup-refused: exact closed native restore changed or another hold remains (holds=${unresolved.size}, eligible=${eligible}, hashMatch=${hashMatch})`,
+          `resident-cleanup-refused: exact closed native operation changed or another hold remains (holds=${unresolved.size}, eligible=${eligible}, hashMatch=${hashMatch})`,
         );
     }
     for (const [key, value] of unresolved) {
@@ -15996,6 +16027,7 @@ export class ResidentDO extends Sandbox<Env> {
           (old.resource !== resource ||
             old.key !== target.key ||
             old.recordHash !== target.recordHash ||
+            JSON.stringify(old.unknownEffect ?? null) !== JSON.stringify(target.unknownEffect ?? null) ||
             old.original === undefined ||
             old.originalOperationOutcome !== "unknown" ||
             !["prepared", "runtime-destroyed"].includes(old.state)),
@@ -16024,6 +16056,7 @@ export class ResidentDO extends Sandbox<Env> {
               resource,
               key: target.key,
               recordHash: target.recordHash,
+              ...(target.unknownEffect ? { unknownEffect: target.unknownEffect } : {}),
               original: current.get(target.key),
               originalOperationOutcome: "unknown",
               state: "prepared",
@@ -16043,6 +16076,7 @@ export class ResidentDO extends Sandbox<Env> {
             resource,
             key: target.key,
             recordHash: target.recordHash,
+            ...(target.unknownEffect ? { unknownEffect: target.unknownEffect } : {}),
             original: current.get(target.key),
             originalOperationOutcome: "unknown",
             state: "runtime-destroyed",
@@ -17257,21 +17291,34 @@ async function handleReset(env: Env, body: Record<string, unknown>): Promise<Res
   if (body.dryRun !== undefined && typeof body.dryRun !== "boolean")
     return json({ error: "dryRun must be a boolean" }, 400);
   const discard = body.discardUnknownNative;
-  const validDiscardTarget = (value: unknown): value is NativeDiscardTarget =>
-    !!value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    Object.keys(value).sort().join(",") === "key,recordHash" &&
-    validNativeOperationKey((value as { key?: unknown }).key) &&
-    typeof (value as { recordHash?: unknown }).recordHash === "string" &&
-    /^[a-f0-9]{64}$/.test((value as { recordHash: string }).recordHash);
+  const validDiscardTarget = (value: unknown): value is NativeDiscardTarget => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const target = value as { key?: unknown; recordHash?: unknown; unknownEffect?: unknown };
+    const keys = Object.keys(value).sort().join(",");
+    if (
+      !validNativeOperationKey(target.key) ||
+      typeof target.recordHash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(target.recordHash)
+    )
+      return false;
+    if (keys === "key,recordHash") return true;
+    if (keys !== "key,recordHash,unknownEffect" || !target.unknownEffect || typeof target.unknownEffect !== "object")
+      return false;
+    const unknownEffect = target.unknownEffect as { originBuild?: unknown };
+    return (
+      Object.keys(unknownEffect).join(",") === "originBuild" &&
+      typeof unknownEffect.originBuild === "string" &&
+      unknownEffect.originBuild.length > 0 &&
+      unknownEffect.originBuild.length <= 128
+    );
+  };
   const validDiscard = Array.isArray(discard)
     ? discard.length >= 2 &&
       discard.length <= 64 &&
       discard.every(validDiscardTarget) &&
       new Set(discard.map((target: NativeDiscardTarget) => target.key)).size === discard.length &&
       new Set(discard.map((target: NativeDiscardTarget) => target.recordHash)).size === discard.length
-    : validDiscardTarget(discard);
+    : validDiscardTarget(discard) && !discard.unknownEffect;
   if (discard !== undefined && !validDiscard)
     return json(
       {

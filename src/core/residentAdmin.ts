@@ -31,7 +31,9 @@ export interface ResidentAdminClient {
     dryRun: boolean,
     full?: boolean,
     resident?: number,
-    discardUnknownNative?: { key: string; recordHash: string } | { key: string; recordHash: string }[],
+    discardUnknownNative?:
+      | { key: string; recordHash: string; unknownEffect?: { originBuild: string } }
+      | { key: string; recordHash: string; unknownEffect?: { originBuild: string } }[],
   ): Promise<ResidentAdminResponse>;
   residents(): Promise<ResidentAdminResponse>;
   /** Read the selected resident's workload count and the records behind it. */
