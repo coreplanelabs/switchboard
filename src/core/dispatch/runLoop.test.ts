@@ -3,6 +3,7 @@ import { withOrganizationPrivateAudience } from "./privateDestination.js";
 import { markPrivateConversation } from "./privateConversation.js";
 import { bindConversationRead } from "./conversationRead.js";
 import { createSpanLog } from "../trace/spanLog.js";
+import { recordingSink } from "../testing/recordingSink.js";
 import { humanReview } from "../testing/humanReview.js";
 import type { CheckExecutionReceipt } from "../checkExecutionTypes.js";
 import { checkStateFixture } from "../testing/checkState.js";
@@ -764,13 +765,14 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const bearers = new RunBearerStore({ clock: () => NOW });
     s.deps.runBearers = bearers;
     mintFor(bearers, s);
-    const trace = startRequestRoot({ clock: () => NOW }, { channel: "slack", receivedAt: NOW });
+    const sink = recordingSink();
+    const trace = startRequestRoot({ clock: () => NOW, sinks: [sink] }, { channel: "slack", receivedAt: NOW });
     trace.bindRun(s.run.id, (event) => s.registry.publish(s.run.id, event));
     await runLoop(s.deps, {
       ...s.ctx,
       root: trace.root,
-      admittedContextCheck: async () => {
-        await api.listRepos();
+      admittedContextCheck: async (sourceSpan) => {
+        await (sourceSpan ? api.withSpan(sourceSpan) : api).listRepos();
         return { ok: true };
       },
     });
@@ -789,6 +791,10 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         outcome: "context_exception",
       },
     });
+    const sourceContext = sink.ended("run.source_check.context")!;
+    expect(
+      sink.ends.filter((span) => span.name === "github.rest" && span.parentSpanId === sourceContext.spanId),
+    ).toMatchObject([{ traceId: trace.root.traceId, attrs: { route: "installation_repos", httpStatus: 403 } }]);
   });
 
   it("retains an exhausted source read on the run and refuses the next model call", async () => {

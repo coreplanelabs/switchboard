@@ -7,11 +7,108 @@ import {
   RestGithubApi,
 } from "../../execution/githubApi.js";
 import { classifyError } from "../trace/classify.js";
+import { createTracer } from "../trace/tracer.js";
+import { recordingSink } from "../testing/recordingSink.js";
 import { currentGithubReadCapability } from "./executionGithubContext.js";
 import { githubFileTool } from "../../tools/github.js";
 import { sourceHash } from "../references/receipts.js";
 
 describe("current native execution read authority", () => {
+  it.each([
+    {
+      status: 403,
+      headers: { "x-github-request-id": "A1:B2" },
+      message: "Resource not accessible by integration",
+      responseReason: "permission-indicated",
+      responseMessage: "Resource not accessible by integration",
+    },
+    {
+      status: 403,
+      headers: { "x-github-request-id": "A1:B2", "x-ratelimit-remaining": "0" },
+      message: "API rate limit exceeded",
+      responseReason: "primary-rate-limit-indicated",
+      responseMessage: "API rate limit exceeded",
+    },
+    {
+      status: 429,
+      headers: { "x-github-request-id": "A1:B2" },
+      message: "Request refused https://private.example/token=SECRET",
+      responseReason: "rate-limit-indicated",
+      responseMessage: "Request refused «redacted-url»",
+    },
+  ])("retains safe commit-checks HTTP $status refusal and its source span", async (scenario) => {
+    const requests: string[] = [];
+    const api = new RestGithubApi({
+      token: async () => "fixture-token",
+      fetch: async (url) => {
+        const path = new URL(String(url)).pathname;
+        requests.push(path);
+        if (path === "/installation/repositories")
+          return Response.json({ repositories: [{ full_name: "acme/private", private: true }] });
+        if (path === "/repos/acme/private/pulls/7")
+          return Response.json({
+            number: 7,
+            state: "closed",
+            head: { repo: { full_name: "acme/private" }, ref: "change", sha: "a".repeat(40) },
+            base: { repo: { full_name: "acme/private" }, ref: "main" },
+          });
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(scenario.headers)) if (value !== undefined) headers.set(name, value);
+        return Response.json({ message: scenario.message }, { status: scenario.status, headers });
+      },
+    });
+    const sink = recordingSink();
+    const root = createTracer({ clock: () => 1_000 }).start("request", { sinks: [sink] });
+    const sourceSpan = root.start("run.source_check.context");
+    const result = await currentGithubReadCapability(
+      {
+        version: 2,
+        runId: "run",
+        callId: "call",
+        tool: "github_pull_get",
+        repos: ["acme/private"],
+        resultHash: "a".repeat(64),
+        inputHash: "b".repeat(64),
+        admissionHash: "c".repeat(64),
+      },
+      { repo: "acme/private", number: 7, includeChecks: true },
+      { api, canWrite: () => false },
+      "review",
+      new Map(),
+      sourceSpan,
+    );
+    sourceSpan.end();
+    root.end();
+    expect(requests).toEqual([
+      "/installation/repositories",
+      "/repos/acme/private/pulls/7",
+      `/repos/acme/private/commits/${"a".repeat(40)}/check-runs`,
+    ]);
+    expect(result).toMatchObject({
+      ok: false,
+      githubAccess: {
+        tool: "github_pull_get",
+        stage: "tool-read",
+        operation: "getCommitChecks",
+        reason: "http",
+        route: "commit_checks",
+        httpStatus: scenario.status,
+        requestId: "A1:B2",
+        responseReason: scenario.responseReason,
+        responseMessage: scenario.responseMessage,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private.example");
+    expect(JSON.stringify(result)).not.toContain("SECRET");
+    expect(
+      sink.ends.find((span) => span.name === "github.rest" && span.attrs?.route === "commit_checks"),
+    ).toMatchObject({
+      traceId: root.traceId,
+      parentSpanId: sourceSpan.id,
+      attrs: { route: "commit_checks", httpStatus: scenario.status },
+    });
+  });
+
   it.each([
     {
       name: "primary limit from remaining zero",

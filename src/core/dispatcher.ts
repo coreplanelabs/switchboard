@@ -70,7 +70,7 @@ import { UnknownAllocationClaimError } from "./runLedger/allocationAck.js";
 import { PromotionPendingError, PromotionIdentityRefusal } from "./runLedger/promotion.js";
 import { systemClock } from "./trace/index.js";
 import { closedStage } from "./trace/closedStage.js";
-import type { SpanSink, Tracer } from "./trace/types.js";
+import type { Span, SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { assignRunLiveState, type ResidentLiveStateObservation } from "./runLiveState.js";
@@ -4864,11 +4864,14 @@ export async function dispatch(
     let committedContextCheckpoint: ContextCheckpointReceipt | undefined;
     const normalizeAdmittedOrigins = (context: ContextDependencies) =>
       committedContextCheckpoint ? applyContextCheckpoint(context, committedContextCheckpoint) : context;
-    const validateExecutionContext = async (context: ContextDependencies): Promise<AudienceCheck> => {
+    const validateExecutionContext = async (
+      context: ContextDependencies,
+      sourceSpan?: Span,
+    ): Promise<AudienceCheck> => {
       // Archived results use current read access. Only this run's own results
       // require its exact specialist execution admission.
       if (!context.executionGithub?.some((ref) => ref.runId === run.id))
-        return contextReader.validateDependencies(context);
+        return contextReader.validateDependencies(context, sourceSpan);
       const current = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === run.id);
       const hash = current && current.ownerGen === deps.runLedger.gen && (await executionAdmissionHash(current.meta));
       if (!current) return { ok: false, code: "saved-context-unproved", check: "execution_owner_missing" };
@@ -4883,9 +4886,10 @@ export async function dispatch(
           gen: deps.runLedger.gen,
           admissionHash: hash,
         },
-      }).validateDependencies(context);
+      }).validateDependencies(context, sourceSpan);
     };
-    const revalidateAdmitted = () => revalidateAdmittedContext(() => admittedContext, validateExecutionContext);
+    const revalidateAdmitted = (sourceSpan?: Span) =>
+      revalidateAdmittedContext(() => admittedContext, validateExecutionContext, sourceSpan);
     seedContext = mergeContextDependencies(seedContext, {
       ...freshContext(),
       origins: [{ runId: run.id, requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey }],
