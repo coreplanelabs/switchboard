@@ -58,6 +58,7 @@ import {
 } from "./workflowReconciliation.js";
 import {
   findPullOwnersInRows,
+  isKnownForeignUnitWithoutExternalClaims,
   terminalPullOwnerTargets,
   pullOwnerTargetMatches,
   unitPullTargets,
@@ -398,14 +399,21 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       if (count > PULL_OWNER_SCAN_MAX || bytes > PULL_OWNER_SCAN_MAX_BYTES)
         throw new Error("pull owner scan incomplete");
     };
-    const units = [...this.units.values()].map((text) => {
+    const units = [...this.units.entries()].flatMap(([key, text]) => {
+      const instanceId = key.slice(0, key.indexOf("\0"));
+      const parentText = this.rows.get(instanceId);
+      const parent = parentText === undefined ? undefined : JSON.parse(parentText);
       const current = JSON.parse(text);
-      return auditing && auditing.instanceId === current.instanceId && auditing.unit === current.unit
-        ? auditing
-        : current;
+      if (isKnownForeignUnitWithoutExternalClaims(parent, instanceId, current, targets)) {
+        visit(text, parentText ?? "");
+        return [];
+      }
+      const selected =
+        auditing && auditing.instanceId === current.instanceId && auditing.unit === current.unit ? auditing : current;
+      visit(JSON.stringify(selected), parentText ?? "");
+      return [selected];
     });
     for (const unit of units) {
-      visit(JSON.stringify(unit), this.rows.get(unit.instanceId) ?? "");
       if (isCoordinatorUnit(unit) && unit.adoption?.audit) auditedRunIds.add(unit.adoption.runId);
     }
     for (const row of this.runOwner.live.values()) visit(JSON.stringify(row.meta), JSON.stringify(row.state));

@@ -114,6 +114,8 @@ export interface PullOwnershipDiagnostics {
   qualificationSnapshot?: PullOwnerQualificationSnapshot;
   /** Physical locations align with merged run rows; they carry no ownership facts. */
   runOrigins?: Array<{ source: "live_runs" | "runs"; rowIndex: number }>;
+  /** Physical unit positions remain stable when known foreign parents are excluded. */
+  unitOrigins?: number[];
   cursor?: { source: PullOwnershipSource; rowIndex?: number };
   cause?: PullOwnerDiagnosticCause;
   failure?: { check: PullOwnershipCheck; source?: PullOwnershipSource; rowIndex?: number };
@@ -246,6 +248,26 @@ export interface PullOwnershipRows {
   }>;
   effects: unknown[];
   settlements?: unknown[];
+}
+
+/** Publication, effects and recovery may name owners outside the parent repository. */
+export function isKnownForeignUnitWithoutExternalClaims(
+  instance: unknown,
+  instanceId: string,
+  unit: unknown,
+  targets?: readonly PullTarget[],
+): boolean {
+  if (!targets?.length || !isCoordinatorInstance(instance) || instance.id !== instanceId) return false;
+  if (targets.some((target) => instance.repo.toLowerCase() === target.repo.toLowerCase())) return false;
+  if (!unit || typeof unit !== "object" || Array.isArray(unit)) return false;
+  const row = unit as Record<string, unknown>;
+  return (
+    row.adoption === undefined &&
+    row.publication === undefined &&
+    row.currentEffect === undefined &&
+    row.recovery === undefined &&
+    !isCoordinatorUnit(unit)
+  );
 }
 
 export function isPullTarget(value: unknown): value is PullTarget {
@@ -427,8 +449,9 @@ export function findPullOwnersInRows(
         : {}),
   });
   for (const [rowIndex, row] of rows.units.entries()) {
+    const sourceRowIndex = diagnostics?.unitOrigins?.[rowIndex] ?? rowIndex;
     if (!isCoordinatorInstance(row.instance) || !isCoordinatorUnit(row.unit) || row.unit.instanceId !== row.instance.id)
-      return fail("unit_shape", "units", rowIndex);
+      return fail("unit_shape", "units", sourceRowIndex);
     const unit = row.unit;
     if (
       unit.publication &&
@@ -436,14 +459,14 @@ export function findPullOwnersInRows(
         unit.publication.owner.instanceId !== unit.instanceId ||
         unit.publication.owner.unit !== unit.unit)
     )
-      return fail("unit_publication_binding", "units", rowIndex);
+      return fail("unit_publication_binding", "units", sourceRowIndex);
     if (
       unit.currentEffect?.phase === "active" &&
       (unit.currentEffect.target.repo.toLowerCase() !== row.instance.repo.toLowerCase() ||
         unit.currentEffect.target.ref !== unit.branch ||
         unit.currentEffect.target.pr !== unit.pr?.number)
     )
-      return fail("unit_effect_binding", "units", rowIndex);
+      return fail("unit_effect_binding", "units", sourceRowIndex);
     if (!sameRepo(row.instance.repo)) continue;
     const held =
       unitHoldsPulls(unit, row.instance) ||

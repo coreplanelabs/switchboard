@@ -121,6 +121,7 @@ describe("managed review publication ownership", () => {
     const { ledger, store } = await fixture();
     const legacy = { ...row, publication: undefined, currentEffect: undefined, ending };
     seedCoordinatorUnit(store, legacy);
+    expect(await store.findPullOwners({ repo: "other/api", pr: 99 })).toEqual({ ok: true, owners: [] });
     expect(await ledger.finish(runId, "g1", terminal())).toEqual({ ok: true, stored: true });
     expect(await store.findPullOwners({ repo: instance.repo, pr: 7 })).toEqual({
       ok: true,

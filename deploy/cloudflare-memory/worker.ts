@@ -562,6 +562,7 @@ import {
   pullOwnerReadDiagnosticFor,
   type PullOwnershipSource,
   findPullOwnersInRows,
+  isKnownForeignUnitWithoutExternalClaims,
   terminalPullOwnerTargets,
   unitPullTargets,
   pullBindingChanges,
@@ -6352,20 +6353,23 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (diagnostics) diagnostics.runOrigins = [];
     const rows: PullOwnershipRows = { complete: true, units: [], runs: [], effects, settlements: [] };
     position("units");
+    if (diagnostics) diagnostics.unitOrigins = [];
     for (const row of bounded(
-      this.sql.exec<{ unit_json: string; instance_json: string | null }>(
-        `SELECT u.json AS unit_json, i.json AS instance_json FROM coordinator_units u LEFT JOIN coordinator_instances i ON i.instance_id = u.instance_id LIMIT ?`,
+      this.sql.exec<{ instance_id: string; unit_json: string; instance_json: string | null }>(
+        `SELECT u.instance_id, u.json AS unit_json, i.json AS instance_json FROM coordinator_units u LEFT JOIN coordinator_instances i ON i.instance_id = u.instance_id ORDER BY u.rowid LIMIT ?`,
         limit,
       ),
       "units",
-    ))
+    )) {
+      const instance = row.instance_json === null ? undefined : parse(row.instance_json, "instance_shape");
+      const unit = parse(row.unit_json, "unit_shape");
+      if (isKnownForeignUnitWithoutExternalClaims(instance, row.instance_id, unit, targets)) continue;
+      if (diagnostics) diagnostics.unitOrigins!.push(diagnostics.scan!.rowIndex);
       rows.units.push({
-        unit: (() => {
-          const unit = parse(row.unit_json, "unit_shape");
-          return auditing && auditing.instanceId === unit.instanceId && auditing.unit === unit.unit ? auditing : unit;
-        })(),
-        instance: row.instance_json === null ? undefined : parse(row.instance_json, "instance_shape"),
+        unit: auditing && auditing.instanceId === unit.instanceId && auditing.unit === unit.unit ? auditing : unit,
+        instance,
       });
+    }
     const auditedRunIds = new Set(
       rows.units.flatMap((row) =>
         isCoordinatorUnit(row.unit) && row.unit.adoption?.audit ? [row.unit.adoption.runId] : [],

@@ -4880,6 +4880,41 @@ describe("durable coordinator Workflow reconciliation", () => {
       (await post("/runs/coordinator/reconcile/offer", { storeKey: key, instanceId: instance.id, unit: unit.unit }))
         .status,
     ).toBe(200);
+    expect(
+      (await post("/runs/coordinator/pull-owners", { storeKey: key, target: { repo: "other/api", pr: 7 } })).data,
+    ).toEqual({ ok: true, owners: [] });
+    expect(
+      (
+        await post("/runs/coordinator/pull-owners", {
+          storeKey: key,
+          target: { repo: instance.repo, ref: unit.branch },
+        })
+      ).data,
+    ).toEqual({ ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }] });
+    const other = {
+      ...instance,
+      id: "other_reconcile_task",
+      repo: "other/api",
+      branch: "fix/other",
+      threadKey: "slack:C1:other",
+    };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance: other })).status).toBe(200);
+    expect(
+      (
+        await post("/runs/coordinator/units/put", {
+          storeKey: key,
+          units: [
+            {
+              ...unit,
+              instanceId: other.id,
+              unit: "NEXT",
+              branch: other.branch,
+              pr: { number: 7, url: "https://github.com/other/api/pull/7" },
+            },
+          ],
+        })
+      ).status,
+    ).toBe(200);
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
       expect(owner.openPlaneEffects()).toMatchObject([
         { kind: "coordinator_reconcile", instanceId: instance.id, unit: unit.unit, workflowId: instance.id },
@@ -12419,6 +12454,28 @@ describe("complete canonical pull ownership", () => {
           )
         ).status,
       ).toBe(200);
+      if (publicationState === "pending") {
+        const liveStub = env.RUNS.get(env.RUNS.idFromName(key));
+        await runInDurableObject(liveStub, async (_owner: RunHistoryDO, state) => {
+          state.storage.sql.exec(
+            `UPDATE coordinator_units SET json=? WHERE instance_id=? AND unit=?`,
+            JSON.stringify({ ...row, publication: undefined }),
+            instance.id,
+            row.unit,
+          );
+        });
+        expect(
+          (await post("/runs/coordinator/pull-owners", { storeKey: key, target: { repo: "other/api", pr: 99 } })).data,
+        ).toEqual({ ok: true, owners: [] });
+        await runInDurableObject(liveStub, async (_owner: RunHistoryDO, state) => {
+          state.storage.sql.exec(
+            `UPDATE coordinator_units SET json=? WHERE instance_id=? AND unit=?`,
+            JSON.stringify(row),
+            instance.id,
+            row.unit,
+          );
+        });
+      }
       const effect = {
         version: 1 as const,
         id: "ONE/1/review",
@@ -12477,7 +12534,7 @@ describe("complete canonical pull ownership", () => {
           // grants no new effect or publication authority.
           state.storage.sql.exec(
             `UPDATE coordinator_units SET json=? WHERE instance_id=? AND unit=?`,
-            JSON.stringify({ ...ended, publication: undefined }),
+            JSON.stringify({ ...ended, publication: undefined, currentEffect: undefined }),
             instance.id,
             "ONE",
           );
@@ -14222,6 +14279,92 @@ describe("durable original report eligibility", () => {
 });
 
 describe("coordinator admission diagnostics", () => {
+  it("admits a PR despite an invalid unit under a verified foreign repository", async () => {
+    const key = storeKey();
+    const target: CoordinatorInstance = {
+      id: "target_owner",
+      kind: "ship",
+      userId: "cli:owner",
+      channelId: "cli:local",
+      threadKey: "cli:target",
+      repo: "acme/api",
+      branch: "fix/target",
+      base: "main",
+      createdAt: 1,
+    };
+    const foreign = { ...target, id: "foreign_owner", repo: "other/api", threadKey: "cli:foreign" };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance: target })).status).toBe(200);
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance: foreign })).status).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)",
+        foreign.id,
+        "BROKEN",
+        JSON.stringify({ privateText: "secret-fixture" }),
+        1,
+      );
+    });
+    const unit: CoordinatorUnit = {
+      instanceId: target.id,
+      unit: "ROOT",
+      slug: "task",
+      branch: target.branch,
+      dependsOn: [],
+      rounds: [],
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    };
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    expect(
+      (
+        await post("/runs/coordinator/pull-owners", {
+          storeKey: key,
+          target: { repo: target.repo, pr: 7 },
+        })
+      ).data,
+    ).toEqual({ ok: true, owners: [{ kind: "unit", instanceId: target.id, unit: "ROOT" }] });
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      expect(await owner.listUnits(target.id)).toEqual([unit]);
+      expect(
+        state.storage.sql
+          .exec<{ json: string }>("SELECT json FROM coordinator_units WHERE instance_id = ?", foreign.id)
+          .one().json,
+      ).toBe(JSON.stringify({ privateText: "secret-fixture" }));
+    });
+    const sameRepo = { ...target, id: "same_repo_broken", threadKey: "cli:same-repo" };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance: sameRepo })).status).toBe(200);
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)",
+        sameRepo.id,
+        "BROKEN",
+        JSON.stringify({ privateText: "same-repo-secret" }),
+        1,
+      );
+    });
+    const position = await runInDurableObject(stub, async (_owner: RunHistoryDO, state) =>
+      state.storage.sql
+        .exec<{ instance_id: string }>(
+          "SELECT u.instance_id FROM coordinator_units u LEFT JOIN coordinator_instances i ON i.instance_id = u.instance_id ORDER BY u.rowid",
+        )
+        .toArray()
+        .findIndex((row) => row.instance_id === sameRepo.id),
+    );
+    expect(position).toBeGreaterThan(0);
+    expect(
+      (
+        await post("/runs/coordinator/pull-owners", {
+          storeKey: key,
+          target: { repo: target.repo, pr: 7 },
+          diagnostic: true,
+        })
+      ).data,
+    ).toMatchObject({
+      ok: false,
+      reason: "incomplete",
+      diagnostic: { stage: "unit_shape", source: "units", rowIndex: position, cause: "validation" },
+    });
+  });
   it("logs a bounded failing check and retains the refused ownership rows", async () => {
     const key = storeKey();
     const instance: CoordinatorInstance = {
