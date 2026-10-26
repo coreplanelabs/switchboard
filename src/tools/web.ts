@@ -1,6 +1,7 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { Agent, fetch as undiciFetch } from "undici";
 import { observeHttpRequest } from "../core/trace/httpTransport.js";
+import { oneLine, redactAndCap } from "../core/redact.js";
 import type { Secret, Secrets } from "../secrets.js";
 import type { RunnableTool } from "./runnableTool.js";
 
@@ -43,6 +44,97 @@ export class NullWebSearch implements WebSearch {
   }
 }
 
+type BraveFailure = {
+  kind: "http" | "transport" | "timeout" | "decode";
+  status?: number;
+  code?: string;
+  requestId?: string;
+  detail?: string;
+  remaining?: readonly number[];
+  resetSeconds?: readonly number[];
+};
+
+class BraveSearchError extends Error {
+  constructor(
+    readonly facts: Readonly<BraveFailure>,
+    cause?: unknown,
+  ) {
+    const message =
+      facts.kind === "http"
+        ? [
+            `Brave search HTTP ${facts.status}`,
+            ...(facts.code ? [`code ${facts.code}`] : []),
+            ...(facts.requestId ? [`request ${facts.requestId}`] : []),
+            ...(facts.remaining ? [`remaining ${facts.remaining.join(",")}`] : []),
+            ...(facts.resetSeconds ? [`reset ${facts.resetSeconds.join(",")}s`] : []),
+            ...(facts.detail ? [`detail ${facts.detail}`] : []),
+          ].join("; ")
+        : facts.kind === "decode"
+          ? `Brave search HTTP ${facts.status} response was invalid`
+          : facts.kind === "timeout"
+            ? "Brave search timed out before a response"
+            : `Brave search ${facts.kind} failed before a response`;
+    super(message, { cause });
+    this.name = "BraveSearchError";
+  }
+}
+
+function rateWindowFacts(value: string | null): readonly number[] | undefined {
+  if (!value || value.length > 64 || !/^(?:0|[1-9][0-9]{0,9})(?:,\s*(?:0|[1-9][0-9]{0,9})){0,3}$/.test(value))
+    return undefined;
+  const numbers = value.split(",").map((part) => Number(part.trim()));
+  return numbers.every((number) => number <= 1_000_000_000) ? numbers : undefined;
+}
+
+function braveDetail(value: unknown, query: string, apiKey: string): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const first = oneLine(value);
+  if (!first) return undefined;
+  const text = first
+    .replaceAll(apiKey, "«redacted»")
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "«redacted-url»")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "«redacted-email»");
+  return redactAndCap(query.length >= 4 ? text.replaceAll(query, "«redacted-query»") : text, 200);
+}
+
+async function braveFailure(res: Response, query: string, apiKey: string): Promise<BraveSearchError> {
+  let body: Awaited<ReturnType<typeof readCapped>>;
+  try {
+    body = await readCapped(res, 8_192);
+  } catch (cause) {
+    return new BraveSearchError({ kind: "decode", status: res.status }, cause);
+  }
+  let remote: Record<string, unknown> | undefined;
+  if (!body.truncated) {
+    try {
+      const parsed: unknown = JSON.parse(body.bytes.toString("utf8"));
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed) &&
+        "type" in parsed &&
+        parsed.type === "ErrorResponse"
+      ) {
+        const error = (parsed as { error?: unknown }).error;
+        if (error && typeof error === "object" && !Array.isArray(error)) remote = error as Record<string, unknown>;
+      }
+    } catch {
+      // The HTTP failure still has a status; unparseable body text is not a provider message.
+    }
+  }
+  const code = typeof remote?.code === "string" && /^[A-Z][A-Z_]{0,39}$/.test(remote.code) ? remote.code : undefined;
+  const requestId = typeof remote?.id === "string" && /^[A-Za-z0-9-]{1,64}$/.test(remote.id) ? remote.id : undefined;
+  return new BraveSearchError({
+    kind: "http",
+    status: res.status,
+    ...(code ? { code } : {}),
+    ...(requestId ? { requestId } : {}),
+    ...(remote ? { detail: braveDetail(remote.detail, query, apiKey) } : {}),
+    remaining: rateWindowFacts(res.headers.get("x-ratelimit-remaining")),
+    resetSeconds: rateWindowFacts(res.headers.get("x-ratelimit-reset")),
+  });
+}
+
 /** Real adapter: Brave Search API. Coded now; stays keyless until the operator
  *  provisions BRAVE_SEARCH_API_KEY (a separate, deliberate decision). */
 export class BraveWebSearch implements WebSearch {
@@ -54,13 +146,30 @@ export class BraveWebSearch implements WebSearch {
   async search(query: string, opts?: { count?: number }): Promise<WebSearchResult[]> {
     const count = Math.min(Math.max(Math.trunc(opts?.count ?? 5), 1), 10);
     const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`;
-    const res = await this.fetchImpl(url, {
-      headers: { Accept: "application/json", "X-Subscription-Token": this.apiKey.reveal() },
-      signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`brave search returned HTTP ${res.status}`);
-    const data = (await res.json()) as { web?: { results?: Array<Record<string, unknown>> } };
-    const results = data?.web?.results ?? [];
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url, {
+        headers: { Accept: "application/json", "X-Subscription-Token": this.apiKey.reveal() },
+        signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+      });
+    } catch (cause) {
+      const timedOut = cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError");
+      throw new BraveSearchError({ kind: timedOut ? "timeout" : "transport" }, cause);
+    }
+    if (!res.ok) throw await braveFailure(res, query, this.apiKey.reveal());
+    let results: Array<Record<string, unknown>>;
+    try {
+      const data: unknown = await res.json();
+      if (!data || typeof data !== "object" || Array.isArray(data)) throw new TypeError("invalid Brave response");
+      const web = (data as Record<string, unknown>).web;
+      if (web != null && (typeof web !== "object" || Array.isArray(web))) throw new TypeError("invalid Brave response");
+      const rows = web == null ? [] : ((web as Record<string, unknown>).results ?? []);
+      if (!Array.isArray(rows) || rows.some((row) => !row || typeof row !== "object" || Array.isArray(row)))
+        throw new TypeError("invalid Brave response");
+      results = rows as Array<Record<string, unknown>>;
+    } catch (cause) {
+      throw new BraveSearchError({ kind: "decode", status: res.status }, cause);
+    }
     return results.slice(0, count).map((r) => ({
       title: String(r.title ?? ""),
       url: String(r.url ?? ""),
