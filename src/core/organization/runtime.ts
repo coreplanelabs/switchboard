@@ -8,6 +8,7 @@ import type { IngressResult } from "../runLedger/ingress.js";
 import { envelopeSchema } from "./contract.js";
 import type {
   OrganizationEnvelope,
+  OrganizationDispatchResult,
   OrganizationReceipt,
   OrganizationResult,
   OrganizationStore,
@@ -26,6 +27,7 @@ export interface OrganizationExecutionRequest {
 export interface OrganizationOwnerOutcome {
   status: "completed" | "refused" | "uncertain";
   reason?: string;
+  dispatchResult?: OrganizationDispatchResult;
 }
 export type OrganizationActorResolution =
   { status?: "resolved"; actor: Actor; msg: IncomingMessage } | { status: "fenced" | "unavailable" } | undefined;
@@ -393,6 +395,9 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
             runId: original.runId,
             status: outcome.status === "uncertain" ? "uncertain" : "completed",
             outcome: outcome.reason ?? outcome.status,
+            handlerOutcome: outcome.status,
+            ownerStage: "execute",
+            ...(outcome.dispatchResult ? { dispatchResult: outcome.dispatchResult } : {}),
             ...(outcome.status === "refused" ? { refusalPending: true } : {}),
             ...(original.launch
               ? { producerGeneration: original.launch.producerGeneration, launchId: original.launch.launchId }
@@ -514,6 +519,7 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
           status: outcome.status === "uncertain" ? "uncertain" : "completed",
           outcome: outcome.reason ?? outcome.status,
           handlerOutcome: outcome.status,
+          ...(outcome.dispatchResult ? { dispatchResult: outcome.dispatchResult } : {}),
           ...(ownerStage ? { ownerStage } : {}),
           ...(failure ? { failure } : {}),
           ...(outcome.status === "refused" ? { refusalPending: true } : {}),

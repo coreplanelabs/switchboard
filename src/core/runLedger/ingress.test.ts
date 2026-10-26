@@ -155,6 +155,37 @@ describe("original ingress owner", () => {
       },
     });
   });
+  it("saves a closed dispatch refusal and rejects arbitrary refusal text", async () => {
+    const ledger = new InMemoryRunLedger(() => 1);
+    const owned = await ledger.consumeIngress({ ...request, origin, receiptId: "organization:org:test:7" });
+    if (owned.status !== "claimed") throw new Error("original owner not claimed");
+    const settlement = {
+      effectKey: request.effectKey,
+      digest: request.digest,
+      runId: owned.record.runId,
+      status: "uncertain" as const,
+      outcome: "The original owner could not confirm dispatch.",
+      handlerOutcome: "uncertain" as const,
+      ownerStage: "execute" as const,
+    };
+    const invalid = {
+      ...settlement,
+      dispatchResult: { status: "refused", cause: "system", refusalCode: "private_source_body" },
+    } as unknown as Parameters<typeof ledger.finishIngress>[0];
+    expect(await ledger.finishIngress(invalid)).toEqual({ status: "invalid" });
+    expect(
+      await ledger.finishIngress({
+        ...settlement,
+        dispatchResult: { status: "refused", cause: "system", refusalCode: "pr_head_unknown" },
+      }),
+    ).toMatchObject({
+      status: "record",
+      record: {
+        status: "uncertain",
+        dispatchResult: { status: "refused", cause: "system", refusalCode: "pr_head_unknown" },
+      },
+    });
+  });
 
   it.each(["completed", "content cleared", "pending", "uncertain", "refusal", "live custody", "dependent consumer"])(
     "bounds unread continuation metadata after its original horizon: %s",

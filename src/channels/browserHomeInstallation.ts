@@ -23,6 +23,7 @@ import type { OriginalUnitRecipient } from "./originalUnitRecipient.js";
 import type { UnitEventKey } from "../core/coordinator/instanceStore.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import { dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "../core/dispatcher.js";
+import { causeOf, REFUSAL_CODES } from "../core/refusal.js";
 import { identityKey } from "../core/identity/engine.js";
 import type { PersonDirectory, ExternalIdentity } from "../core/identity/contract.js";
 import {
@@ -149,11 +150,23 @@ export interface BrowserHomeInstallationOptions {
   publicBaseUrl?: string;
 }
 function ownerOutcome(outcome: DispatchOutcome): OrganizationOwnerOutcome {
-  if (outcome.inputQueued) return { status: "uncertain", reason: "The original input is queued with its owner." };
-  if (outcome.status === "completed") return { status: "completed" };
+  const refusalCode = REFUSAL_CODES.find((code) => code === outcome.refusal);
+  const cause = refusalCode ? causeOf(refusalCode) : outcome.cause;
+  const dispatchResult: NonNullable<OrganizationOwnerOutcome["dispatchResult"]> = {
+    status: outcome.inputQueued ? "input_queued" : outcome.unknownClaim ? "unknown_claim" : outcome.status,
+    ...(cause ? { cause } : {}),
+    ...(refusalCode ? { refusalCode } : {}),
+  };
+  if (outcome.inputQueued)
+    return { status: "uncertain", reason: "The original input is queued with its owner.", dispatchResult };
+  if (outcome.status === "completed") return { status: "completed", dispatchResult };
   if (outcome.status === "refused" && outcome.cause !== "system")
-    return { status: "refused", reason: outcome.refusal ?? "The original owner refused this request." };
-  return { status: "uncertain", reason: outcome.refusal ?? "The original owner's result could not be confirmed." };
+    return { status: "refused", reason: outcome.refusal ?? "The original owner refused this request.", dispatchResult };
+  return {
+    status: "uncertain",
+    reason: outcome.refusal ?? "The original owner's result could not be confirmed.",
+    dispatchResult,
+  };
 }
 const targetKey = (unit: CoordinatorUnit, gate: NonNullable<NonNullable<CoordinatorUnit["idle"]>["humanGate"]>) =>
   `${unitKeyOf(unit)}:question:${homeQuestionRevision(gate)}:${homeQuestionDigest(gate)}`;

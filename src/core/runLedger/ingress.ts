@@ -5,6 +5,7 @@ import { TRANSCRIPT_REQUEST_BYTES } from "./types.js";
 import {
   envelopeSchema,
   ORGANIZATION_OWNER_STAGES,
+  organizationDispatchResultSchema,
   organizationOwnerFailureFactSchema,
 } from "../organization/contract.js";
 
@@ -58,6 +59,7 @@ export const ingressRecordSchema = ingressRequestSchema
     createdAt: instant,
     settledAt: instant.optional(),
     handlerOutcome: z.enum(["completed", "refused", "uncertain"]).optional(),
+    dispatchResult: organizationDispatchResultSchema.optional(),
     ownerStage: z.enum(ORGANIZATION_OWNER_STAGES).optional(),
     failure: organizationOwnerFailureFactSchema.optional(),
     refusalPending: z.boolean().optional(),
@@ -139,6 +141,7 @@ export const ingressSettlementSchema = z
     status: z.enum(["completed", "uncertain"]),
     outcome: z.string().max(2048),
     handlerOutcome: z.enum(["completed", "refused", "uncertain"]).optional(),
+    dispatchResult: organizationDispatchResultSchema.optional(),
     ownerStage: z.enum(ORGANIZATION_OWNER_STAGES).optional(),
     failure: organizationOwnerFailureFactSchema.optional(),
     refusalPending: z.boolean().optional(),
@@ -261,6 +264,7 @@ export function finishIngress(prior: IngressRecord | null, input: IngressSettlem
       outcome,
       settledAt: now,
       ...(input.handlerOutcome ? { handlerOutcome: input.handlerOutcome } : {}),
+      ...(input.dispatchResult ? { dispatchResult: input.dispatchResult } : {}),
       ...(input.ownerStage ? { ownerStage: input.ownerStage } : {}),
       ...(input.failure ? { failure: input.failure } : {}),
       ...(input.refusalPending ? { refusalPending: true } : {}),
