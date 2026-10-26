@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WebAPIHTTPError, WebAPIPlatformError } from "@slack/web-api";
 import { Secret } from "../secrets.js";
 import {
   actOnMissedMessage,
@@ -1262,8 +1263,42 @@ describe("SlackIO.status — status budget", () => {
     await vi.advanceTimersByTimeAsync(120_000);
     expect(status.update).toHaveBeenCalledTimes(11); // the first send + 10 re-sends
     expect(warn.mock.calls.map((c) => String(c[0]))).toContain(
-      "[slack] card C1:card.1: terminal frame not painted (slack_webapi_rate_limited_error) after 11 attempts",
+      "[slack] card C1:card.1: terminal frame not painted (slack_webapi_rate_limited_error; retry after 2s) after 11 attempts",
     );
+  });
+
+  it("a terminal HTTP refusal keeps Slack's status without headers or body", async () => {
+    const { client, statusClient, status } = clients();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: openBudget() }).status({ title: "👀" });
+    status.update.mockRejectedValueOnce(
+      new WebAPIHTTPError(403, "Forbidden", { authorization: "PRIVATE_HEADER" }, "PRIVATE_BODY"),
+    );
+    await handle.done({ title: "✅" });
+    expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+      "[slack] card C1:card.1: terminal frame not painted (slack_webapi_http_error; HTTP 403) after 1 attempts",
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/PRIVATE_HEADER|PRIVATE_BODY/);
+  });
+
+  it("a Slack platform refusal keeps its code without copying an unknown error object", async () => {
+    const { client, statusClient, status } = clients();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const handle = await new SlackIO(client, ev, { statusClient, statusBudget: openBudget() }).status({ title: "👀" });
+    status.update.mockRejectedValueOnce(new WebAPIPlatformError({ ok: false, error: "missing_scope" }));
+    await handle.done({ title: "✅" });
+    expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+      "[slack] card C1:card.1: terminal frame not painted (slack_webapi_platform_error; Slack code missing_scope) after 1 attempts",
+    ]);
+
+    status.update.mockRejectedValueOnce({ private: "PRIVATE_OBJECT_BODY" });
+    const next = await new SlackIO(client, ev, { statusClient, statusBudget: openBudget() }).status({ title: "👀" });
+    await next.done({ title: "✅" });
+    expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+      "[slack] card C1:card.1: terminal frame not painted (slack_webapi_platform_error; Slack code missing_scope) after 1 attempts",
+      "[slack] card C1:card.1: terminal frame not painted (Slack failure) after 1 attempts",
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("PRIVATE_OBJECT_BODY");
   });
 
   it("a terminal frame the budget cannot fund now is sent when the budget says, and done() does not wait for it", async () => {

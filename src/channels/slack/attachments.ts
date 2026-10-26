@@ -5,6 +5,7 @@
 import { extname } from "node:path";
 import type { DocumentAttachment, ImageAttachment, StagedFile } from "../../core/types.js";
 import { processSecrets, type Secret } from "../../secrets.js";
+import { describeSlackFailure } from "./failure.js";
 
 // Attachment ingestion. Only image types every provider accepts; Slack file
 // downloads need the files:read bot scope.
@@ -274,7 +275,7 @@ async function downloadSlackFile(
     }
     return Buffer.from(await res.arrayBuffer());
   } catch (err) {
-    console.error(`[files] download failed for ${label}: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[files] download failed for ${label}: ${describeSlackFailure(err)}`);
     return undefined;
   }
 }
