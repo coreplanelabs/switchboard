@@ -576,6 +576,72 @@ describe("archive teardown exclusion", () => {
     );
     expect(rows.get(key)).toMatchObject({ native: { threadKey: "late-restore-reply" } });
     expect(effects).toEqual(["destroy"]);
+
+    // A full reset must name every closed opaque restore before it destroys
+    // the shared runtime. Both original outcomes remain unknown afterward.
+    rows.clear();
+    for (const [name, value] of initialRows) rows.set(name, value);
+    const otherKey = "native-operation:op:other";
+    rows.set(otherKey, JSON.parse(JSON.stringify(initialRows.get(key)).replaceAll("op:archive", "op:other")));
+    const otherHash = (await new NativeOperationJournal(storage).list()).operations.find(
+      (row) => row.key === otherKey,
+    )!.recordHash;
+    const targets = [
+      { key, recordHash },
+      { key: otherKey, recordHash: otherHash },
+    ];
+    lateRecordWrite = false;
+    effects.length = 0;
+    await expect(resident.teardown([targets[0], { ...targets[1], recordHash: "0".repeat(64) }])).rejects.toThrow(
+      "resident-cleanup-refused",
+    );
+    expect(effects).toEqual([]);
+    destroyFails = true;
+    await expect(resident.teardown(targets)).rejects.toThrow("runtime destruction unconfirmed");
+    expect(
+      [...rows.entries()]
+        .filter(([name]) => name.startsWith("native-emergency-discard:"))
+        .map(([, value]) => (value as { state: string }).state),
+    ).toEqual(["prepared", "prepared"]);
+    destroyFails = false;
+    effects.length = 0;
+    await expect(resident.teardown(targets)).rejects.toThrow("earlier destruction is unconfirmed");
+    expect(effects).toEqual([]);
+    rows.clear();
+    for (const [name, value] of initialRows) rows.set(name, value);
+    rows.set(otherKey, JSON.parse(JSON.stringify(initialRows.get(key)).replaceAll("op:archive", "op:other")));
+    expect(await resident.teardown(targets)).toMatchObject({
+      containerStopped: true,
+      storageCleared: true,
+      discardedUnknownNatives: targets,
+      errors: [],
+    });
+    expect(effects).toEqual(["destroy"]);
+    for (const target of targets) {
+      expect(rows.has(target.key)).toBe(false);
+      expect([...rows.values()]).toContainEqual(
+        expect.objectContaining({
+          key: target.key,
+          recordHash: target.recordHash,
+          originalOperationOutcome: "unknown",
+          state: "runtime-destroyed",
+        }),
+      );
+    }
+    expect(await resident.teardown(targets)).toMatchObject({ discardedUnknownNatives: targets, errors: [] });
+    expect(effects).toEqual(["destroy"]);
+
+    rows.clear();
+    for (const [name, value] of initialRows) rows.set(name, value);
+    rows.set(otherKey, JSON.parse(JSON.stringify(initialRows.get(key)).replaceAll("op:archive", "op:other")));
+    effects.length = 0;
+    lateRecordWrite = true;
+    await expect(resident.teardown(targets)).rejects.toThrow(
+      "resident-cleanup-refused: original native record changed after backup cleanup",
+    );
+    expect(rows.has(key)).toBe(true);
+    expect(rows.has(otherKey)).toBe(true);
+    expect(effects).toEqual(["destroy"]);
   });
 });
 
@@ -939,6 +1005,18 @@ describe("full resident reset", () => {
     const invalid = await endpoint({}, { resource, discardUnknownNative: { key: "native-operation:op:archive" } });
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toEqual({ error: "one exact native key and record hash are required" });
+    const targets = [
+      { key: "native-operation:op:archive", recordHash: "a".repeat(64) },
+      { key: "native-operation:op:other", recordHash: "b".repeat(64) },
+    ];
+    const duplicate = await endpoint({}, { resource, discardUnknownNative: [targets[0], targets[0]] });
+    expect(duplicate.status).toBe(400);
+    expect(await duplicate.json()).toEqual({
+      error: "two to 64 distinct exact native keys and record hashes are required",
+    });
+    const selectedPlan = await endpoint({}, { resource, dryRun: true, discardUnknownNative: targets });
+    expect(selectedPlan.status).toBe(200);
+    expect(await selectedPlan.json()).toMatchObject({ dryRun: true, originalOperationOutcome: "unknown" });
     await expect(endpoint({}, { resource })).rejects.toThrow("resident-destroy-unconfirmed");
     expect(record).toEqual({
       resource: "repo:acme/api",

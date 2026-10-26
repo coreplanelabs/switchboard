@@ -759,6 +759,11 @@ export const repoRebuild = defineCommand({
       .regex(/^[a-f0-9]{64}$/)
       .optional()
       .describe("record hash from the current native-operation inventory"),
+    discardNativeRecordsJson: z
+      .string()
+      .max(40000)
+      .optional()
+      .describe("JSON array of two to 64 exact native keys and record hashes from one full-reset preview"),
   }),
   action: "repo:write",
   effect: "write",
@@ -768,9 +773,11 @@ export const repoRebuild = defineCommand({
       dryRunRequested(input)
         ? PLAN_ONLY_RISK
         : input.options?.full === true || input.options?.full === "true"
-          ? input.options?.discardNativeKey
-            ? `destroys the resident container, discards native record ${input.options.discardNativeKey} at hash ${input.options.discardNativeRecordHash}, and deletes all resident workspaces, bindings and backups; original result remains unknown`
-            : "permanently deletes all resident workspaces, bindings, operation records and backups, then recreates it"
+          ? input.options?.discardNativeRecordsJson
+            ? "destroys the resident container, discards the exact native records in --discard-native-records-json, and deletes all resident workspaces, bindings and backups; original results remain unknown"
+            : input.options?.discardNativeKey
+              ? `destroys the resident container, discards native record ${input.options.discardNativeKey} at hash ${input.options.discardNativeRecordHash}, and deletes all resident workspaces, bindings and backups; original result remains unknown`
+              : "permanently deletes all resident workspaces, bindings, operation records and backups, then recreates it"
           : "discards the container and snapshot; keeps bindings and operation records",
   },
   describe:
@@ -789,6 +796,9 @@ export const repoRebuild = defineCommand({
         ? removed.unverifiedNativeOperations.map((entry) => obj(entry))
         : [];
       const discarded = o.discardedUnknownNative ? obj(o.discardedUnknownNative) : undefined;
+      const discardedSet = Array.isArray(o.discardedUnknownNatives)
+        ? o.discardedUnknownNatives.map((entry) => obj(entry))
+        : [];
       return o.dryRun === true
         ? [
             `Full rebuild of \`${slug}\` would delete its container, ${n(removed.threadBindings)} thread binding(s), ${n(removed.backupObjects)} backup object(s), ${n(removed.r2Objects)} prefix object(s), and all stored workspace and operation state.`,
@@ -798,7 +808,7 @@ export const repoRebuild = defineCommand({
             `Keep the repo registration and commands; recreate on \`${str(reprovision.defaultRef)}\`.`,
             "Original operation results remain unknown. Nothing was changed.",
           ].join("\n")
-        : `Fully rebuilding \`${slug}\`: container destroyed, stored work cleared, ${n(o.backupObjectsDeleted)} backup object(s) and ${n(o.r2ObjectsDeleted)} prefix object(s) deleted. Recreating on \`${str(reprovision.defaultRef)}\`; provisioning has started.${discarded ? ` Exact unverified native record \`${str(discarded.key)}\` was discarded after destruction; its audit remains.` : ""} Original operation results remain unknown.`;
+        : `Fully rebuilding \`${slug}\`: container destroyed, stored work cleared, ${n(o.backupObjectsDeleted)} backup object(s) and ${n(o.r2ObjectsDeleted)} prefix object(s) deleted. Recreating on \`${str(reprovision.defaultRef)}\`; provisioning has started.${discarded ? ` Exact unverified native record \`${str(discarded.key)}\` was discarded after destruction; its audit remains.` : ""}${discardedSet.length ? ` ${discardedSet.length} exact unverified native records were discarded after destruction; their audits remain.` : ""} Original operation results remain unknown.`;
     }
     const discards = obj(o.discards);
     const snap = discards.snapshot ? obj(discards.snapshot) : undefined;
@@ -833,15 +843,46 @@ export const repoRebuild = defineCommand({
   handler: async ({ args, options, deps, span }) => {
     const dryRun = options.dryRun ?? false;
     const full = options.full ?? false;
-    const discardUnknownNative =
+    let discardUnknownNative: { key: string; recordHash: string } | { key: string; recordHash: string }[] | undefined =
       options.discardNativeKey && options.discardNativeRecordHash
         ? { key: options.discardNativeKey, recordHash: options.discardNativeRecordHash }
         : undefined;
+    if (options.discardNativeRecordsJson !== undefined) {
+      if (options.discardNativeKey !== undefined || options.discardNativeRecordHash !== undefined)
+        throw new CommandError("invalid_input", "select one native disposal form");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(options.discardNativeRecordsJson);
+      } catch {
+        throw new CommandError("invalid_input", "--discard-native-records-json must contain a JSON array");
+      }
+      const selected = z
+        .array(
+          z
+            .object({
+              key: z.string().regex(/^native-operation:.{1,495}$/),
+              recordHash: z.string().regex(/^[a-f0-9]{64}$/),
+            })
+            .strict(),
+        )
+        .min(2)
+        .max(64)
+        .safeParse(parsed);
+      if (
+        !selected.success ||
+        new Set(selected.data.map((target) => target.key)).size !== selected.data.length ||
+        new Set(selected.data.map((target) => target.recordHash)).size !== selected.data.length
+      )
+        throw new CommandError("invalid_input", "select two to 64 distinct exact native keys and record hashes");
+      discardUnknownNative = selected.data;
+    }
     if (
-      (options.discardNativeKey !== undefined || options.discardNativeRecordHash !== undefined) &&
+      (options.discardNativeKey !== undefined ||
+        options.discardNativeRecordHash !== undefined ||
+        options.discardNativeRecordsJson !== undefined) &&
       (!full || !discardUnknownNative || options.resident !== undefined)
     )
-      throw new CommandError("invalid_input", "an exact native key and record hash require --full without --resident");
+      throw new CommandError("invalid_input", "exact native record selectors require --full without --resident");
     const api = await adminOf(deps, span);
     const r = await call(() =>
       options.resident !== undefined
