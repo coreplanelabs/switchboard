@@ -507,6 +507,46 @@ describe("authorizePrHead — the PR head preflight", () => {
   const review = getAgent("review");
   const text = "review https://github.com/acme/api/pull/41";
 
+  it("keeps the safe lookup result in an exact-commit refusal", async () => {
+    const request = `review-head:${SHA_A} ${text}`;
+    const h = setup({ text: request });
+    expect(
+      await authorizePrHead({
+        ...h.gate,
+        ...h.cardCtx,
+        agent: review,
+        directives: { text: request },
+        repoCtx: { repo: "acme/api", pr: 41, prHeadFailure: { code: "http_failed", httpStatus: 403 } },
+      }),
+    ).toEqual({ kind: "refused", reason: "workspace_head_mismatch" });
+    expect(h.replies[0]).toContain("GitHub returned HTTP 403");
+    expect(h.replies[0]).toContain("No review started or was posted to GitHub");
+  });
+
+  it("keeps the safe lookup result in a saved Ship target refusal", async () => {
+    const h = setup({ text });
+    expect(
+      await authorizePrHead({
+        ...h.gate,
+        ...h.cardCtx,
+        agent: review,
+        directives: { text },
+        publication: {
+          repo: "acme/api",
+          pr: 41,
+          headRef: "feature/x",
+          baseRef: "main",
+          publicationRef: "feature/x",
+          expectedHeadSha: SHA_A,
+          owner: { instanceId: "ship_review", unit: "ONE" },
+        },
+        repoCtx: { repo: "acme/api", ref: "feature/x", prHeadFailure: { code: "http_failed", httpStatus: 403 } },
+      }),
+    ).toEqual({ kind: "refused", reason: "workspace_head_mismatch" });
+    expect(h.replies[0]).toContain("The review target changed from its saved pull request and commit");
+    expect(h.replies[0]).toContain("GitHub returned HTTP 403");
+  });
+
   it("an explicit review head rejects malformed, duplicate, missing and changed targets, but allows its exact head", async () => {
     for (const [prefix, headSha] of [
       [`review-head:${SHA_A}`, SHA_B],

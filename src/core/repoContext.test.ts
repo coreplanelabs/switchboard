@@ -52,6 +52,27 @@ afterEach(() => {
 });
 
 describe("resolveRepoContext: read-scoped PR lookup", () => {
+  it("keeps a safe HTTP failure on an explicit PR target", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    stubFetch({ status: 403, body: { message: "private response text" } });
+    expect(
+      await resolveRepoContext(
+        msg("review https://github.com/acme/api/pull/7"),
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      ),
+    ).toEqual({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+      prHeadFailure: { code: "http_failed", httpStatus: 403 },
+    });
+  });
+
   it("keeps native source identity for explicit, accepted and inherited PR targets", async () => {
     const source = { host: "github.com" as const, appId: 1, installationId: 2 };
     vi.spyOn(githubApp, "resolveGithubCredential").mockResolvedValue({ token: "read", expiresAtMs: null, source });
@@ -362,6 +383,27 @@ describe("currentPrHeadSha — the review post transition guard", () => {
 });
 
 describe("resolveRepoContext: accepted operation authority", () => {
+  it("keeps a safe PR lookup failure when a saved review branch cannot be verified", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    stubFetch({ status: 403, body: { message: "private response text" } });
+    const context = await resolveRepoContext(
+      msg("review https://github.com/acme/api/pull/7"),
+      [],
+      async () => true,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      { repo: "acme/api", ref: "fix/pr", prTarget: { number: 7, source: "parent" } },
+    );
+    expect(context).toEqual({
+      repo: "acme/api",
+      ref: "fix/pr",
+      prHeadFailure: { code: "http_failed", httpStatus: 403 },
+    });
+    expect(JSON.stringify(context)).not.toContain("private response text");
+  });
+
   it("resolves each parent work target despite another PR in the same conversation", async () => {
     const history = [{ role: "user", text: "Review https://github.com/acme/other/pull/7" }];
     const results = [];

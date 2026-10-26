@@ -33,7 +33,7 @@ import { isRunStopError } from "../../execution/executor.js";
 import { shellQuote } from "../../execution/shellQuote.js";
 import { seedDoorRemote } from "../../execution/seedPlan.js";
 import { parseRevParseOutput } from "../reviewedHead.js";
-import { checkPrHeadPreflight, guardAttachedHead } from "../reviewRound.js";
+import { checkPrHeadPreflight, guardAttachedHead, prHeadFailureText } from "../reviewRound.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { ChannelIO, IncomingMessage, StatusHandle } from "../types.js";
@@ -400,10 +400,24 @@ export async function authorizePrHead(
       agent.name !== "review" || !/^[0-9a-f]{40}$/i.test(requestedHead)
         ? "review-head requires one full commit SHA on a review request."
         : `Requested review head \`${requestedHead}\` does not match the current head \`${repoCtx.headSha ?? "unknown"}\`.`;
-    await refuse(refusalOf("workspace_head_mismatch", `${reason} No review started or was posted to GitHub.`), () =>
-      card.done(
-        shell.close({ kind: "not_started", icon: "🔀", reason: "review head mismatch", ...closeLines(clock(), false) }),
+    const failure =
+      agent.name === "review" && /^[0-9a-f]{40}$/i.test(requestedHead)
+        ? prHeadFailureText(repoCtx.prHeadFailure)
+        : undefined;
+    await refuse(
+      refusalOf(
+        "workspace_head_mismatch",
+        `${reason}${failure ? ` ${failure}.` : ""} No review started or was posted to GitHub.`,
       ),
+      () =>
+        card.done(
+          shell.close({
+            kind: "not_started",
+            icon: "🔀",
+            reason: "review head mismatch",
+            ...closeLines(clock(), false),
+          }),
+        ),
     );
     return { kind: "refused", reason: "workspace_head_mismatch" };
   }
@@ -422,8 +436,12 @@ export async function authorizePrHead(
       repoCtx.baseRef !== bound.baseRef ||
       repoCtx.headSha?.toLowerCase() !== bound.expectedHeadSha.toLowerCase())
   ) {
+    const failure = prHeadFailureText(repoCtx.prHeadFailure);
     await refuse(
-      refusalOf("workspace_head_mismatch", "The review target changed from its saved pull request and commit."),
+      refusalOf(
+        "workspace_head_mismatch",
+        `The review target changed from its saved pull request and commit.${failure ? ` ${failure}.` : ""}`,
+      ),
       () =>
         card.done(
           shell.close({
