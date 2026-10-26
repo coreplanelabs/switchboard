@@ -54,6 +54,15 @@ updates:
       # Revisit when the OpenCode pin moves; imageOpenCodeHarness.test.ts
       # checks the decoder against both packages' declared dependency.
       - dependency-name: "effect"
+      # The pi runtime and CLI must match the versions in all three images.
+      # Move these pins together after the provider conformance suite passes.
+      - dependency-name: "@earendil-works/pi-ai"
+      - dependency-name: "@earendil-works/pi-coding-agent"
+      # OpenCode's CLI, protocol, and schema must match the client and images.
+      # Move these pins with Effect after the harness suite passes.
+      - dependency-name: "@opencode/cli"
+      - dependency-name: "@opencode/protocol"
+      - dependency-name: "@opencode/schema"
       # The @cloudflare/sandbox SDK and the container image it drives are one
       # protocol in two artifacts; `check:sandbox-pair` fails verify when a
       # package pin and its Dockerfile tag differ. They move together, by hand,
