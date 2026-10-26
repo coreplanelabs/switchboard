@@ -27,6 +27,255 @@ describe("paging failure artifact", () => {
   });
 });
 
+describe("production smoke without redeploy", () => {
+  const workflow = parse(readFileSync(".github/workflows/smoke-production.yml", "utf8")) as any;
+  const steps = workflow.jobs.smoke.steps as {
+    name?: string;
+    run?: string;
+    env?: Record<string, string>;
+    if?: string;
+  }[];
+
+  it("uses one protected manual run and refuses a moved verifier, repeated attempt, or wrong deploy receipt", () => {
+    expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
+    expect(workflow.jobs.smoke.environment).toBe("production");
+    expect(workflow.jobs.smoke.concurrency).toEqual({ group: "deploy-production", "cancel-in-progress": false });
+    expect(workflow.jobs.smoke.permissions).toEqual({ contents: "read", actions: "read" });
+    expect(workflow.jobs.smoke["timeout-minutes"]).toBeLessThanOrEqual(60);
+
+    const fence = steps.find((step) => step.name === "fence one attempt and the deployed release")!;
+    const dir = mkdtempSync(path.join(tmpdir(), "smoke-only-fence-"));
+    const verifier = "a".repeat(40);
+    const build = "e".repeat(40);
+    const deployment = {
+      workflowName: "deploy-production",
+      headSha: build,
+      conclusion: "success",
+      event: "workflow_dispatch",
+      jobs: [
+        {
+          conclusion: "success",
+          steps: [
+            { name: "deploy", conclusion: "success" },
+            { name: "what is live", conclusion: "success" },
+          ],
+        },
+      ],
+    };
+    try {
+      writeFileSync(
+        path.join(dir, "gh"),
+        '#!/bin/sh\nif [ "$1" = api ]; then printf "%s\\n" "$TEST_MAIN"; else printf "%s\\n" "$TEST_DEPLOYMENT_JSON"; fi\n',
+        { mode: 0o755 },
+      );
+      const base = {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        RUNNER_TEMP: dir,
+        GITHUB_REF: "refs/heads/main",
+        GITHUB_RUN_ATTEMPT: "1",
+        GITHUB_SHA: verifier,
+        GITHUB_REPOSITORY: "acme/widget",
+        EXPECTED_BUILD: build,
+        FIXTURE_HEAD: "f".repeat(40),
+        RELEASE_TAG: "v1.2.3",
+        DEPLOYMENT_RUN_ID: "12345",
+        TEST_MAIN: verifier,
+        TEST_DEPLOYMENT_JSON: JSON.stringify(deployment),
+      };
+      const run = (env: Record<string, string>) => spawnSync("bash", ["-c", fence.run!], { env: { ...base, ...env } });
+      const passed = run({});
+      expect(passed.status, passed.stderr.toString()).toBe(0);
+      expect(run({ TEST_MAIN: "b".repeat(40) }).status).toBe(1);
+      expect(run({ GITHUB_RUN_ATTEMPT: "2" }).status).toBe(1);
+      expect(run({ TEST_DEPLOYMENT_JSON: JSON.stringify({ ...deployment, headSha: "f".repeat(40) }) }).status).toBe(1);
+      expect(JSON.parse(readFileSync(path.join(dir, "smoke-receipt.json"), "utf8"))).toMatchObject({
+        capabilityOutcome: "incomplete",
+        reason: "preflight_unproven",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("pins the disposable Review target and requires Sandbox observation authority before admission", () => {
+    expect(steps.find((step) => step.name === "one production capability smoke")?.env?.CLOUDFLARE_API_TOKEN).toBe(
+      "${{ secrets.CLOUDFLARE_DEPLOY_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}",
+    );
+    const config = steps.find((step) => step.name === "verify dedicated smoke configuration")!;
+    const head = "f".repeat(40);
+    const fixture = {
+      disposable: true,
+      channel: "release-smoke",
+      subject: "release-smoke",
+      repo: "acme/switchboard-release-smoke",
+      workspace: { path: "SMOKE.txt", answer: "fixture" },
+      review: { number: 1, head },
+      maxObservedUsd: 1,
+    };
+    const base = {
+      ...process.env,
+      SWITCHBOARD_DEPLOY_PROFILE: "github://acme/config/profile.json@main",
+      SMOKE_INGRESS_TOKEN: "fixture",
+      SMOKE_INGRESS_ORIGIN: "https://smoke.test",
+      SMOKE_INGRESS_CONFIG: JSON.stringify(fixture),
+      SANDBOX_TOKEN: "fixture",
+      RESIDENT_READ_TOKEN: "fixture",
+      HAS_CLOUDFLARE_TOKEN: "true",
+      SMOKE_ACCESS_CLIENT_ID: "",
+      SMOKE_ACCESS_CLIENT_SECRET: "",
+      CONFIG_REPO_NAME: "",
+      HAS_APP_CREDENTIALS: "false",
+      GITHUB_REPOSITORY_OWNER: "acme",
+      FIXTURE_HEAD: head,
+    };
+    const run = (env: Record<string, string>) => spawnSync("bash", ["-c", config.run!], { env: { ...base, ...env } });
+    const passed = run({});
+    expect(passed.status, passed.stderr.toString()).toBe(0);
+    expect(run({ HAS_CLOUDFLARE_TOKEN: "false" }).status).toBe(1);
+    expect(run({ SMOKE_INGRESS_CONFIG: JSON.stringify({ ...fixture, repo: "acme/other" }) }).status).toBe(1);
+    expect(
+      run({ SMOKE_INGRESS_CONFIG: JSON.stringify({ ...fixture, review: { number: 1, head: "a".repeat(40) } }) }).status,
+    ).toBe(1);
+    expect(
+      run({ SMOKE_INGRESS_CONFIG: JSON.stringify({ ...fixture, workspace: { path: "OTHER.txt", answer: "fixture" } }) })
+        .status,
+    ).toBe(1);
+  });
+
+  it("requires four exact live builds and an undrained Resident before reader preflight and one admission", () => {
+    const names = steps.map((step) => step.name);
+    const index = (name: string) => names.indexOf(name);
+    const render = steps.find((step) => step.name === "render profile-bound Worker configs")!;
+    expect(render.run).toBe("npm run deploy:gen");
+    expect(render.env?.CONFIG_REPO_TOKEN).toBe("${{ steps.infra-token.outputs.token }}");
+    expect(JSON.parse(readFileSync("package.json", "utf8")).scripts["deploy:gen"]).toBe(
+      "npm run --silent cli -- deploy init",
+    );
+    expect(index("fence one attempt and the deployed release")).toBeLessThan(
+      index("render profile-bound Worker configs"),
+    );
+    expect(index("render profile-bound Worker configs")).toBeLessThan(index("read the fleet plan"));
+    expect(index("read the fleet plan")).toBeLessThan(index("verify all live Workers and the smoke reader"));
+    expect(index("verify all live Workers and the smoke reader")).toBeLessThan(
+      index("one production capability smoke"),
+    );
+    expect(steps.find((step) => step.name === "smoke acceptance artifact")?.if).toBe("always()");
+    expect(JSON.stringify(steps)).not.toMatch(/deploy all|deploy images|resident:retire|--force/);
+
+    const live = steps.find((step) => step.name === "verify all live Workers and the smoke reader")!;
+    const smoke = steps.find((step) => step.name === "one production capability smoke")!;
+    expect(smoke.env?.SMOKE_INGRESS_THREAD).toBe("smoke-${{ github.run_id }}-${{ github.run_attempt }}");
+    expect(smoke.run).toContain("smoke:ingress");
+    const dir = mkdtempSync(path.join(tmpdir(), "smoke-only-live-"));
+    const build = "e".repeat(40);
+    try {
+      writeFileSync(
+        path.join(dir, "smoke-fleet.json"),
+        JSON.stringify({
+          steps: [
+            { name: "bot", healthUrl: "https://bot.test/healthz" },
+            { name: "memory", wakeUrl: "https://memory.test/healthz" },
+            { name: "resident", wakeUrl: "https://resident.test/healthz", drain: { url: "https://resident.test" } },
+            { name: "sandbox", healthUrl: "https://sandbox.test/healthz", liveGate: { bearerEnv: "SANDBOX_TOKEN" } },
+          ],
+        }),
+      );
+      writeFileSync(
+        path.join(dir, "curl"),
+        `#!/bin/sh
+for url do :; done
+case "$url" in
+  */residents) printf '%s\\n' "$TEST_RESIDENT_JSON" ;;
+  *sandbox*) printf '{"ok":true,"build":{"commit":"%s"}}\\n' "$TEST_SANDBOX_BUILD" ;;
+  *bot*) printf '{"ok":true,"build":{"commit":"%s"},"draining":false}\\n' "$EXPECTED_BUILD" ;;
+  *) printf '{"ok":true,"build":{"commit":"%s"}}\\n' "$EXPECTED_BUILD" ;;
+esac
+`,
+        { mode: 0o755 },
+      );
+      writeFileSync(path.join(dir, "npm"), '#!/bin/sh\nprintf "%s\\n" "$*" > "$TEST_NPM_CALL"\n', { mode: 0o755 });
+      const legacyRow = { resource: "repo:fixture/smoke", live: { imageReport: "current" } };
+      const legacyRegistry = { draining: null, count: 1, residents: [legacyRow] };
+      const twoCopyRegistry = {
+        draining: null,
+        count: 2,
+        pendingReplicas: 0,
+        residents: [
+          { ...legacyRow, residentId: "resident-a" },
+          { ...legacyRow, residentId: "resident-b" },
+        ],
+      };
+      const base = {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        RUNNER_TEMP: dir,
+        EXPECTED_BUILD: build,
+        SANDBOX_TOKEN: "fixture",
+        RESIDENT_READ_TOKEN: "fixture",
+        TEST_SANDBOX_BUILD: build,
+        TEST_RESIDENT_JSON: JSON.stringify(legacyRegistry),
+        TEST_NPM_CALL: path.join(dir, "npm-call"),
+      };
+      const run = (env: Record<string, string>) => {
+        rmSync(base.TEST_NPM_CALL, { force: true });
+        return spawnSync("bash", ["-c", live.run!], { env: { ...base, ...env } });
+      };
+      const passed = run({});
+      expect(passed.status, passed.stderr.toString()).toBe(0);
+      expect(readFileSync(base.TEST_NPM_CALL, "utf8")).toContain("--check --check-reader");
+      const twoCopies = run({ TEST_RESIDENT_JSON: JSON.stringify(twoCopyRegistry) });
+      expect(twoCopies.status, twoCopies.stderr.toString()).toBe(0);
+      expect(run({ TEST_SANDBOX_BUILD: "f".repeat(40) }).status).toBe(1);
+      expect(existsSync(base.TEST_NPM_CALL)).toBe(false);
+      expect(run({ TEST_RESIDENT_JSON: JSON.stringify({ ...legacyRegistry, pendingReplicas: 1 }) }).status).toBe(1);
+      expect(existsSync(base.TEST_NPM_CALL)).toBe(false);
+      expect(run({ TEST_RESIDENT_JSON: JSON.stringify({ ...twoCopyRegistry, pendingReplicas: 1 }) }).status).toBe(1);
+      expect(existsSync(base.TEST_NPM_CALL)).toBe(false);
+      expect(
+        run({
+          TEST_RESIDENT_JSON: JSON.stringify({
+            ...twoCopyRegistry,
+            residents: [
+              { ...legacyRow, residentId: "resident-a" },
+              { ...legacyRow, residentId: "resident-a" },
+            ],
+          }),
+        }).status,
+      ).toBe(1);
+      expect(existsSync(base.TEST_NPM_CALL)).toBe(false);
+      expect(
+        run({ TEST_RESIDENT_JSON: JSON.stringify({ ...legacyRegistry, draining: { kind: "busy" } }) }).status,
+      ).toBe(1);
+      expect(existsSync(base.TEST_NPM_CALL)).toBe(false);
+      expect(
+        run({
+          TEST_RESIDENT_JSON: JSON.stringify({
+            ...legacyRegistry,
+            residents: [{ ...legacyRow, live: { imageReport: "stale" } }],
+          }),
+        }).status,
+      ).toBe(1);
+      expect(existsSync(base.TEST_NPM_CALL)).toBe(false);
+      expect(
+        run({
+          TEST_RESIDENT_JSON: JSON.stringify({
+            ...legacyRegistry,
+            residents: [{ ...legacyRow, live: { imageReport: "current", error: "unavailable" } }],
+          }),
+        }).status,
+      ).toBe(1);
+      expect(existsSync(base.TEST_NPM_CALL)).toBe(false);
+      expect(run({ TEST_RESIDENT_JSON: JSON.stringify({ ...legacyRegistry, count: 2 }) }).status).toBe(1);
+      expect(existsSync(base.TEST_NPM_CALL)).toBe(false);
+      expect(run({ TEST_RESIDENT_JSON: JSON.stringify({ draining: null, count: 0, residents: [] }) }).status).toBe(1);
+      expect(existsSync(base.TEST_NPM_CALL)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("Sandbox verification workflow", () => {
   it("failed inner inspection fails the step after retaining its report", () => {
     const workflow = parse(readFileSync(".github/workflows/verify-sandbox.yml", "utf8"));
