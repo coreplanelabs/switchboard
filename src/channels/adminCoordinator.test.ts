@@ -16999,6 +16999,23 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
   };
 
+  const endSetupRefusal = (child: RunRecord): void => {
+    if (child.finishedAt === undefined) throw new Error("A finished setup record needs its ending time");
+    const refusalIndex = child.events.findIndex((event) => event.type === "refusal" && event.code === "setup_failed");
+    if (refusalIndex < 0) throw new Error("A setup refusal needs its refusal event");
+    child.events.splice(refusalIndex + 1, 0, {
+      type: "run_state",
+      state: "ended",
+      since: child.finishedAt,
+      at: child.finishedAt,
+      cause: "failed",
+    });
+    child.events = child.events.map((event, index) => ({ ...event, seq: index + 1 }));
+    child.eventCount = child.events.length;
+    child.storedEventCount = child.events.length;
+    child.liveState = { state: "ended", since: child.finishedAt };
+  };
+
   it("renews one expired no-work findings lease on the original unit and replays the same claim", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
     await h.instances.put({ ...recoveryInstance(), grant: { renewals: 1, costCapUsd: 2 } });
@@ -17301,37 +17318,38 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     return { h, row, child };
   };
 
-  it.each(["coding", "findings"] as const)(
-    "prices the complete admitted %s attach refusal at zero while preserving prior spend and input target",
-    async (stage) => {
-      const { h, child } = await admittedCodingBudgetHarness(stage);
-      expect(child.events).toHaveLength(21);
-      expect(child.events.slice(12, 17).map((event) => event.type)).toEqual([
-        "run_state",
-        "span_end",
-        "span_start",
-        "span_end",
-        "refusal",
-      ]);
-      expect(await callRecovery(h)).toMatchObject({ status: 200 });
-      const [claimed] = await h.instances.listUnits(INSTANCE.id);
-      expect(claimed?.recovery).toMatchObject({
-        kind: "findings",
-        expectedHeadSha: HEAD,
-        remainingMs: minutesToMs(60),
-        accounting: {
-          spendUsd: 0.25,
-          renewalsSpent: 0,
-          grant: { renewals: 0, costCapUsd: 0.5 },
-          children: expect.arrayContaining([
-            { runId: child.id, key: child.idempotencyKey, usd: 0 },
-            { runId: "run-original-review", key: `${INSTANCE.id}:U12/1/review`, usd: 0.25 },
-          ]),
-        },
-      });
-      expect(h.dispatched).toEqual([]);
-    },
-  );
+  it.each([
+    ["coding", false],
+    ["coding", true],
+    ["findings", false],
+    ["findings", true],
+  ] as const)("prices the complete admitted %s attach refusal with ended=%s at zero", async (stage, ended) => {
+    const { h, child } = await admittedCodingBudgetHarness(stage, ended ? endSetupRefusal : undefined);
+    expect(child.events.slice(12, 17).map((event) => event.type)).toEqual([
+      "run_state",
+      "span_end",
+      "span_start",
+      "span_end",
+      "refusal",
+    ]);
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "findings",
+      expectedHeadSha: HEAD,
+      remainingMs: minutesToMs(60),
+      accounting: {
+        spendUsd: 0.25,
+        renewalsSpent: 0,
+        grant: { renewals: 0, costCapUsd: 0.5 },
+        children: expect.arrayContaining([
+          { runId: child.id, key: child.idempotencyKey, usd: 0 },
+          { runId: "run-original-review", key: `${INSTANCE.id}:U12/1/review`, usd: 0.25 },
+        ]),
+      },
+    });
+    expect(h.dispatched).toEqual([]);
+  });
 
   it.each([
     "model activity",
@@ -17404,9 +17422,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     },
   );
 
-  it.each(["preparing", "drain"] as const)(
-    "prices a complete %s setup refusal carrying only its resolved input target at zero",
-    async (phase) => {
+  it.each([
+    ["preparing", false],
+    ["preparing", true],
+    ["drain", false],
+    ["drain", true],
+  ] as const)(
+    "prices a complete %s setup refusal with ended=%s and its resolved input target at zero",
+    async (phase, ended) => {
       const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
       await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
       await h.instances.putUnits([setupRefusalRow()]);
@@ -17423,6 +17446,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         headSha: HEAD,
         seq: 2,
       };
+      if (ended) endSetupRefusal(child);
       await h.store.put(child);
       expect(await callRecovery(h)).toMatchObject({ status: 200 });
       const [claimed] = await h.instances.listUnits(INSTANCE.id);
@@ -18043,6 +18067,48 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.recoveries).toHaveLength(1);
     expect(h.dispatched).toEqual([]);
   });
+
+  it.each(["after attach start", "before attach start"] as const)(
+    "recovers an ended review setup refusal when memory read ends %s",
+    async (order) => {
+      const { h, fixed } = await admittedReviewWithRefusalReply((child) => {
+        if (order === "before attach start")
+          [child.events[13], child.events[14]] = [child.events[14]!, child.events[13]!];
+        endSetupRefusal(child);
+      });
+      expect(await callRecovery(h)).toMatchObject({
+        status: 200,
+        body: { diagnostic: { reviewStart: "verified_no_work", runId: "run-h2-attach" } },
+      });
+      const [claimed] = await h.instances.listUnits(INSTANCE.id);
+      expect(claimed?.recovery).toMatchObject({
+        kind: "review",
+        expectedHeadSha: fixed,
+        accounting: { children: expect.arrayContaining([expect.objectContaining({ runId: "run-h2-attach", usd: 0 })]) },
+      });
+    },
+  );
+
+  it.each(["wrong cause", "missing terminal event", "work after terminal"] as const)(
+    "refuses an ended setup record with %s before claiming recovery",
+    async (scenario) => {
+      const { h, row } = await admittedReviewWithRefusalReply((child) => {
+        endSetupRefusal(child);
+        const terminalIndex = child.events.findIndex((event) => event.type === "run_state" && event.state === "ended");
+        if (scenario === "wrong cause")
+          child.events[terminalIndex] = { ...child.events[terminalIndex], cause: "completed" } as RunEvent;
+        if (scenario === "missing terminal event") child.events.splice(terminalIndex, 1);
+        if (scenario === "work after terminal")
+          child.events.splice(terminalIndex + 1, 0, { type: "tool_call", tool: "bash", summary: "git status" });
+        child.events = child.events.map((event, index) => ({ ...event, seq: index + 1 }));
+        child.eventCount = child.events.length;
+        child.storedEventCount = child.events.length;
+      });
+      expect((await callRecovery(h)).status).toBe(409);
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    },
+  );
 
   it.each([
     "reversed cleanup pairs",

@@ -1087,11 +1087,12 @@ export async function dispatch(
   // recorded (a setup failure's silent close, then its error reply).
   let refusalRecorded = false;
   let operatorEvent: OperatorEventFields | undefined;
-  let setupFinalizer: (() => void) | undefined;
+  let setupFinalizer: (() => Promise<void>) | undefined;
   let setupRefusal: Refusal | undefined;
   let setupFailure: RunFailure | undefined;
   let setupFinished = false;
   let setupCustodyHeld = false;
+  let setupTerminalStateHeld = false;
   let nativeClaimHeld = false;
   let setupUntrackedWhy: string | undefined;
   const audienceTrace: AudienceTrace = { refusal: audienceRefusalOf(resume?.row.state.audienceRefusal) };
@@ -3727,7 +3728,7 @@ export async function dispatch(
     const installSetupFinalizer = (runId: string, channelVisibility: ChannelVisibility) => {
       const reservation = reserved;
       // The same finalizer serves every admitted run.
-      setupFinalizer = () => {
+      setupFinalizer = async () => {
         if (setupFinished || setupCustodyHeld || runLoopStarted || fencedWhileAttaching) return;
         setupFinished = true;
         const status =
@@ -3736,7 +3737,7 @@ export async function dispatch(
             : stoppedWhileAttaching === "soft"
               ? "stopped_soft"
               : "failed";
-        finishSetupRun(deps, {
+        const finish = await finishSetupRun(deps, {
           audience: audienceTrace,
           runId,
           registry,
@@ -3758,6 +3759,38 @@ export async function dispatch(
           ...(runSetup !== undefined ? { setup: runSetup } : {}),
           refusal: setupRefusal ?? refusalOf("setup_failed", "The run ended before its model started."),
         });
+        if (!finish.ok) {
+          console.warn(`[dispatch] ${msg.threadKey} run ${runId} setup terminal state unconfirmed (${finish.reason})`);
+          if (
+            fencedWhileAttaching ||
+            finish.reason === "fenced" ||
+            finish.reason === "unknown-run" ||
+            finish.reason === "missing-run"
+          ) {
+            fencedWhileAttaching = true;
+            return;
+          }
+          setupCustodyHeld = true;
+          setupTerminalStateHeld = true;
+          resumeRowRetained = true;
+          if (admitted) admitted.unknownClaim = { runId };
+          const original = registry.getById(runId);
+          if (reservation?.tracked() && original)
+            deps.threadsElsewhere.remember(msg.threadKey, {
+              runId,
+              agent: original.agent,
+              startedAt: original.startedAt,
+            });
+          const text =
+            "I could not confirm that the original run ended. The original run remains on hold. A Switchboard operator needs to check it before work can continue.";
+          if (setupCard && setupShell)
+            await setupCard
+              .done(setupShell.close({ kind: "setup_failed", reason: text, ...closeLines(clock(), false) }))
+              .catch(() => {});
+          const link = admitted?.runLink;
+          await io.reply(link ? `${text}\n\n[Live run](${link})` : text).catch(() => {});
+          return;
+        }
         try {
           io.runFinished?.({ id: runId, status });
         } catch {
@@ -5816,7 +5849,8 @@ export async function dispatch(
       setupRefusal ??= thrown ?? refusalOf("setup_failed", errMsg);
       if (fleetBusyEndingFactsOf(err) !== undefined) setupFailure = { kind: "sandbox_fleet_busy" };
       runSetup ??= lostSetupOf(err);
-      setupFinalizer();
+      await setupFinalizer();
+      if (setupCustodyHeld || fencedWhileAttaching) return ended;
     }
     // A run the full sandbox fleet ended is one queryable line in the bot's
     // own log (docs/reference/specs/execution.md item 14) — this line is what a log sweep
@@ -5892,7 +5926,7 @@ export async function dispatch(
     clearInterval(setupHeartbeat); // a refusal or a setup failure ended the request before the run loop took the card
     // Every admitted run has a terminal same-id path, including a refusal
     // returned before the model loop.
-    setupFinalizer?.();
+    await setupFinalizer?.();
     // The backstop: a finished run no reply attempt reached (a fenced run, a
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
@@ -6006,11 +6040,20 @@ export async function dispatch(
       if (pending.ledgerSeq === undefined)
         await pending.io?.reply("This reply was not saved with the run and will not be processed.").catch(() => {});
     }
+    if (setupTerminalStateHeld && admitted) {
+      const durable = [];
+      for (const pending of admitted.inbox.drain()) {
+        if (pending.ledgerSeq !== undefined) durable.push(pending);
+        else
+          await pending.io?.reply("This reply was not saved with the run and will not be processed.").catch(() => {});
+      }
+      admitted.inbox.requeue(durable);
+    }
     const settled = settleThread(deps, {
       msg,
       // An unknown native claim has no confirmed row for queued work. Keep
       // its local slot so settlement cannot start a replacement request.
-      admitted: fencedWhileAttaching || nativeClaimHeld ? undefined : admitted,
+      admitted: fencedWhileAttaching || nativeClaimHeld || setupTerminalStateHeld ? undefined : admitted,
       // A stop that ended the attach counts as the loop's stop would: the
       // request ends `stopped`, and a follow-up queued during the wait is told.
       stopCounts:

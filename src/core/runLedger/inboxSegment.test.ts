@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_RECORD_BYTES } from "../runRecord.js";
-import { closeInboxSegment, encodeInboxSegment, inboxSegmentFloor } from "./inboxSegment.js";
+import { closeInboxSegment, closedInboxUnreadStep, encodeInboxSegment, inboxSegmentFloor } from "./inboxSegment.js";
 import type { LiveRunRow, StepRecord } from "./types.js";
 
 const row: LiveRunRow = {
@@ -29,6 +29,36 @@ const step: StepRecord = {
 };
 
 describe("private inbox segment archive", () => {
+  it("retains an unread setup input after the ended assignment moves the row to finishing", () => {
+    const terminal = {
+      ...row,
+      phase: "finishing" as const,
+      liveState: { state: "ended" as const, since: 2_000 },
+      state: { setupInboxUnconsumed: true },
+    };
+    const owner = {
+      runId: row.runId,
+      gen: row.ownerGen,
+      channelId: row.meta.channelId,
+      threadKey: row.threadKey,
+      requester: row.meta.userId,
+      startedAt: row.startedAt,
+      inboxSeq: 1,
+    };
+    const archive = closeInboxSegment(undefined, terminal, null, 1);
+    expect(closedInboxUnreadStep(archive, owner)).toEqual({ lastStep: null });
+    expect(inboxSegmentFloor(archive, terminal)).toBe(0);
+    expect(
+      closedInboxUnreadStep(closeInboxSegment(undefined, { ...terminal, state: {} }, null, 1), owner),
+    ).toBeUndefined();
+    expect(
+      closedInboxUnreadStep(
+        closeInboxSegment(undefined, { ...terminal, liveState: { state: "preparing", since: 2_000 } }, null, 1),
+        owner,
+      ),
+    ).toBeUndefined();
+  });
+
   it("rejects the non-ASCII counterexample that fits character count but exceeds the existing byte ceiling", () => {
     const original = { ...step, padding: "雪".repeat(300_000) };
     const archive = closeInboxSegment(undefined, row, original, 1);

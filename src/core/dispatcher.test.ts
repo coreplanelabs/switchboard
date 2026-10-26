@@ -5027,6 +5027,7 @@ describe("executor provisioning by agent resources", () => {
   it("releases a review workspace when setup fails after attach", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.admission = new ThreadAdmission();
     const registry = new RunRegistry();
     deps.runRegistry = registry;
     const ledger = new InMemoryRunLedger();
@@ -5035,10 +5036,12 @@ describe("executor provisioning by agent resources", () => {
     deps.runStore = ledgerBackedStore(ledger, store);
     const writer = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
     deps.runHistoryWriter = writer;
-    const commit = registry.commitLiveState.bind(registry);
-    vi.spyOn(registry, "commitLiveState").mockImplementation((id, assignment) =>
-      assignment.liveState.state === "preparing" ? false : commit(id, assignment),
-    );
+    class BrokenMcp extends NullMcpToolSource {
+      override async toolsFor(): Promise<never> {
+        throw new Error("tool discovery unavailable");
+      }
+    }
+    deps.mcp = new BrokenMcp();
     const release = vi.fn(async () => ({ released: ledger.finished.size === 1 }));
     vi.mocked(makeExecutor).mockResolvedValueOnce({
       executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
@@ -5055,6 +5058,7 @@ describe("executor provisioning by agent resources", () => {
   it("keeps a setup workspace when its original terminal write cannot be confirmed", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.admission = new ThreadAdmission();
     const registry = new RunRegistry();
     deps.runRegistry = registry;
     const inner = new InMemoryRunLedger();
@@ -5073,10 +5077,12 @@ describe("executor provisioning by agent resources", () => {
     deps.runStore = ledgerBackedStore(ledger, store);
     const writer = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
     deps.runHistoryWriter = writer;
-    const commit = registry.commitLiveState.bind(registry);
-    vi.spyOn(registry, "commitLiveState").mockImplementation((id, assignment) =>
-      assignment.liveState.state === "preparing" ? false : commit(id, assignment),
-    );
+    class BrokenMcp extends NullMcpToolSource {
+      override async toolsFor(): Promise<never> {
+        throw new Error("tool discovery unavailable");
+      }
+    }
+    deps.mcp = new BrokenMcp();
     const release = vi.fn(async () => ({ released: true }));
     vi.mocked(makeExecutor).mockResolvedValueOnce({
       executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
@@ -5088,6 +5094,150 @@ describe("executor provisioning by agent resources", () => {
     expect(release).not.toHaveBeenCalled();
     expect(inner.live.size).toBe(1);
     expect(inner.finished.size).toBe(0);
+    expect(provider.requests).toEqual([]);
+  });
+
+  it.each([
+    "initial state unavailable",
+    "ledger refusal",
+    "ledger unavailable",
+    "ledger fenced",
+    "registry refusal",
+    "untracked registry refusal",
+  ] as const)("keeps an unfinished setup run when its ended state has %s", async (failure) => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.admission = new ThreadAdmission();
+    const registry = new RunRegistry({ genId: () => "setup-state-held", genToken: () => "tok" });
+    const inner = new InMemoryRunLedger();
+    const refusalReason =
+      failure === "ledger unavailable" ? "unavailable" : failure === "ledger fenced" ? "fenced" : "stale-sequence";
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "assignLiveState" && (failure.startsWith("ledger") || failure === "initial state unavailable"))
+          return async (...args: Parameters<InMemoryRunLedger["assignLiveState"]>) =>
+            args[2].state === (failure === "initial state unavailable" ? "admitted" : "ended")
+              ? { ok: false as const, reason: failure === "initial state unavailable" ? "unavailable" : refusalReason }
+              : target.assignLiveState(...args);
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as InMemoryRunLedger;
+    const store = new InMemoryRunStore();
+    deps.runRegistry = registry;
+    if (failure !== "untracked registry refusal") {
+      deps.runLedger = createLedgerWriteThrough({ ledger, gen: "gen-setup", fallback: store, warn: () => {} });
+      deps.runStore = ledgerBackedStore(ledger, store);
+    } else deps.runStore = store;
+    const writer = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
+    deps.runHistoryWriter = writer;
+    if (failure === "registry refusal" || failure === "untracked registry refusal") {
+      const commit = registry.commitLiveState.bind(registry);
+      vi.spyOn(registry, "commitLiveState").mockImplementation((id, assignment) =>
+        assignment.liveState.state === "ended" ? false : commit(id, assignment),
+      );
+    }
+    let discoveryStarted!: () => void;
+    let failDiscovery!: () => void;
+    const started = new Promise<void>((resolve) => (discoveryStarted = resolve));
+    const discovery = new Promise<never>((_, reject) => {
+      failDiscovery = () => reject(new Error("tool discovery unavailable"));
+    });
+    class BrokenMcp extends NullMcpToolSource {
+      override async toolsFor() {
+        discoveryStarted();
+        return discovery;
+      }
+    }
+    deps.mcp = new BrokenMcp();
+    const release = vi.fn(async () => ({ released: true }));
+    if (failure !== "initial state unavailable")
+      vi.mocked(makeExecutor).mockResolvedValueOnce({
+        executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
+      });
+    const { io, replies } = fakeIO();
+    const original = dispatch(deps, msg("agent:review look at it", "slack:UADMIN"), io);
+    if (failure !== "initial state unavailable") {
+      await started;
+      await dispatch(deps, msg("and check the next point", "slack:UADMIN"), fakeIO().io);
+      failDiscovery();
+    }
+    await original;
+    await writer.settled();
+
+    expect(registry.getById("setup-state-held")).toMatchObject({ finished: false });
+    expect(registry.getById("setup-state-held")?.liveState?.state).toBe(
+      failure === "initial state unavailable" ? undefined : "preparing",
+    );
+    expect(await store.get("setup-state-held")).toBeNull();
+    expect(inner.finished.size).toBe(0);
+    if (failure !== "untracked registry refusal") {
+      expect(inner.live.has("setup-state-held")).toBe(true);
+      if (failure !== "ledger fenced")
+        expect(deps.threadsElsewhere.get("slack:CX:1.0")?.runId).toBe("setup-state-held");
+    }
+    if (failure === "ledger fenced") expect(replies).toEqual([]);
+    else expect(replies.join("\n")).toContain("original run remains on hold");
+    if (failure !== "ledger fenced") expect(release).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+  });
+
+  it("tells a pre-reservation follow-up that a held setup did not save it", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.admission = new ThreadAdmission();
+    const registry = new RunRegistry({ genId: () => "setup-follow-up-held", genToken: () => "tok" });
+    const inner = new InMemoryRunLedger();
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "assignLiveState")
+          return async (...args: Parameters<InMemoryRunLedger["assignLiveState"]>) =>
+            args[2].state === "ended" ? { ok: false as const, reason: "unavailable" } : target.assignLiveState(...args);
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as InMemoryRunLedger;
+    const store = new InMemoryRunStore();
+    deps.runRegistry = registry;
+    deps.runLedger = createLedgerWriteThrough({ ledger, gen: "gen-setup", fallback: store, warn: () => {} });
+    deps.runStore = ledgerBackedStore(ledger, store);
+    deps.runHistoryWriter = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
+    const reserve = deps.runLedger.reserve.bind(deps.runLedger);
+    let reachedReserve!: () => void;
+    const atReserve = new Promise<void>((resolve) => (reachedReserve = resolve));
+    let releaseReserve!: () => void;
+    const heldReserve = new Promise<void>((resolve) => (releaseReserve = resolve));
+    deps.runLedger.reserve = async (request) => {
+      reachedReserve();
+      await heldReserve;
+      return reserve(request);
+    };
+    class BrokenMcp extends NullMcpToolSource {
+      override async toolsFor(): Promise<never> {
+        throw new Error("tool discovery unavailable");
+      }
+    }
+    deps.mcp = new BrokenMcp();
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+    });
+    const original = fakeIO();
+    const running = dispatch(deps, msg("agent:review look at it", "slack:UADMIN"), original.io);
+    await atReserve;
+    const early = fakeIO();
+    await dispatch(deps, msg("also check the setup path", "slack:UADMIN"), early.io);
+    releaseReserve();
+    await running;
+    await deps.runHistoryWriter.settled();
+
+    expect(early.replies).toContain("This reply was not saved with the run and will not be processed.");
+    expect(deps.admission.get("slack:CX:1.0")?.unknownClaim).toEqual({ runId: "setup-follow-up-held" });
+    const late = fakeIO();
+    await dispatch(deps, msg("check one more thing", "slack:UADMIN"), late.io);
+    expect(late.replies.join("\n")).toContain("hold");
+    expect(registry.getById("setup-follow-up-held")).toMatchObject({ finished: false });
+    expect(inner.live.has("setup-follow-up-held")).toBe(true);
+    expect(makeExecutor).toHaveBeenCalledTimes(1);
     expect(provider.requests).toEqual([]);
   });
 
@@ -5621,7 +5771,16 @@ describe("executor provisioning by agent resources", () => {
     expect(
       events.find((event) => event.type === "span_end" && event.name === "dispatch.gate.attached_head.reprovision"),
     ).toMatchObject({ status: "error", error: "checkout transport failed token=«redacted»" });
-    expect(read.value).toMatchObject({ status: "failed", diagnosis: { byCategory: { infra_failure: { count: 1 } } } });
+    expect(read.value).toMatchObject({
+      status: "failed",
+      liveState: { state: "ended" },
+      diagnosis: { byCategory: { infra_failure: { count: 1 } } },
+    });
+    expect(events.filter((event) => event.type === "run_state").at(-1)).toMatchObject({
+      state: "ended",
+      cause: "failed",
+      seq: read.value.liveStateSeq,
+    });
     expect(provider.requests).toEqual([]);
     expect(JSON.stringify(events)).not.toContain("private-value");
     const commands = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
@@ -5639,6 +5798,8 @@ describe("executor provisioning by agent resources", () => {
     expect(response).toMatchObject({
       ok: true,
       value: {
+        status: "failed",
+        liveState: { state: "ended" },
         events: expect.arrayContaining([
           expect.objectContaining({
             type: "span_end",
@@ -20461,6 +20622,18 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         await h.writer.settled();
         expect(h.deps.runLedger.open).toHaveBeenCalledOnce();
         const record = await h.store.get("run-l");
+        if (failure === "working-state") {
+          expect(record).toBeNull();
+          expect(h.ledger.live.has("run-l")).toBe(true);
+          expect(h.ledger.finished.size).toBe(0);
+          expect(h.finished).not.toHaveBeenCalled();
+          expect(release).not.toHaveBeenCalled();
+          expect(abandon).not.toHaveBeenCalled();
+          expect(h.provider.requests).toEqual([]);
+          expect(vi.mocked(runPiHarnessOpen)).not.toHaveBeenCalled();
+          expect(h.dispatched).toHaveLength(1);
+          return;
+        }
         expect(record).toMatchObject({
           id: "run-l",
           status: "failed",
@@ -20791,7 +20964,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       }
     });
 
-    it("persists the fallback live-state failure under the advertised id with zero model or tool calls", async () => {
+    it("holds the fallback live-state failure when its terminal state also cannot commit", async () => {
       const h = await setup("review");
       const exec = vi.fn(async () => "");
       vi.mocked(makeExecutor).mockImplementationOnce(async (_config, context) => {
@@ -20808,18 +20981,13 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       await Promise.all(h.dispatched);
       await h.writer.settled();
       const record = await h.store.get("run-l");
-      expect(record).toMatchObject({ id: "run-l", status: "failed", parentInstanceId: h.instance.id });
-      expect(record!.events).toContainEqual(
-        expect.objectContaining({
-          type: "refusal",
-          code: "setup_failed",
-          cause: "system",
-          text: "The fallback live state could not be confirmed: durable-unavailable (unavailable).",
-        }),
-      );
+      expect(record).toBeNull();
+      expect(h.registry.getById("run-l")).toMatchObject({ finished: false });
       expect(h.provider.requests).toEqual([]);
       expect(exec).not.toHaveBeenCalled();
-      expect(h.ledger.live.size).toBe(0);
+      expect(h.ledger.live.size).toBe(1);
+      expect(h.ledger.finished.size).toBe(0);
+      expect(h.finished).not.toHaveBeenCalled();
     });
 
     it.each(["untracked", "fenced", "throw"] as const)(
@@ -24006,7 +24174,21 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(order.indexOf("finish run-1")).toBeLessThan(order.indexOf("claim run-2 ok"));
     expect(order.filter((o) => o.startsWith("claim run-2"))).toEqual(["claim run-2 ok", "claim run-2 ok"]);
     expect(inner.live.has("run-1")).toBe(false);
-    expect(inner.finished.get("run-1")).toMatchObject({ status: "failed", agent: "general", usage: { turns: 0 } });
+    expect(inner.finished.get("run-1")).toMatchObject({
+      status: "failed",
+      agent: "general",
+      liveState: { state: "ended" },
+      usage: { turns: 0 },
+    });
+    expect(
+      inner.finished
+        .get("run-1")!
+        .events.filter((event) => event.type === "run_state")
+        .at(-1),
+    ).toMatchObject({
+      state: "ended",
+      cause: "failed",
+    });
     expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(
       inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
