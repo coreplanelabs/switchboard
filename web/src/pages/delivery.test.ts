@@ -3,6 +3,7 @@ import DeliveryPage from "../../green/pages/Delivery.vue";
 import { mountApp } from "../testing/mount";
 import type { DeliveryReport, PullRequestFacts } from "@core/core/delivery.js";
 import { buildDeliveryReport } from "@core/core/delivery.js";
+import { buildReviewPostBody } from "@core/core/reviewVerdict.js";
 import type { DeliverySeed } from "@core/channels/webSeed.js";
 import { coverageNote, freshHref, hours, monthDay, pct, snapshotTime, tilesOf } from "../lib/delivery";
 
@@ -64,7 +65,18 @@ function report(over: Partial<Parameters<typeof buildDeliveryReport>[0]> = {}): 
             author: REVIEWER,
             state: "commented",
             submittedAt: "2026-09-11T00:05:15Z",
-            body: "Changes requested: one bug.\n- [blocking] F1 a.ts — the bug\n- [nit] F2 b.ts — a nit",
+            body: buildReviewPostBody(
+              "One bug and one small note.",
+              {
+                verdict: "request_changes",
+                summary: "Two findings",
+                findings: [
+                  { id: "F1", severity: "blocking", file: "a.ts", title: "The bug" },
+                  { id: "F2", severity: "nit", file: "b.ts", title: "A small note" },
+                ],
+              },
+              { repo: "acme/api", head: "28837ecbdc07dd578743919c3a071dcd3756a47a" },
+            ),
           },
           { author: REVIEWER, state: "commented", submittedAt: "2026-09-11T00:17:46Z", body: "LGTM: fixed." },
         ],
