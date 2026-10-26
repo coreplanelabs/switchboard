@@ -204,8 +204,16 @@ function overrideContexts(packages, overrides) {
       const owner = record.name ?? path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length);
       const active = [...rules];
       for (const rule of rules) {
-        const nested = rule[owner];
-        if (nested && typeof nested === "object" && !active.includes(nested)) active.push(nested);
+        for (const [key, nested] of Object.entries(rule)) {
+          const matches =
+            key === owner ||
+            (key.startsWith(`${owner}@`) &&
+              typeof record.version === "string" &&
+              semver.satisfies(record.version, key.slice(owner.length + 1)));
+          if (!matches) continue;
+          if (nested && typeof nested === "object" && !active.includes(nested)) active.push(nested);
+          break;
+        }
       }
       const key = `${path}:${active
         .map((rule) => {
