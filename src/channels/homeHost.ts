@@ -53,7 +53,7 @@ export interface HomeHostOptions {
     reader: HomeRuntimeContext,
     request: Omit<OrganizationExecutionRequest, "io">,
     role: "user" | "assistant",
-  ): Promise<import("../core/references/contextDependencies.js").ContextDependencies | undefined>;
+  ): Promise<import("../core/references/contextDependencies.js").ContextDependencies | null | undefined>;
   normalizeHistory?(
     reader: HomeRuntimeContext,
     request: Omit<OrganizationExecutionRequest, "io">,
@@ -189,6 +189,7 @@ export function createHomeHost(options: HomeHostOptions) {
           request,
           entry.role as "user" | "assistant",
         );
+        if (context === null) continue;
         turns.push({
           role: entry.role as "user" | "assistant",
           text: entry.content,

@@ -3982,6 +3982,45 @@ describe("browser installation", () => {
     expect((await s.runStore.put({ ...original!, contextDependencies: undefined })).stored).toBe(true);
     await expect(binding.io.authoritativePrivateHistory!()).rejects.toThrow("history source could not be verified");
   });
+  it("lets a later MCP Review omit a failed setup reply from its history", async () => {
+    const head = "a".repeat(40);
+    const base = "b".repeat(40);
+    const s = await ssoInstallation("access", undefined, (core) => {
+      core.githubCredentials = TEST_GITHUB_CREDENTIALS;
+      core.resolveRepoContext = () => ({
+        repo: "sample/api",
+        ref: "patch-1",
+        baseRef: "main",
+        baseSha: base,
+        pr: 42,
+        headSha: head,
+      });
+      core.fetchPrHead = async () => head;
+      core.fetchPrBase = async () => ({ baseRef: "main", baseSha: base });
+      core.fetchPrFacts = async () => ({
+        state: "open",
+        headRef: "patch-1",
+        baseRef: "main",
+        baseSha: base,
+        headSha: head,
+        headBranchExists: true,
+        sameRepoHead: true,
+        verifiedHead: { repo: "sample/api", ref: "patch-1", sha: head },
+      });
+    });
+    const text = "agent:review https://github.com/sample/api/pull/42";
+    const first = await s.send({ text, thread: "failed-review-setup", idempotencyKey: "first-review" });
+    const firstId = first.wire.result.structuredContent.admission.runId;
+    await s.execute();
+    const failed = await s.runStore.get(firstId);
+    expect(failed?.status).toBe("failed");
+    expect(failed?.events).toContainEqual(expect.objectContaining({ type: "refusal", code: "setup_failed" }));
+
+    const second = await s.send({ text, thread: "failed-review-setup", idempotencyKey: "second-review" });
+    const binding = await s.installation.originalBinding(second.wire.result.structuredContent.admission.runId);
+    if (!binding) throw new Error("No second Review source");
+    expect(await binding.io.authoritativePrivateHistory!()).toEqual([{ role: "user", text, user: "access:alice" }]);
+  });
   it.each(["missing", "unknown"] as const)("withholds retained command output with %s source proof", async (proof) => {
     const s = await ssoInstallation("access");
     const first = await s.send({ text: "memory forget", thread: "command-sources", idempotencyKey: "command" });
