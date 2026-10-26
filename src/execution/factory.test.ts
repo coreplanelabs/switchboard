@@ -4063,6 +4063,42 @@ describe("makeExecutor seeded sandbox", () => {
     expect(calls).toEqual(["/status", "/seed"]);
   });
 
+  it("an uncertain seed process refuses without using a cold checkout", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(degraded(C1), {
+      body: {
+        seeded: false,
+        reason: "seed-uncertain",
+        detail: "fixup: process output did not complete",
+        step: "fixup",
+      },
+    });
+    await expect(makeExecutor(residentOpts(), repoCtx())).rejects.toMatchObject({
+      name: "ReadyEnvironmentError",
+      reason: "seed_outcome_unknown",
+      beforeModel: true,
+    });
+    expect(calls).toEqual(["/status", "/seed"]);
+  });
+
+  it("an uncertain cleanup answer refuses setup before a cold checkout", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(degraded(C1), {
+      body: {
+        seeded: false,
+        reason: "seed-uncertain",
+        detail: "cleanup after fixup: process outcome unknown",
+        step: "fixup",
+      },
+    });
+    await expect(makeExecutor(residentOpts(), repoCtx())).rejects.toMatchObject({
+      name: "ReadyEnvironmentError",
+      reason: "seed_outcome_unknown",
+      beforeModel: true,
+    });
+    expect(calls).toEqual(["/status", "/seed"]);
+  });
+
   it("a failed or unconfigured seed is never retried: the cold path, the refusal on the note", async () => {
     stubEnvs();
     const { calls } = stubFetch(degraded(C1), {

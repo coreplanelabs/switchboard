@@ -139,6 +139,18 @@ import {
   type SeedStep,
 } from "../../src/execution/seedPlan.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
+import {
+  RootProcessOutcomeUnknownError,
+  failedSeedCleanupOutcome,
+  rootProcessOutput,
+} from "../../src/execution/sandboxRootProcess.js";
+import {
+  guardSeedMutation,
+  guardedSeedAttempt,
+  pendingSeedAttemptAnswer,
+  SEED_ATTEMPT_KEY,
+  waitForPendingRestores,
+} from "../../src/execution/seedAttemptFence.js";
 import { CheckoutFence, installRepairCommand } from "../../src/execution/installRepairEffect.js";
 import {
   INSTALL_REPAIR_POLICY_VERSION,
@@ -592,51 +604,57 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   async repairDependencies(owner: PreservationOwner, targetHead: string): Promise<InstallRepairReceipt | null> {
     if (this.ctx.container?.running !== true) return null;
     const result = this.checkoutFence.exclusive(() =>
-      this.idle.served(async () => {
-        if (this.ctx.container?.running !== true || !/^[0-9a-f]{40}$/.test(targetHead)) return null;
-        const record = await this.readLegacyPreservation();
-        if (!record || !sameOwner(record.owner, owner) || this.ctx.id.name !== owner.thread) return null;
-        if (this.ctx.container?.running !== true) return null;
-        // This key belongs to the original run and seed. A lost response may
-        // follow a completed native install; re-entry must inspect, never run it again.
-        const attemptKey = `switchboard.install-repair.attempt:${owner.run}:${owner.seed}`;
-        const prior = await this.inspectRepairDependencies(owner, targetHead);
-        if (prior.kind === "completed") return prior.receipt;
-        if (prior.kind === "unknown") return null;
-        await this.ctx.storage.put(attemptKey, { owner, targetHead });
-        try {
-          const process = await this.ctx.container.exec([
-            "bash",
-            "-c",
-            installRepairCommand(targetHead, owner.container),
-          ]);
-          const output = await process.output();
-          const text = new TextDecoder().decode(output.stdout);
-          const match = /^REPAIRED:([0-9a-f]{64})$/.exec(text);
-          const after = await this.readLegacyPreservation();
-          if (
-            output.exitCode !== 0 ||
-            !match ||
-            !after ||
-            !sameOwner(after.owner, owner) ||
-            this.ctx.container?.running !== true
-          )
-            return null;
-          const receipt = {
-            version: INSTALL_REPAIR_RECEIPT_VERSION,
-            owner,
-            targetHead,
-            policyVersion: INSTALL_REPAIR_POLICY_VERSION,
-            lockfileKey: match[1],
-          } satisfies InstallRepairReceipt;
-          await this.ctx.storage.put(attemptKey, { owner, targetHead, receipt });
-          return receipt;
-        } catch {
-          // Native command may have started before the response was lost. Never
-          // re-send automatically or turn an unknown outcome into a receipt.
-          return null;
-        }
-      }),
+      this.idle.served(() =>
+        guardSeedMutation(
+          () => this.ctx.storage.get(SEED_ATTEMPT_KEY),
+          null as InstallRepairReceipt | null,
+          async () => {
+            if (this.ctx.container?.running !== true || !/^[0-9a-f]{40}$/.test(targetHead)) return null;
+            const record = await this.readLegacyPreservation();
+            if (!record || !sameOwner(record.owner, owner) || this.ctx.id.name !== owner.thread) return null;
+            if (this.ctx.container?.running !== true) return null;
+            // This key belongs to the original run and seed. A lost response may
+            // follow a completed native install; re-entry must inspect, never run it again.
+            const attemptKey = `switchboard.install-repair.attempt:${owner.run}:${owner.seed}`;
+            const prior = await this.inspectRepairDependencies(owner, targetHead);
+            if (prior.kind === "completed") return prior.receipt;
+            if (prior.kind === "unknown") return null;
+            await this.ctx.storage.put(attemptKey, { owner, targetHead });
+            try {
+              const process = await this.ctx.container.exec([
+                "bash",
+                "-c",
+                installRepairCommand(targetHead, owner.container),
+              ]);
+              const output = await process.output();
+              const text = new TextDecoder().decode(output.stdout);
+              const match = /^REPAIRED:([0-9a-f]{64})$/.exec(text);
+              const after = await this.readLegacyPreservation();
+              if (
+                output.exitCode !== 0 ||
+                !match ||
+                !after ||
+                !sameOwner(after.owner, owner) ||
+                this.ctx.container?.running !== true
+              )
+                return null;
+              const receipt = {
+                version: INSTALL_REPAIR_RECEIPT_VERSION,
+                owner,
+                targetHead,
+                policyVersion: INSTALL_REPAIR_POLICY_VERSION,
+                lockfileKey: match[1],
+              } satisfies InstallRepairReceipt;
+              await this.ctx.storage.put(attemptKey, { owner, targetHead, receipt });
+              return receipt;
+            } catch {
+              // Native command may have started before the response was lost. Never
+              // re-send automatically or turn an unknown outcome into a receipt.
+              return null;
+            }
+          },
+        ),
+      ),
     );
     return result ?? null;
   }
@@ -706,19 +724,31 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   ): Promise<ExecAnswer | ExecFailure> {
     const startedAt = systemClock();
     return this.checkoutFence.shared(() =>
-      this.idle.served(async () => {
-        try {
-          return await this.gate.through(
-            () => this.execute(command, execTimeoutSecs, envVars),
-            (cause) => sandboxStartingExecAnswer(cause),
-          );
-        } catch (err) {
-          // The warm-up's own failure, handed on by the gate: a full fleet, a
-          // refused connect or a silent control port keeps its name; anything
-          // else propagates. Nothing ran — the warm-up is a spawn.
-          return this.spawnFailure(err, startedAt);
-        }
-      }),
+      this.idle.served(() =>
+        guardSeedMutation(
+          () => this.ctx.storage.get(SEED_ATTEMPT_KEY),
+          {
+            error: "saved workspace setup has an unknown outcome",
+            reason: "seed-uncertain",
+            stdout: "",
+            stderr: "saved workspace setup has an unknown outcome",
+            exitCode: 127,
+          } satisfies ExecFailure,
+          async () => {
+            try {
+              return await this.gate.through(
+                () => this.execute(command, execTimeoutSecs, envVars),
+                (cause) => sandboxStartingExecAnswer(cause),
+              );
+            } catch (err) {
+              // The warm-up's own failure, handed on by the gate: a full fleet, a
+              // refused connect or a silent control port keeps its name; anything
+              // else propagates. Nothing ran — the warm-up is a spawn.
+              return this.spawnFailure(err, startedAt);
+            }
+          },
+        ),
+      ),
     );
   }
 
@@ -813,6 +843,16 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     }
     return this.checkoutFence.shared(() =>
       this.idle.served(async () => {
+        let held: boolean;
+        try {
+          held = (await this.ctx.storage.get(SEED_ATTEMPT_KEY)) !== undefined;
+        } catch {
+          held = true;
+        }
+        if (held) {
+          console.log(JSON.stringify({ event: "sandbox.seed-held", slug: seed.slug }));
+          return pendingSeedAttemptAnswer();
+        }
         // Commit the fence before any restore can create (or erase) a checkout.
         // A failed seed still leaves uncertainty; only terminal ownership could
         // ever release this classification, not a missing marker or a new boot.
@@ -862,45 +902,56 @@ export class SwitchboardSandbox extends Sandbox<Env> {
                 } as SeedAnswer;
               }
             }
-            const answer = await this.seedNow(seed, envVars, !!prior);
-            if (!answer.seeded || !claim) return answer;
-            // Only a cached answer may reuse the prior binding; never give a
-            // fresh result the owner's receipt, even if its HEAD happens to fit.
-            if (prior && !answer.cached)
-              return {
-                seeded: false,
-                reason: "seed-incompatible",
-                detail: "preservation seed binding changed",
-                step: "fixup",
-              } as SeedAnswer;
-            if (
-              claim.thread !== (this.ctx.id.name ?? "") ||
-              claim.repository !== seed.slug ||
-              claim.ref !== (seed.fetchRef ?? seed.ref) ||
-              !seedClaimHeadMatches(claim.head, answer.sha, !!prior && answer.cached) ||
-              claim.seed !== seed.checkoutBackupId
-            )
-              return {
-                seeded: false,
-                reason: "seed-incompatible",
-                detail: "preservation seed binding changed",
-                step: "fixup",
-              } as SeedAnswer;
-            try {
-              if (prior) return { ...answer, preservationContainer: prior.owner.container };
-              if (!doorOrigin) throw new Error("unbound door origin");
-              const owner: PreservationOwner = { ...claim, container: crypto.randomUUID() };
-              await this.writeFile(PRESERVATION_CONTAINER_MARKER, owner.container);
-              await this.saveLegacyPreservation({ owner, doorOrigin } satisfies CheckpointRecord, null);
-              return { ...answer, preservationContainer: owner.container };
-            } catch {
-              return {
-                seeded: false,
-                reason: "seed-incompatible",
-                detail: "preservation binding unavailable",
-                step: "fixup",
-              } as SeedAnswer;
-            }
+            return guardedSeedAttempt(
+              () =>
+                this.ctx.storage.transaction(async (storage) => {
+                  if ((await storage.get(SEED_ATTEMPT_KEY)) !== undefined) return false;
+                  await storage.put(SEED_ATTEMPT_KEY, "pending");
+                  return true;
+                }),
+              () => this.ctx.storage.delete(SEED_ATTEMPT_KEY),
+              async () => {
+                const answer = await this.seedNow(seed, envVars, !!prior);
+                if (!answer.seeded || !claim) return answer;
+                // Only a cached answer may reuse the prior binding; never give a
+                // fresh result the owner's receipt, even if its HEAD happens to fit.
+                if (prior && !answer.cached)
+                  return {
+                    seeded: false,
+                    reason: "seed-incompatible",
+                    detail: "preservation seed binding changed",
+                    step: "fixup",
+                  } as SeedAnswer;
+                if (
+                  claim.thread !== (this.ctx.id.name ?? "") ||
+                  claim.repository !== seed.slug ||
+                  claim.ref !== (seed.fetchRef ?? seed.ref) ||
+                  !seedClaimHeadMatches(claim.head, answer.sha, !!prior && answer.cached) ||
+                  claim.seed !== seed.checkoutBackupId
+                )
+                  return {
+                    seeded: false,
+                    reason: "seed-incompatible",
+                    detail: "preservation seed binding changed",
+                    step: "fixup",
+                  } as SeedAnswer;
+                try {
+                  if (prior) return { ...answer, preservationContainer: prior.owner.container };
+                  if (!doorOrigin) throw new Error("unbound door origin");
+                  const owner: PreservationOwner = { ...claim, container: crypto.randomUUID() };
+                  await this.writeFile(PRESERVATION_CONTAINER_MARKER, owner.container);
+                  await this.saveLegacyPreservation({ owner, doorOrigin } satisfies CheckpointRecord, null);
+                  return { ...answer, preservationContainer: owner.container };
+                } catch {
+                  return {
+                    seeded: false,
+                    reason: "seed-incompatible",
+                    detail: "preservation binding unavailable",
+                    step: "fixup",
+                  } as SeedAnswer;
+                }
+              },
+            );
           },
           (cause) => sandboxStartingAnswer(cause),
         );
@@ -941,6 +992,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     // A bound retry can only use that marker: if it disappeared or changed
     // since the pre-check, never fall through to the fresh seed's sweep.
     const marker = await this.runRoot(["cat", SEED_MARKER], 30_000).catch((err: unknown) => {
+      if (err instanceof RootProcessOutcomeUnknownError) throw err;
       if (bound) return null;
       throw err;
     });
@@ -954,7 +1006,10 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     if (markerDecision === "cached") {
       if (seed.depsBackupId) {
         const layout = await this.runRoot(["bash", "-c", dependencyLayoutCommand(SEED_CHECKOUT_DIR)], 30_000).catch(
-          () => null,
+          (err: unknown) => {
+            if (err instanceof RootProcessOutcomeUnknownError) throw err;
+            return null;
+          },
         );
         if (!layout || layout.exitCode !== 0)
           return {
@@ -1045,13 +1100,29 @@ export class SwitchboardSandbox extends Sandbox<Env> {
         ms,
       };
     } catch (err) {
+      if (err instanceof RootProcessOutcomeUnknownError) {
+        console.log(JSON.stringify({ event: "sandbox.seed-uncertain", slug: seed.slug, step, ms: systemClock() - t0 }));
+        return { seeded: false, reason: "seed-uncertain", detail: `${step}: process output did not complete`, step };
+      }
       const shape = thrownShape(err);
-      // A half seed never survives either: the run that follows goes cold
-      // and clones into an empty workspace. A restore the verdict gave up on
-      // keeps streaming (the SDK's call cannot be cancelled): it is waited
-      // for, bounded, before the sweep runs over its directory.
-      await this.settlePendingRestores(SEED_ABANDONED_RESTORE_WAIT_MS);
-      await this.runRoot(["sh", "-c", `${unmountAllRestoresScript()}\n${this.seedSweep()}`], 60_000).catch(() => {});
+      // A restore can keep writing after its deadline; preserve its directory
+      // and the durable attempt when it has not settled before cleanup.
+      if (!(await waitForPendingRestores(this.pendingRestores, SEED_ABANDONED_RESTORE_WAIT_MS))) {
+        console.log(JSON.stringify({ event: "sandbox.seed-uncertain", slug: seed.slug, step, ms: systemClock() - t0 }));
+        return { seeded: false, reason: "seed-uncertain", detail: `${step}: restore outcome unknown`, step };
+      }
+      const cleanup = await failedSeedCleanupOutcome(() =>
+        this.runRoot(["sh", "-c", `${unmountAllRestoresScript()}\n${this.seedSweep()}`], 60_000),
+      );
+      if (cleanup === "unknown") {
+        console.log(JSON.stringify({ event: "sandbox.seed-uncertain", slug: seed.slug, step, ms: systemClock() - t0 }));
+        return {
+          seeded: false,
+          reason: "seed-uncertain",
+          detail: `cleanup after ${step}: process outcome unknown`,
+          step,
+        };
+      }
       const reason = isBackupMissing(shape) ? "seed-missing" : "seed-failed";
       const detail = `${step}: ${thrownText(shape)}`;
       console.log(
@@ -1119,15 +1190,6 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  sweep must not race. */
   private readonly pendingRestores = new Set<Promise<unknown>>();
 
-  /** Wait for every pending restore to settle, at most `maxMs`: a restore the
-   *  judge called stalled may still finish, and `rm -rf` under a streaming
-   *  extraction leaves debris the next seed's own sweep has to clear. */
-  private async settlePendingRestores(maxMs: number): Promise<void> {
-    if (this.pendingRestores.size === 0) return;
-    const settled = Promise.allSettled([...this.pendingRestores]);
-    await Promise.race([settled, new Promise<void>((r) => setTimeout(r, maxMs))]);
-  }
-
   /** `du -sk` over the paths, summed, in KiB; null when nothing could be
    *  measured — including a `du` that did not answer inside its own limit
    *  (a mount mid-restore under load): the judge treats a sample the
@@ -1138,7 +1200,8 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     let r: { stdout: string; exitCode: number };
     try {
       r = await this.runRoot(["du", "-sk", ...paths], 30_000);
-    } catch {
+    } catch (err) {
+      if (err instanceof RootProcessOutcomeUnknownError) throw err;
       return null;
     }
     if (r.exitCode === 124) return null;
@@ -1268,8 +1331,9 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     });
   }
 
-  /** One process as root, collected inside this object — the seed's own
-   *  commands, outside the /exec shape (no shell-level `timeout`, no WORKDIR). */
+  /** One process as root — the seed's own commands, outside the /exec shape
+   *  (no shell-level `timeout`, no WORKDIR). An unavailable output observation
+   *  leaves its effects unknown even when a kill is requested. */
   private async runRoot(
     argv: SandboxCommand,
     timeoutMs: number,
@@ -1279,8 +1343,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       env,
       timeout: timeoutMs + SDK_BACKSTOP_MARGIN_MS,
     });
-    const out = await proc.output({ encoding: "utf8", timeout: timeoutMs + OUTPUT_WAIT_AFTER_DEADLINE_MS });
-    return { stdout: out.stdout, stderr: out.stderr, exitCode: out.timedOut ? 124 : out.exitCode };
+    return rootProcessOutput(proc, timeoutMs + OUTPUT_WAIT_AFTER_DEADLINE_MS);
   }
 
   /** A failure met BEFORE a process was started — the spawn, or the gate's
@@ -1418,13 +1481,18 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   async write(path: string, content: string): Promise<{ ok: true } | FileRefusal> {
     return this.checkoutFence.shared(() =>
       this.idle.served(() =>
-        this.gate.through(
+        guardSeedMutation(
+          () => this.ctx.storage.get(SEED_ATTEMPT_KEY),
+          { error: "saved workspace setup has an unknown outcome", status: 409 } satisfies FileRefusal,
           () =>
-            this.fileOp(async () => {
-              await this.writeFile(path, content);
-              return { ok: true as const };
-            }),
-          (cause) => this.startingRefusal(cause),
+            this.gate.through(
+              () =>
+                this.fileOp(async () => {
+                  await this.writeFile(path, content);
+                  return { ok: true as const };
+                }),
+              (cause) => this.startingRefusal(cause),
+            ),
         ),
       ),
     );
@@ -1918,6 +1986,8 @@ function streamSeed(
         const raw = thrownText(thrownShape(err));
         if (isRuntimeUnreachableError(err)) return runtimeUnreachableAnswer(raw);
         if (isFleetBusyError(err)) return fleetBusyAnswer(raw);
+        if (err instanceof RootProcessOutcomeUnknownError)
+          return { seeded: false, reason: "seed-uncertain", detail: raw } satisfies SeedAnswer;
         return { seeded: false, reason: "seed-failed", detail: raw } satisfies SeedAnswer;
       },
     },

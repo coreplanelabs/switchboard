@@ -295,10 +295,17 @@ export const SEED_BUDGET_MS = SEED_RESTORE_MAX_MS + SEED_FIXUP_TIMEOUT_MS + 60_0
 
 /** Why a seed did not happen, as the machine tokens the refusal carries:
  *  the handle's objects are gone (the bot re-reads `/status` once and retries),
- *  a step failed (the run goes cold with the note), or the Worker has no
+ *  a step failed (the run goes cold with the note), the Worker has no
  *  presigned transfer configured (a gigabyte restore never goes through the
- *  isolate — resident-repos.md item 61). */
-export const SEED_REASONS = ["seed-missing", "seed-failed", "seed-unconfigured", "seed-incompatible"] as const;
+ *  isolate — resident-repos.md item 61), or process output did not finish
+ *  (the workspace is retained and the run refuses fallback). */
+export const SEED_REASONS = [
+  "seed-missing",
+  "seed-failed",
+  "seed-unconfigured",
+  "seed-incompatible",
+  "seed-uncertain",
+] as const;
 export type SeedReason = (typeof SEED_REASONS)[number];
 
 /** The handle the bot forwards: the resident's snapshot as `/status` publishes
@@ -520,7 +527,8 @@ export interface SeededSandbox {
 
 /** After a refused seed: retry once with a fresh handle when the handle's
  *  objects were gone and the resident has since published another (a rotation
- *  took the first); otherwise the run goes cold, and the reason says why. */
+ *  took the first). An uncertain process or incompatible saved workspace
+ *  refuses; other failures go cold with a named reason. */
 export type SeedRetry =
   { action: "retry"; seed: SandboxSeed } | { action: "cold"; why: string } | { action: "refuse"; why: string };
 
@@ -531,6 +539,8 @@ export function seedRetryDecision(input: {
   alreadyRetried: boolean;
 }): SeedRetry {
   const { answer, attempted, fresh } = input;
+  if (answer.reason === "seed-uncertain")
+    return { action: "refuse", why: "saved workspace setup has an unknown outcome" };
   if (answer.reason === "seed-incompatible") return { action: "refuse", why: "cached dependency layout is invalid" };
   if (answer.reason === "seed-missing" && !input.alreadyRetried) {
     if (fresh && fresh.checkoutBackupId !== attempted.checkoutBackupId) {

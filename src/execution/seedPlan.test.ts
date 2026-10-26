@@ -623,7 +623,13 @@ describe("the seed's constants", () => {
     expect(SEED_BUDGET_MS).toBeGreaterThan(SEED_RESTORE_MAX_MS + SEED_FIXUP_TIMEOUT_MS);
     // the wait for an abandoned restore fits inside the seed's own caps, so a failed seed still answers in budget
     expect(SEED_ABANDONED_RESTORE_WAIT_MS).toBeLessThan(SEED_RESTORE_MAX_MS);
-    expect(SEED_REASONS).toEqual(["seed-missing", "seed-failed", "seed-unconfigured", "seed-incompatible"]);
+    expect(SEED_REASONS).toEqual([
+      "seed-missing",
+      "seed-failed",
+      "seed-unconfigured",
+      "seed-incompatible",
+      "seed-uncertain",
+    ]);
   });
 });
 
@@ -703,6 +709,54 @@ describe("the seeded sandbox wiring (static)", () => {
     expect(seedNow.indexOf('if (markerDecision === "refuse")')).toBeLessThan(seedNow.indexOf("this.seedSweep()"));
   });
 
+  it("reserves a durable seed attempt before any fresh sweep and refuses a later pending attempt", () => {
+    const seedRoute = worker.slice(worker.indexOf("async seed(seed:"), worker.indexOf("private claimMatches("));
+    expect(seedRoute).toContain("this.ctx.storage.get(SEED_ATTEMPT_KEY)");
+    expect(seedRoute).toContain("pendingSeedAttemptAnswer()");
+    expect(seedRoute).toContain('console.log(JSON.stringify({ event: "sandbox.seed-held", slug: seed.slug }))');
+    expect(seedRoute).toContain("this.ctx.storage.transaction(async (storage) => {");
+    expect(seedRoute).toContain('storage.put(SEED_ATTEMPT_KEY, "pending")');
+    expect(seedRoute.indexOf("this.ctx.storage.get(SEED_ATTEMPT_KEY)")).toBeLessThan(
+      seedRoute.indexOf("this.gate.through("),
+    );
+    expect(seedRoute.indexOf('storage.put(SEED_ATTEMPT_KEY, "pending")')).toBeLessThan(
+      seedRoute.indexOf("this.seedNow(seed, envVars, !!prior)"),
+    );
+  });
+
+  it("refuses ordinary command, write and dependency repair effects while a seed attempt is pending", () => {
+    const command = worker.slice(worker.indexOf("async runCommand("), worker.indexOf("private async execute("));
+    const write = worker.slice(
+      worker.indexOf("async write(path:"),
+      worker.indexOf("/** The last part of a step's output"),
+    );
+    const repair = worker.slice(
+      worker.indexOf("async repairDependencies("),
+      worker.indexOf("/** The start gate's view"),
+    );
+    for (const [route, effect] of [
+      [command, "this.execute("],
+      [write, "this.writeFile("],
+      [repair, "this.ctx.container.exec("],
+    ]) {
+      expect(route).toContain("guardSeedMutation(");
+      expect(route.indexOf("guardSeedMutation(")).toBeLessThan(route.indexOf(effect));
+    }
+  });
+
+  it("keeps an unknown root-process result typed through optional seed checks", () => {
+    const marker = worker.slice(
+      worker.indexOf("const marker = await this.runRoot("),
+      worker.indexOf("const markerDecision ="),
+    );
+    const layout = worker.slice(worker.indexOf("const layout = await this.runRoot("), worker.indexOf("if (!layout ||"));
+    const sample = worker.slice(worker.indexOf("private async duKiB("), worker.indexOf("async exportPublicationPack("));
+    for (const check of [marker, layout, sample]) {
+      expect(check).toContain("err instanceof RootProcessOutcomeUnknownError");
+      expect(check).toContain("throw err");
+    }
+  });
+
   it("presigned only: the transfer mode is read first and a local-mode Worker answers seed-unconfigured", () => {
     const seedNow = worker.slice(worker.indexOf("private async seedNow("), worker.indexOf("private seedSweep("));
     expect(seedNow.indexOf("backupTransferMode(")).toBeLessThan(seedNow.indexOf("SEED_MARKER"));
@@ -753,27 +807,32 @@ describe("the seeded sandbox wiring (static)", () => {
     expect(seedNow).toMatch(/return \{\s*seeded: true,\s*cached: false,[\s\S]*?phases,[\s\S]*?\};/);
   });
 
-  it("every restore is judged by bytes against the seed's one deadline and extracted onto the disk; a failure sweeps mounts, tree and marker and is classified missing or failed", () => {
+  it("every restore is judged by bytes against the seed's one deadline; an uncertain failure sweep refuses fallback", () => {
     expect(worker).toMatch(/judgeRestoreProgress\(\{ startedMs, nowMs: systemClock\(\), samples, deadlineMs \}\)/);
     expect(worker).toMatch(
       /extractRestoreScript\(\{ mountDir, backupId: id, archivePath: restoreArchivePath\(id\), targetDir \}\)/,
     );
     expect((worker.match(/unmountAllRestoresScript\(\)/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect(worker).toContain("const cleanup = await failedSeedCleanupOutcome(");
+    expect(worker).toContain('if (cleanup === "unknown")');
     expect(worker).toContain('isBackupMissing(shape) ? "seed-missing" : "seed-failed"');
   });
 
-  it("the streamed /seed answer has its own root, keeps a start or a full fleet's wait token, and never answers a throw as anything but seed-failed", () => {
+  it("the streamed /seed answer keeps wait tokens and returns an unknown root process as seed-uncertain", () => {
     const streamSeed = worker.slice(worker.indexOf("function streamSeed("), worker.indexOf("type WaitAnswer ="));
     expect(streamSeed).toContain('"sandbox.seed"');
     expect(streamSeed).toContain("fleetBusyAnswer(raw)");
     expect(streamSeed).toContain("runtimeUnreachableAnswer(raw)");
+    expect(streamSeed).toContain("if (err instanceof RootProcessOutcomeUnknownError)");
+    expect(streamSeed).toContain('reason: "seed-uncertain"');
     expect(streamSeed).toContain('reason: "seed-failed"');
+    expect(streamSeed.indexOf('reason: "seed-uncertain"')).toBeLessThan(streamSeed.indexOf('reason: "seed-failed"'));
   });
 
-  it("a restore-progress sample the container could not take is no evidence — never the seed's failure", () => {
+  it("an ordinary unavailable progress sample is no evidence while unknown process output propagates", () => {
     const du = worker.slice(worker.indexOf("private async duKiB("), worker.indexOf("private async runRoot("));
     expect(du).toMatch(
-      /try \{\s*r = await this\.runRoot\(\["du", "-sk", \.\.\.paths\], 30_000\);\s*\} catch \{\s*return null;/,
+      /try \{\s*r = await this\.runRoot\(\["du", "-sk", \.\.\.paths\], 30_000\);\s*\} catch \(err\) \{\s*if \(err instanceof RootProcessOutcomeUnknownError\) throw err;\s*return null;/,
     );
     expect(du).toContain("if (r.exitCode === 124) return null;");
   });
@@ -826,11 +885,16 @@ describe("the seeded sandbox wiring (static)", () => {
 
 describe("the seeded sandbox wiring (static) — a restore the judge gave up on", () => {
   const worker = readFileSync(new URL("../../deploy/cloudflare-sandbox/worker.ts", import.meta.url), "utf8");
-  it("is remembered until it settles, never rejects unhandled, and is waited for (bounded) before the failure sweep", () => {
+  it("is remembered until it settles and refuses the failure sweep when the wait expires", () => {
     expect(worker).toMatch(/this\.pendingRestores\.add\(restore\);\s*restore\.then\(/);
     const catchBlock = worker.slice(worker.indexOf("    } catch (err) {", worker.indexOf("private async seedNow(")));
-    expect(catchBlock.indexOf("settlePendingRestores(SEED_ABANDONED_RESTORE_WAIT_MS)")).toBeGreaterThan(-1);
-    expect(catchBlock.indexOf("settlePendingRestores(")).toBeLessThan(catchBlock.indexOf("unmountAllRestoresScript()"));
+    expect(catchBlock).toContain(
+      "if (!(await waitForPendingRestores(this.pendingRestores, SEED_ABANDONED_RESTORE_WAIT_MS)))",
+    );
+    expect(catchBlock.indexOf("waitForPendingRestores(")).toBeLessThan(catchBlock.indexOf("failedSeedCleanupOutcome("));
+    expect(catchBlock.indexOf('reason: "seed-uncertain"', catchBlock.indexOf("waitForPendingRestores("))).toBeLessThan(
+      catchBlock.indexOf("failedSeedCleanupOutcome("),
+    );
   });
 });
 
@@ -943,6 +1007,22 @@ describe("seedRetryDecision", () => {
         alreadyRetried: false,
       }),
     ).toEqual({ action: "cold", why: "seed unconfigured (presigned R2 transfer needs R2_ACCESS_KEY_ID)" });
+  });
+
+  it("an uncertain seed process refuses retry and cold fallback", () => {
+    expect(
+      seedRetryDecision({
+        answer: {
+          seeded: false,
+          reason: "seed-uncertain",
+          detail: "fixup: process output did not complete",
+          step: "fixup",
+        },
+        attempted,
+        fresh: undefined,
+        alreadyRetried: false,
+      }),
+    ).toEqual({ action: "refuse", why: "saved workspace setup has an unknown outcome" });
   });
 });
 

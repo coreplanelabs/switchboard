@@ -122,6 +122,7 @@ beforeAll(async () => {
     import { checkpointIfSafe, sameOwner, normalizedSeedDoorOrigin, boundSeedOriginMatches, seedClaimHeadMatches } from './src/execution/sandboxCheckpoint.ts';
     import { decodeLifecycle, updateCheckpoint } from './src/execution/sandboxOperationWindow.ts';
     import { seedMarkerText } from './src/execution/seedPlan.ts';
+    import { guardedSeedAttempt, pendingSeedAttemptAnswer, SEED_ATTEMPT_KEY } from './src/execution/seedAttemptFence.ts';
     import { sandboxStartingAnswer } from './src/execution/sandboxErrors.ts';
     const PRESERVATION_KEY = ${JSON.stringify(OWNER_KEY)}, PRESERVATION_SEED_STATE_KEY = ${JSON.stringify(SEED_KEY)};
     const SEED_MARKER = '/fixture-seed', PRESERVATION_CONTAINER_MARKER = '/fixture-container';
