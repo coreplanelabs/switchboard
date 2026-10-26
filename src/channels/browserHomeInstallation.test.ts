@@ -3856,6 +3856,27 @@ describe("browser installation", () => {
       );
     },
   );
+  it("reports the dispatch refusal for an accepted MCP Review with no Review run", async () => {
+    const s = await ssoInstallation("access");
+    const response = await s.send({
+      text: "agent:review review https://github.com/sample/api/pull/999",
+      idempotencyKey: "diagnose-refused-review",
+    });
+    expect(response.wire.result?.structuredContent?.admission).toMatchObject({
+      status: "accepted",
+      runId: expect.any(String),
+    });
+    const id = response.wire.result.structuredContent.admission.runId;
+    await s.execute();
+    expect((await s.runStore.get(id))?.agent).toBe("door");
+    expect(await s.ledger.readIngressByRun(id)).toMatchObject({
+      status: "record",
+      record: {
+        status: "uncertain",
+        dispatchResult: { status: "refused", cause: "system", refusalCode: "pr_head_unknown" },
+      },
+    });
+  });
   it("retains private history after restart and login renewal without unlocking the old execution", async () => {
     const s = await ssoInstallation("access", {
       name: "fixture",

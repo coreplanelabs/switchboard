@@ -4937,12 +4937,14 @@ describe("RunsService — original organization admission", () => {
       status: "completed",
       outcome: "Original owner completed.",
       handlerOutcome: "completed",
+      dispatchResult: { status: "completed" },
       producerGeneration: "bot-generation-1",
       launchId,
     });
     expect(await svc.getAdmission(id)).toMatchObject({
       kind: "known",
       value: {
+        dispatchResult: { status: "completed" },
         producer: {
           status: "terminal",
           generation: "bot-generation-1",
@@ -4950,6 +4952,32 @@ describe("RunsService — original organization admission", () => {
           outcome: "completed",
           terminalAt: NOW,
         },
+      },
+    });
+    const diagnostic = await ledger.consumeIngress({
+      ...request,
+      effectKey: "organization:acme:9",
+      receiptId: "organization:acme:9",
+    });
+    if (diagnostic.status !== "claimed") throw new Error("diagnostic owner not claimed");
+    await ledger.finishIngress({
+      effectKey: "organization:acme:9",
+      digest,
+      runId: diagnostic.record.runId,
+      status: "uncertain",
+      outcome: "Dispatch refused before Review work started.",
+      handlerOutcome: "uncertain",
+      ownerStage: "execute",
+      dispatchResult: { status: "refused", cause: "system", refusalCode: "pr_head_unknown" },
+    });
+    expect(await svc.getRun(diagnostic.record.runId)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getAdmission(diagnostic.record.runId)).toMatchObject({
+      kind: "known",
+      value: {
+        ownerStatus: "uncertain",
+        ownerStage: "execute",
+        dispatchResult: { status: "refused", cause: "system", refusalCode: "pr_head_unknown" },
+        producer: { status: "unknown" },
       },
     });
     expect(await svc.getAdmission("f3e13f45-5801-49f5-a024-01db96685eca")).toEqual({ kind: "not_found" });

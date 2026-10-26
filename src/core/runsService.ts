@@ -395,6 +395,7 @@ export interface AdmissionView {
   createdAt: number;
   settledAt?: number;
   handlerOutcome?: IngressRecord["handlerOutcome"];
+  dispatchResult?: IngressRecord["dispatchResult"];
   ownerStage?: IngressRecord["ownerStage"];
   failure?: IngressRecord["failure"];
   producer:
@@ -1478,6 +1479,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             createdAt: record.createdAt,
             ...(record.settledAt !== undefined ? { settledAt: record.settledAt } : {}),
             ...(record.handlerOutcome !== undefined ? { handlerOutcome: record.handlerOutcome } : {}),
+            ...(record.dispatchResult !== undefined ? { dispatchResult: record.dispatchResult } : {}),
             ...(record.ownerStage !== undefined ? { ownerStage: record.ownerStage } : {}),
             ...(record.failure !== undefined ? { failure: record.failure } : {}),
             producer: record.launch

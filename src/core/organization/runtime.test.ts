@@ -914,6 +914,88 @@ describe("organization runtime", () => {
     expect(s.tasks).toEqual([]);
   });
 
+  it("replaces a queued result with the refusal from its unread continuation", async () => {
+    const s = setup();
+    const admitted = await s.send("unread-refusal");
+    if (admitted.status !== "receipt" || !admitted.receipt.effectKey) throw new Error("not admitted");
+    const first = createOrganizationRuntime({
+      ...s,
+      dispatchOwned: async () => ({
+        status: "uncertain",
+        reason: "Input queued on receiver.",
+        dispatchResult: { status: "input_queued" },
+      }),
+    });
+    await first.reconcile("org:test");
+    await s.tasks.shift()!();
+    const original = await s.ledger.readIngress(admitted.receipt.effectKey);
+    if (original.status !== "record") throw new Error("original owner not found");
+    expect(original.record.dispatchResult).toEqual({ status: "input_queued" });
+    const receiver = "unread-refusal-receiver";
+    await s.ledger.claim({
+      runId: receiver,
+      gen: "old-generation",
+      threadKey: reference.threadKey,
+      leaseMs: 30,
+      startedAt: 1,
+      meta: { channelId: reference.channelId, userId: reference.userId, threadKey: reference.threadKey },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    const { withOriginalOrganizationDispatch } = await import("../dispatch/originalOrganizationInput.js");
+    const { durableInboxMessage } = await import("../runLedger/inboxMessage.js");
+    const message = withOriginalOrganizationDispatch(
+      { ...reference, text: "Start original work" },
+      { ingressRunId: original.record.runId, organizationSequence: admitted.receipt.revision },
+    );
+    const pushed = await s.ledger.pushInbox(receiver, durableInboxMessage(message, message.text, 1));
+    await s.ledger.holdUnreadIngress({
+      ingressRunId: original.record.runId,
+      receiverRunId: receiver,
+      receiverGen: "old-generation",
+      inboxSeq: pushed.seq!,
+    });
+    await s.ledger.finish(receiver, "old-generation", {
+      id: receiver,
+      channelId: reference.channelId,
+      userId: reference.userId,
+      threadKey: reference.threadKey,
+      channelVisibility: "unknown",
+      startedAt: 1,
+      finishedAt: 2,
+      status: "completed",
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      events: [],
+      diagnosis: analyzeRunFriction([]),
+    });
+    const resumed = createOrganizationRuntime({
+      ...s,
+      owner: "replacement",
+      dispatchOwned: async () => ({
+        status: "uncertain",
+        reason: "pr_head_unknown",
+        dispatchResult: { status: "refused", cause: "system", refusalCode: "pr_head_unknown" },
+      }),
+    });
+    await resumed.reconcile("org:test");
+    await s.tasks.shift()!();
+    expect(await s.ledger.readIngressByRun(original.record.runId)).toMatchObject({
+      status: "record",
+      record: {
+        runId: original.record.runId,
+        status: "uncertain",
+        unread: { status: "claimed" },
+        handlerOutcome: "uncertain",
+        ownerStage: "execute",
+        dispatchResult: { status: "refused", cause: "system", refusalCode: "pr_head_unknown" },
+      },
+    });
+    expect(s.effects).toEqual([]);
+  });
+
   it("holds a pending request across missing proof and admits the same key once after fresh proof", async () => {
     const s = setup();
     let available = false;

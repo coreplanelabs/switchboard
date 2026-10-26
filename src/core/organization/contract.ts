@@ -1,5 +1,6 @@
 import type { ErrorKind } from "../trace/types.js";
 import { z } from "zod";
+import { REFUSAL_CODES, type RefusalCode } from "../refusal.js";
 import { identitySchema } from "../identity/contract.js";
 import { nativeMediaSchema, nativeMediaDigestSchema } from "../nativeMedia.js";
 
@@ -477,6 +478,14 @@ export const ORGANIZATION_OWNER_STAGES = [
   "schedule",
 ] as const;
 export type OrganizationOwnerStage = (typeof ORGANIZATION_OWNER_STAGES)[number];
+export const organizationDispatchResultSchema = z
+  .object({
+    status: z.enum(["input_queued", "unknown_claim", "completed", "refused", "failed", "stopped"]),
+    cause: z.enum(["request", "policy", "system"]).optional(),
+    refusalCode: z.enum(REFUSAL_CODES as [RefusalCode, ...RefusalCode[]]).optional(),
+  })
+  .strict();
+export type OrganizationDispatchResult = z.infer<typeof organizationDispatchResultSchema>;
 export const organizationOwnerFailureFactSchema = z
   .object({
     stage: z.enum(ORGANIZATION_OWNER_STAGES),

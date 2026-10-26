@@ -1916,6 +1916,32 @@ describe("original ingress SQLite owner", () => {
         launch: { producerGeneration: "bot-generation-1", launchId: launch.launchId },
       },
     });
+    const diagnostic = {
+      ...request,
+      effectKey: "organization:original:2",
+      receiptId: "organization:original:2",
+    };
+    const second = await client().consumeIngress(diagnostic);
+    if (second.status !== "claimed") throw new Error("diagnostic owner not claimed");
+    expect(
+      await client().finishIngress({
+        effectKey: diagnostic.effectKey,
+        digest: diagnostic.digest,
+        runId: second.record.runId,
+        status: "uncertain",
+        outcome: "Dispatch refused before Review work started.",
+        handlerOutcome: "uncertain",
+        ownerStage: "execute",
+        dispatchResult: { status: "refused", cause: "system", refusalCode: "pr_head_unknown" },
+      }),
+    ).toMatchObject({ status: "record" });
+    expect(await client().readIngressByRun(second.record.runId)).toMatchObject({
+      status: "record",
+      record: {
+        status: "uncertain",
+        dispatchResult: { status: "refused", cause: "system", refusalCode: "pr_head_unknown" },
+      },
+    });
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
         "UPDATE ingress_owners SET data = json_set(data, '$.originExpiresAt', 1) WHERE effect_key = ?",
