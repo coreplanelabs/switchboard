@@ -7,7 +7,6 @@ import {
   InMemoryDeliverySource,
   NullDeliveryService,
   parseDeliveryConfig,
-  parseFindings,
   pullRequestOfRun,
   renderDeliveryReport,
   resolveDeliveryRange,
@@ -21,6 +20,7 @@ import {
   type PullRequestFacts,
   type RunFact,
 } from "./delivery.js";
+import { buildReviewPostBody, type Finding } from "./reviewVerdict.js";
 
 // The delivery indicators: pure arithmetic over facts a fetcher assembled from
 // GitHub and the run history. The fixture is one trunk pass of six pull
@@ -381,6 +381,37 @@ describe("buildDeliveryReport — the trunk pass week", () => {
 });
 
 describe("buildDeliveryReport — the edges", () => {
+  it("counts the typed findings in a rendered review body", () => {
+    const findings: Finding[] = [
+      { id: "F1", severity: "blocking", file: "a.ts", title: "Unsafe write" },
+      { id: "F2", severity: "major", file: "b.ts", title: "Missing guard" },
+      { id: "F3", severity: "minor", file: "c.ts", title: "Unclear result" },
+      { id: "F4", severity: "nit", file: "d.ts", title: "Unused name" },
+    ];
+    const body = buildReviewPostBody("A legacy-looking line in prose:\n- [fyi] F9 e.ts — prose only", {
+      verdict: "request_changes",
+      summary: "Four findings",
+      findings,
+    });
+    const pr: PullRequestFacts = {
+      ...TRUNK_PASS[5],
+      reviews: [lgtm("2026-09-11T00:23:46Z", TRUNK_PASS[5].firstHeadSha!, body)],
+    };
+
+    const result = report({ prs: [pr] });
+    expect(result.prs[0].findings).toEqual({ blocking: 1, major: 1, minor: 1, nit: 1, fyi: 0 });
+    expect(result.totals.findings).toEqual({
+      total: 4,
+      blocking: 1,
+      major: 1,
+      minor: 1,
+      nit: 1,
+      fyi: 0,
+      noHumanEdit: 4,
+      noHumanEditShare: 1,
+    });
+  });
+
   it("a range with no merges renders zero rows for every week, not an error", () => {
     const r = buildDeliveryReport({
       repo: "acme/api",
@@ -515,25 +546,145 @@ describe("buildDeliveryReport — the edges", () => {
   });
 });
 
-describe("parseFindings", () => {
-  it("reads the review agent's finding lines by severity and ignores everything else", () => {
-    expect(
-      parseFindings(
-        [
-          "Changes requested: two problems.",
-          "- [blocking] F1 a.ts:1 — the bug",
-          "- [major] F2 b.ts — the design",
-          "* [minor] F3 c.ts — the style",
-          "  - [nit] F4 — a nit",
-          "- [fyi] F5 — a note",
-          "- [blocker] F6 — the other spelling",
-          "**F1 (blocking)** — prose that repeats the finding is not a second finding",
-          "[minor] not a list item, still a finding line",
-        ].join("\n"),
-      ),
-    ).toEqual(["blocking", "major", "minor", "nit", "fyi", "blocking", "minor"]);
-    expect(parseFindings("LGTM: nothing to report")).toEqual([]);
-    expect(parseFindings("")).toEqual([]);
+describe("review finding metrics", () => {
+  const completeFinding = { id: "F1", severity: "blocking", file: "a.ts", title: "Unsafe write" };
+
+  it.each([
+    { name: "missing verdict", payload: { findings: [completeFinding] } },
+    { name: "invalid verdict", payload: { verdict: "dismissed", findings: [completeFinding] } },
+    { name: "missing findings", payload: { verdict: "approve" } },
+    {
+      name: "missing finding ID",
+      payload: { verdict: "request_changes", findings: [{ ...completeFinding, id: undefined }] },
+    },
+    {
+      name: "missing finding file",
+      payload: { verdict: "request_changes", findings: [{ ...completeFinding, file: undefined }] },
+    },
+    {
+      name: "missing finding severity",
+      payload: { verdict: "request_changes", findings: [{ ...completeFinding, severity: undefined }] },
+    },
+    {
+      name: "unknown finding severity",
+      payload: { verdict: "request_changes", findings: [{ ...completeFinding, severity: "urgent" }] },
+    },
+    {
+      name: "blank finding title",
+      payload: { verdict: "request_changes", findings: [{ ...completeFinding, title: "   " }] },
+    },
+    { name: "none with findings", payload: { verdict: "none", findings: [completeFinding] } },
+  ])("refuses an incomplete typed marker: $name", ({ payload }) => {
+    const pr: PullRequestFacts = {
+      ...TRUNK_PASS[5],
+      reviews: [
+        lgtm(
+          "2026-09-11T00:23:46Z",
+          TRUNK_PASS[5].firstHeadSha!,
+          `<!-- switchboard:verdict ${JSON.stringify(payload)} -->`,
+        ),
+      ],
+    };
+    expect(() => report({ prs: [pr] })).toThrow(/Invalid delivery verdict/);
+  });
+
+  it("accepts a none marker without findings", () => {
+    const pr: PullRequestFacts = {
+      ...TRUNK_PASS[5],
+      reviews: [
+        lgtm("2026-09-11T00:23:46Z", TRUNK_PASS[5].firstHeadSha!, '<!-- switchboard:verdict {"verdict":"none"} -->'),
+      ],
+    };
+    expect(report({ prs: [pr] }).totals.findings.total).toBe(0);
+  });
+
+  it.each([
+    {
+      name: "a tilde line does not close a backtick fence",
+      body: ["```text", "~~~", "- [blocking] F1 a.ts — example", "```", "- [minor] F2 b.ts — real"].join("\n"),
+      expected: { total: 1, blocking: 0, minor: 1 },
+    },
+    {
+      name: "a shorter closer stays in the fence and a longer closer ends it",
+      body: ["~~~~", "~~~", "- [major] F1 a.ts — example", "~~~~~", "- [nit] F2 b.ts — real"].join("\n"),
+      expected: { total: 1, major: 0, nit: 1 },
+    },
+    {
+      name: "a fence indented four spaces does not open a fenced block",
+      body: ["    ```", "- [blocking] F1 a.ts — real"].join("\n"),
+      expected: { total: 1, blocking: 1 },
+    },
+    {
+      name: "a closing fence with extra text stays inside the block",
+      body: ["```text", "```js", "- [major] F1 a.ts — example", "```", "- [nit] F2 b.ts — real"].join("\n"),
+      expected: { total: 1, major: 0, nit: 1 },
+    },
+  ])("$name", ({ body, expected }) => {
+    const pr: PullRequestFacts = {
+      ...TRUNK_PASS[5],
+      reviews: [lgtm("2026-09-11T00:23:46Z", TRUNK_PASS[5].firstHeadSha!, body)],
+    };
+    expect(report({ prs: [pr] }).totals.findings).toMatchObject(expected);
+  });
+
+  it("ignores marker mentions in prose and fenced examples", () => {
+    const marker =
+      '<!-- switchboard:verdict {"verdict":"request_changes","findings":[{"id":"F1","severity":"blocking","file":"a.ts","title":"Example"}]} -->';
+    const bodies = [
+      "This review discusses the literal <!-- switchboard:verdict marker.",
+      ["A sample marker follows:", "```html", marker, "```", "The sample is not a verdict."].join("\n"),
+    ];
+    for (const body of bodies) {
+      const pr: PullRequestFacts = {
+        ...TRUNK_PASS[5],
+        reviews: [lgtm("2026-09-11T00:23:46Z", TRUNK_PASS[5].firstHeadSha!, body)],
+      };
+      expect(report({ prs: [pr] }).totals.findings.total).toBe(0);
+    }
+  });
+
+  it("keeps blocker and fyi counts when a typed marker uses those severity labels", () => {
+    const marker = {
+      verdict: "request_changes",
+      findings: [
+        { id: "F1", severity: "blocker", file: "a.ts", title: "Unsafe write" },
+        { id: "F2", severity: "fyi", file: "b.ts", title: "Useful context" },
+      ],
+    };
+    const pr: PullRequestFacts = {
+      ...TRUNK_PASS[5],
+      reviews: [
+        lgtm(
+          "2026-09-11T00:23:46Z",
+          TRUNK_PASS[5].firstHeadSha!,
+          `<!-- switchboard:verdict ${JSON.stringify(marker)} -->`,
+        ),
+      ],
+    };
+    expect(report({ prs: [pr] }).totals.findings).toMatchObject({ total: 2, blocking: 1, fyi: 1 });
+  });
+
+  it("counts structured legacy lines, ignores fenced examples, and refuses a malformed final marker", () => {
+    const body = [
+      "An older review body:",
+      "- [blocking] F1 a.ts — one bug",
+      "- [blocker] F3 c.ts — another bug",
+      "- [fyi] F4 d.ts — a note",
+      "[minor] this line has no finding ID",
+      "```text",
+      "- [major] F2 b.ts — an example only",
+      "```",
+    ].join("\n");
+    const pr: PullRequestFacts = {
+      ...TRUNK_PASS[5],
+      reviews: [lgtm("2026-09-11T00:23:46Z", TRUNK_PASS[5].firstHeadSha!, body)],
+    };
+    expect(report({ prs: [pr] }).totals.findings).toMatchObject({ total: 3, blocking: 2, major: 0, minor: 0, fyi: 1 });
+    expect(() =>
+      report({
+        prs: [{ ...pr, reviews: [{ ...pr.reviews[0], body: `${body}\n<!-- switchboard:verdict {broken} -->` }] }],
+      }),
+    ).toThrow();
   });
 });
 

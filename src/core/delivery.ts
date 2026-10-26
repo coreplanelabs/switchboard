@@ -268,18 +268,66 @@ export function weekStartOf(iso: string): string {
   return addDays(day, -((dow + 6) % 7));
 }
 
-/** The review agent's finding lines, by severity: `- [blocking] F1 path — title`
- *  (any list marker or none; `blocker` is the same severity). Prose that
- *  repeats a finding (`**F1 (blocking)**`) is not a second finding. */
-export function parseFindings(body: string): FindingSeverity[] {
-  const out: FindingSeverity[] = [];
+function legacyFindingSeveritiesOf(body: string): FindingSeverity[] {
+  const severities: FindingSeverity[] = [];
+  let fence: { character: string; length: number } | undefined;
   for (const line of body.split("\n")) {
-    const m = /^\s*(?:[-*•]\s*)?\[(blocking|blocker|major|minor|nit|fyi)\]/i.exec(line);
-    if (!m) continue;
-    const s = m[1].toLowerCase();
-    out.push(s === "blocker" ? "blocking" : (s as FindingSeverity));
+    const candidate = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      if (
+        candidate &&
+        candidate[1][0] === fence.character &&
+        candidate[1].length >= fence.length &&
+        /^[ \t]*$/.test(candidate[2])
+      )
+        fence = undefined;
+      continue;
+    }
+    if (candidate && (candidate[1][0] === "~" || !candidate[2].includes("`"))) {
+      fence = { character: candidate[1][0], length: candidate[1].length };
+      continue;
+    }
+    const match = /^\s*(?:[-*•]\s*)?\[(blocking|blocker|major|minor|nit|fyi)\]\s+F[1-9]\d*\s+\S.*\s+—\s+\S/i.exec(line);
+    if (!match) continue;
+    const severity = match[1].toLowerCase();
+    severities.push(severity === "blocker" ? "blocking" : (severity as FindingSeverity));
   }
-  return out;
+  return severities;
+}
+
+function findingSeveritiesOf(body: string): FindingSeverity[] {
+  const lastLine = body.trimEnd().split("\n").at(-1) ?? "";
+  if (!lastLine.startsWith("<!-- switchboard:verdict")) return legacyFindingSeveritiesOf(body);
+  const marker = /^<!-- switchboard:verdict (\{[^\r\n]*\}) -->$/.exec(lastLine);
+  if (!marker) throw new Error("Invalid delivery verdict marker");
+  const payload: unknown = JSON.parse(marker[1]!);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload))
+    throw new Error("Invalid delivery verdict marker");
+  const typed = payload as Record<string, unknown>;
+  if (typed.verdict !== "approve" && typed.verdict !== "request_changes" && typed.verdict !== "none")
+    throw new Error("Invalid delivery verdict marker");
+  const rows = typed.findings;
+  if (typed.verdict === "none" && (rows === undefined || (Array.isArray(rows) && rows.length === 0))) return [];
+  if (!Array.isArray(rows)) throw new Error("Invalid delivery verdict findings");
+  if (typed.verdict === "none") throw new Error("Invalid delivery verdict findings");
+  return rows.map((row: unknown) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("Invalid delivery verdict findings");
+    const finding = row as Record<string, unknown>;
+    if (
+      typeof finding.id !== "string" ||
+      !finding.id.trim() ||
+      typeof finding.file !== "string" ||
+      !finding.file.trim() ||
+      typeof finding.title !== "string" ||
+      !finding.title.trim()
+    )
+      throw new Error("Invalid delivery verdict findings");
+    const severity = finding.severity;
+    if (severity === "blocker") return "blocking";
+    if (typeof severity === "string" && (FINDING_SEVERITIES as readonly string[]).includes(severity))
+      return severity as FindingSeverity;
+    throw new Error("Invalid delivery verdict findings");
+  });
 }
 
 const emptyCounts = (): Record<FindingSeverity, number> => ({ blocking: 0, major: 0, minor: 0, nit: 0, fyi: 0 });
@@ -358,7 +406,7 @@ function pullRequestRow(
   }
   const approved = verdicts.some((v) => v.state === "approved" || /^\s*LGTM\b/i.test(v.body));
   const findings = emptyCounts();
-  for (const v of verdicts) for (const s of parseFindings(v.body)) findings[s]++;
+  for (const v of verdicts) for (const s of findingSeveritiesOf(v.body)) findings[s]++;
   const firstVerdictAt = verdicts.length > 0 ? Date.parse(verdicts[0].at) : undefined;
   const humanEdit =
     firstVerdictAt === undefined

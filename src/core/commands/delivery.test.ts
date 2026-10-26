@@ -15,6 +15,7 @@ import { ALL_CAPABILITIES } from "../capabilities.js";
 import { NO_CAPABILITIES } from "../capabilities.js";
 import type { RunRecord } from "../runRecord.js";
 import { analyzeRunFriction } from "../runFriction.js";
+import { buildReviewPostBody } from "../reviewVerdict.js";
 
 // Feature: docs/reference/specs/delivery.md — `delivery report`: the indicators
 // over a repository's merged pull requests and the caller's own run history,
@@ -48,7 +49,15 @@ const pr = (number: number, over: Partial<PullRequestFacts> = {}): PullRequestFa
       author: REVIEWER,
       state: "commented",
       submittedAt: "2026-09-11T00:05:15Z",
-      body: "Changes requested: one bug.\n- [blocking] F1 a.ts — the bug",
+      body: buildReviewPostBody(
+        "One unsafe write.",
+        {
+          verdict: "request_changes",
+          summary: "One bug",
+          findings: [{ id: "F1", severity: "blocking", file: "a.ts", title: "The bug" }],
+        },
+        { repo: "acme/api", head: "28837ecbdc07dd578743919c3a071dcd3756a47a" },
+      ),
     },
     { author: REVIEWER, state: "commented", submittedAt: "2026-09-11T00:17:46Z", body: "LGTM: fixed." },
   ],
