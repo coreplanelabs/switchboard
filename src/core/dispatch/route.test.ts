@@ -74,6 +74,7 @@ describe("the readers' router is retired", () => {
       complete: async (request) => {
         request.observer?.onRequestStart?.("transport-fixture");
         request.observer?.onResponseHeaders?.(200);
+        request.observer?.onFirstContent?.();
         return { content: [], stopReason: "end_turn" };
       },
     };
@@ -83,6 +84,7 @@ describe("the readers' router is retired", () => {
     );
     expect(observations).toContainEqual({ transport: "request_send", transportId: "transport-fixture" });
     expect(observations).toContainEqual({ transport: "response_headers", status: 200 });
+    expect(observations).toContainEqual({ stream: "first_content" });
   });
 });
 

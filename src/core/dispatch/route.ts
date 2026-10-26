@@ -533,6 +533,7 @@ export function providerStructuredModel(
             observer: {
               onRequestStart: (transportId: string) => observe({ transport: "request_send", transportId }),
               onResponseHeaders: (status: number) => observe({ transport: "response_headers", status }),
+              onFirstContent: () => observe({ stream: "first_content" }),
               onResponse: (requestId: string) => observe({ requestId }),
             },
           }

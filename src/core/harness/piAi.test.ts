@@ -137,6 +137,10 @@ describe("PiAiProviders — the provider table config.yaml names, built on pi's 
       observer: {
         onRequestStart: () => events.push("send"),
         onResponseHeaders: (status) => events.push(`headers:${status}`),
+        onFirstContent: () => {
+          events.push("first-content");
+          throw new Error("diagnostic sink failed");
+        },
       },
     });
     await vi.waitFor(() => expect(events).toEqual(["send", "fetch"]));
@@ -144,7 +148,7 @@ describe("PiAiProviders — the provider table config.yaml names, built on pi's 
       new Response(anthropicToolCallStream(), { status: 200, headers: { "content-type": "text/event-stream" } }),
     );
     await expect(completion).resolves.toMatchObject({ stopReason: "tool_use" });
-    expect(events).toEqual(["send", "fetch", "headers:200"]);
+    expect(events).toEqual(["send", "fetch", "headers:200", "first-content"]);
   });
 
   it("observes the provider request ID at response headers without changing the completion", async () => {

@@ -260,7 +260,22 @@ export class PiAiProvider implements Provider {
       // Direct API modules take pi's normalized transcript, not the public
       // Context shorthand. Shape tools before moving them into its system message.
       const transcript = normalizeContext(shaped.body as unknown as Context);
-      const message = await this.api$().stream(model, transcript, options).result();
+      const stream = this.api$().stream(model, transcript, options);
+      let firstContent = false;
+      for await (const event of stream) {
+        if (
+          !firstContent &&
+          (event.type === "text_start" || event.type === "thinking_start" || event.type === "toolcall_start")
+        ) {
+          firstContent = true;
+          try {
+            req.observer?.onFirstContent?.();
+          } catch {
+            /* Diagnostics cannot fail a completion. */
+          }
+        }
+      }
+      const message = await stream.result();
       return fromPiMessage(message, this.name, req.tools, failureContext);
     } catch (err) {
       // Pi's `aborted` stop reason is local cancellation, not provider health.
