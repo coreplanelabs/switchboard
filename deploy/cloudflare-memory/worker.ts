@@ -16,7 +16,7 @@ import {
   type SourceInputCheckpointRequest,
   type SourceInputCheckpointResult,
 } from "../../src/core/runLedger/sourceInputIntent.js";
-import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
+import { observeObjectConstruction, observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import { bindingFetch, installHttpTransport } from "../../src/core/trace/httpTransport.js";
 import { WriteReceipts } from "./writeReceipts.js";
 import {
@@ -2717,7 +2717,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   private readonly writeReceipts: WriteReceipts;
   private readonly reviewFeedback: ReviewFeedbackStorage;
   /** Diagnostic identity only; a reconstruction does not retain it or grant ownership. */
-  private readonly incarnationId = crypto.randomUUID();
+  private readonly incarnationId: string;
   /** Where a turned-final run's point goes (run-metrics.md): the Analytics
    *  Engine dataset when the deploy bound one, the NullSink otherwise —
    *  selected once at construction, the `SHIP_COORDINATOR?` shape. */
@@ -2951,7 +2951,10 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   constructor(ctx: DurableObjectState, env: Env) {
+    const incarnationId = crypto.randomUUID();
+    const construction = observeObjectConstruction("RunHistoryDO", ctx.id.toString(), BUILD, incarnationId);
     super(ctx, env);
+    this.incarnationId = incarnationId;
     this.sql = ctx.storage.sql;
     this.writeReceipts = new WriteReceipts(this.sql);
     this.reviewFeedback = new ReviewFeedbackStorage(ctx.storage);
@@ -3413,6 +3416,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     );
     if (!planeLevelColumns.has("cause")) this.sql.exec(`ALTER TABLE plane_levels ADD COLUMN cause TEXT`);
     this.observeInputGate("constructor", null, (observe) => this.armCoordinatorReconciliation(systemClock(), observe));
+    construction.complete();
   }
 
   // ---- the orchestration plane (record 0064; orchestration-plane.md) ----------
@@ -6914,6 +6918,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   private async checkpointSource(
     runId: string,
     observe: ObserveCheckpointStage = async (_stage, _runId, call) => call(),
+    correlation?: CheckpointGateCorrelation,
   ): Promise<CanonicalCheckpointSource | undefined> {
     const live = this.liveRow(runId);
     const archived = live ? undefined : await this.get(runId);
@@ -6928,6 +6933,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.session.key)).read(
           receipt.session.seedFrom,
           receipt.session.through,
+          correlation,
         ),
       );
       transcriptHash = await sourceHash(assembleTranscript(data.rows, data.attachments, receipt.session.seedFrom));
@@ -7053,7 +7059,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       runId,
       async (observe) => {
         await this.recoverPendingCheckpoint(runId, observe);
-        const source = await this.checkpointSource(runId, observe);
+        const source = await this.checkpointSource(runId, observe, correlation);
         return source?.receipt && (await validateContextCheckpoint(source.receipt, source)) ? source : undefined;
       },
       correlation,
@@ -7074,7 +7080,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         if (!fence.ok) return fence;
         if (!row) return { ok: false, reason: "unknown-run" };
         const unavailable = (): ContextCheckpointResult => ({ ok: false, reason: "checkpoint-unavailable" });
-        const committed = await this.checkpointSource(request.runId, observe);
+        const committed = await this.checkpointSource(request.runId, observe, correlation);
         if (committed?.receipt && (await validateContextCheckpoint(committed.receipt, committed)))
           return { ok: true, receipt: committed.receipt };
         const session = row.meta.session;
@@ -13484,10 +13490,13 @@ type SessionTurnRow = { id: number; idx: number; part: number; json: string; tex
 export class SessionLogDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
   private readonly writeReceipts: WriteReceipts;
-  private readonly incarnationId = crypto.randomUUID();
+  private readonly incarnationId: string;
 
   constructor(ctx: DurableObjectState, env: Env) {
+    const incarnationId = crypto.randomUUID();
+    const construction = observeObjectConstruction("SessionLogDO", ctx.id.toString(), BUILD, incarnationId);
     super(ctx, env);
+    this.incarnationId = incarnationId;
     this.sql = ctx.storage.sql;
     this.writeReceipts = new WriteReceipts(this.sql);
     this.sql.exec(`
@@ -13530,6 +13539,7 @@ export class SessionLogDO extends DurableObject<Env> {
     if (!columns.has("row_id")) this.sql.exec(`ALTER TABLE turns ADD COLUMN row_id TEXT`);
     if (!columns.has("row_hash")) this.sql.exec(`ALTER TABLE turns ADD COLUMN row_hash TEXT`);
     this.sql.exec(`CREATE UNIQUE INDEX IF NOT EXISTS turns_row_id ON turns(row_id) WHERE row_id IS NOT NULL`);
+    construction.complete();
   }
 
   /** The index the next row lands at: one past the newest turn, 0 for an empty
@@ -14777,15 +14787,53 @@ export class SessionLogDO extends DurableObject<Env> {
 
   /** The rows from `from` to `to` (inclusive; the tail when `to` is absent), in
    *  (idx, part) order, with the attachments those rows reference. */
-  async read(from: number, to?: number): Promise<{ rows: TranscriptRow[]; attachments: TranscriptAttachment[] }> {
-    const rows = this.sql
-      .exec<{ idx: number; part: number; json: string }>(
-        `SELECT idx, part, json FROM turns WHERE idx >= ? AND idx <= ? ORDER BY idx, part`,
-        from,
-        to ?? Number.MAX_SAFE_INTEGER,
-      )
-      .toArray();
-    return projectTranscriptRows(rows, this.attachmentsOf(rows));
+  async read(
+    from: number,
+    to?: number,
+    correlation?: CheckpointGateCorrelation,
+  ): Promise<{ rows: TranscriptRow[]; attachments: TranscriptAttachment[] }> {
+    const requestId = storageRequestIdOf(correlation?.requestId);
+    const progress = (
+      stage: "entry" | "rows" | "attachments" | "result",
+      outcome: "started" | "completed" | "returned" | "failed",
+      error?: unknown,
+    ) => {
+      try {
+        console.log(
+          JSON.stringify({
+            event: "storage.session_read.progress",
+            objectId: this.ctx.id.toString(),
+            incarnationId: this.incarnationId,
+            ...(requestId ? { requestId } : {}),
+            stage,
+            outcome,
+            ...(outcome === "failed" ? { errorName: checkpointErrorName(error) } : {}),
+            build: BUILD,
+          }),
+        );
+      } catch {
+        // An unavailable diagnostic sink cannot alter a source read.
+      }
+    };
+    progress("entry", "started");
+    try {
+      const rows = this.sql
+        .exec<{ idx: number; part: number; json: string }>(
+          `SELECT idx, part, json FROM turns WHERE idx >= ? AND idx <= ? ORDER BY idx, part`,
+          from,
+          to ?? Number.MAX_SAFE_INTEGER,
+        )
+        .toArray();
+      progress("rows", "completed");
+      const attachments = this.attachmentsOf(rows);
+      progress("attachments", "completed");
+      const result = projectTranscriptRows(rows, attachments);
+      progress("result", "returned");
+      return result;
+    } catch (error) {
+      progress("result", "failed", error);
+      throw error;
+    }
   }
 
   private attachmentsOf(rows: readonly TranscriptRow[]): TranscriptAttachment[] {
@@ -15881,9 +15929,9 @@ async function handleLedger(
           const to = parseLogIndex(b.to, "to");
           if (!to.ok) return json({ error: to.error }, 400);
           if (to.value < from.value) return json({ error: "to must be at least from" }, 400);
-          return json(await stub.read(from.value, to.value));
+          return json(await stub.read(from.value, to.value, { requestId }));
         }
-        return json(await stub.read(from.value));
+        return json(await stub.read(from.value, undefined, { requestId }));
       }
       if (pathname === "/runs/session/read-tail") {
         const max = b.maxBytes;
