@@ -1,5 +1,5 @@
 import { createSign } from "node:crypto";
-import { redactAndCap } from "../core/redact.js";
+import { oneLine, redactAndCap } from "../core/redact.js";
 import { classifyError, httpStatusCode } from "../core/trace/classify.js";
 import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 import { systemClock } from "../core/trace/clock.js";
@@ -157,8 +157,7 @@ export async function resolveGithubDoorToken(scope: GithubTokenScope, repo?: str
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`GitHub door token mint failed: HTTP ${res.status} ${redactAndCap(body, 300)}`);
+    throw new Error(`GitHub door token mint failed: HTTP ${res.status}${await githubFailureFacts(res)}`);
   }
   const data = (await res.json()) as { token: string; expires_at: string };
   verifyGithubMintScope(data, repo, permissions);
@@ -248,10 +247,44 @@ async function githubJson(url: string, bearer: string): Promise<unknown> {
     headers: { authorization: `Bearer ${bearer}`, accept: "application/vnd.github+json", "user-agent": "switchboard" },
   });
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`${url.replace("https://api.github.com", "")}: HTTP ${res.status} ${body.slice(0, 200)}`);
+    throw new Error(`${url.replace("https://api.github.com", "")}: HTTP ${res.status}${await githubFailureFacts(res)}`);
   }
   return res.json();
+}
+
+/** Keep only validated headers and GitHub's isolated JSON message, never a raw body. */
+async function githubFailureFacts(res: Response): Promise<string> {
+  const facts: string[] = [];
+  const requestId = res.headers.get("x-github-request-id");
+  if (requestId && /^[0-9A-Fa-f:]{1,64}$/.test(requestId)) facts.push(`request ${requestId}`);
+  const boundedNumber = (name: string, max: number): number | undefined => {
+    const value = res.headers.get(name);
+    if (!value || !/^(?:0|[1-9][0-9]{0,9})$/.test(value)) return undefined;
+    const number = Number(value);
+    return number <= max ? number : undefined;
+  };
+  const remaining = boundedNumber("x-ratelimit-remaining", 1_000_000_000);
+  if (remaining !== undefined) facts.push(`remaining ${remaining}`);
+  const retryAfter = boundedNumber("retry-after", 604_800);
+  if (retryAfter !== undefined) facts.push(`retry after ${retryAfter}s`);
+  try {
+    const body: unknown = JSON.parse(await res.text());
+    const message =
+      body && typeof body === "object" && !Array.isArray(body) ? (body as { message?: unknown }).message : null;
+    if (typeof message === "string") {
+      const safe = redactAndCap(
+        oneLine(message)
+          .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "«redacted-url»")
+          .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "«redacted-email»")
+          .replace(/\bfor user ID\s+\S+/gi, "for user ID «redacted»"),
+        240,
+      );
+      if (safe) facts.push(`message ${safe}`);
+    }
+  } catch {
+    // A missing or invalid body has no safe message; the HTTP status and headers still describe the failure.
+  }
+  return facts.length ? `; ${facts.join("; ")}` : "";
 }
 
 /** The mint as the caller's `github.token_mint` child when it has a span
@@ -293,8 +326,7 @@ async function mintCore(scope: GithubTokenScope, span?: Span, signal?: AbortSign
     { route: "app_installation_token", name: "github.rest" },
   );
   if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    throw classifyError(new Error(`GitHub App token mint failed: HTTP ${res.status} ${redactAndCap(errBody, 300)}`), {
+    throw classifyError(new Error(`GitHub App token mint failed: HTTP ${res.status}${await githubFailureFacts(res)}`), {
       kind: "http",
       code: httpStatusCode(res.status),
     });
