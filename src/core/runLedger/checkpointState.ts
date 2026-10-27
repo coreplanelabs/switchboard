@@ -147,6 +147,14 @@ export function preserveCheckpointState(
     if (incoming[key] !== undefined && JSON.stringify(incoming[key]) !== JSON.stringify(prior[key])) return undefined;
     if (prior[key] !== undefined) next[key] = structuredClone(prior[key]);
   }
+  if (prior.reviewClaimSource !== undefined) {
+    if (
+      incoming.reviewClaimSource !== undefined &&
+      JSON.stringify(incoming.reviewClaimSource) !== JSON.stringify(prior.reviewClaimSource)
+    )
+      return undefined;
+    next.reviewClaimSource = structuredClone(prior.reviewClaimSource);
+  }
   if (prior.unitSeedReceipt !== undefined) {
     if (
       incoming.unitSeedReceipt !== undefined &&

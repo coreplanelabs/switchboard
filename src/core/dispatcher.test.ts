@@ -154,7 +154,7 @@ import { FakeHarnessContainer } from "./harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./harness/pi/testing/providerPi.js";
 import { SOFT_STOP_INSTRUCTION } from "./harness/windDown.js";
 import { ThreadsElsewhere, type ThreadElsewhere } from "./runLedger/threadsElsewhere.js";
-import type { AppendableEvent, ClaimRequest, StepRecord } from "./runLedger/types.js";
+import { LEASE_MS, type AppendableEvent, type ClaimRequest, type StepRecord } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import { mcpToolName } from "./commandSurface.js";
@@ -8433,10 +8433,13 @@ describe("review post-step", () => {
 
     /** A review-agent provider answering a sequence of turns: each entry is
      *  either a plain answer or a verdict call followed by an answer. */
-    function turnsProvider(turns: Array<{ verdict?: { verdict: string; head: string }; answer: string }>) {
+    function turnsProvider(
+      turns: Array<{ verdict?: { verdict: string; head: string }; answer: string; sourceRead?: true }>,
+    ) {
       const requests: CompletionRequest[] = [];
       let i = 0;
       let pendingAnswer: string | undefined;
+      let pendingTurn: (typeof turns)[number] | undefined;
       const provider: Provider & { requests: CompletionRequest[] } = {
         name: "fake",
         requests,
@@ -8448,8 +8451,16 @@ describe("review post-step", () => {
             pendingAnswer = undefined;
             return { content: [{ type: "text", text: a }], stopReason: "end_turn" };
           }
-          const t = turns[i++];
+          const t = pendingTurn ?? turns[i++];
           if (!t) throw new Error("provider asked for more turns than scripted");
+          if (t.sourceRead && pendingTurn === undefined) {
+            pendingTurn = t;
+            return {
+              content: [{ type: "tool_use", id: `read-${i}`, name: "review_read", input: { kind: "diff" } }],
+              stopReason: "tool_use",
+            };
+          }
+          pendingTurn = undefined;
           if (t.verdict) {
             pendingAnswer = t.answer;
             return {
@@ -8496,10 +8507,14 @@ describe("review post-step", () => {
       });
 
     /** An executor whose HEAD is a mutable cell; `moveTo` (when present) sets it. */
-    function movableExecutor(initial: string, opts: { moveTo?: boolean; moveLandsAt?: string } = { moveTo: true }) {
+    function movableExecutor(
+      initial: string,
+      opts: { moveTo?: boolean; moveLandsAt?: string; sourceReadComplete?: boolean } = { moveTo: true },
+    ) {
       const state = {
         head: initial,
         moves: [] as string[],
+        sourceReads: [] as string[],
         released: 0,
         probeSpans: [] as string[],
         moveSpans: [] as string[],
@@ -8511,10 +8526,35 @@ describe("review post-step", () => {
           state.probeSpans.push(opts?.span?.name ?? "none");
           return `${state.head}\n`;
         },
-        execResult: async (_cmd: string, opts?: { span?: { name: string } }) => {
+        execResult: async (_cmd: string, execOptions?: { span?: { name: string } }) => {
           const comparison = comparisonResult(_cmd);
           if (comparison) return comparison;
-          state.probeSpans.push(opts?.span?.name ?? "none");
+          if (_cmd.startsWith("node -e ") && _cmd.includes('"kind":"diff"')) {
+            state.sourceReads.push(state.head);
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify({
+                source: {
+                  repo: "acme/api",
+                  pr: 42,
+                  head: state.head,
+                  baseRef: "main",
+                  base: PINNED_BASE.baseSha,
+                  mergeBase: PINNED_BASE.baseSha,
+                  kind: "diff",
+                },
+                sourceHash: "d".repeat(64),
+                size: opts.sourceReadComplete === false ? 8 : 4,
+                offset: 0,
+                nextOffset: 4,
+                eof: opts.sourceReadComplete !== false,
+                text: "diff",
+              }),
+              stderr: "",
+              truncated: false,
+            };
+          }
+          state.probeSpans.push(execOptions?.span?.name ?? "none");
           return { exitCode: 0, stdout: state.head + "\n", stderr: "", truncated: false };
         },
         readFile: async () => "",
@@ -8545,7 +8585,7 @@ describe("review post-step", () => {
       const deps = makeDeps(YAML_FIXTURE, input.provider);
       deps.resolveRepoContext = () => reviewContext(PR_HEAD);
       const spy = postSpy();
-      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+      const ledger = wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       deps.fetchPrFacts = async () => currentReviewFacts(PR_HEAD);
       const heads = [...input.heads];
@@ -8559,13 +8599,17 @@ describe("review post-step", () => {
         commitAsks.push({ base: q.base, sha: q.sha });
         return input.commits?.[q.sha];
       };
-      return { deps, spy, headAsks, commitAsks };
+      return { deps, ledger, spy, headAsks, commitAsks };
     }
 
     it("matching commit metadata still requires a fresh review at the new head", async () => {
       const provider = turnsProvider([
         { verdict: { verdict: "approve", head: PR_HEAD }, answer: "Old approval." },
-        { verdict: { verdict: "request_changes", head: OTHER_HEAD }, answer: "The new contents have a defect." },
+        {
+          sourceRead: true,
+          verdict: { verdict: "request_changes", head: OTHER_HEAD },
+          answer: "The new contents have a defect.",
+        },
       ]);
       const ex = movableExecutor(PR_HEAD);
       const { deps, spy, commitAsks } = setup({ provider, heads: [OTHER_HEAD], commits: SAME });
@@ -8573,6 +8617,7 @@ describe("review post-step", () => {
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(reviewTurns(provider)).toHaveLength(2);
       expect(ex.moves).toEqual([OTHER_HEAD]);
+      expect(ex.sourceReads).toEqual([OTHER_HEAD]);
       expect(ex.probeSpans).toContain("run.settle_reviewed_head");
       expect(ex.moveSpans).toEqual(["run.settle_reviewed_head"]);
       expect(spy.calls).toHaveLength(1);
@@ -8588,10 +8633,52 @@ describe("review post-step", () => {
       expect(replies.some((reply) => reply.includes("review carried"))).toBe(false);
     });
 
+    it.each(["none", "partial", "complete"] as const)(
+      "claims a moved head in the same public Review only after a full pinned source read (%s)",
+      async (mode) => {
+        const provider = turnsProvider([
+          { verdict: { verdict: "approve", head: PR_HEAD }, answer: "First review complete." },
+          {
+            ...(mode === "none" ? {} : { sourceRead: true as const }),
+            verdict: { verdict: "approve", head: OTHER_HEAD },
+            answer: "Second review complete.",
+          },
+        ]);
+        const ex = movableExecutor(PR_HEAD, { moveTo: true, sourceReadComplete: mode !== "partial" });
+        const { deps, ledger, spy } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+        const advance = vi.spyOn(deps.runLedger, "advanceReviewHead");
+        const post = deps.postReviewComment!;
+        deps.postReviewComment = async (...args) => {
+          expect(advance).toHaveBeenCalledTimes(1);
+          const runId = advance.mock.calls[0][0].runId;
+          expect([...ledger.live.keys()]).toEqual([runId]);
+          expect(ledger.live.get(runId)).toMatchObject({
+            meta: { headSha: OTHER_HEAD },
+            state: { reviewClaimSource: { headSha: OTHER_HEAD, sourceHash: "d".repeat(64), complete: true } },
+          });
+          return post(...args);
+        };
+        const { io, replies } = fakeIO();
+        await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+        await deps.runHistoryWriter.settled();
+        expect(reviewTurns(provider)).toHaveLength(2);
+        expect(ex.moves).toEqual([OTHER_HEAD]);
+        expect(ex.sourceReads).toEqual(mode === "none" ? [] : [OTHER_HEAD]);
+        expect(advance).toHaveBeenCalledTimes(mode === "complete" ? 1 : 0);
+        expect(spy.calls.map((call) => call.target.commitId)).toEqual(mode === "complete" ? [OTHER_HEAD] : []);
+        expect([...ledger.finished.values()]).toHaveLength(1);
+        if (mode !== "complete") expect(replies.join("\n")).toContain("This Review is incomplete.");
+      },
+    );
+
     it("substantive move → the same run re-reviews: note + card, worktree moved, second turn sees the new head and the follow-up, post pinned to the new head with the NEW verdict", async () => {
       const provider = turnsProvider([
         { verdict: { verdict: "approve", head: PR_HEAD }, answer: "First review: approve." },
-        { verdict: { verdict: "request_changes", head: OTHER_HEAD }, answer: "Second review: the new test is wrong." },
+        {
+          sourceRead: true,
+          verdict: { verdict: "request_changes", head: OTHER_HEAD },
+          answer: "Second review: the new test is wrong.",
+        },
       ]);
       const ex = movableExecutor(PR_HEAD);
       const { deps, spy, headAsks } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
@@ -8601,6 +8688,7 @@ describe("review post-step", () => {
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       // Two review turns (each: verdict call + answer) in ONE run.
       expect(ex.moves).toEqual([OTHER_HEAD]);
+      expect(ex.sourceReads).toEqual([OTHER_HEAD]);
       expect(ex.moveSpans).toEqual(["run.settle_reviewed_head"]);
       const userTurns = reviewTurns(provider);
       expect(userTurns).toHaveLength(2);
@@ -8680,13 +8768,14 @@ describe("review post-step", () => {
     it("the head moves AGAIN after the re-review → re-reviewed once only; posted pinned to the re-reviewed head with the re-request note for the newest", async () => {
       const provider = turnsProvider([
         { answer: "first" },
-        { verdict: { verdict: "approve", head: OTHER_HEAD }, answer: "second" },
+        { sourceRead: true, verdict: { verdict: "approve", head: OTHER_HEAD }, answer: "second" },
       ]);
       const ex = movableExecutor(PR_HEAD);
       const { deps, spy } = setup({ provider, heads: [OTHER_HEAD, THIRD, THIRD], commits: CHANGED });
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(ex.moves).toEqual([OTHER_HEAD]);
+      expect(ex.sourceReads).toEqual([OTHER_HEAD]);
       expect(reviewTurns(provider)).toHaveLength(2);
       expect(spy.calls.map((c) => c.target.commitId)).toEqual([OTHER_HEAD]);
       expect(replies.some((r) => r.includes("reviewed d75b5a5, head is now 0123456") && r.includes("re-request"))).toBe(
@@ -17460,6 +17549,182 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     };
     return { io, replies };
   }
+
+  it("returns the Ship Review owner's receipt for another channel and holds a moved head", async () => {
+    const provider = capturingProvider("This must not run");
+    const { deps, ledger } = wired(provider);
+    const headA = "a".repeat(40);
+    const headB = "b".repeat(40);
+    deps.resolveRepoContext = () => reviewContext(headA);
+    deps.fetchPrHead = async () => headA;
+    deps.fetchPrFacts = async () => currentReviewFacts(headA);
+    expect(
+      await ledger.claim({
+        runId: "ship-review-owner",
+        threadKey: "slack:C1:original",
+        gen: "prior-generation",
+        leaseMs: LEASE_MS,
+        startedAt: 1_000,
+        meta: {
+          agent: "review",
+          repo: "acme/api",
+          pr: 42,
+          headSha: headA,
+          channelId: "slack:C1",
+          userId: "slack:UADMIN",
+          threadKey: "slack:C1:original",
+          parentInstanceId: "plan-example-1",
+          idempotencyKey: "plan-example-1:U12/0/review",
+        },
+        system: "review",
+        tools: [],
+      }),
+    ).toMatchObject({ ok: true });
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const slot = admission.claim("slack:C1:original", { agent: "review", now: 1_000 }).live;
+    slot.runId = "ship-review-owner";
+    deps.admission = admission;
+    const sameThread = ioWithCard();
+    await dispatch(
+      deps,
+      {
+        ...msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"),
+        channelId: "slack:C1",
+        threadKey: "slack:C1:original",
+      },
+      sameThread.io,
+    );
+    expect(sameThread.replies.join("\n")).toContain("Added your message to the *review* work in this thread");
+    expect(slot.inbox.size).toBe(1);
+    expect(ledger.inbox.get("ship-review-owner")).toHaveLength(1);
+    const requestOnly = ioWithCard();
+    await dispatch(
+      deps,
+      {
+        ...msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"),
+        channelId: "slack:C1",
+        threadKey: "slack:C1:original",
+      },
+      requestOnly.io,
+      { contextMode: "request" },
+    );
+    expect(requestOnly.replies.join("\n")).toContain("This Review could not be verified as a new request.");
+    expect(slot.inbox.size).toBe(1);
+    expect(ledger.inbox.get("ship-review-owner")).toHaveLength(1);
+    deps.admission = new ThreadAdmission<DispatchFollowUp>();
+    deps.hostedRuns = true;
+    const sameThreadAfterRestart = ioWithCard();
+    await dispatch(
+      deps,
+      {
+        ...msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"),
+        channelId: "slack:C1",
+        threadKey: "slack:C1:original",
+      },
+      sameThreadAfterRestart.io,
+    );
+    expect(sameThreadAfterRestart.replies.join("\n")).toContain(
+      "The Review could not confirm a durable PR owner. No Review started.",
+    );
+    expect(slot.inbox.size).toBe(1);
+    expect(ledger.inbox.get("ship-review-owner")).toHaveLength(1);
+    const duplicate = ioWithCard();
+    await dispatch(
+      deps,
+      {
+        ...msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"),
+        channelId: "mcp:review",
+        threadKey: "mcp:review:42",
+      },
+      duplicate.io,
+    );
+    expect(duplicate.replies.join("\n")).toContain("Ship Review run ship-review-owner already owns acme/api#42");
+    expect(slot.inbox.size).toBe(1);
+    expect(ledger.inbox.get("ship-review-owner")).toHaveLength(1);
+    deps.resolveRepoContext = () => reviewContext(headB);
+    deps.fetchPrHead = async () => headB;
+    deps.fetchPrFacts = async () => currentReviewFacts(headB);
+    const moved = ioWithCard();
+    await dispatch(
+      deps,
+      {
+        ...msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"),
+        channelId: "slack:C2",
+        threadKey: "slack:C2:later",
+      },
+      moved.io,
+    );
+    expect(moved.replies.join("\n")).toContain("Ship Review run ship-review-owner still owns acme/api#42");
+    expect(slot.inbox.size).toBe(1);
+    expect(ledger.inbox.get("ship-review-owner")).toHaveLength(1);
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect([...ledger.live.keys()]).toEqual(["ship-review-owner"]);
+  });
+
+  it("limits an occupied Review receipt to independent requesters who can read its run", async () => {
+    const yaml = YAML_FIXTURE.replace(
+      '  "slack:UADMIN": { actions: all, channels: all, repos: all }',
+      '  "slack:UADMIN": { actions: all, channels: all, repos: all }\n' +
+        '  "slack:UOTHER": { repos: ["acme/api"], channels: ["slack:C2"] }\n' +
+        '  "slack:UREADER": { repos: ["acme/api"], channels: ["mcp:private"] }',
+    ).replace("  agents: [coding]\n", '  agents: [coding]\n  repos: ["acme/api"]\n');
+    const provider = capturingProvider("This must not run");
+    const { deps, ledger } = wired(provider, { yaml });
+    const head = "a".repeat(40);
+    deps.resolveRepoContext = () => reviewContext(head);
+    deps.fetchPrHead = async () => head;
+    deps.fetchPrFacts = async () => currentReviewFacts(head);
+    expect(
+      await ledger.claim({
+        runId: "private-ship-review",
+        threadKey: "mcp:private:original",
+        gen: "prior-generation",
+        leaseMs: LEASE_MS,
+        startedAt: 1_000,
+        meta: {
+          agent: "review",
+          repo: "acme/api",
+          pr: 42,
+          headSha: head,
+          channelId: "mcp:private",
+          userId: "mcp:alice",
+          channelVisibility: "machine",
+          threadKey: "mcp:private:original",
+          parentInstanceId: "private-ship-parent",
+        },
+        system: "review",
+        tools: [],
+      }),
+    ).toMatchObject({ ok: true });
+    const request = (userId: string, threadKey: string) => ({
+      ...msg("agent:review https://github.com/acme/api/pull/42", userId),
+      channelId: "slack:C2",
+      threadKey,
+    });
+    const otherRequest = request("slack:UOTHER", "slack:C2:other");
+    const readerRequest = request("slack:UREADER", "slack:C2:reader");
+    expect(deps.config.canUseRepo(chatActorOf(deps.config, otherRequest), "acme/api")).toBe(true);
+    expect(deps.config.canUseRepo(chatActorOf(deps.config, readerRequest), "acme/api")).toBe(true);
+
+    const other = ioWithCard();
+    await dispatch(deps, otherRequest, other.io);
+    expect(other.replies.join("\n")).toContain("A Review already owns acme/api#42. No new Review started.");
+    expect(other.replies.join("\n")).not.toContain("private-ship-review");
+    expect(other.replies.join("\n")).not.toContain("private-ship-parent");
+    expect(other.replies.join("\n")).not.toContain(head);
+    expect(other.replies.join("\n")).not.toContain("Ship");
+
+    const reader = ioWithCard();
+    await dispatch(deps, readerRequest, reader.io);
+    expect(reader.replies.join("\n")).toContain(
+      `Ship Review run private-ship-review already owns acme/api#42 at head ${head}`,
+    );
+    expect(ledger.inbox.get("private-ship-review")).toBeUndefined();
+    expect(provider.requests).toHaveLength(0);
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect([...ledger.live.keys()]).toEqual(["private-ship-review"]);
+  });
 
   it("keeps a checkpoint-held agent run under its accepted ingress ID", async () => {
     const provider = capturingProvider("Finished checking");

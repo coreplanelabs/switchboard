@@ -44,6 +44,7 @@ import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi, RestGithubApi } from "../../execution/githubApi.js";
 import { githubPullGetTool } from "../../tools/github.js";
 import { submitVerdictTool } from "../../tools/submit.js";
+import { reviewReadTool } from "../../tools/reviewRead.js";
 import { diffDigestTool } from "../../tools/diffDigest.js";
 import type { ToolContext } from "../../tools/runnableTool.js";
 import { githubRepositoryDependencies, mergeContextDependencies } from "../references/contextDependencies.js";
@@ -238,6 +239,7 @@ async function trackedCodingContext(
       threadKey: ctx.msg.threadKey,
       ...(ctx.repoCtx.repo ? { repo: ctx.repoCtx.repo } : {}),
       ...(ctx.repoCtx.pr !== undefined ? { pr: ctx.repoCtx.pr } : {}),
+      ...(ctx.agent.name === "review" && ctx.reviewHead ? { headSha: ctx.repoCtx.headSha ?? ctx.reviewHead } : {}),
       ...(ctx.coordinator
         ? { parentInstanceId: ctx.coordinator.parentInstanceId, idempotencyKey: ctx.coordinator.idempotencyKey }
         : {}),
@@ -9045,20 +9047,22 @@ describe("the pi harness — the container replaced under a living bot: the rela
       provider: {
         name: "fake",
         complete: async () => {
-          const phase = turn++ % 3;
+          const phase = turn++ % 4;
           const input =
             phase === 0
               ? { name: "github_pull_get", input: { repo: "o/r", number: 42, includeReviewHistory: true } }
-              : {
-                  name: "submit_verdict",
-                  input: {
-                    verdict: "approve",
-                    summary: "The replacement checkout is correct.",
-                    head: checkoutHead,
-                    findings: [],
-                  },
-                };
-          return phase < 2
+              : phase === 1
+                ? { name: "review_read", input: { kind: "diff" } }
+                : {
+                    name: "submit_verdict",
+                    input: {
+                      verdict: "approve",
+                      summary: "The replacement checkout is correct.",
+                      head: checkoutHead,
+                      findings: [],
+                    },
+                  };
+          return phase < 3
             ? { content: [{ type: "tool_use", id: `new-${turn}`, ...input }], stopReason: "tool_use" }
             : { content: [{ type: "text", text: "The replacement checkout is correct." }], stopReason: "end_turn" };
         },
@@ -9072,6 +9076,33 @@ describe("the pi harness — the container replaced under a living bot: the rela
         if (command.includes("@@diff_digest:range@@") && command.includes("git -C '/workspace/new checkout'"))
           return {
             stdout: `@@diff_digest:range@@\n${"e".repeat(40)}\n${checkoutHead}\n1\t0\tsrc/x.ts\n@@diff_digest:name-status@@\nM\tsrc/x.ts\n`,
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          };
+        if (
+          command.startsWith("node -e ") &&
+          command.includes("/workspace/new checkout") &&
+          command.includes('"kind":"diff"')
+        )
+          return {
+            stdout: JSON.stringify({
+              source: {
+                repo: "o/r",
+                pr: 42,
+                head: checkoutHead,
+                baseRef: "main",
+                base: "e".repeat(40),
+                mergeBase: "e".repeat(40),
+                kind: "diff",
+              },
+              sourceHash: "d".repeat(64),
+              size: 4,
+              offset: 0,
+              nextOffset: 4,
+              eof: true,
+              text: "diff",
+            }),
             stderr: "",
             exitCode: 0,
             truncated: false,
@@ -9162,13 +9193,25 @@ describe("the pi harness — the container replaced under a living bot: the rela
         },
       ]);
       expect(checkoutHead).toBe("b1b2c3d4e5f60718293a4b5c6d7e8f9012345678");
+      const sourceReads = commands.filter(
+        (command) => command.startsWith("node -e ") && command.includes('"kind":"diff"'),
+      );
+      expect(sourceReads).toHaveLength(2);
+      expect(sourceReads.every((command) => command.includes("/workspace/new checkout"))).toBe(true);
+      expect(sourceReads[0]).toContain(head);
+      expect(sourceReads[1]).toContain(nextHead);
       expect(
-        commands.filter((command) => !command.includes("review_before=") && !command.includes("@@diff_digest:range@@")),
+        commands.filter(
+          (command) =>
+            !command.includes("review_before=") &&
+            !command.includes("@@diff_digest:range@@") &&
+            !command.startsWith("node -e "),
+        ),
       ).toEqual(Array(3).fill("git -C '/workspace/new checkout' rev-parse --verify HEAD"));
       expect(commands.find((command) => command.includes("review_before="))).toContain(
         "git -C '/workspace/new checkout' check-ref-format 'refs/heads/main'",
       );
-      expect(commands.every((command) => command.includes("git -C '/workspace/new checkout'"))).toBe(true);
+      expect(commands.every((command) => command.includes("/workspace/new checkout"))).toBe(true);
       s.ending.drain(true);
       await s.writer.settled();
       expect((await s.store.get("run-l"))?.reviewPost).toEqual({
@@ -10833,6 +10876,145 @@ describe("the pi harness — the review preset", () => {
         ...(rebased ? {} : { verdict: "approve" }),
       });
       expect(rec.events.filter((event) => event.type === "run_note" && event.kind === "verdict_turn")).toHaveLength(1);
+    },
+  );
+
+  it.each(["none", "partial", "complete", "advance-error"] as const)(
+    "binds a moved Review head only after a complete source read (%s)",
+    async (mode) => {
+      const nextHead = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+      const sourceComplete = mode === "complete" || mode === "advance-error";
+      let checkoutHead = HEAD;
+      let nativeLedger: InMemoryRunLedger | undefined;
+      const posts: ReviewCommentTarget[] = [];
+      const observed = watched(piHarness);
+      observed.harness.open = async () => ({
+        answer: "First review completed at the old head.",
+        followUp: async ({ toolContext }) => {
+          if (mode !== "none") {
+            const page = await reviewReadTool.run({ kind: "diff" }, toolContext);
+            expect(JSON.parse(String(page))).toMatchObject({ source: { head: nextHead }, eof: sourceComplete });
+          }
+          toolContext.reviewHistory!.snapshot = { head: nextHead, findings: [] };
+          const submitted = await submitVerdictTool.run(
+            { verdict: "approve", summary: "The new head looks correct", head: nextHead, findings: [] },
+            toolContext,
+          );
+          expect(submitted).toContain("verdict recorded: approve");
+          return "Second review completed at the new head.";
+        },
+        remainingMs: () => 240_000,
+        end: async () => {},
+      });
+      const s = setup("", {
+        agent: "review",
+        ...prThread,
+        repoCtx: { ...prThread.repoCtx, headSha: HEAD },
+        yaml: REVIEW_PI_YAML,
+        executor: {
+          execResult: async (command: string) => ({
+            exitCode: 0,
+            stdout: command.includes("node -e")
+              ? JSON.stringify({
+                  source: {
+                    repo: "o/r",
+                    pr: 42,
+                    head: nextHead,
+                    baseRef: "main",
+                    base: "e".repeat(40),
+                    mergeBase: "e".repeat(40),
+                    kind: "diff",
+                  },
+                  sourceHash: "d".repeat(64),
+                  size: sourceComplete ? 4 : 8,
+                  offset: 0,
+                  nextOffset: 4,
+                  eof: sourceComplete,
+                  text: "diff",
+                })
+              : `${checkoutHead}\n`,
+            stderr: "",
+            truncated: false,
+          }),
+          moveTo: async (sha) => {
+            checkoutHead = sha;
+            return { sha };
+          },
+        },
+        harness: {
+          harnesses: roster(observed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+        review: {
+          head: HEAD,
+          currentHead: nextHead,
+          commits: (sha) => ({
+            commits: (sha === HEAD ? [HEAD] : [HEAD, nextHead]).map((value) => ({ sha: value, message: "change" })),
+            files: ["src/x.ts"],
+            filesTruncated: false,
+          }),
+          post: async (target) => {
+            expect(nativeLedger?.live.get("run-l")).toMatchObject({
+              meta: { headSha: nextHead },
+              state: { reviewClaimSource: { headSha: nextHead, sourceHash: "d".repeat(64), complete: true } },
+            });
+            posts.push(target);
+            return { state: "accepted" as const };
+          },
+        },
+      });
+      const ctx = await trackedCodingContext(s, s.ctx, s.ctx.msg.threadKey, (ledger) => {
+        nativeLedger = ledger;
+      });
+      if (mode === "advance-error")
+        vi.spyOn(s.deps.runLedger, "advanceReviewHead").mockRejectedValueOnce(
+          new TransientStoreError("PRIVATE_SOURCE_BYTES"),
+        );
+      const warnings: string[] = [];
+      const warning =
+        mode === "advance-error"
+          ? vi.spyOn(console, "warn").mockImplementation((line) => void warnings.push(String(line)))
+          : undefined;
+      const out = await (async () => {
+        try {
+          return answered(await runLoop(s.deps, ctx));
+        } finally {
+          warning?.mockRestore();
+        }
+      })();
+      expect(out.reviewHead).toBe(nextHead);
+      expect(posts).toEqual(mode === "complete" ? [{ repo: "o/r", number: 42, commitId: nextHead }] : []);
+      expect(out.verdict?.verdict ?? "incomplete").toBe(mode === "complete" ? "approve" : "incomplete");
+      if (mode !== "complete") {
+        expect(out.answer).toContain("This Review is incomplete");
+        expect(s.registry.snapshot("run-l", s.run.token)?.events).toContainEqual(
+          expect.objectContaining({
+            type: "run_note",
+            kind: "review_incomplete",
+            summary: `review incomplete: head claim refused (source-unproved) at ${nextHead}`,
+          }),
+        );
+      }
+      if (mode === "advance-error") {
+        const report = warnings
+          .map((line) => {
+            try {
+              return JSON.parse(line);
+            } catch {
+              return undefined;
+            }
+          })
+          .find((value) => value?.event === "review.head_advance.failure");
+        expect(report).toMatchObject({
+          event: "review.head_advance.failure",
+          runId: "run-l",
+          head: nextHead,
+          kind: "transient-store",
+        });
+        expect(warnings.join("\n")).not.toContain("PRIVATE_SOURCE_BYTES");
+      }
     },
   );
 

@@ -327,7 +327,47 @@ export type ClaimResult =
       ok: false;
       reason: "thread-live";
       live: { runId: string; agent?: string; startedAt: number; idempotencyKey?: string };
+    }
+  | {
+      ok: false;
+      reason: "review-owned";
+      live: {
+        runId: string;
+        agent: "review";
+        startedAt: number;
+        channelId?: string;
+        userId?: string;
+        channelVisibility?: ChannelVisibility;
+        headSha?: string;
+        parentInstanceId?: string;
+      };
+    }
+  | {
+      ok: false;
+      reason: "review-conflict";
     };
+
+export interface ReviewSourceReceipt {
+  kind: "diff";
+  repo: string;
+  pr: number;
+  headSha: string;
+  baseSha: string;
+  sourceHash: string;
+  size: number;
+  complete: true;
+}
+
+export interface ReviewHeadAdvanceRequest {
+  runId: string;
+  gen: string;
+  from: string;
+  to: string;
+  source: ReviewSourceReceipt;
+}
+
+export type ReviewHeadAdvanceResult =
+  { ok: true } | { ok: false; reason: "fenced" | "source-unproved" | "review-owned" };
 
 /** Receiver-produced original admission identity, not a disposal permit. */
 export interface WorkspaceAllocationAck {

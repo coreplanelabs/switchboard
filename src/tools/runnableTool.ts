@@ -55,8 +55,8 @@ export interface ToolContext {
   reviewReadTarget?: () => import("./reviewRead.js").ReviewReadTarget | undefined;
   /** Accept one verified diff page before the model sees it. */
   onReviewReadPage?: (
-    page: import("./reviewRead.js").ReviewReadProgress & { offset: number },
-  ) => Promise<boolean> | boolean;
+    page: import("./reviewRead.js").ReviewReadPageReceipt,
+  ) => Promise<boolean | void> | boolean | void;
   /** Durable read actions bound by dispatch, never authority supplied by tool arguments. */
   sourceReads?: SourceReads;
   executor: Executor;

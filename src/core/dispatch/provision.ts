@@ -1,5 +1,9 @@
 import { privateDestinationOf, organizationPrivateAudienceOf, copyPrivateSourceFacts } from "./privateDestination.js";
-import { NativeClaimUnknownError, TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
+import {
+  NativeClaimUnknownError,
+  ReviewClaimOccupiedError,
+  TerminalCommitmentUnknownError,
+} from "../runLedger/writeThrough.js";
 import { originalColdAllocation, sameWorkspaceAllocation } from "../runLedger/workspaceDurability.js";
 import { residentRouteOf } from "../../execution/residentRoute.js";
 import { resourceLifetimeSchema } from "../../agents/resourceLifetime.js";
@@ -1001,6 +1005,40 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
         }),
       )
       .catch((err: unknown) => {
+        if (err instanceof ReviewClaimOccupiedError) {
+          const where = `${repoCtx.repo}#${repoCtx.pr}`;
+          const claim = err.claim;
+          if (claim.reason === "review-conflict")
+            throw new RefusalError(
+              refusalOf("review_occupied", `Multiple unfinished Reviews claim ${where}. No new Review started.`),
+            );
+          const owner = claim.live;
+          if (
+            !owner.channelId ||
+            !owner.userId ||
+            !authorize(chatActorOf(deps.config, msg), "runs:read", {
+              type: "run",
+              id: owner.runId,
+              channelId: owner.channelId,
+              userId: owner.userId,
+              repo: repoCtx.repo,
+              channelVisibility: owner.channelVisibility ?? "unknown",
+            }).allow
+          )
+            throw new RefusalError(
+              refusalOf("review_occupied", `A Review already owns ${where}. No new Review started.`),
+            );
+          const ownerName = owner.parentInstanceId ? "Ship Review run" : "Review run";
+          const sameHead = owner.headSha === repoCtx.headSha;
+          throw new RefusalError(
+            refusalOf(
+              "review_occupied",
+              sameHead
+                ? `${ownerName} ${owner.runId} already owns ${where} at head ${owner.headSha}. This request uses its run receipt; no new Review started.`
+                : `${ownerName} ${owner.runId} still owns ${where}${owner.headSha ? ` at head ${owner.headSha}` : ""}. A new Review waits for verified terminal settlement. No new Review started.`,
+            ),
+          );
+        }
         if (
           !coordinator ||
           err instanceof TerminalCommitmentUnknownError ||
@@ -1024,6 +1062,10 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
               ? "The original review reservation was refused because its thread is occupied."
               : "The original review could not be durably tracked.",
         ),
+      );
+    if (agent.name === "review" && repoCtx.pr !== undefined && deps.hostedRuns && reserved.kind !== "tracked")
+      throw new RefusalError(
+        refusalOf("setup_failed", "The Review could not confirm a durable PR owner. No Review started."),
       );
     const allocationAck =
       reserved.kind === "tracked" ? allocationAckOf(reserved.allocationAck, expectedAdmission) : undefined;

@@ -190,6 +190,7 @@ import {
 import { normalizeHead } from "../reviewedHead.js";
 import { parseDigestReport, type DigestReport } from "../diffDigest.js";
 import { runReviewPostStep, settleReviewedHead, type ReviewPostOutcome, type RoundWorkspace } from "../reviewRound.js";
+import type { ReviewSourceReceipt } from "../runLedger/types.js";
 import { postReviewComment } from "../../execution/githubComments.js";
 import {
   observeCodingWorkspace,
@@ -685,6 +686,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // native result checkpoint in this harness; compacted history need not echo.
   const sourceResultCalls = new Set<string>();
   let reviewSubmission: ReviewSubmission | undefined;
+  let reviewClaimUnconfirmed = false;
   let recoveryCheckpointFailure: Record<string, unknown> | undefined;
   const recoveryError = (error: unknown) => ({
     kind:
@@ -714,7 +716,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     storage: originalStorageFailure(error),
   });
   const diagnoseRecovery = (
-    event: "recovery.checkpoint.failure" | "recovery.checkpoint.hold",
+    event: "recovery.checkpoint.failure" | "recovery.checkpoint.hold" | "review.head_advance.failure",
     facts: Record<string, unknown>,
   ): void => {
     try {
@@ -3089,6 +3091,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     isPrReview && repoCtx.repo && repoCtx.pr !== undefined
       ? { target: { repo: repoCtx.repo, number: repoCtx.pr } }
       : undefined;
+  let completeReviewSource: ReviewSourceReceipt | undefined;
   const toolContext = {
     recovery,
     ...(command ? { command } : {}),
@@ -3140,21 +3143,32 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(reviewHistory ? { reviewHistory } : {}),
     ...(isPrReview
       ? {
-          onReviewReadPage: async (
-            page: import("../../tools/reviewRead.js").ReviewReadProgress & { offset: number },
-          ) => {
+          onReviewReadPage: async (page: import("../../tools/reviewRead.js").ReviewReadPageReceipt) => {
+            if (page.kind !== "diff") return;
             const next = advanceReviewRead(reviewReadProgress, page);
             if (!next) return false;
             if (ledgerRun?.tracked() && !(await ledgerRun.setStateAndFlush({ reviewReadProgress: next }))) return false;
             reviewReadProgress = next;
             invalidReviewReadProgress = false;
             if (!ledgerRun?.tracked()) ledgerRun?.setState({ reviewReadProgress: next });
+            if (
+              next.eof &&
+              page.target.head === (reviewHistory?.requiredHead ?? reviewHead ?? repoCtx.headSha) &&
+              repoCtx.repo &&
+              repoCtx.pr !== undefined
+            )
+              completeReviewSource = {
+                kind: "diff",
+                repo: repoCtx.repo,
+                pr: repoCtx.pr,
+                headSha: page.target.head,
+                baseSha: page.target.base,
+                sourceHash: page.sourceHash,
+                size: page.size,
+                complete: true,
+              };
             return true;
           },
-        }
-      : {}),
-    ...(isPrReview
-      ? {
           reviewReadTarget: () => {
             const head = reviewHistory?.requiredHead ?? reviewHead ?? repoCtx.headSha;
             return !privateAudienceLatch.revoked &&
@@ -4568,6 +4582,34 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           at: clock(),
         });
       }
+      if (deps.runLedger.sessionPersistence && repoCtx.headSha && reviewHead && reviewHead !== repoCtx.headSha) {
+        const source = reviewCompletionFailure === undefined ? completeReviewSource : undefined;
+        const currentHistory = toolContext.reviewHistory?.snapshot?.head === reviewHead;
+        const advanced =
+          source?.headSha === reviewHead && currentHistory && ledgerRun?.tracked()
+            ? await deps.runLedger
+                .advanceReviewHead({ runId: run.id, from: repoCtx.headSha, to: reviewHead, source })
+                .catch((error: unknown) => {
+                  diagnoseRecovery("review.head_advance.failure", { head: reviewHead, ...recoveryError(error) });
+                  return { ok: false as const, reason: "source-unproved" as const };
+                })
+            : { ok: false as const, reason: "source-unproved" as const };
+        if (!advanced.ok) {
+          reviewClaimUnconfirmed = true;
+          onEvent({
+            type: "run_note",
+            kind: "review_incomplete",
+            summary: `review incomplete: head claim refused (${advanced.reason}) at ${reviewHead}`,
+            at: clock(),
+          });
+          verdict = undefined;
+          reviewSubmission = {
+            status: "rejected",
+            reason: "The new head has no complete source read and acknowledged Review ownership.",
+          };
+          answer = `I could not confirm complete source coverage and durable Review ownership for ${repoCtx.repo}#${repoCtx.pr} at ${reviewHead}. This Review is incomplete. Request a new Review after this run ends.`;
+        }
+      }
     }
     if (agent.name === "review" && reviewSubmission !== undefined) await persistReviewSubmission(reviewSubmission);
     // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt
@@ -4586,6 +4628,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       repoCtx.repo &&
       repoCtx.pr !== undefined &&
       !tailSkipped() &&
+      !reviewClaimUnconfirmed &&
       postedBefore === undefined &&
       verdict === undefined &&
       reviewCompletionFailure === undefined &&
@@ -5233,7 +5276,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // verdict a previous generation posted before the restart is the outcome
     // already (`postedBefore`): the record carries it, GitHub is not asked twice.
     if (postedBefore) reviewPost = postedBefore;
-    else if (agent.name === "review" && !tailSkipped())
+    else if (agent.name === "review" && !tailSkipped() && !reviewClaimUnconfirmed)
       reviewPost = await root.span("run.review_post_step", () =>
         runReviewPostStep({
           remainingMs: () =>

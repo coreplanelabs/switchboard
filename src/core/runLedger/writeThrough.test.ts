@@ -50,6 +50,7 @@ import {
 import {
   createLedgerWriteThrough,
   NativeClaimUnknownError,
+  ReviewClaimOccupiedError,
   deliverPlaneSteer,
   LANDED_MAX,
   mintGeneration,
@@ -172,6 +173,207 @@ const openReq = (over: Partial<OpenRunRequest> = {}): OpenRunRequest => ({
   seed: { messages: [user("earlier"), assistant("sure"), user("go")], budgetMs: 600_000 },
   ...over,
 });
+
+it("keeps a Review owner after its claim acknowledgment is lost and returns that owner to another channel", async () => {
+  const store = new InMemoryRunLedger(() => 10_000);
+  const originalClaim = store.claim.bind(store);
+  let lost = true;
+  const first = harness({
+    ledger: overriding(store, {
+      claim: async (request, body) => {
+        const result = await originalClaim(request, body);
+        if (lost) {
+          lost = false;
+          throw new TransientStoreError("claim reply lost");
+        }
+        return result;
+      },
+    }),
+  });
+  const original = openReq({ seed: undefined });
+  original.meta = {
+    ...original.meta,
+    residentExecution: "native-v1",
+    repo: "acme/api",
+    pr: 42,
+    headSha: "a".repeat(40),
+  };
+  await expect(first.wt.reserve(original)).rejects.toBeInstanceOf(NativeClaimUnknownError);
+  const other = harness({ ledger: store });
+  const duplicate = openReq({
+    runId: "other-run",
+    threadKey: "mcp:review:42",
+    seed: undefined,
+    meta: { ...original.meta, channelId: "mcp:review", threadKey: "mcp:review:42" },
+  });
+  const refused = await other.wt.reserve(duplicate).catch((error: unknown) => error);
+  expect(refused).toBeInstanceOf(ReviewClaimOccupiedError);
+  expect(refused).toMatchObject({
+    name: "ReviewClaimOccupiedError",
+    claim: { reason: "review-owned", live: { runId: "r1", headSha: "a".repeat(40) } },
+  });
+  expect(store.live.has("r1")).toBe(true);
+  expect(store.live.has("other-run")).toBe(false);
+});
+
+it("keeps acknowledged Review head proof across state saves and a lost save reply", async () => {
+  const inner = new InMemoryRunLedger(() => 10_000);
+  let loseNextStateReply = false;
+  const ledger = overriding(inner, {
+    setState: async (...args) => {
+      const result = await inner.setState(...args);
+      if (loseNextStateReply) {
+        loseNextStateReply = false;
+        throw new UncertainStoreError(
+          "state reply lost",
+          await storeRequestWitness("/runs/state", JSON.stringify(args)),
+        );
+      }
+      return result;
+    },
+  });
+  const { wt } = harness({ ledger });
+  const firstHead = "a".repeat(40);
+  const secondHead = "b".repeat(40);
+  const thirdHead = "c".repeat(40);
+  const source = (headSha: string) => ({
+    kind: "diff" as const,
+    repo: "acme/api",
+    pr: 42,
+    headSha,
+    baseSha: "d".repeat(40),
+    sourceHash: "e".repeat(64),
+    size: 4,
+    complete: true as const,
+  });
+  const run = (await openRun(
+    wt,
+    openReq({
+      seed: undefined,
+      meta: { ...openReq().meta, repo: "acme/api", pr: 42, headSha: firstHead },
+    }),
+  ))!;
+  try {
+    expect(
+      await wt.advanceReviewHead({ runId: "r1", from: firstHead, to: secondHead, source: source(secondHead) }),
+    ).toEqual({ ok: true });
+    loseNextStateReply = true;
+    expect(await run.commitState({ progress: "saved with lost reply" })).toBe("unavailable");
+    expect(await run.commitState({ progress: "confirmed after readback" })).toBe("ok");
+    expect(inner.live.get("r1")?.state).toMatchObject({
+      progress: "confirmed after readback",
+      reviewClaimSource: source(secondHead),
+    });
+    expect(
+      await wt.advanceReviewHead({ runId: "r1", from: secondHead, to: thirdHead, source: source(thirdHead) }),
+    ).toEqual({ ok: true });
+    loseNextStateReply = true;
+    expect(await run.commitState({ progress: "saved at third head" })).toBe("unavailable");
+    expect(await run.commitState({ progress: "confirmed at third head" })).toBe("ok");
+    expect(inner.live.get("r1")?.state).toMatchObject({
+      progress: "confirmed at third head",
+      reviewClaimSource: source(thirdHead),
+    });
+  } finally {
+    await run.close();
+  }
+});
+
+it.each([
+  [false, 0, false],
+  [true, 0, false],
+  [true, 2, false],
+  [true, 2, true],
+  [false, 2, true],
+] as const)(
+  "finishes the original Review after a failed head advance so another Review can claim the PR: committed=%s readbacks=%s prior=%s",
+  async (committed, failedReadbacks, priorSource) => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let loseNextStateReply = false;
+    let readbackFailures = failedReadbacks;
+    const ledger = overriding(inner, {
+      advanceReviewHead: async (request) => {
+        if (committed) {
+          expect(await inner.advanceReviewHead(request)).toEqual({ ok: true });
+          throw new UncertainStoreError(
+            "head advance reply lost",
+            await storeRequestWitness("/runs/review-head/advance", JSON.stringify(request)),
+          );
+        }
+        throw new TransientStoreError("head advance unavailable");
+      },
+      setState: async (...args) => {
+        const result = await inner.setState(...args);
+        if (loseNextStateReply && result.ok) {
+          loseNextStateReply = false;
+          throw new UncertainStoreError(
+            "state reply lost",
+            await storeRequestWitness("/runs/state", JSON.stringify(args)),
+          );
+        }
+        return result;
+      },
+      peekInbox: async (...args) => {
+        if (readbackFailures > 0) {
+          readbackFailures--;
+          throw new TransientStoreError("head readback unavailable");
+        }
+        return inner.peekInbox(...args);
+      },
+    });
+    const { wt } = harness({ ledger });
+    const firstHead = "a".repeat(40);
+    const secondHead = "b".repeat(40);
+    const source = (headSha: string) => ({
+      kind: "diff" as const,
+      repo: "acme/api",
+      pr: 42,
+      headSha,
+      baseSha: "c".repeat(40),
+      sourceHash: "d".repeat(64),
+      size: 4,
+      complete: true as const,
+    });
+    const meta = { ...openReq().meta, repo: "acme/api", pr: 42, headSha: firstHead };
+    let run: LedgerRun;
+    if (priorSource) {
+      const state = { reviewClaimSource: source(firstHead) };
+      const request = openReq({ seed: undefined, meta, state });
+      expect(await inner.claim({ ...request, gen: "gen-A", leaseMs: 30_000 })).toMatchObject({ ok: true });
+      run = wt.adopt({ runId: request.runId, threadKey: request.threadKey, meta, state, lastStep: 0, lastSeq: 0 });
+    } else {
+      run = (await openRun(wt, openReq({ seed: undefined, meta })))!;
+    }
+    await expect(
+      wt.advanceReviewHead({
+        runId: "r1",
+        from: firstHead,
+        to: secondHead,
+        source: source(secondHead),
+      }),
+    ).rejects.toThrow(committed ? "head advance reply lost" : "head advance unavailable");
+    loseNextStateReply = committed;
+    if (committed) expect(await run.commitState({ progress: "saved with lost reply" })).toBe("unavailable");
+    expect(await run.commitState({ progress: "review incomplete" })).toBe("ok");
+    if (committed)
+      expect(inner.live.get("r1")?.state).toMatchObject({
+        progress: "review incomplete",
+        reviewClaimSource: { headSha: secondHead },
+      });
+    expect(await run.sink.put({ ...record("r1"), status: "failed" })).toEqual({ ok: true, stored: true });
+    expect(inner.live.has("r1")).toBe(false);
+    const next = await wt.reserve(
+      openReq({
+        runId: "next-review",
+        threadKey: "mcp:review:42",
+        seed: undefined,
+        meta: { ...meta, channelId: "mcp:review", threadKey: "mcp:review:42" },
+      }),
+    );
+    expect(next.kind).toBe("tracked");
+    if (next.kind === "tracked") await next.run.close();
+  },
+);
 
 describe("unknown native initial claim", () => {
   it.each([false, true])("holds the original HTTP 500 claim without replay: committed=%s", async (committed) => {

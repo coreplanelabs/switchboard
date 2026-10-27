@@ -654,11 +654,14 @@ import {
   isIntakeReceipt,
   type ClaimRequest,
   type ClaimResult,
+  type ReviewHeadAdvanceRequest,
+  type ReviewHeadAdvanceResult,
   type FenceResult,
   type IntakeQuery,
   type IntakeReceipt,
   type IntakeWriteResult,
   type LivePhase,
+  type LiveRunMeta,
   type LiveRunRow,
   type LiveStateAssignRequest,
   type LiveStateAssignResult,
@@ -670,6 +673,7 @@ import {
   type TranscriptAttachment,
   type TranscriptRow,
 } from "../../src/core/runLedger/types.ts";
+import { reviewSourceProvesHead } from "../../src/core/runLedger/reviewClaim.ts";
 import {
   isMcpTicket,
   isSealedCredential,
@@ -8532,6 +8536,48 @@ export class RunHistoryDO extends DurableObject<Env> {
           throw new Error("recorded check authorization is immutable");
         const existing = this.liveByThread(req.threadKey);
         if (
+          req.meta.agent === "review" &&
+          req.meta.repo &&
+          req.meta.pr !== undefined &&
+          (!existing || existing.runId === req.runId)
+        ) {
+          const owners = this.sql
+            .exec<{ run_id: string; started_at: number; meta_json: string }>(
+              `SELECT run_id, started_at, meta_json FROM live_runs
+               WHERE json_extract(meta_json, '$.agent') = 'review'
+                 AND lower(json_extract(meta_json, '$.repo')) = ?
+                 AND json_extract(meta_json, '$.pr') = ?
+                 AND run_id != ? LIMIT 2`,
+              req.meta.repo.toLowerCase(),
+              req.meta.pr,
+              req.runId,
+            )
+            .toArray();
+          if (owners.length > 1) {
+            out = { ok: false, reason: "review-conflict" };
+            return;
+          }
+          const owner = owners[0];
+          if (owner) {
+            const meta = parseStoredJson(owner.meta_json) as LiveRunMeta;
+            out = {
+              ok: false,
+              reason: "review-owned",
+              live: {
+                runId: owner.run_id,
+                agent: "review",
+                startedAt: owner.started_at,
+                channelId: meta.channelId,
+                userId: meta.userId,
+                ...(meta.channelVisibility ? { channelVisibility: meta.channelVisibility } : {}),
+                ...(meta.headSha ? { headSha: meta.headSha } : {}),
+                ...(meta.parentInstanceId ? { parentInstanceId: meta.parentInstanceId } : {}),
+              },
+            };
+            return;
+          }
+        }
+        if (
           existing?.runId === req.runId &&
           existing.ownerGen === req.gen &&
           req.phase === "attaching" &&
@@ -8699,6 +8745,51 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       return out;
     });
+  }
+
+  async advanceReviewHead(request: ReviewHeadAdvanceRequest): Promise<ReviewHeadAdvanceResult> {
+    let result: ReviewHeadAdvanceResult = { ok: false, reason: "fenced" };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.liveRow(request.runId);
+      if (!row || row.ownerGen !== request.gen || row.phase !== "live") return;
+      if (!reviewSourceProvesHead(request, row.meta)) {
+        result = { ok: false, reason: "source-unproved" };
+        return;
+      }
+      if (row.meta.headSha === request.to) {
+        result =
+          row.state.reviewClaimSource && JSON.stringify(row.state.reviewClaimSource) === JSON.stringify(request.source)
+            ? { ok: true }
+            : { ok: false, reason: "source-unproved" };
+        return;
+      }
+      if (row.meta.headSha !== request.from) return;
+      const competing = this.sql
+        .exec<{ run_id: string }>(
+          `SELECT run_id FROM live_runs
+           WHERE json_extract(meta_json, '$.agent') = 'review'
+             AND lower(json_extract(meta_json, '$.repo')) = ?
+             AND json_extract(meta_json, '$.pr') = ?
+             AND run_id != ? LIMIT 1`,
+          row.meta.repo!.toLowerCase(),
+          row.meta.pr!,
+          request.runId,
+        )
+        .toArray();
+      if (competing.length) {
+        result = { ok: false, reason: "review-owned" };
+        return;
+      }
+      this.sql.exec(
+        "UPDATE live_runs SET meta_json=?, state_json=? WHERE run_id=? AND owner_gen=?",
+        JSON.stringify({ ...row.meta, headSha: request.to }),
+        JSON.stringify({ ...row.state, reviewClaimSource: request.source }),
+        request.runId,
+        request.gen,
+      );
+      result = { ok: true };
+    });
+    return result;
   }
 
   /** Extends the lease iff the caller owns the run; answers what another generation asked for. */
@@ -15185,6 +15276,7 @@ const LEDGER_ROUTES = new Set<string>([
   "/runs/coordinator/wake",
   "/runs/decision-record/reserve",
   "/runs/claim",
+  "/runs/review-head/advance",
   "/runs/claim-observations/record",
   "/runs/claim-observations/list",
   "/runs/cancellation/prepare",
@@ -16457,6 +16549,30 @@ async function handleLedger(
       `[runs/claim] ${key.value} ${req.value.runId} on ${req.value.threadKey} → ${r.ok ? "claimed" : r.reason}`,
     );
     return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/review-head/advance") {
+    const value = b.request;
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return json({ error: "invalid review head request" }, 400);
+    const request = value as Record<string, unknown>;
+    const runId = parseRunId(request.runId);
+    const ownerGen = gen(request.gen);
+    if (!runId.ok || !ownerGen.ok || typeof request.from !== "string" || typeof request.to !== "string")
+      return json({ error: "invalid review head request" }, 400);
+    const source = request.source;
+    if (!source || typeof source !== "object" || Array.isArray(source))
+      return json({ error: "invalid review source receipt" }, 400);
+    const result = await stub.advanceReviewHead({
+      runId: runId.value,
+      gen: ownerGen.value,
+      from: request.from,
+      to: request.to,
+      source: source as ReviewHeadAdvanceRequest["source"],
+    });
+    console.log(
+      `[runs/review-head] ${runId.value} ${request.from}→${request.to} → ${result.ok ? "advanced" : result.reason}`,
+    );
+    return result.ok ? json(result) : json(result, 409);
   }
   if (pathname === "/runs/resident-claim") {
     const runId = parseRunId(b.runId);

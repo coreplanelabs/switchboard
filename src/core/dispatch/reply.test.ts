@@ -640,6 +640,9 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       // dispatcher.test.ts's coordinator producer identity cases prove the
       // pre-ack failure sentence and typed response, without a child id.
       "child_reservation_failed",
+      // dispatcher.test.ts proves the cross-thread owner's receipt and the
+      // neutral reply for a caller who cannot read that run.
+      "review_occupied",
       // dispatcher.test.ts quotes the typed budget outcome and its reply at
       // every expired setup boundary; this refusal is not silent.
       "run_budget_exhausted",

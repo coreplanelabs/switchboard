@@ -18,18 +18,35 @@ export interface ReviewReadProgress {
   eof: boolean;
 }
 
+export interface ReviewReadPageReceipt {
+  target: ReviewReadTarget;
+  kind: "diff" | "file";
+  sourceHash: string;
+  size: number;
+  offset: number;
+  nextOffset: number;
+  eof: boolean;
+}
+
 export function advanceReviewRead(
   progress: ReviewReadProgress | undefined,
-  page: ReviewReadProgress & { offset: number },
+  page: ReviewReadPageReceipt,
 ): ReviewReadProgress | undefined {
+  if (page.kind !== "diff") return progress;
   if (page.nextOffset < page.offset) return undefined;
   const sameSource =
-    progress?.head === page.head && progress.sourceHash === page.sourceHash && progress.size === page.size;
+    progress?.head === page.target.head && progress.sourceHash === page.sourceHash && progress.size === page.size;
   if (page.offset !== 0 && !sameSource) return undefined;
   if (sameSource && page.offset !== 0 && page.offset !== progress.nextOffset && page.nextOffset > progress.nextOffset)
     return undefined;
   if (sameSource && page.nextOffset <= progress.nextOffset) return progress;
-  return { head: page.head, sourceHash: page.sourceHash, size: page.size, nextOffset: page.nextOffset, eof: page.eof };
+  return {
+    head: page.target.head,
+    sourceHash: page.sourceHash,
+    size: page.size,
+    nextOffset: page.nextOffset,
+    eof: page.eof,
+  };
 }
 
 export function reviewReadProgressOf(value: unknown): ReviewReadProgress | undefined {
@@ -225,17 +242,16 @@ export const reviewReadTool: RunnableTool = {
         !ctx.github.canWrite(target.repo)
       )
         return fail("review source access changed during the read");
-      if (input.kind === "diff") {
-        const accepted = await ctx.onReviewReadPage?.({
-          head: target.head,
-          sourceHash: page.sourceHash!,
-          size: page.size!,
-          offset,
-          nextOffset: page.nextOffset!,
-          eof: page.eof!,
-        });
-        if (accepted === false) return fail("diff pages must be read in order from one unchanged source");
-      }
+      const accepted = await ctx.onReviewReadPage?.({
+        target,
+        kind: input.kind,
+        sourceHash: page.sourceHash!,
+        size: page.size!,
+        offset,
+        nextOffset: page.nextOffset!,
+        eof: page.eof!,
+      });
+      if (accepted === false) return fail("diff pages must be read in order from one unchanged source");
       return result.stdout;
     } catch {
       return fail("source read did not complete; no page was accepted");

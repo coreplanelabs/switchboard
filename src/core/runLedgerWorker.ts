@@ -231,6 +231,8 @@ import {
   type IntakeWriteResult,
   type ClaimRequest,
   type ClaimResult,
+  type ReviewHeadAdvanceRequest,
+  type ReviewHeadAdvanceResult,
   type FenceResult,
   type LiveRunRow,
   type LiveStateAssignRequest,
@@ -773,12 +775,42 @@ export class WorkerRunLedger implements RunLedger {
         r,
       );
     if (r.status === 409) {
+      if (r.data.reason === "review-conflict") return { ok: false, reason: "review-conflict" };
       const live = (r.data.live ?? {}) as {
         runId?: string;
         agent?: string;
         startedAt?: number;
         idempotencyKey?: string;
+        channelId?: string;
+        userId?: string;
+        channelVisibility?: string;
+        headSha?: string;
+        parentInstanceId?: string;
       };
+      if (r.data.reason === "review-owned") {
+        if (!live.runId || live.agent !== "review" || !Number.isFinite(live.startedAt))
+          throw this.invalidResult(new PermanentStoreError("run ledger /runs/claim: invalid Review owner"), r);
+        return {
+          ok: false,
+          reason: "review-owned",
+          live: {
+            runId: live.runId,
+            agent: "review",
+            startedAt: live.startedAt!,
+            ...(typeof live.channelId === "string" ? { channelId: live.channelId } : {}),
+            ...(typeof live.userId === "string" ? { userId: live.userId } : {}),
+            ...(live.channelVisibility === "public" ||
+            live.channelVisibility === "private" ||
+            live.channelVisibility === "dm" ||
+            live.channelVisibility === "machine" ||
+            live.channelVisibility === "unknown"
+              ? { channelVisibility: live.channelVisibility }
+              : {}),
+            ...(typeof live.headSha === "string" ? { headSha: live.headSha } : {}),
+            ...(typeof live.parentInstanceId === "string" ? { parentInstanceId: live.parentInstanceId } : {}),
+          },
+        };
+      }
       return {
         ok: false,
         reason: "thread-live",
@@ -823,6 +855,14 @@ export class WorkerRunLedger implements RunLedger {
     )
       throw this.invalidResult(new UnknownAllocationClaimError("original commit acknowledgment unavailable"), r);
     return { ok: true, ...(allocationAck ? { allocationAck } : {}), ...(promotionCommit ? { promotionCommit } : {}) };
+  }
+
+  async advanceReviewHead(request: ReviewHeadAdvanceRequest): Promise<ReviewHeadAdvanceResult> {
+    const result = await this.post("/runs/review-head/advance", { storeKey: this.opts.storeKey, request });
+    if (result.data.ok === true) return { ok: true };
+    const reason = result.data.reason;
+    if (reason === "fenced" || reason === "source-unproved" || reason === "review-owned") return { ok: false, reason };
+    throw this.invalidResult(new PermanentStoreError("run ledger review head update returned no receipt"), result);
   }
 
   async confirmPromotion(input: SourceSeedReference): Promise<PromotionConfirmationResult> {
