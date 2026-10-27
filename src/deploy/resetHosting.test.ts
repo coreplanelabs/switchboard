@@ -115,6 +115,22 @@ describe("reset hosting restoration", () => {
     });
   });
 
+  it("accepts container logs in the configuration and refuses conflicting log settings", () => {
+    const { rendered, capture } = fixture();
+    capture.applications[0].observability = null;
+    (capture.applications[0].configuration as Record<string, unknown>).observability = { logs: { enabled: true } };
+    expect(JSON.parse(restoreHostingConfig(rendered, capture)).containers).toEqual([
+      {
+        class_name: "Server",
+        image: "selected-image",
+        instance_type: { vcpu: 1, memory_mib: 6144, disk_mb: 12000 },
+        max_instances: 3,
+      },
+    ]);
+    capture.applications[0].observability = { logs: { enabled: false } };
+    expect(() => restoreHostingConfig(rendered, capture)).toThrow("cannot reproduce advanced container configuration");
+  });
+
   it("refuses unreproducible storage, domains and advanced container settings before creation", () => {
     for (const kind of ["storage", "domain", "capacity", "affinity", "pricing"] as const) {
       const { rendered, capture } = fixture();

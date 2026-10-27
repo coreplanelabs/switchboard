@@ -127,12 +127,23 @@ export function restoreHostingConfig(rendered: string, capture: ResetHostingCapt
     const app = apps[0];
     const capacity = object(app.configuration);
     const disk = object(capacity.disk);
+    const appObservability = app.observability;
+    const containerObservability = capacity.observability;
     if (
       Object.keys(capacity).some(
         (key) =>
-          !["image", "vcpu", "memory", "memory_mib", "disk", "network", "command", "entrypoint", "runtime"].includes(
-            key,
-          ),
+          ![
+            "image",
+            "vcpu",
+            "memory",
+            "memory_mib",
+            "disk",
+            "network",
+            "command",
+            "entrypoint",
+            "runtime",
+            "observability",
+          ].includes(key),
       ) ||
       !isDeepStrictEqual(capacity.network, { assign_ipv6: "none", assign_ipv4: "none", mode: "private" }) ||
       !isDeepStrictEqual(capacity.command, []) ||
@@ -142,7 +153,10 @@ export function restoreHostingConfig(rendered: string, capture: ResetHostingCapt
       (app.affinities !== undefined && !isDeepStrictEqual(app.affinities, {})) ||
       !["default", "durable_object"].includes(String(app.scheduling_policy)) ||
       app.rollout_active_grace_period !== 0 ||
-      !isDeepStrictEqual(app.observability, { logs: { enabled: true } }) ||
+      !isDeepStrictEqual(appObservability ?? containerObservability, { logs: { enabled: true } }) ||
+      (appObservability != null &&
+        containerObservability != null &&
+        !isDeepStrictEqual(appObservability, containerObservability)) ||
       typeof capacity.vcpu !== "number" ||
       !isDeepStrictEqual(app.network, { bandwidth_limit_mbps: capacity.vcpu * 1000 }) ||
       !Number.isSafeInteger(capacity.memory_mib) ||
