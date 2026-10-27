@@ -1328,10 +1328,34 @@ describe("unified sessions — durable owner and retention lifecycle", () => {
       "current",
     );
     await post("/runs/session/owner", { key, runId: "current", gen: "g2" });
-    expect((await post("/runs/context-checkpoint", { storeKey, runId: "current" })).data.source).toMatchObject({
+    const requestId = "22222222-2222-4222-8222-222222222222";
+    const lines: string[] = [];
+    const logger = vi.spyOn(console, "log").mockImplementation((line) => lines.push(String(line)));
+    let source: Awaited<ReturnType<typeof post>>;
+    try {
+      source = await post(
+        "/runs/context-checkpoint",
+        { storeKey, runId: "current" },
+        { "x-switchboard-storage-request-id": requestId },
+      );
+    } finally {
+      logger.mockRestore();
+    }
+    expect(source.data.source).toMatchObject({
       receipt,
       members: ["current"],
     });
+    const sourceRead = lines
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((event) => event.event === "storage.session_read.progress");
+    expect(sourceRead.map((event) => `${event.stage}:${event.outcome}`)).toEqual([
+      "entry:started",
+      "rows:completed",
+      "attachments:completed",
+      "result:returned",
+    ]);
+    expect(sourceRead.every((event) => event.requestId === requestId)).toBe(true);
     expect(
       (
         await post("/runs/state", {

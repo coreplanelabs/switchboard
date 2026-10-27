@@ -1,7 +1,7 @@
 import { testSessionSources, testSlackReceipt } from "../../src/core/testing/slackReceipts.ts";
 import { env, runInDurableObject } from "cloudflare:test";
 import { fetchMemoryTest } from "./testFetch.ts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { GAP_MARKER, NOTEPAD_MAX_BYTES } from "../../src/core/runLedger/sessionLog.ts";
 import type { SessionLogDO } from "./worker.ts";
 
@@ -18,13 +18,13 @@ const AUTH = { authorization: "Bearer test-token", "content-type": "application/
 let n = 0;
 const sessionKey = () => `slack:C1:${Date.now()}.${n++}:coding`;
 
-async function post(path: string, body: unknown) {
+async function post(path: string, body: unknown, headers: Record<string, string> = {}) {
   const raw = JSON.stringify(body);
   return fetchMemoryTest(
     `${BASE}${path}`,
     {
       method: "POST",
-      headers: { ...AUTH, "content-length": String(new TextEncoder().encode(raw).byteLength) },
+      headers: { ...AUTH, ...headers, "content-length": String(new TextEncoder().encode(raw).byteLength) },
       body: raw,
     },
     async (res) => ({
@@ -46,6 +46,119 @@ const result = (idx: number, part: number, callId: string, t: string) => ({
 });
 const stubOf = (key: string) => env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(key));
 const indices = (rows: unknown) => (rows as Array<{ idx: number; part: number }>).map((r) => [r.idx, r.part]);
+
+describe("session object startup boundaries", () => {
+  it("records both startup boundaries for a new session without its private key", async () => {
+    const key = sessionKey();
+    const lines: string[] = [];
+    const logger = vi.spyOn(console, "log").mockImplementation((line) => lines.push(String(line)));
+    let response: Awaited<ReturnType<typeof post>>;
+    try {
+      response = await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    } finally {
+      logger.mockRestore();
+    }
+    expect(response.status).toBe(200);
+    const events = lines
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((event) => event.event === "object.construct.progress" && event.objectType === "SessionLogDO");
+    expect(events.map((event) => event.phase)).toEqual(["started", "completed"]);
+    expect(events[1]).toMatchObject({
+      objectId: env.SESSION_LOGS.idFromName(key).toString(),
+      incarnationId: events[0]?.incarnationId,
+    });
+    expect(JSON.stringify(events)).not.toContain(key);
+    expect(JSON.stringify(events)).not.toContain("elapsedMs");
+  });
+
+  it("keeps the owner claim when construction logging fails", async () => {
+    const key = sessionKey();
+    const logger = vi.spyOn(console, "log").mockImplementation((line) => {
+      if (String(line).includes("object.construct.progress")) throw new Error("PRIVATE_SINK");
+    });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let owner: Awaited<ReturnType<typeof post>>;
+    try {
+      owner = await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+      expect(warning.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        { event: "cloudflare.correlation.unavailable", service: "memory", stage: "operator-log" },
+        { event: "cloudflare.correlation.unavailable", service: "memory", stage: "operator-log" },
+      ]);
+    } finally {
+      logger.mockRestore();
+      warning.mockRestore();
+    }
+    expect(owner.status).toBe(200);
+    expect(
+      (await post("/runs/session/write", { key, gen: "g1", runId: "r1", rows: [text(0, 0, "saved")], attachments: [] }))
+        .status,
+    ).toBe(200);
+    expect(indices((await post("/runs/session/read-tail", { key, maxBytes: 10000 })).data.rows)).toEqual([[0, 0]]);
+  });
+});
+
+describe("session source read progress", () => {
+  it("binds a completed read to its request without logging session content", async () => {
+    const key = sessionKey();
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    expect((await post("/runs/session/owner", { key, runId: "r1", gen: "g1" })).status).toBe(200);
+    expect(
+      (
+        await post("/runs/session/write", {
+          key,
+          gen: "g1",
+          runId: "r1",
+          rows: [text(0, 0, "PRIVATE_CONTENT")],
+          attachments: [],
+        })
+      ).status,
+    ).toBe(200);
+    const lines: string[] = [];
+    const logger = vi.spyOn(console, "log").mockImplementation((line) => lines.push(String(line)));
+    let read: Awaited<ReturnType<typeof post>>;
+    try {
+      read = await post(
+        "/runs/session/read",
+        { key, from: 0, to: 0 },
+        { "x-switchboard-storage-request-id": requestId },
+      );
+    } finally {
+      logger.mockRestore();
+    }
+    expect(read.status).toBe(200);
+    expect(indices(read.data.rows)).toEqual([[0, 0]]);
+    const events = lines
+      .filter((line) => line.startsWith("{"))
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((event) => event.event === "storage.session_read.progress");
+    expect(events.map((event) => `${event.stage}:${event.outcome}`)).toEqual([
+      "entry:started",
+      "rows:completed",
+      "attachments:completed",
+      "result:returned",
+    ]);
+    expect(events[3]).toMatchObject({
+      requestId,
+      objectId: env.SESSION_LOGS.idFromName(key).toString(),
+    });
+    expect(JSON.stringify(events)).not.toContain("elapsedMs");
+    expect(JSON.stringify(events)).not.toContain("stageMs");
+    expect(JSON.stringify(events)).not.toContain(key);
+    expect(JSON.stringify(events)).not.toContain("PRIVATE_CONTENT");
+
+    const throwing = vi.spyOn(console, "log").mockImplementation((line) => {
+      if (String(line).includes("storage.session_read.progress")) throw new Error("PRIVATE_SINK");
+    });
+    try {
+      const afterSinkFailure = await post("/runs/session/read", { key, from: 0, to: 0 });
+      expect(afterSinkFailure.status).toBe(200);
+      expect(indices(afterSinkFailure.data.rows)).toEqual([[0, 0]]);
+    } finally {
+      throwing.mockRestore();
+    }
+  });
+});
 
 describe("requester target checkpoint independent of session transcript", () => {
   it("returns the newest compaction independently of a tail that cannot hold it", async () => {

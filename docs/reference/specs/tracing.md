@@ -83,6 +83,8 @@ The CLI and load harness write diagnostic console records to stderr, preserving 
 
 A send without a receiver record does not prove delivery or rejection. A receiver record without a completion does not identify the cause. Inspect the correlated native invocation outcome and RPC chain before attributing a reset, resource limit or internal platform error. A platform failure before application entry can have no application record. Platform retention, collection limits and outages can still leave evidence unavailable; missing evidence remains unknown.
 
+`RunHistoryDO` and `SessionLogDO` record `object.construct.progress` before their base constructor and after synchronous setup returns. These boundary records carry a fixed class name, object ID, instance incarnation and serving build, but no object name, session key, request content or exception text. They carry no duration: deployed Worker clocks do not advance reliably through synchronous work. Cloudflare invocation wall and CPU times supply the outer duration when retained. An absent completion leaves construction outcome unknown. The records do not measure platform dispatch before the constructor starts or prove why storage inside it waited. Other Durable Object constructors are outside this diagnostic slice.
+
 | Criterion | Proof |
 | --- | --- |
 | Deployment rendering enables full invocation logs and query redaction without enabling unqualified native traces | `[unit]` `src/deploy/wranglerTemplate.test.ts::templateView::renders full invocation logs without enabling unqualified native traces` |
@@ -91,6 +93,7 @@ A send without a receiver record does not prove delivery or rejection. A receive
 | Organization admission failures retain their existing unavailable result and a request ID without replay or private command data | `[unit]` `src/core/organization/worker.test.ts::organization Worker correlation::*` |
 | CLI answers and load-harness JSON remain separate from request diagnostics | `[unit]` `src/cli.ask.test.ts::*`, `src/load/intakeCli.test.ts::intake A/B CLI::*` |
 | The Memory HTTP entry records correlation before body consumption and preserves the original Cloudflare-boundary failure | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::Worker failure correlation::*` |
+| A new session object emits paired, private-safe construction boundaries without a misleading synchronous duration, while a failed diagnostic sink cannot prevent the owner claim | `[unit]` `deploy/cloudflare-memory/sessionLog.test.ts::session object startup boundaries::*` |
 | A deployed failure joins its original run or client request to native RPC method, object and platform outcome | `[gap]` Native tracing on Memory, Resident and Sandbox requires the release-owner privacy and volume checks. Use the correlation procedure in operate-production.md after qualification and deployment. Local tests do not prove Cloudflare ingestion or a provider-internal cause. |
 
 ## Request failure context

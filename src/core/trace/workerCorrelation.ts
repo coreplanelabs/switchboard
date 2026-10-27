@@ -1,6 +1,27 @@
 import { parseTraceparent } from "./traceparent.js";
 
 export const WORKER_REQUEST_ID_HEADER = "x-switchboard-request-id";
+
+/** Construction boundaries do not claim a duration: deployed Worker clocks
+ * stay frozen across synchronous work. */
+export function observeObjectConstruction(
+  objectType: "RunHistoryDO" | "SessionLogDO",
+  objectId: string,
+  build: { commit: string; builtAt?: string },
+  incarnationId: string,
+): { complete: () => void } {
+  const emit = (phase: "started" | "completed") => {
+    try {
+      console.log(
+        JSON.stringify({ event: "object.construct.progress", objectType, objectId, incarnationId, phase, build }),
+      );
+    } catch {
+      unavailable("memory", "operator-log");
+    }
+  };
+  emit("started");
+  return { complete: () => emit("completed") };
+}
 const STORAGE_REQUEST_ID_HEADER = "x-switchboard-storage-request-id";
 const uuid = (value: string | null): string | undefined =>
   value && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value) ? value : undefined;
