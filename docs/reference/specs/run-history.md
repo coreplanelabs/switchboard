@@ -27,6 +27,8 @@ Shared conversation text, negative custody checkpoints, original native/workspac
 - **Tests**: `src/core/runLedger/sourceInputArchive.test.ts`
 
 - **Tests**: `src/core/runLedger/inboxDelivery.test.ts`, `src/core/runLedger/sourceRelevance.test.ts`
+- **Code**: `src/core/references/sourceRelevancePreparation.ts` (private relevance identity and original readback, always held)
+- **Tests**: `src/core/references/sourceRelevancePreparation.test.ts`
 
 
 Opted-in coding runs also obey the [first coding baseline](first-coding-test.md) admission and durable receipt contract.
@@ -1234,6 +1236,14 @@ Saving a result upgrades the existing job to version 3. Claim, retry, expiry and
 
 No source processor calls this operation. Recovery must read and match the saved source, context and input before reusing a result. A result cannot select a specialist, ignore evidence by itself, grant permission, prove internal delivery, settle a job or retire input. Those integration steps remain pending.
 
+The read-only `prepareSourceRelevanceEvidence` helper freezes the canonical source receipt, original task and caller-owned classifier-policy revision. It derives context and input hashes from the complete task, typed common source content, exact shared classifier prompt and effective settings. Missing or unsupported identities hold preparation. The caller must bind its policy revision to the actual classifier configuration; this component cannot infer a model identity from a function.
+
+Every result is `held`. A matching preparation returns `admission-unproved`, including when the canonical rows are unchanged. This helper has no model, classifier, source-access callback or save dependency. It does not establish a combined current source/task/access admission check. Active classification must use the existing owned orchestrator and guarded model path under its reviewed admission contract. A boolean access result cannot turn this preparation into admission.
+
+Supplying an original save request permits only private readback of that exact historical result. A valid original request is copied and its actual error is captured before other inputs are checked. Early input holds and missing, conflicting or unavailable readback retain that request and error, including null or undefined, without any retry. Without an original request, preparation does not return a stored recommendation. Each returned snapshot is retained inspection data. Later revalidation or reconciliation requires a new inspection with the original; retained data never becomes current access, fresh exposure, model, delivery or settlement authority.
+
+No source producer or processor calls this helper. Active current-access admission, durable classifier-attempt custody, provider configuration binding and integrated qualification remain open feature gates. An empty result store does not prove that an earlier classifier had no effect.
+
 | Criterion | Proof |
 | --- | --- |
 | An exact save survives reclaim; incapable readers hold the new schema, and stale or conflicting results cannot change newer work. | `[unit]` `src/core/runLedger/sourceRelevance.test.ts::saved source relevance::retains a context-bound result and replays it after expiry without changing the job`; `::fences an unsaved late result and keeps the saved result through retry and failure`; `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source relevance in SQLite::saves through the private HTTP route and holds incompatible readers` |
@@ -1243,7 +1253,10 @@ No source processor calls this operation. Recovery must read and match the saved
 | Unreadable saved jobs log their event key and a fixed invalid-json/invalid-schema cause. Stored bytes and exceptions stay out of logs; refusal retains the original job. | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source relevance stored-job diagnostics::*` |
 | Successful HTTP saves and exact replays log the event key, fixed verdict/source and original save time. Refusals log the validated request's event key and fixed reason; malformed requests expose no raw key. Logs exclude private text, context coordinates and claim tokens. | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source relevance diagnostics in SQLite::*` |
 | HTTP acknowledgments bind the exact source receipt and frozen result. Refusals stay explicit; missing or malformed responses remain unknown with no fallback operation. | `[unit]` `src/core/runLedgerWorker.test.ts::source relevance client::*` |
-| The source processor reuses a matching saved result and checks current context/access before an authorized route or fold. | `[gap]` No processor or source producer is enabled. This is storage support only. |
+| Preparation derives exact private source/task/policy identity, uses effective defaults and always holds admission. | `[unit]` `src/core/references/sourceRelevancePreparation.test.ts::private source relevance preparation::prepares detached exact identity while always holding admission`; `::uses effective defaults and changes identity with task, policy or settings`; `::returns no admission result when access changes during canonical reads` |
+| Only an exact original request can yield a private saved record; conflicting or missing readback confers no authority. | `[unit]` `src/core/references/sourceRelevancePreparation.test.ts::private source relevance preparation::reads the exact original saved record only as private held evidence`; `::refuses changed original receipt, context, input or saved result without changing custody` |
+| Original request snapshots and errors, including null and undefined, survive early input holds and missing, unavailable or unsupported readback; preparation preserves source and task identity. | `[unit]` `src/core/references/sourceRelevancePreparation.test.ts::private source relevance preparation::*` |
+| The source processor reuses a matching saved result and checks current context/access before an authorized route or fold. | `[gap]` No source processor or producer calls the read-only preparation helper. The owned orchestrator/guarded model admission path, durable classifier-attempt custody, delivery, obligations and runtime qualification remain open. |
 
 ## Terminal native retirement authority
 
