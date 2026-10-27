@@ -58,7 +58,9 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
   connectHosted,
+  HostedMcpFailure,
   hostedMcpCall,
+  hostedRpcErrorDetails,
   mcpProxyError,
   proxyHostedMcp,
   readHostedProfile,
@@ -760,9 +762,17 @@ async function main(): Promise<void> {
     const cmd = remoteCmd;
     const parameters = hostedCommandArguments(cmd, parsed.input);
     const reply = await hostedMcpCall(hosted, "tools/call", { name: mcpToolName(parsed.id), arguments: parameters });
-    if (reply.error) throw new Error(`hosted command failed: ${JSON.stringify(reply.error)}`);
+    if (reply.error)
+      throw new HostedMcpFailure(
+        `hosted command failed: ${hostedRpcErrorDetails(reply.error, hosted.bearer) ?? "refused"}`,
+      );
     const result = reply.result as { content?: { text?: string }[] } | undefined;
-    const value = JSON.parse(result?.content?.[0]?.text?.split("\n").slice(1).join("\n") ?? "null") as JsonValue;
+    let value: JsonValue;
+    try {
+      value = JSON.parse(result?.content?.[0]?.text?.split("\n").slice(1).join("\n") ?? "null") as JsonValue;
+    } catch (cause) {
+      throw new HostedMcpFailure("hosted command failed: invalid response", { cause });
+    }
     console.log(parsed.json ? JSON.stringify(value, null, 2) : renderText(cmd, value));
     return;
   }
@@ -788,7 +798,10 @@ async function main(): Promise<void> {
       { name: "dispatch", arguments: { text: parsed.text, thread, idempotencyKey } },
       HOSTED_MCP_CALL_TIMEOUT_MS,
     );
-    if (reply.error) throw new Error(`hosted request failed: ${JSON.stringify(reply.error)}`);
+    if (reply.error)
+      throw new HostedMcpFailure(
+        `hosted request failed: ${hostedRpcErrorDetails(reply.error, hosted.bearer) ?? "refused"}`,
+      );
     const result = reply.result as
       | {
           content?: { text?: string }[];
@@ -1001,8 +1014,15 @@ async function askLoopbackServer(input: {
 // are unit-tested).
 if (claimEntry(import.meta.url)) {
   main().catch((err) => {
-    // `ask` without a bot config: the same one-line refusal the commands give, not a stack.
-    console.error(err instanceof CommandError ? errorLine(err.code, err.message) : err);
+    // Hosted errors retain raw causes in process; the terminal gets only their safe message.
+    // `ask` without a bot config keeps the same one-line refusal as commands.
+    console.error(
+      err instanceof CommandError
+        ? errorLine(err.code, err.message)
+        : err instanceof HostedMcpFailure
+          ? err.message
+          : err,
+    );
     process.exit(1);
   });
 }
