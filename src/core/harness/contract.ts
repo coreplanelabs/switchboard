@@ -645,7 +645,8 @@ export interface HarnessRun {
   /** Controller-recorded reads whose observed native result must be saved before another model call. */
   sourceResultCallIds?: () => readonly string[];
   prepareSourceMedia?: () => Promise<boolean>;
-  /** Called only when the harness confirms a steer reached the model's conversation. */
+  /** Positive native acceptance of an ordinary steer, or a successful typed
+   * internal control response. Source evidence needs its separate native proof. */
   confirmedFollowUps?: (inputs: readonly FollowUpInput[]) => void;
   onEvent?: (event: RunEvent) => void;
   onProgress?: (note: string) => void;

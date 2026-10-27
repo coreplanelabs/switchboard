@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import * as receipts from "../core/references/receipts.js";
+import { seedSourceInputCheckpoints } from "../core/testing/sourceInputs.js";
+import { unreadInbox } from "../core/runLedger/decisions.js";
+import type { StepRecord } from "../core/runLedger/types.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Secret } from "../secrets.js";
 import { FollowUpInbox } from "../core/threadAdmission.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import type { RunLedger } from "../core/runLedger/ledger.js";
 import { LEASE_MS } from "../core/runLedger/types.js";
-import { createLedgerWriteThrough, deliverPlaneSteer } from "../core/runLedger/writeThrough.js";
+import { createLedgerWriteThrough, createPlaneSteerSender, deliverPlaneSteer } from "../core/runLedger/writeThrough.js";
 import { handlePlaneEffects, type PlaneEffectsDeps } from "./planeEffects.js";
 import type {
   CoordinatorReconcileEffect,
@@ -91,6 +96,215 @@ function harness(over: Partial<PlaneEffectsDeps> = {}) {
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
+
+describe("exact provider recovery delivery", () => {
+  it.each([false, true])(
+    "acknowledges the original pushed row while keeping display text separate: changed=%s",
+    async (changed) => {
+      const ledger = new InMemoryRunLedger(() => 1000);
+      const fixture = await seedSourceInputCheckpoints(ledger);
+      const original = {
+        version: 1 as const,
+        kind: "provider-reissue" as const,
+        targetRunId: fixture.id,
+        channelId: "cli:main",
+        threadKey: fixture.thread,
+        text: changed
+          ? "stored display bytes"
+          : "the model provider anthropic is answering again — re-issue the held turn and continue",
+        at: 2000,
+        userId: "plane" as const,
+        userName: "plane" as const,
+        plane: { steer: "reissue" as const, provider: "anthropic" },
+        // The canonical writer appends custody after the original message.
+        target: {
+          version: 1,
+          runId: fixture.id,
+          channelId: "cli:main",
+          threadKey: fixture.thread,
+          requester: "cli:alice",
+          producerGen: fixture.gen,
+        },
+      };
+      ledger.inbox.get(fixture.id)!.push({ seq: 5, message: original });
+      const inbox = new FollowUpInbox();
+      const sender = createPlaneSteerSender({
+        draining: () => false,
+        getRun: () => ({ threadKey: fixture.thread }),
+        getInbox: () => ({ runId: fixture.id, inbox }),
+      });
+      const h = harness({ execute: { draining: () => false, admit: async () => "done", steer: sender } });
+      const r = request(
+        { effects: [{ id: "steer:source-consumer:5", kind: "steer", runId: fixture.id, seq: 5, message: original }] },
+        { bearer: "memory-token" },
+      );
+      handlePlaneEffects(r.req, r.res, h.deps);
+      await vi.waitFor(() => expect(r.writes.status).toBe(200));
+      expect(h.acked).toEqual([{ id: "steer:source-consumer:5", outcome: "done" }]);
+      const [delivered] = inbox.drain();
+      expect(delivered.text).toBe(
+        "the model provider anthropic is answering again — re-issue the held turn and continue",
+      );
+      expect(
+        await ledger.step(
+          fixture.id,
+          fixture.gen,
+          {
+            ...fixture.step,
+            step: 1,
+            inboxConsumedSeq: 5,
+            inboxAcknowledgedRows: [delivered.ledgerWitness!],
+          },
+          [],
+          fixture.session,
+        ),
+      ).toEqual({ ok: true });
+      const after = await ledger.peekInbox(fixture.id, fixture.gen, 0);
+      if (!after.ok) throw new Error("missing canonical provider row");
+      expect(after.items.filter(unreadInbox(after.boundary.lastStep as StepRecord)).map((row) => row.seq)).toEqual([
+        1, 2, 3, 4,
+      ]);
+      expect(delivered.ledgerWitness).toEqual({
+        version: 1,
+        runId: fixture.id,
+        seq: 5,
+        digest: createHash("sha256").update(JSON.stringify(original)).digest("hex"),
+      });
+    },
+  );
+
+  it.each(["push", "heartbeat"] as const)(
+    "defers %s recovery if drain begins while receipt hashing waits",
+    async (transport) => {
+      const offered = steer("live-run-1", 7) as Extract<PlaneEffect, { kind: "steer" }>;
+      const inbox = new FollowUpInbox();
+      let draining = false;
+      let entered!: () => void, release!: () => void;
+      const hashing = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const originalHash = receipts.sourceHash;
+      const hash = vi.spyOn(receipts, "sourceHash").mockImplementation(async (value) => {
+        const digest = await originalHash(value);
+        entered();
+        await gate;
+        return digest;
+      });
+      const sender = createPlaneSteerSender({
+        draining: () => draining,
+        getRun: () => ({ threadKey: "slack:C1:1.0" }),
+        getInbox: () => ({ runId: "live-run-1", inbox }),
+      });
+      const execute = { draining: () => draining, admit: async () => "done" as const, steer: sender };
+      const outcomes: PlaneAckOutcome[] = [];
+      let start: () => void;
+      let close: (() => Promise<void>) | undefined;
+      if (transport === "push") {
+        const h = harness({
+          execute,
+          ack: async (_effect, outcome) => {
+            outcomes.push(outcome);
+          },
+        });
+        const r = request({ effects: [offered] }, { bearer: "memory-token" });
+        start = () => handlePlaneEffects(r.req, r.res, h.deps);
+      } else {
+        const inner = new InMemoryRunLedger(() => 1000);
+        await inner.claim({
+          runId: "live-run-1",
+          threadKey: "slack:C1:1.0",
+          gen: "g1",
+          startedAt: 1000,
+          leaseMs: LEASE_MS,
+          meta: { channelId: "slack:C1", userId: "slack:UTEST", threadKey: "slack:C1:1.0", agent: "coding" },
+          system: "coding",
+          tools: [],
+        });
+        const ledger = new Proxy(inner, {
+          get(target, prop) {
+            if (prop === "heartbeat") return async () => ({ ok: true, effects: [offered] });
+            if (prop === "planeAck")
+              return async (_id: string, outcome: PlaneAckOutcome) => {
+                outcomes.push(outcome);
+              };
+            const value = target[prop as keyof InMemoryRunLedger];
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        const beats: Array<() => void> = [];
+        const wt = createLedgerWriteThrough({
+          ledger,
+          gen: "g1",
+          fallback: { put: async () => {}, abandoned: () => {} },
+          warn: () => {},
+          planeEffects: execute,
+          setInterval: (fn) => {
+            beats.push(fn);
+            return {};
+          },
+          clearInterval: () => {},
+        });
+        const row = inner.live.get("live-run-1")!;
+        const run = wt.adopt({
+          runId: row.runId,
+          threadKey: row.threadKey,
+          meta: row.meta,
+          startedAt: row.startedAt,
+          state: row.state,
+          lastStep: 0,
+          lastSeq: 0,
+        });
+        close = () => run.close();
+        start = () => beats[0]!();
+      }
+      try {
+        start();
+        await hashing;
+        draining = true;
+        release();
+        await vi.waitFor(() => expect(outcomes).toEqual(["deferred"]));
+        expect(inbox.drain()).toEqual([]);
+        draining = false;
+        start();
+        await vi.waitFor(() => expect(outcomes).toEqual(["deferred", "done"]));
+        expect(inbox.drain().map((input) => input.ledgerSeq)).toEqual([7]);
+        start();
+        await vi.waitFor(() => expect(outcomes).toEqual(["deferred", "done", "skipped"]));
+        expect(inbox.drain()).toEqual([]);
+        draining = true;
+        start();
+        await vi.waitFor(() => expect(outcomes).toEqual(["deferred", "done", "skipped", "deferred"]));
+      } finally {
+        release();
+        hash.mockRestore();
+        await close?.();
+      }
+    },
+  );
+
+  it("checks the current run and admission slot before delivery and duplicate handling", async () => {
+    const inbox = new FollowUpInbox();
+    let run: { finished?: boolean; threadKey?: string } | undefined;
+    let slot = { runId: "another-run", inbox };
+    let draining = false;
+    const sender = createPlaneSteerSender({ draining: () => draining, getRun: () => run, getInbox: () => slot });
+    const offered = steer() as Extract<PlaneEffect, { kind: "steer" }>;
+    expect(await sender(offered)).toBe("deferred");
+    run = { threadKey: "slack:C1:1.0", finished: true };
+    expect(await sender(offered)).toBe("deferred");
+    run.finished = false;
+    expect(await sender(offered)).toBe("deferred");
+    slot = { runId: offered.runId, inbox };
+    expect(await sender(offered)).toBe("done");
+    expect(await sender(offered)).toBe("skipped");
+    draining = true;
+    expect(await sender(offered)).toBe("deferred");
+    expect(inbox.drain().map((input) => input.ledgerSeq)).toEqual([7]);
+  });
+});
 
 describe("POST /plane/effects — the push transport (record 0064)", () => {
   it("reconciles a closed offer without a runId and passes its verified report receipt to ACK", async () => {

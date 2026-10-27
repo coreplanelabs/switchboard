@@ -14,7 +14,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Secret } from "../secrets.js";
-import type { PlaneAckOutcome, PlaneEffect } from "../core/plane/decide.js";
+import type { PlaneAckOutcome, PlaneEffect, PlaneSteerMessage } from "../core/plane/decide.js";
 import {
   isCoordinatorReconcileEffect,
   isCoordinatorReconcileReceipt,
@@ -64,6 +64,27 @@ type ObjectValue = Record<string, unknown>;
 const objectValue = (v: unknown): ObjectValue | undefined =>
   typeof v === "object" && v !== null && !Array.isArray(v) ? (v as ObjectValue) : undefined;
 
+function isSteerMessage(message: Record<string, unknown>, runId: string): message is PlaneSteerMessage {
+  if (
+    typeof message.channelId !== "string" ||
+    message.channelId.length === 0 ||
+    typeof message.threadKey !== "string" ||
+    message.threadKey.length === 0 ||
+    typeof message.text !== "string" ||
+    typeof message.at !== "number" ||
+    !Number.isFinite(message.at) ||
+    message.userId !== "plane" ||
+    message.userName !== "plane"
+  )
+    return false;
+  const restored = messageFromInbox(message, message.at, {
+    runId,
+    channelId: message.channelId,
+    threadKey: message.threadKey,
+  });
+  return restored?.control?.kind === "provider-reissue";
+}
+
 function parseEffect(v: unknown): PushedEffect | undefined {
   const e = objectValue(v);
   if (!e || typeof e.id !== "string" || e.id.length === 0) return undefined;
@@ -77,43 +98,15 @@ function parseEffect(v: unknown): PushedEffect | undefined {
   }
   if (e.kind !== "steer" || !Number.isSafeInteger(e.seq) || (e.seq as number) < 1) return undefined;
   const message = objectValue(e.message);
-  if (
-    !message ||
-    typeof message.channelId !== "string" ||
-    message.channelId.length === 0 ||
-    typeof message.threadKey !== "string" ||
-    message.threadKey.length === 0 ||
-    typeof message.text !== "string" ||
-    typeof message.at !== "number" ||
-    !Number.isFinite(message.at) ||
-    message.userId !== "plane" ||
-    message.userName !== "plane"
-  )
-    return undefined;
-  const restored = messageFromInbox(message, message.at, {
-    runId: e.runId,
-    channelId: message.channelId,
-    threadKey: message.threadKey,
-  });
-  if (restored?.control?.kind !== "provider-reissue") return;
+  if (!message || !isSteerMessage(message, e.runId)) return;
   return {
     id: e.id,
     kind: "steer",
     runId: e.runId,
     seq: e.seq as number,
-    message: {
-      version: 1,
-      kind: "provider-reissue",
-      targetRunId: e.runId,
-      ...(restored.custody ? { target: restored.custody } : {}),
-      channelId: message.channelId,
-      threadKey: message.threadKey,
-      text: restored.msg.text,
-      at: message.at,
-      userId: "plane",
-      userName: "plane",
-      plane: { steer: "reissue", provider: restored.control.provider },
-    },
+    // The exact stored bytes prove row settlement. Canonical display text is
+    // rendered separately at live delivery, never into this receipt input.
+    message,
   };
 }
 

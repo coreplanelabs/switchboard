@@ -97,3 +97,87 @@ export async function seedSourceInputIntent(
   };
   return input;
 }
+
+/** Isolated native checkpoint fixture. These synthetic native IDs prove the
+ * store boundary only; they do not claim acceptance by a running harness. */
+export async function seedSourceInputCheckpoints(ledger: RunLedger, renderedHash?: string) {
+  const id = "source-consumer",
+    gen = "g1",
+    thread = "cli:thread";
+  const policy = { version: 1, commandRoute: "native", identity: "write" };
+  const launch = { version: 1, harness: "pi", phase: "prepared", ordinal: 0, sessionPolicy: policy };
+  const requireOk = (result: { ok: boolean }) => {
+    if (!result.ok) throw new Error(`Native checkpoint fixture refused: ${JSON.stringify(result)}`);
+  };
+  requireOk(
+    await ledger.claim({
+      runId: id,
+      threadKey: thread,
+      gen,
+      startedAt: 1,
+      leaseMs: 10000,
+      system: "original",
+      tools: [],
+      meta: { agent: "orchestrator", userId: "cli:alice", channelId: "cli:main", threadKey: thread },
+      state: { harnessLaunch: launch },
+    }),
+  );
+  requireOk(await ledger.setState(id, gen, { harnessLaunch: { ...launch, phase: "begun" } }));
+  requireOk(
+    await ledger.setState(id, gen, {
+      harness: { harness: "pi", launchOrdinal: 0, sessionFile: "original-native-session", sessionPolicy: policy },
+    }),
+  );
+  const session = `fixture:checkpoint:${crypto.randomUUID()}`;
+  await ledger.claimSession(session, id, gen);
+  const step = {
+    step: 0,
+    seq: 0,
+    turnIndex: 0,
+    inFlight: [],
+    inboxConsumedSeq: 0,
+    remainingMs: 1000,
+    turn: 0,
+    iteration: 0,
+  };
+  requireOk(await ledger.step(id, gen, step, [], session));
+  requireOk(await ledger.pushInbox(id, { text: "Unrelated first row" }));
+  const original = testSourceInputIntent();
+  if (renderedHash !== undefined) original.entries[0]!.renderedHash = renderedHash;
+  const first = await seedSourceInputIntent(ledger, original);
+  requireOk(await ledger.pushInbox(id, { text: "Unrelated third row" }));
+  const second = testSourceInputIntent();
+  second.entries[0]!.id = "source-input-two";
+  if (renderedHash !== undefined) second.entries[0]!.renderedHash = renderedHash;
+  const another = await seedSourceInputIntent(ledger, second);
+  const intents: SourceInputIntents = { version: 1, entries: [...first.entries, ...another.entries] };
+  requireOk(await ledger.setState(id, gen, { sourceInputIntents: intents }));
+  for (const entry of intents.entries) entry.phase = "begun";
+  requireOk(
+    await ledger.setState(id, gen, {
+      sourceInputIntents: intents,
+      contextDependencies: {
+        version: 4,
+        status: "known",
+        revision: 0,
+        origins: [],
+        slack: [],
+        mcp: [],
+        sourceInputs: intents.entries.map((entry) => entry.reference),
+      },
+    }),
+  );
+  const receipt: import("../runLedger/sourceInputIntent.js").SourceInputAdmission = {
+    version: 1,
+    inputId: intents.entries[0]!.id,
+    intentHash: await sourceHash(sourceSnapshot(intents.entries[0])),
+    native: {
+      harness: "pi",
+      sessionId: "original-native-session",
+      sessionIdentity: "native-session-uuid",
+      entryId: "native-entry-one",
+      entryHash: "a".repeat(64),
+    },
+  };
+  return { id, gen, thread, session, step, intents, receipt };
+}

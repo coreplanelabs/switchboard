@@ -4,6 +4,18 @@ import {
   sourceObligationJobOf,
   retainSourceObligationRangeHolders,
 } from "../../src/core/runLedger/sourceObligations.js";
+import {
+  inboxAcknowledgedRowsOf,
+  prepareInboxAcknowledgments,
+  inboxAcknowledgmentRowsUnchanged,
+} from "../../src/core/runLedger/inboxAcknowledgments.js";
+import {
+  prepareSourceInputCheckpoint,
+  protectSourceInputStep,
+  sourceInputCheckpointRequestOf,
+  type SourceInputCheckpointRequest,
+  type SourceInputCheckpointResult,
+} from "../../src/core/runLedger/sourceInputIntent.js";
 import { observeWorkerRequest } from "../../src/core/trace/workerCorrelation.js";
 import { bindingFetch, installHttpTransport } from "../../src/core/trace/httpTransport.js";
 import { WriteReceipts } from "./writeReceipts.js";
@@ -76,6 +88,7 @@ import {
 } from "../../src/core/runLedger/inboxDelivery.ts";
 import { EXECUTION_PROTOCOL_HEADER, NATIVE_REVIEW_STOP_HEADER } from "../../src/core/runLedger/types.js";
 import {
+  sourceSnapshot,
   sourceRelevanceRequestOf,
   type SourceRelevanceSaveResult,
   isSourceEventKey,
@@ -2717,6 +2730,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       | "readContextCheckpoint"
       | "normalizeContextOrigins"
       | "setState"
+      | "sourceInputCheckpoint"
       | "constructor"
       | "replaceInstance"
       | "withRangePins"
@@ -2832,7 +2846,8 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** A source refusal rejects after gate release, without resetting sibling runs. */
   private async withInputGate<T>(
-    operation: "archiveCheckpoint" | "readContextCheckpoint" | "normalizeContextOrigins" | "setState",
+    operation:
+      "archiveCheckpoint" | "readContextCheckpoint" | "normalizeContextOrigins" | "setState" | "sourceInputCheckpoint",
     runId: string,
     action: (observe: ObserveCheckpointStage) => Promise<T>,
     correlation?: CheckpointGateCorrelation,
@@ -8793,18 +8808,78 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** The step record (item 31), written by the client AFTER the transcript turns. Fenced. */
   async recordStep(runId: string, gen: string, record: StepRecord): Promise<FenceResult> {
     if (!Number.isSafeInteger(record.step) || record.step < 0) throw new Error("invalid public step key");
-    let out: FenceResult = { ok: true };
+    const normal =
+      record.inboxAcknowledgedRows === undefined ? undefined : inboxAcknowledgedRowsOf(record.inboxAcknowledgedRows);
+    if (record.inboxAcknowledgedRows !== undefined && !normal) return { ok: false, reason: "fenced" };
+    record = { ...record, ...(normal ? { inboxAcknowledgedRows: normal } : {}) };
+    const capture = () => ({
+      row: this.liveRow(runId),
+      archive: this.inboxSegmentArchive(runId),
+      base: workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotionStepBase ?? 0,
+      prior: this.sql
+        .exec<{ json: string }>(
+          "SELECT json FROM run_steps WHERE run_id=? AND step>=0 ORDER BY step DESC LIMIT 1",
+          runId,
+        )
+        .toArray()[0]?.json,
+    });
+    const initial = capture();
+    const fence = checkFence(initial.row, gen);
+    if (!fence.ok) return fence;
+    if (!initial.row) return { ok: false, reason: "unknown-run" };
+    if (normal?.length && initial.row.phase !== "live") return { ok: false, reason: "fenced" };
+    const index = initial.base + record.step;
+    const existingJson = this.sql
+      .exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step=?", runId, index)
+      .toArray()[0]?.json;
+    const existing = existingJson ? (parseStoredJson(existingJson) as StepRecord) : undefined;
+    if (existing?.inboxAcknowledgedRows?.length)
+      return JSON.stringify(sourceSnapshot(existing)) === JSON.stringify(sourceSnapshot(record))
+        ? { ok: true }
+        : { ok: false, reason: "fenced" };
+    const prior = initial.prior ? (parseStoredJson(initial.prior) as StepRecord) : undefined;
+    if (normal?.length && prior && record.step <= prior.step) return { ok: false, reason: "fenced" };
+    const floor = inboxSegmentFloor(initial.archive, initial.row);
+    if (floor === undefined) throw new Error("retained inbox segment boundary is unreadable");
+    const readInbox = () =>
+      this.sql
+        .exec<{ seq: number; json: string }>(
+          "SELECT seq,json FROM run_inbox WHERE run_id=? AND seq>? ORDER BY seq",
+          runId,
+          floor,
+        )
+        .toArray()
+        .map((item) => ({ seq: item.seq, message: parseStoredJson(item.json) as Record<string, unknown> }));
+    const before = JSON.stringify(initial);
+    const prepared = normal?.length
+      ? await prepareInboxAcknowledgments(runId, record, readInbox())
+      : { witnesses: [], rows: [] };
+    let out: FenceResult = { ok: false, reason: "fenced" };
     this.ctx.storage.transactionSync(() => {
-      out = checkFence(this.liveRow(runId), gen);
-      if (!out.ok) return;
-      if (inboxSegmentFloor(this.inboxSegmentArchive(runId), this.liveRow(runId)!) === undefined)
-        throw new Error("retained inbox segment boundary is unreadable");
+      const currentInbox = readInbox();
+      if (
+        !prepared ||
+        before !== JSON.stringify(capture()) ||
+        !inboxAcknowledgmentRowsUnchanged(prepared.rows, (seq) => currentInbox.find((item) => item.seq === seq))
+      )
+        return;
+      const protectedStep = protectSourceInputStep(initial.row!.state, record, currentInbox, prior, prepared.witnesses);
+      if (!protectedStep) {
+        console.warn("[runs/step] source input protection refused", {
+          runId,
+          ownerGen: gen,
+          step: record.step,
+          acknowledged: normal?.length ?? 0,
+        });
+        return;
+      }
       this.sql.exec(
-        `INSERT OR REPLACE INTO run_steps (run_id, step, json) VALUES (?, ?, ?)`,
+        "INSERT OR REPLACE INTO run_steps (run_id, step, json) VALUES (?, ?, ?)",
         runId,
-        (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotionStepBase ?? 0) + record.step,
-        JSON.stringify(record),
+        index,
+        JSON.stringify(protectedStep),
       );
+      out = { ok: true };
     });
     return out;
   }
@@ -9006,6 +9081,67 @@ export class RunHistoryDO extends DurableObject<Env> {
       progress("validation", "failed", { errorName: checkpointErrorName(error) });
       throw error;
     }
+  }
+
+  async sourceInputCheckpoint(
+    runId: string,
+    gen: string,
+    request: SourceInputCheckpointRequest,
+  ): Promise<SourceInputCheckpointResult> {
+    const parsed = sourceInputCheckpointRequestOf(request);
+    if (!parsed) return { ok: false, reason: "fenced" };
+    return this.withInputGate("sourceInputCheckpoint", runId, async () => {
+      const capture = () => ({
+        row: this.liveRow(runId),
+        archive: this.inboxSegmentArchive(runId),
+        step: this.sql
+          .exec<{ step: number; json: string }>(
+            "SELECT step,json FROM run_steps WHERE run_id=? AND step>=0 ORDER BY step DESC LIMIT 1",
+            runId,
+          )
+          .toArray()[0],
+        inbox: this.sql
+          .exec<{ seq: number; json: string }>("SELECT seq,json FROM run_inbox WHERE run_id=? ORDER BY seq", runId)
+          .toArray(),
+      });
+      const initial = capture();
+      const fence = checkFence(initial.row, gen);
+      if (!fence.ok) return fence;
+      if (!initial.row) return { ok: false, reason: "unknown-run" };
+      if (parsed.operation !== "read" && this.promotionHeld(runId, gen)) return { ok: false, reason: "fenced" };
+      const floor = inboxSegmentFloor(initial.archive, initial.row);
+      if (
+        floor === undefined ||
+        initial.inbox.length > RUN_EVENTS_MAX_PAGE ||
+        initial.inbox.reduce((size, item) => size + 3 * item.json.length, 0) > MAX_RECORD_BYTES
+      )
+        return { ok: false, reason: "fenced" };
+      const before = JSON.stringify(initial);
+      const prepared = await prepareSourceInputCheckpoint(
+        initial.row,
+        parsed,
+        initial.inbox
+          .filter((item) => item.seq > floor)
+          .map((item) => ({ seq: item.seq, message: parseStoredJson(item.json) as Record<string, unknown> })),
+        initial.step ? (parseStoredJson(initial.step.json) as StepRecord) : undefined,
+      );
+      let result: SourceInputCheckpointResult = { ok: false, reason: "fenced" };
+      this.ctx.storage.transactionSync(() => {
+        if (!prepared || before !== JSON.stringify(capture())) return;
+        if (parsed.operation !== "read") {
+          this.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", JSON.stringify(prepared.state), runId);
+          if (prepared.step && initial.step)
+            this.sql.exec(
+              "UPDATE run_steps SET json=? WHERE run_id=? AND step=?",
+              JSON.stringify(prepared.step),
+              runId,
+              initial.step.step,
+            );
+        }
+        result = { ok: true, checkpoint: prepared.checkpoint };
+      });
+      return result;
+    });
   }
 
   async setState(
@@ -15014,6 +15150,7 @@ const LEDGER_ROUTES = new Set<string>([
   "/runs/live-state",
   "/runs/step",
   "/runs/state",
+  "/runs/source-input/checkpoint",
   "/runs/inbox",
   "/runs/inbox/deliver",
   "/runs/inbox/read",
@@ -15431,6 +15568,8 @@ function parseStep(v: unknown): Validated<StepRecord> {
       !s.inboxDeferredSeqs.every((seq) => typeof seq === "number" && Number.isInteger(seq) && seq > 0))
   )
     return invalid("record.inboxDeferredSeqs must be an array of positive integers");
+  if (s.inboxAcknowledgedRows !== undefined && !inboxAcknowledgedRowsOf(s.inboxAcknowledgedRows))
+    return invalid("record.inboxAcknowledgedRows must contain exact row witnesses");
   if (s.publicationAnswer !== undefined && typeof s.publicationAnswer !== "string")
     return invalid("record.publicationAnswer must be a string");
   if (!Array.isArray(s.inFlight)) return invalid("record.inFlight must be an array");
@@ -16928,12 +17067,27 @@ async function handleLedger(
       throw error;
     }
   }
+  if (pathname === "/runs/source-input/checkpoint") {
+    const request = sourceInputCheckpointRequestOf(b.request);
+    if (!request) return json({ error: "invalid source input checkpoint request" }, 400);
+    const result = await stub.sourceInputCheckpoint(runId.value, g.value, request);
+    if (!result.ok)
+      console.log("[runs/source-input/checkpoint] refused", {
+        runId: runId.value,
+        operation: request.operation,
+        reason: result.reason,
+      });
+    return json(result, result.ok ? 200 : 409);
+  }
   if (pathname === "/runs/step") {
     const record = parseStep(b.record);
     if (!record.ok) return json({ error: record.error }, 400);
-    return fenced(
-      await replayableRpc<FenceResult>("step-rpc", (fresh) => fresh.recordStep(runId.value, g.value, record.value)),
+    const result = await replayableRpc<FenceResult>("step-rpc", (fresh) =>
+      fresh.recordStep(runId.value, g.value, record.value),
     );
+    return result.ok && record.value.inboxAcknowledgedRows?.length
+      ? json({ ...result, inboxAcknowledgedRows: inboxAcknowledgedRowsOf(record.value.inboxAcknowledgedRows) })
+      : fenced(result);
   }
   if (pathname === "/runs/state") {
     if (typeof b.state !== "object" || b.state === null) return json({ error: "state must be an object" }, 400);

@@ -1686,7 +1686,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const at = unechoed.findIndex((u) => echoKey(u.message) === key);
       if (at < 0) return;
       const [echoed] = unechoed.splice(at, 1);
-      run.confirmedFollowUps?.(echoed!.inputs);
+      const ordinary = echoed!.inputs.filter(
+        (input) => !(input.userId === PLANE_ACTOR_ID && isReissueSteerText(input.text)),
+      );
+      if (ordinary.length) run.confirmedFollowUps?.(ordinary);
       if (echoed!.seq > mirror.inboxConsumedSeq) mirror.inboxConsumedSeq = echoed!.seq;
     };
     unechoedSeqs = () =>
@@ -2419,6 +2422,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               ...reissueInFlightRows.map((item) => item.ledgerSeq ?? 0),
               ...pendingReissue.map((item) => item.ledgerSeq ?? 0),
             );
+            run.confirmedFollowUps?.([...reissueInFlightRows, ...pendingReissue]);
             await mirror.checkpointInbox();
             reissueInFlight = undefined;
             clearProviderHold();
@@ -2440,6 +2444,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               mirror.inboxConsumedSeq,
               ...pendingReissue.map((item) => item.ledgerSeq ?? 0),
             );
+            run.confirmedFollowUps?.(pendingReissue);
             await mirror.checkpointInbox();
             clearProviderHold();
           }
@@ -3050,6 +3055,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
                   ...turnReissueInFlightRows.map((item) => item.ledgerSeq ?? 0),
                   ...turnReissueRows.map((item) => item.ledgerSeq ?? 0),
                 );
+                run.confirmedFollowUps?.([...turnReissueInFlightRows, ...turnReissueRows]);
                 await mirror.checkpointInbox();
                 clearTurnProviderHold();
               }
@@ -3069,6 +3075,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
                   mirror.inboxConsumedSeq,
                   ...turnReissueRows.map((item) => item.ledgerSeq ?? 0),
                 );
+                run.confirmedFollowUps?.(turnReissueRows);
                 await mirror.checkpointInbox();
                 clearTurnProviderHold();
               }

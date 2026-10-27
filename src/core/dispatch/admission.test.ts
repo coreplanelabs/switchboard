@@ -1,6 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { parseDirectives } from "../../directives.js";
@@ -425,6 +426,51 @@ describe("admit — the thread admission claim", () => {
     expect(replies).toEqual([]);
     expect(admission.get(THREAD)).toBe(claim.live); // still the live run's slot
   });
+
+  it.each([false, true])(
+    "captures the original normal row before native delivery and holds changed proof: changed=%s",
+    async (changed) => {
+      const inner = new InMemoryRunLedger(() => NOW);
+      await inner.claim({
+        runId: "run-owned",
+        threadKey: THREAD,
+        gen: "gen-T",
+        leaseMs: 30_000,
+        startedAt: 5_000,
+        meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD, agent: "general" },
+        card: null,
+        system: "sys",
+        tools: [],
+      });
+      const read = inner.readInbox.bind(inner);
+      if (changed)
+        inner.readInbox = async (...args) =>
+          (await read(...args)).map((item) => ({ ...item, message: { ...item.message, text: "another payload" } }));
+      const s = setup("also check the migration");
+      s.deps.runLedger = createLedgerWriteThrough({
+        ledger: inner,
+        gen: "gen-T",
+        fallback: new NullRunStore(),
+        warn: () => {},
+      });
+      const live = s.admission.claim(THREAD, { agent: "general" }).live;
+      live.runId = "run-owned";
+      expect(await admit(s.deps, s.ctx)).toEqual({ kind: "steered", where: "here", runId: "run-owned" });
+      const [stored] = await read("run-owned", 0);
+      const [input] = live.inbox.drain();
+      expect(input).toMatchObject({ text: "also check the migration", ledgerSeq: 1 });
+      expect(input.ledgerWitness).toEqual(
+        changed
+          ? undefined
+          : {
+              version: 1,
+              runId: "run-owned",
+              seq: 1,
+              digest: createHash("sha256").update(JSON.stringify(stored!.message)).digest("hex"),
+            },
+      );
+    },
+  );
 
   it("a requester DM question followed by fix it keeps one live run and its private address through durable delivery", async () => {
     const dm = {

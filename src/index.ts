@@ -120,7 +120,7 @@ import { meatOnPath } from "./core/meatProcess.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
 import {
   createLedgerWriteThrough,
-  deliverPlaneSteer,
+  createPlaneSteerSender,
   mintGeneration,
   NullLedgerWriteThrough,
 } from "./core/runLedger/writeThrough.js";
@@ -608,15 +608,11 @@ export async function runBot(): Promise<void> {
       await planeAdmitPass();
       return "done";
     },
-    steer: async (effect: Extract<PlaneEffect, { kind: "steer" }>): Promise<PlaneAckOutcome> => {
-      const run = defaultRunRegistry.getById(effect.runId);
-      if (!run || run.finished || !run.threadKey) return "deferred";
-      // The push route checks the ledger's generation fence before reaching
-      // this local lookup. The heartbeat path is already owner-fenced by the
-      // heartbeat that carried the effect; the admission slot then prevents a
-      // different run on the same thread from receiving it.
-      return deliverPlaneSteer(effect, defaultAdmission.get(run.threadKey));
-    },
+    steer: createPlaneSteerSender({
+      draining: () => draining,
+      getRun: (id) => defaultRunRegistry.getById(id),
+      getInbox: (threadKey) => defaultAdmission.get(threadKey),
+    }),
   };
   const runLedger = ledgerClient
     ? createLedgerWriteThrough({
