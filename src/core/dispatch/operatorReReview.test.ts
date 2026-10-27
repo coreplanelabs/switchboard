@@ -338,22 +338,43 @@ describe("required context shares the operator deadline", () => {
   it("cannot renew the clock after required attachment context consumes it", async () => {
     let now = 0;
     const model = vi.fn<RouteModel>(async () => bind());
-    const result = await operatorStage(
-      { config: config(), clock: () => now, operatorModel: model },
-      {
-        mode: "on",
-        msg: {
-          ...message(`Review ${url}`),
-          documents: [{ name: "context.txt", mediaType: "text/plain", data: "context" }],
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await operatorStage(
+        { config: config(), clock: () => now, operatorModel: model },
+        {
+          mode: "on",
+          msg: {
+            ...message(`Review ${url}`),
+            documents: [{ name: "context.txt", mediaType: "text/plain", data: "private attachment body" }],
+          },
+          readTail: async () => {
+            now += OPERATOR_TIMEOUT_MS;
+            return { turns: [], unavailable: [] };
+          },
         },
-        readTail: async () => {
-          now += OPERATOR_TIMEOUT_MS;
-          return { turns: [], unavailable: [] };
-        },
-      },
-    );
-    expect(result).toMatchObject({ outcome: "non_decision", reason: "operator_timeout" });
-    expect(model).not.toHaveBeenCalled();
+      );
+      expect(result).toMatchObject({ outcome: "non_decision", reason: "operator_timeout" });
+      expect(model).not.toHaveBeenCalled();
+      const events = log.mock.calls.map(([line]) => {
+        try {
+          return JSON.parse(String(line));
+        } catch {
+          return undefined;
+        }
+      });
+      expect(events.find((line) => line?.type === "routing_step" && line?.phase === "context")).toMatchObject({
+        contextStage: "saved_context",
+      });
+      expect(events.find((line) => line?.type === "routing_timeout")).toMatchObject({
+        phase: "context",
+        contextStage: "saved_context",
+        budgetMs: OPERATOR_TIMEOUT_MS,
+      });
+      expect(JSON.stringify(events)).not.toContain("private attachment body");
+    } finally {
+      log.mockRestore();
+    }
   });
 });
 

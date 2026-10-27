@@ -946,16 +946,22 @@ describe("explicit PR directives at the operator stage", () => {
         releaseSource();
         await new Promise((resolve) => setImmediate(resolve));
         expect(model).not.toHaveBeenCalled();
-        const event = log.mock.calls
-          .map(([line]) => {
-            try {
-              return JSON.parse(String(line));
-            } catch {
-              return undefined;
-            }
-          })
-          .find((line) => line?.type === "routing_timeout");
-        expect(event).toMatchObject({ phase: "context", budgetMs: 60_000 });
+        const events = log.mock.calls.map(([line]) => {
+          try {
+            return JSON.parse(String(line));
+          } catch {
+            return undefined;
+          }
+        });
+        expect(events.find((line) => line?.type === "routing_step" && line?.phase === "context")).toMatchObject({
+          contextStage: "source_validation",
+        });
+        expect(events.find((line) => line?.type === "routing_timeout")).toMatchObject({
+          phase: "context",
+          contextStage: "source_validation",
+          budgetMs: 60_000,
+        });
+        expect(JSON.stringify(events)).not.toContain("Review https://github.com/acme/api/pull/7");
       } finally {
         releaseSource();
         log.mockRestore();

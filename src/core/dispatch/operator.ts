@@ -3413,6 +3413,8 @@ export async function operatorStage(
   const now = deps.clock ?? Date.now;
   const startedAt = now();
   const signal = AbortSignal.timeout(OPERATOR_TIMEOUT_MS);
+  // Keep the last context operation until its routing step and timeout are logged.
+  let contextStage: "saved_context" | "source_validation" | undefined;
   const recorder = new RoutingRecorder(now, startedAt, startedAt + OPERATOR_TIMEOUT_MS, signal, (step) =>
     console.log(
       JSON.stringify({
@@ -3421,17 +3423,20 @@ export async function operatorStage(
         messageId: msg.messageId,
         routingStartedAt: startedAt,
         ...step,
+        ...(step.phase === "context" && contextStage ? { contextStage } : {}),
       }),
     ),
   );
   const reportTimeout = (telemetry: RoutingTelemetry) => {
     const step = telemetry.steps.at(-1);
+    const phase = telemetry.timeout?.phase ?? step?.phase ?? "unknown";
     console.log(
       JSON.stringify({
         type: "routing_timeout",
         threadKey: msg.threadKey,
         messageId: msg.messageId,
-        phase: telemetry.timeout?.phase ?? step?.phase ?? "unknown",
+        phase,
+        ...(phase === "context" && contextStage ? { contextStage } : {}),
         budgetMs: OPERATOR_TIMEOUT_MS,
         elapsedMs: Math.max(0, telemetry.finishedAt - telemetry.startedAt),
         ...(step?.provider ? { provider: step.provider } : {}),
@@ -3513,9 +3518,16 @@ export async function operatorStage(
   const prepare = () => prepareActionContext(deps, ctx, projection);
   let prepared: Awaited<ReturnType<typeof prepare>> | undefined;
   const readContext = async () => {
+    contextStage = "saved_context";
     if (ctx.contextMode === "request") throw new Error("Earlier conversation context is excluded from this Review.");
     return (prepared ??= await withinOperatorDeadline(prepare(), signal)).input;
   };
+  const beforeModel = ctx.beforeModel
+    ? () => {
+        contextStage = "source_validation";
+        return ctx.beforeModel!();
+      }
+    : undefined;
   const needsSavedContext =
     ctx.contextMode !== "request" &&
     (ctx.pending !== undefined ||
@@ -3572,7 +3584,7 @@ export async function operatorStage(
             startedAt,
             signal,
             recorder,
-            ...(ctx.beforeModel ? { beforeModel: ctx.beforeModel } : {}),
+            ...(beforeModel ? { beforeModel } : {}),
             ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
             ...(!needsSavedContext ? { readContext } : {}),
           });
