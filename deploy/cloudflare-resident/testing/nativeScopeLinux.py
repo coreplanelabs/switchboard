@@ -16,7 +16,10 @@ def ctl(mode,r,**extra):
     assert p.returncode==0,(mode,p.stdout,p.stderr)
     return json.loads(p.stdout)
 def launch(r,label,role='trusted'):
-    body="import pathlib,time,os; p=pathlib.Path('/workspace/proof/%s'); p.write_text('0');\nif os.fork()==0:\n os.setsid();\n for n in range(1500): p.with_suffix('.child').write_text(str(n)); time.sleep(.02)\n os._exit(0)\nfor n in range(1500): p.write_text(str(n)); time.sleep(.02)" % label
+    # The counter is written atomically. The assertion below reads this file
+    # while the payload is still writing it, and a truncating write would let
+    # the reader observe an empty file.
+    body="import pathlib,os,time; d=pathlib.Path('/workspace/proof'); p=d/'%s';\ndef put(q,t):\n s=q.with_name(q.name+'.part'+str(os.getpid())); s.write_text(t); os.replace(s,q)\nput(p,'0');\nif os.fork()==0:\n os.setsid();\n for n in range(1500): put(p.with_suffix('.child'),str(n)); time.sleep(.02)\n os._exit(0)\nfor n in range(1500): put(p,str(n)); time.sleep(.02)" % label
     p=subprocess.Popen(['/usr/bin/python3','-I',HELPER],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     p.stdin.write(json.dumps({'mode':'launch','ref':r,'attempt':str(uuid.uuid4()),'role':role,'user':'worker2','argv':['/usr/bin/python3','-I','-c',body]}));p.stdin.close()
     until=time.monotonic()+3
