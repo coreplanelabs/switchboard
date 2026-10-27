@@ -1,5 +1,57 @@
 # Changelog
 
+## [1.310.0](https://github.com/coreplanelabs/switchboard/compare/v1.309.0...v1.310.0) (2026-10-27)
+
+
+### Features
+
+* **core:** prepare private source relevance evidence ([#3471](https://github.com/coreplanelabs/switchboard/issues/3471)) ([116716e](https://github.com/coreplanelabs/switchboard/commit/116716e99f245e588a5fb5300be2af74732dfe06))
+* **deploy:** verify production without redeploy ([#3489](https://github.com/coreplanelabs/switchboard/issues/3489)) ([ed0df1e](https://github.com/coreplanelabs/switchboard/commit/ed0df1ea1c0dd65ed5898b7059ecce985d2d290d))
+* **http:** match GitHub facts to saved task identities ([#3464](https://github.com/coreplanelabs/switchboard/issues/3464)) ([7a30f63](https://github.com/coreplanelabs/switchboard/commit/7a30f63304afe0c1e38cc0259c625f18701b676b))
+* **runs:** checkpoint and acknowledge native source inputs ([#3466](https://github.com/coreplanelabs/switchboard/issues/3466)) ([28556dd](https://github.com/coreplanelabs/switchboard/commit/28556dd09138a474f265735dbcd19897574037f6))
+* **runs:** retain pending source obligation metadata ([#3468](https://github.com/coreplanelabs/switchboard/issues/3468)) ([18cefc8](https://github.com/coreplanelabs/switchboard/commit/18cefc87a3ed5985f173e886a8428734489b5696))
+
+
+### Bug fixes
+
+* **core:** check version-qualified lockfile overrides ([70d99ff](https://github.com/coreplanelabs/switchboard/commit/70d99ff5ac80badac2bff7dc4f7989407e031fe5))
+* **core:** continue Review after setup refusal ([#3500](https://github.com/coreplanelabs/switchboard/issues/3500)) ([dc28496](https://github.com/coreplanelabs/switchboard/commit/dc28496102db7de14714413b7038e0281bcc5811))
+* **core:** explain blocked Review source lookups ([#3449](https://github.com/coreplanelabs/switchboard/issues/3449)) ([31aa2a3](https://github.com/coreplanelabs/switchboard/commit/31aa2a355dd01740691234877c7e7f8a1b49562a))
+* **core:** finish Review within its time budget ([#3458](https://github.com/coreplanelabs/switchboard/issues/3458)) ([a6db728](https://github.com/coreplanelabs/switchboard/commit/a6db72835d14a1a7dfc3a6b9fc2ce82e2bca9c2d))
+* **core:** hold Review turns through Memory read failures ([#3460](https://github.com/coreplanelabs/switchboard/issues/3460)) ([a6865cd](https://github.com/coreplanelabs/switchboard/commit/a6865cd612101382e24880be7848908e00c020f8))
+* **core:** identify operator context timeout stage ([#3492](https://github.com/coreplanelabs/switchboard/issues/3492)) ([82b72eb](https://github.com/coreplanelabs/switchboard/commit/82b72ebc253046c82592f013f6c224872983be4c))
+* **core:** keep one Review owner per pull request ([#3475](https://github.com/coreplanelabs/switchboard/issues/3475)) ([455ffbc](https://github.com/coreplanelabs/switchboard/commit/455ffbc812135db4a57a6c6a006116e15e38567b))
+* **core:** keep OpenCode work during source outages ([#3481](https://github.com/coreplanelabs/switchboard/issues/3481)) ([6228722](https://github.com/coreplanelabs/switchboard/commit/62287227e6d2d67ae9f6d3280891c73fed386bb9))
+* **core:** report GitHub check source refusals ([#3493](https://github.com/coreplanelabs/switchboard/issues/3493)) ([eefc63f](https://github.com/coreplanelabs/switchboard/commit/eefc63f6a61d9eed8d24c40f3f65fbbb01e6163b))
+* **core:** retain safe GitHub token failure details ([#3431](https://github.com/coreplanelabs/switchboard/issues/3431)) ([f9d5d4b](https://github.com/coreplanelabs/switchboard/commit/f9d5d4b66e5d60cd73a56400e0ec214522ad927a))
+* **core:** show when routing first produces content ([#3441](https://github.com/coreplanelabs/switchboard/issues/3441)) ([a9d9290](https://github.com/coreplanelabs/switchboard/commit/a9d929059f5dce511de24862d9e35dd5fce3bac3))
+* **delivery:** count typed review findings by severity ([#3486](https://github.com/coreplanelabs/switchboard/issues/3486)) ([6c40c1b](https://github.com/coreplanelabs/switchboard/commit/6c40c1b7029a8ef58c0e4ca7cb2a9259f77ae63a))
+* **deploy:** name bash timeout units in Workspace smoke ([#3491](https://github.com/coreplanelabs/switchboard/issues/3491)) ([807d686](https://github.com/coreplanelabs/switchboard/commit/807d68615d4b88190d285d82102b16bfc6ad0233))
+* **deploy:** retry a self-clearing read refusal in the smoke ([#3476](https://github.com/coreplanelabs/switchboard/issues/3476)) ([aa1109f](https://github.com/coreplanelabs/switchboard/commit/aa1109fc637b4eb3121fc38106f8d5c84fb36bb1))
+* **deps:** raise pinned undici to a patched version ([#3488](https://github.com/coreplanelabs/switchboard/issues/3488)) ([49e7f62](https://github.com/coreplanelabs/switchboard/commit/49e7f62a9edd0ae243565e690a11f8083b23960f))
+* **mcp:** report hosted response failures safely ([#3479](https://github.com/coreplanelabs/switchboard/issues/3479)) ([0934ac5](https://github.com/coreplanelabs/switchboard/commit/0934ac546ab20167631162e29adf5e9eccba0e8b))
+* **resident:** keep unreadable snapshot stamps degraded ([#3480](https://github.com/coreplanelabs/switchboard/issues/3480)) ([dd2e07a](https://github.com/coreplanelabs/switchboard/commit/dd2e07a87daa1e21a2fd01981b34bb94c921a5a5))
+* **resident:** reset exact closed restore sets safely ([#3451](https://github.com/coreplanelabs/switchboard/issues/3451)) ([6948374](https://github.com/coreplanelabs/switchboard/commit/69483748e7560bf449c8435be24e2e833e030d1e))
+* **resident:** reset exact mixed native operation sets ([#3494](https://github.com/coreplanelabs/switchboard/issues/3494)) ([5e128ed](https://github.com/coreplanelabs/switchboard/commit/5e128ed457fade81681f7c0e458ef6fbca498d75))
+* **resident:** resume producer cleanup after runtime sleep ([#3469](https://github.com/coreplanelabs/switchboard/issues/3469)) ([044b259](https://github.com/coreplanelabs/switchboard/commit/044b259f3c4ef20de4f1cddd489e0c943bbd36fa))
+* **resident:** retain safe GitHub mint failures ([#3432](https://github.com/coreplanelabs/switchboard/issues/3432)) ([04201c6](https://github.com/coreplanelabs/switchboard/commit/04201c6b89e0e6a919b8cde2db0b45be659f88b4))
+* **resident:** write the native scope proof counters atomically ([#3498](https://github.com/coreplanelabs/switchboard/issues/3498)) ([6d1fec8](https://github.com/coreplanelabs/switchboard/commit/6d1fec866e03bf21bd5f5491934c62d7152204a0))
+* **review:** honor repo checks and moved-head source reads ([#3473](https://github.com/coreplanelabs/switchboard/issues/3473)) ([d0792f8](https://github.com/coreplanelabs/switchboard/commit/d0792f887bb9ca08ab444747aca3a499765e780e))
+* **runs:** continue after a confirmed session write ([6daf979](https://github.com/coreplanelabs/switchboard/commit/6daf979c0ad63fbe818172d6c5328b99b93c6dd9))
+* **runs:** mark Memory RPC boundaries ([#3502](https://github.com/coreplanelabs/switchboard/issues/3502)) ([184e900](https://github.com/coreplanelabs/switchboard/commit/184e9001399759ded20ea6611d907540b0e747a9))
+* **runs:** record original ingress producer receipts ([#3495](https://github.com/coreplanelabs/switchboard/issues/3495)) ([e05539c](https://github.com/coreplanelabs/switchboard/commit/e05539cc0b12803471841f94860557fcda97446a))
+* **runs:** retain dispatch refusal on admitted requests ([#3497](https://github.com/coreplanelabs/switchboard/issues/3497)) ([89171ce](https://github.com/coreplanelabs/switchboard/commit/89171ce097095e9a0c9fa684e8d17920885ab9d1))
+* **runs:** show ended state for setup failures ([0777c83](https://github.com/coreplanelabs/switchboard/commit/0777c837615e12bb61d97f87cc49b448ac0b8d9d))
+* **sandbox:** keep uncertain seed workspaces ([#3484](https://github.com/coreplanelabs/switchboard/issues/3484)) ([f08195e](https://github.com/coreplanelabs/switchboard/commit/f08195efcb9a5edb1a704860a27932be1a76b9b1))
+* **ship:** admit PRs past unrelated unit shape errors ([#3450](https://github.com/coreplanelabs/switchboard/issues/3450)) ([5b9c8a6](https://github.com/coreplanelabs/switchboard/commit/5b9c8a6c3bb36419aff0fb7097a02f1e3aaf792e))
+* **slack:** bound SDK and file failure logs ([cd24299](https://github.com/coreplanelabs/switchboard/commit/cd24299de9459420bec2939d737a241223b03213))
+* **web:** retain safe Brave failure details ([#3429](https://github.com/coreplanelabs/switchboard/issues/3429)) ([fb3136d](https://github.com/coreplanelabs/switchboard/commit/fb3136d072cdc1dfceefaf651f15fb1e92a1c281))
+
+
+### Documentation
+
+* **core:** map external service failure evidence ([#3428](https://github.com/coreplanelabs/switchboard/issues/3428)) ([e33bdaf](https://github.com/coreplanelabs/switchboard/commit/e33bdafefe06a3cf106ad9fc977d94bf809b760f))
+
 ## [1.309.0](https://github.com/coreplanelabs/switchboard/compare/v1.308.2...v1.309.0) (2026-10-24)
 
 
