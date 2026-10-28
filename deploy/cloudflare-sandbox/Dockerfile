@@ -203,9 +203,17 @@ RUN apt-get update \
 # the BUILD fails, not a run: the pi on PATH answers the pin, and its own help
 # names the RPC mode the harness drives. Dark until a deployment sets
 # `harness: { coding: pi }`: nothing here starts pi on its own.
-RUN npm install -g @earendil-works/pi-coding-agent@1.2.0 \
+# The install is retried: npm resolves this whole dependency tree against the
+# registry's view AT BUILD TIME, so it can select a version published minutes
+# earlier whose tarball the registry does not serve yet — npm reports that as
+# a 404 and does not retry a 404 itself, so one such reply would fail the build
+# and block every deploy of this image. Three more tries, fifteen seconds
+# apart, and the proofs below still end the build when what landed is not the
+# pin, so a failure that is about the pins fails as it must.
+RUN for attempt in 1 2 3; do npm install -g @earendil-works/pi-coding-agent@1.2.0 \
   @earendil-works/pi-ai@1.2.0 @earendil-works/chord@1.2.0 @earendil-works/pi-agent-core@1.2.0 @earendil-works/pi-codemode@1.2.0 @earendil-works/pi-mcp@1.2.0 @earendil-works/pi-tui@1.2.0 @earendil-works/pi-telemetry@1.2.0 \
-  && npm cache clean --force \
+  && break; sleep 15; done; \
+  npm cache clean --force \
   && pi --version | grep -qx '1.2.0' \
   && pi --help | grep -q -- '--mode <mode>'
 
