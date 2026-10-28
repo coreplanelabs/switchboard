@@ -13565,6 +13565,11 @@ export class RunTranscriptDO extends DurableObject<Env> {
  *  estimate only decides how many rows one pass tries. */
 const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
+/** Rows one paged scan of `turns` holds in the isolate at a time. A log may
+ *  hold more JSON than the isolate has memory, so the byte policy and the
+ *  orphan sweep page instead of reading the whole table at once. */
+const SESSION_LOG_SCAN_BATCH = 256;
+
 type SessionTurnRow = { id: number; idx: number; part: number; json: string; text: string };
 
 /**
@@ -14644,10 +14649,7 @@ export class SessionLogDO extends DurableObject<Env> {
             if (
               original &&
               (original.data !== attachment.data || original.media_type !== attachment.mediaType) &&
-              this.sql
-                .exec<{ idx: number; json: string }>(`SELECT idx, json FROM turns`)
-                .toArray()
-                .some((row) => sessionRowIsPinned(pins, row.idx) && attachmentRefsOf(row.json).includes(attachment.ref))
+              this.pinnedRowReferences(pins, attachment.ref)
             ) {
               out = { ok: false, reason: "fenced" };
               return;
@@ -14746,48 +14748,65 @@ export class SessionLogDO extends DurableObject<Env> {
     } while (offset < text.length);
   }
   private totalBytes(): number {
-    const rows = this.sql
-      .exec<{ idx: number; part: number; json: string }>("SELECT idx,part,json FROM turns")
-      .toArray();
-    return (
-      rows.reduce((n, row) => n + utf8ByteLength(row.json), 0) +
-      this.sql
-        .exec<{ ref: string; bytes: number }>("SELECT ref,bytes FROM attachments")
-        .toArray()
-        .reduce((n, row) => n + row.bytes, 0)
-    );
+    // Summed in SQLite, never by materialising every row's `json` in the
+    // isolate: this runs on every write (the byte policy) and a log may hold
+    // more bytes than the isolate has. `length(CAST(... AS BLOB))` is the UTF-8
+    // byte length `utf8ByteLength` gives.
+    const turns = this.sql
+      .exec<{ bytes: number }>(`SELECT COALESCE(SUM(length(CAST(json AS BLOB))),0) AS bytes FROM turns`)
+      .one().bytes;
+    const attachments = this.sql
+      .exec<{ bytes: number }>(`SELECT COALESCE(SUM(bytes),0) AS bytes FROM attachments`)
+      .one().bytes;
+    return turns + attachments;
   }
 
-  /** Whether any row other than `exceptId` references the attachment `ref`.
-   *  Both legacy and internal descriptors participate; matching uses the
-   *  reference graph, not prose or a substring in another row. */
-  private referencedElsewhere(ref: string, exceptId: number): boolean {
-    return this.sql
-      .exec<{ json: string }>("SELECT json FROM turns WHERE id != ?", exceptId)
-      .toArray()
-      .some((row) => attachmentRefsOf(row.json).includes(ref));
-  }
-  private clearInternalOrphans(): void {
-    const used = new Set(
-      this.sql
-        .exec<{ json: string }>("SELECT json FROM turns")
-        .toArray()
-        .flatMap((row) => attachmentRefsOf(row.json)),
-    );
-    for (const row of this.sql.exec<{ ref: string }>("SELECT ref FROM attachments").toArray())
-      if (row.ref.includes(":v1:") && !used.has(row.ref)) this.sql.exec("DELETE FROM attachments WHERE ref=?", row.ref);
-  }
-
-  /** The bytes a trimmed row would free beyond its own: the attachments only
-   *  it references (session-log item 5). */
-  private soleAttachmentBytes(row: { id: number; json: string }): number {
-    let bytes = 0;
-    for (const ref of attachmentRefsOf(row.json)) {
-      if (this.referencedElsewhere(ref, row.id)) continue;
-      bytes +=
-        this.sql.exec<{ bytes: number }>(`SELECT bytes FROM attachments WHERE ref = ?`, ref).toArray()[0]?.bytes ?? 0;
+  /** Whether any pinned row references the attachment `ref`. Scanned in bounded
+   *  pages: the log may hold more JSON than the isolate has memory, and reading
+   *  the whole table at once resets the object. */
+  private pinnedRowReferences(pins: SessionRangePins, ref: string): boolean {
+    let scanId = -1;
+    for (;;) {
+      const page = this.sql
+        .exec<{ id: number; idx: number; json: string }>(
+          `SELECT id, idx, json FROM turns WHERE id > ? ORDER BY id LIMIT ?`,
+          scanId,
+          SESSION_LOG_SCAN_BATCH,
+        )
+        .toArray();
+      if (page.length === 0) return false;
+      for (const row of page)
+        if (sessionRowIsPinned(pins, row.idx) && attachmentRefsOf(row.json).includes(ref)) return true;
+      scanId = page[page.length - 1]!.id;
     }
-    return bytes;
+  }
+
+  /** An attachment's bytes, or 0 when the log no longer holds it. */
+  private attachmentBytes(ref: string): number {
+    return (
+      this.sql.exec<{ bytes: number }>(`SELECT bytes FROM attachments WHERE ref = ?`, ref).toArray()[0]?.bytes ?? 0
+    );
+  }
+
+  private clearInternalOrphans(): void {
+    const used = new Set<string>();
+    // Paged: the log may hold more JSON than the isolate has memory, and reading
+    // the whole table at once resets the object.
+    let scanId = -1;
+    for (;;) {
+      const page = this.sql
+        .exec<{ id: number; json: string }>(
+          `SELECT id, json FROM turns WHERE id > ? ORDER BY id LIMIT ?`,
+          scanId,
+          SESSION_LOG_SCAN_BATCH,
+        )
+        .toArray();
+      if (page.length === 0) break;
+      for (const row of page) for (const ref of attachmentRefsOf(row.json)) used.add(ref);
+      scanId = page[page.length - 1]!.id;
+    }
+    for (const row of this.sql.exec<{ ref: string }>(`SELECT ref FROM attachments`).toArray())
+      if (row.ref.includes(":v1:") && !used.has(row.ref)) this.sql.exec(`DELETE FROM attachments WHERE ref=?`, row.ref);
   }
 
   /** The byte policy (session-log item 5): over the budget, the oldest tool
@@ -14796,7 +14815,12 @@ export class SessionLogDO extends DurableObject<Env> {
    *  left; user and assistant text is never dropped, nor an attachment a kept
    *  row still shows. Each pass plans on an estimate of the marker's size and
    *  re-measures, so a pass is never short by more than the estimate's error
-   *  and the loop ends when the candidates do. Returns the total after. */
+   *  and the loop ends when the candidates do. Returns the total after.
+   *
+   *  Nothing here reads the whole log at once: `totalBytes` sums in SQLite and
+   *  the candidate scan pages, because the log may hold more bytes than the
+   *  isolate has and a whole-table read resets the object instead of trimming
+   *  it. The reference count each candidate needs comes from the same pass. */
   private enforceBytePolicy(): number {
     const max = Number(
       this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'max_bytes'`).toArray()[0]?.value ??
@@ -14804,14 +14828,48 @@ export class SessionLogDO extends DurableObject<Env> {
     );
     let total = this.totalBytes();
     while (total > max) {
-      const candidates = this.sql
-        .exec<{ id: number; idx: number; bytes: number; json: string }>(
-          `SELECT id, idx, bytes, json FROM turns WHERE kind = 'tool_result' AND trimmed = 0 ORDER BY idx ASC, part ASC`,
-        )
-        .toArray()
-        .filter((c) => !sessionRowIsPinned(this.rangePins(), c.idx))
-        .map((c) => ({ id: c.id, bytes: c.bytes + this.soleAttachmentBytes(c) }));
-      const ids = planSessionTrim(candidates, total - max, TRIM_MARKER_BYTES_ESTIMATE);
+      // How many rows reference each attachment (a row counted once however
+      // many of its parts name it), and every tool-result candidate with the
+      // references it would take with it — one paged pass over the log.
+      const referencingRows = new Map<string, number>();
+      const candidates: Array<{ id: number; idx: number; part: number; bytes: number; refs: string[] }> = [];
+      let scanId = -1;
+      for (;;) {
+        const page = this.sql
+          .exec<{
+            id: number;
+            idx: number;
+            part: number;
+            kind: string;
+            trimmed: number;
+            bytes: number;
+            json: string;
+          }>(
+            `SELECT id, idx, part, kind, trimmed, bytes, json FROM turns WHERE id > ? ORDER BY id LIMIT ?`,
+            scanId,
+            SESSION_LOG_SCAN_BATCH,
+          )
+          .toArray();
+        if (page.length === 0) break;
+        for (const row of page) {
+          const refs = [...new Set(attachmentRefsOf(row.json))];
+          for (const ref of refs) referencingRows.set(ref, (referencingRows.get(ref) ?? 0) + 1);
+          if (row.kind === "tool_result" && row.trimmed === 0)
+            candidates.push({ id: row.id, idx: row.idx, part: row.part, bytes: row.bytes, refs });
+        }
+        scanId = page[page.length - 1]!.id;
+      }
+      const pins = this.rangePins();
+      const sized = candidates
+        .filter((c) => !sessionRowIsPinned(pins, c.idx))
+        .sort((a, b) => a.idx - b.idx || a.part - b.part)
+        .map((c) => ({
+          id: c.id,
+          bytes:
+            c.bytes +
+            c.refs.reduce((n, ref) => n + ((referencingRows.get(ref) ?? 0) <= 1 ? this.attachmentBytes(ref) : 0), 0),
+        }));
+      const ids = planSessionTrim(sized, total - max, TRIM_MARKER_BYTES_ESTIMATE);
       if (ids.length === 0) break;
       for (const id of ids) {
         const row = this.sql
@@ -14827,7 +14885,7 @@ export class SessionLogDO extends DurableObject<Env> {
           this.sql.exec(`UPDATE turns SET trimmed = 1 WHERE id = ?`, id);
           continue;
         }
-        const refs = attachmentRefsOf(row.json);
+        const refs = [...new Set(attachmentRefsOf(row.json))];
         this.putRow({ idx: row.idx, part: row.part, json: marker }, marker, true);
         // The marker keeps the row's keyed-append id (item 13): `putRow` deletes
         // the old row, so without this the partial unique index forgets the id
@@ -14840,9 +14898,12 @@ export class SessionLogDO extends DurableObject<Env> {
             row.idx,
             row.part,
           );
-        // The marker references nothing, so an attachment only this row showed is now orphaned.
+        // The marker references nothing, so an attachment only this row showed
+        // is now orphaned: drop it, and its reference count with it.
         for (const ref of refs) {
-          if (!this.referencedElsewhere(ref, -1)) this.sql.exec(`DELETE FROM attachments WHERE ref = ?`, ref);
+          const left = (referencingRows.get(ref) ?? 1) - 1;
+          referencingRows.set(ref, left);
+          if (left <= 0) this.sql.exec(`DELETE FROM attachments WHERE ref = ?`, ref);
         }
       }
       total = this.totalBytes();
