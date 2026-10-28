@@ -40,6 +40,12 @@ const GLOBAL_FLAGS = new Set(["-g", "--global"]);
 const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn"]);
 const COMMAND_SEPARATORS = new Set(["&&", "||", ";", "|"]);
 
+/** Shell keywords a command may open with. `for attempt in 1 2 3; do npm
+ *  install -g pkg@1.0.0 && break; sleep 15; done` is one command whose
+ *  install the pins must still be read from: without this, wrapping an
+ *  install in a loop would hide a floating pin from the fence entirely. */
+const SHELL_KEYWORDS = new Set(["for", "do", "done", "while", "until", "if", "then", "elif", "else", "time", "!"]);
+
 /** Physical lines → logical statements (a trailing `\` continues), comments
  *  dropped, each token keeping the physical line it was written on. */
 function statements(dockerfile: string): Token[][] {
@@ -115,7 +121,8 @@ export function imagePins(dockerfile: string): ImagePin[] {
     if (instruction !== "RUN") continue;
     for (const command of commands(statement.slice(1))) {
       const words = command.filter((t) => !isFlag(t.text));
-      const [head, verb, ...rest] = words;
+      const opens = words.findIndex((t) => !SHELL_KEYWORDS.has(t.text));
+      const [head, verb, ...rest] = opens === -1 ? [] : words.slice(opens);
       if (!head) continue;
       const isGlobalInstall =
         PACKAGE_MANAGERS.has(head.text) &&

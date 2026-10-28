@@ -58,6 +58,19 @@ describe.each(ALL_IMAGES)("%s", (path) => {
   it("drops npm's cache in the same layer", () => {
     expect(layer).toContain("npm cache clean --force");
   });
+
+  // Feature: docs/reference/specs/harness-pi.md item 3 — the install survives a
+  // transient registry reply. npm resolves this whole tree against the
+  // registry's view at build time, so it can pick a version published minutes
+  // earlier whose tarball the registry is not serving yet; npm reports that as
+  // a 404 and never retries one itself, so without this one reply fails the
+  // build and blocks every deploy of the image. The proofs still follow, so
+  // what landed must still be the pin.
+  it("retries the install before it gives up, and still fails the build on what landed", () => {
+    expect(layer).toContain("for attempt in 1 2 3; do npm install -g");
+    expect(layer).toContain("&& break; sleep 15; done;");
+    expect(layer.indexOf("sleep 15; done;")).toBeLessThan(layer.indexOf(PI_PROOF));
+  });
 });
 
 describe.each(EXECUTION_IMAGES)("%s", (path) => {

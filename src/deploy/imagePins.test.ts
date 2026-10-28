@@ -59,6 +59,13 @@ describe("imagePins (parser)", () => {
     expect(pins).toEqual([{ tool: "pnpm", spec: "10.34.5", line: 2, floating: false }]);
   });
 
+  it("reads an install a shell loop wraps, so a retried install cannot hide a floating pin", () => {
+    const pins = imagePins(
+      "RUN for attempt in 1 2 3; do npm install -g pnpm@latest && break; sleep 15; done; pnpm --version\n",
+    );
+    expect(pins).toEqual([{ tool: "pnpm", spec: "latest", line: 1, floating: true }]);
+  });
+
   it("does not mistake a comment mentioning @latest for an instruction", () => {
     expect(imagePins("# pnpm@latest used to be installed here — see item 10\nFROM node:24.0.0\n")).toEqual([
       { tool: "node", spec: "24.0.0", line: 2, floating: false },
