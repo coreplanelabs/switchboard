@@ -444,10 +444,12 @@ jobs:
             ${{ runner.temp }}/reset-rehearsal/staging-reset-e2e.json
           if-no-files-found: ignore
 
+  # The verdict is for a run that could have deployed and accepted. A cancellation that
+  # stopped only one job leaves cancelled() false, so the dependency results decide too.
   acceptance:
     name: staging / live Review
     needs: [authorize, validate, deploy]
-    if: always() && !cancelled() && (github.event_name == 'pull_request_target' || inputs.pr != '') && (github.event.action != 'labeled' || github.event.label.name == 'deploy:staging')
+    if: always() && !cancelled() && needs.authorize.result != 'cancelled' && needs.validate.result != 'cancelled' && needs.deploy.result != 'cancelled' && (github.event_name == 'pull_request_target' || inputs.pr != '') && (github.event.action != 'labeled' || github.event.label.name == 'deploy:staging')
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 5
     steps:

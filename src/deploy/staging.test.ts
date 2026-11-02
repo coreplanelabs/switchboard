@@ -946,20 +946,32 @@ globalThis.fetch = async (url, init) => {
       "github.event.action != 'labeled' || github.event.label.name == 'deploy:staging'",
     );
     expect(workflow.jobs.acceptance.if).toContain("always()");
+    const runsVerdict = (cancelled: boolean, results: Record<string, string>) =>
+      runInNewContext(
+        workflow.jobs.acceptance.if,
+        {
+          always: () => true,
+          cancelled: () => cancelled,
+          needs: {
+            authorize: { result: results.authorize },
+            validate: { result: results.validate },
+            deploy: { result: results.deploy },
+          },
+          github: { event_name: "pull_request_target", event: { action: "synchronize" } },
+          inputs: {},
+        },
+        { timeout: 100 },
+      );
     for (const cancelled of [false, true]) {
       expect(
-        runInNewContext(
-          workflow.jobs.acceptance.if,
-          {
-            always: () => true,
-            cancelled: () => cancelled,
-            github: { event_name: "pull_request_target", event: { action: "synchronize" } },
-            inputs: {},
-          },
-          { timeout: 100 },
-        ),
+        runsVerdict(cancelled, { authorize: "success", validate: "success", deploy: "skipped" }),
         `cancelled=${cancelled}`,
       ).toBe(!cancelled);
+    }
+    for (const dependency of ["authorize", "validate", "deploy"]) {
+      const results: Record<string, string> = { authorize: "success", validate: "success", deploy: "skipped" };
+      results[dependency] = "cancelled";
+      expect(runsVerdict(false, results), `${dependency} cancelled`).toBe(false);
     }
     expect(workflow.jobs.acceptance.needs).toEqual(["authorize", "validate", "deploy"]);
     const gate = workflow.jobs.acceptance.steps[0];
