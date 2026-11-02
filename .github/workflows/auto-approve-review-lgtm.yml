@@ -8,7 +8,7 @@
 # workflow turns that line into a real approval from the Actions token, so the
 # decision to approve belongs to the repository, not to the App's permissions.
 #
-# The coreplanelabs/switchboard repository also trusts nwm-54 and boristane, matched by
+# The coreplanelabs/switchboard repository also trusts nwm-54, boristane, fer, and matanyall, matched by
 # login and numeric id. Other checkouts opt in through two repository variables:
 #
 #   REVIEW_BOT_LOGIN   the review App's bot user login
@@ -53,7 +53,9 @@ jobs:
         ) ||
         (github.repository == 'coreplanelabs/switchboard' && (
           (github.event.review.user.login == 'nwm-54' && github.event.review.user.id == 45931542) ||
-          (github.event.review.user.login == 'boristane' && github.event.review.user.id == 10452259)
+          (github.event.review.user.login == 'boristane' && github.event.review.user.id == 10452259) ||
+          (github.event.review.user.login == 'fer' && github.event.review.user.id == 21882) ||
+          (github.event.review.user.login == 'matanyall' && github.event.review.user.id == 28307422)
         ))
       ) &&
       github.event.review.state == 'commented' &&
