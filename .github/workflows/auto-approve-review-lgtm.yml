@@ -8,9 +8,8 @@
 # workflow turns that line into a real approval from the Actions token, so the
 # decision to approve belongs to the repository, not to the App's permissions.
 #
-# Off by default. Two repository variables turn it on, and the job does not
-# run while either is unset — for every other checkout this file is an inert
-# template:
+# The coreplanelabs/switchboard repository also trusts nwm-54, matched by
+# login and numeric id. Other checkouts opt in through two repository variables:
 #
 #   REVIEW_BOT_LOGIN   the review App's bot user login
 #   REVIEW_BOT_ID      that user's immutable numeric id
@@ -21,7 +20,7 @@
 # Settings -> Actions -> General); without it the approval POST fails with 422.
 #
 # Guards:
-#   * Only fires for a review authored by the configured App, matched by both
+#   * Only fires for a review authored by a trusted reviewer, matched by both
 #     login and numeric id, in state "commented", whose body starts with the
 #     exact token "LGTM:" (a mention elsewhere in the body never fires).
 #   * Skips if the review is pinned to a commit that is no longer the PR head
@@ -45,10 +44,15 @@ jobs:
   approve:
     runs-on: depot-ubuntu-24.04
     if: >-
-      vars.REVIEW_BOT_LOGIN != '' &&
-      vars.REVIEW_BOT_ID != '' &&
-      github.event.review.user.login == vars.REVIEW_BOT_LOGIN &&
-      format('{0}', github.event.review.user.id) == vars.REVIEW_BOT_ID &&
+      (
+        (
+          vars.REVIEW_BOT_LOGIN != '' &&
+          vars.REVIEW_BOT_ID != '' &&
+          github.event.review.user.login == vars.REVIEW_BOT_LOGIN &&
+          format('{0}', github.event.review.user.id) == vars.REVIEW_BOT_ID
+        ) ||
+        (github.repository == 'coreplanelabs/switchboard' && github.event.review.user.login == 'nwm-54' && github.event.review.user.id == 45931542)
+      ) &&
       github.event.review.state == 'commented' &&
       startsWith(github.event.review.body, 'LGTM:')
     permissions:
@@ -68,7 +72,7 @@ jobs:
             echo "Review is pinned to $REVIEW_COMMIT but PR head is $HEAD_SHA; stale review, skipping."
             exit 0
           fi
-          body="Auto-approved: $REVIEWER reviewed this PR and posted an LGTM verdict (see its review). This repository opted in through its REVIEW_BOT_LOGIN and REVIEW_BOT_ID variables."
+          body="Auto-approved: $REVIEWER reviewed this PR and posted an LGTM verdict (see its review). This repository enabled the reviewer in its auto-approve workflow."
           gh api "repos/$GH_REPO/pulls/$PR/reviews" \
             -f event=APPROVE \
             -f commit_id="$REVIEW_COMMIT" \
